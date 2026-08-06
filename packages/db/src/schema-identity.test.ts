@@ -77,6 +77,24 @@ describe('identity_bindings', () => {
     await pg.query('DELETE FROM projects WHERE slug = $1', ['identity-other'])
   })
 
+  // Covers the foreign key to projects(id). It is easy to lose silently: a
+  // test file elsewhere in this suite drops and recreates `projects` while
+  // `identity_bindings` survives, and `CREATE TABLE IF NOT EXISTS` will not
+  // restore a constraint that CASCADE already severed. Without this FK, a
+  // bogus project_id is accepted instead of rejected, and deleting a project
+  // stops cascading to its identity data — the same "degrades silently,
+  // nothing visibly broken" failure class as the ClickHouse-infinity issue
+  // the dictionary views guard against.
+  it('rejects a binding whose project_id does not reference an existing project', async () => {
+    await expect(
+      pg.query(
+        `INSERT INTO identity_bindings (project_id, anonymous_id, person_id, valid_range)
+         VALUES ($1, 'no-such-project', 'u-fk', tstzrange(NULL, NULL, '[)'))`,
+        [999_999_999],
+      ),
+    ).rejects.toThrow(/foreign key/i)
+  })
+
   it('exposes the dictionary source view with finite, ClickHouse-representable bounds', async () => {
     const r = await pg.query<{ valid_from: Date; valid_to: Date }>(
       `SELECT valid_from, valid_to FROM identity_bindings_dict_src
@@ -101,6 +119,17 @@ describe('person_aliases', () => {
         [projectId],
       ),
     ).rejects.toThrow(/duplicate key/i)
+  })
+
+  // Same coverage as the identity_bindings FK test above, for the other
+  // table with a foreign key to projects(id).
+  it('rejects an alias whose project_id does not reference an existing project', async () => {
+    await expect(
+      pg.query(
+        `INSERT INTO person_aliases (project_id, person_id, canonical_id) VALUES ($1, 'fk-a', 'fk-b')`,
+        [999_999_999],
+      ),
+    ).rejects.toThrow(/foreign key/i)
   })
 
   it('rejects a self-alias, which would be a one-element cycle', async () => {
