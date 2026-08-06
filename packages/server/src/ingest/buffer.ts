@@ -65,8 +65,18 @@ export class IngestBuffer<T> {
     return 'accepted'
   }
 
+  /**
+   * Flushes whatever is currently queued, and also waits for any batch that
+   * had already detached into #inFlight before this call — e.g. one that
+   * add() triggered synchronously by crossing flushRows. Without waiting on
+   * those too, a caller relying on flush() to mean "durable now" (tests,
+   * mainly) can observe a false negative: the row is genuinely on its way to
+   * ClickHouse, just not yet counted by this call.
+   */
   async flush(): Promise<void> {
+    const alreadyInFlight = [...this.#inFlight]
     await this.#flushBatch()
+    await Promise.all(alreadyInFlight.map((batch) => batch.settled))
   }
 
   /**

@@ -252,6 +252,53 @@ describe('IngestBuffer', () => {
     expect(b.add({ n: 2 })).toBe('accepted')
   })
 
+  it('flush waits for a batch that already detached into #inFlight via the row threshold', async () => {
+    // With flushRows: 1, add() itself triggers the flush synchronously —
+    // by the time add() returns, the row has already moved out of #rows and
+    // into #inFlight, with its insert() call started. A flush() that only
+    // re-checks #rows (and finds it empty) would resolve immediately without
+    // ever waiting for that insert to actually land — exactly the bug this
+    // proves against, using a real integration path: an ingest route
+    // configured with flushRows: 1, POST an event, then call flush() and
+    // expect the row to be queryable.
+    let resolveInsertStarted!: () => void
+    const insertStarted = new Promise<void>((resolve) => {
+      resolveInsertStarted = resolve
+    })
+    let resolveGate!: () => void
+    const gate = new Promise<void>((resolve) => {
+      resolveGate = resolve
+    })
+
+    const b = new IngestBuffer<Row>({
+      flushRows: 1,
+      flushIntervalMs: 60_000,
+      maxRows: 100,
+      insert: async () => {
+        resolveInsertStarted()
+        await gate
+      },
+    })
+
+    b.add({ n: 1 }) // hits flushRows immediately; detaches into #inFlight, insert() begins
+    await insertStarted // insert() has started and is now blocked on `gate`
+
+    let settled = false
+    const flushing = b.flush().then(() => {
+      settled = true
+    })
+
+    // Pump far more microtask ticks than a buggy flush() (which resolves in
+    // a handful of chained promise ticks with no dependency on `gate`) would
+    // ever need, so this isn't a race against the fix — it's conclusive.
+    for (let i = 0; i < 10; i++) await Promise.resolve()
+    expect(settled).toBe(false)
+
+    resolveGate()
+    await flushing
+    expect(settled).toBe(true)
+  })
+
   it('flush settles normally even if onError itself throws', async () => {
     const b = new IngestBuffer<Row>({
       flushRows: 1000, // call flush() ourselves instead of relying on the trigger
