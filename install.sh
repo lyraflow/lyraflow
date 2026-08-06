@@ -16,7 +16,17 @@ else
   )
 fi
 
-docker compose pull
+# The published image may not exist yet (or not for this architecture), and
+# `set -e` would abort the whole install on a failed pull. Fall back to
+# building from this checkout so a fresh clone works today; the moment the
+# image is published, the pull succeeds and the build is skipped.
+if ! docker compose pull; then
+  echo
+  echo "Could not pull the published image — building it from this checkout instead."
+  echo "(This is expected before the first release; it takes a few minutes.)"
+  docker compose build
+fi
+
 docker compose up -d
 
 echo

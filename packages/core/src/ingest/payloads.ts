@@ -58,6 +58,17 @@ export const IdentifyPayload = z.object({
 })
 
 export const IngestPayload = z
+  // `._def.schema` unwraps the ZodEffects that `.refine()` wraps each payload
+  // in, because z.discriminatedUnion accepts only plain ZodObjects. Unwrapping
+  // therefore *discards* the hasIdentifier refinement, which is why the
+  // superRefine below re-applies it — without that, every anonymous_id-less,
+  // user_id-less track and page event would validate here even though
+  // TrackPayload/PagePayload reject it on their own.
+  //
+  // Both halves must move together. If a Zod upgrade changes this internal
+  // shape (the `_def` prefix marks it as unstable), fix the unwrap and the
+  // re-application as one change — dropping the superRefine silently reopens
+  // the identifier gap, and `payloads.test.ts` is what catches it.
   .discriminatedUnion('type', [TrackPayload._def.schema, PagePayload._def.schema, IdentifyPayload])
   .superRefine((p, ctx) => {
     if (p.type !== 'identify' && !hasIdentifier(p)) {

@@ -115,6 +115,57 @@ describe('clickhouse schema', () => {
     expect(Number(r[0]?.c)).toBe(1)
   })
 
+  /**
+   * The honest counterpart to the test above. ReplacingMergeTree collapses only
+   * when the *entire* ORDER BY tuple matches — (project_id, timestamp,
+   * anonymous_id, event_id) — and the server fills `timestamp` with wall-clock
+   * at receipt whenever the client omits it. So an SDK that retries a 503'd
+   * batch a few seconds later does NOT get its rows collapsed: it gets a second
+   * physical row with the same event_id and a different timestamp.
+   *
+   * That is safe for correctness precisely because query paths deduplicate by
+   * event_id, and this test pins both halves of that: count() sees 2, and
+   * count(DISTINCT event_id) sees 1. It exists because nothing else catches the
+   * difference — the dedup test above re-inserts with an identical timestamp,
+   * and restart-durability.test.ts counts DISTINCT event_id, which is blind to
+   * duplicates by construction.
+   */
+  it('keeps a retried event with a server-assigned timestamp as a second physical row, deduplicated only by event_id', async () => {
+    const eventId = 'cc2f6a1e-9c4d-4a1f-8f3b-2f1c7d5e6a92'
+    const row = (timestamp: string) => ({
+      project_id: 1,
+      event_id: eventId,
+      anonymous_id: 'anon-retry',
+      user_id: '',
+      event_name: 'retry_semantics',
+      timestamp,
+      received_at: timestamp,
+      trusted: 0,
+      properties: {},
+      properties_num: {},
+      country: 'DE',
+    })
+
+    // Same event_id, two different server-assigned receipt timestamps — what a
+    // client that omits `timestamp` and retries actually produces.
+    await ch.insert({
+      table: 'events',
+      format: 'JSONEachRow',
+      values: [row('2026-08-06 12:00:00.000'), row('2026-08-06 12:00:07.000')],
+    })
+
+    const r = await rows<{ physical: string; distinct_ids: string }>(
+      `SELECT count() AS physical, count(DISTINCT event_id) AS distinct_ids
+       FROM events FINAL WHERE event_name = 'retry_semantics'`,
+    )
+    // FINAL applies every collapse the engine is willing to make, so `physical
+    // = 2` here is not a merge that merely hasn't run yet — these rows never
+    // collapse. If a future schema change made the sort key timestamp-free,
+    // this would drop to 1 and the test would fail loudly, which is the point.
+    expect(Number(r[0]?.physical)).toBe(2)
+    expect(Number(r[0]?.distinct_ids)).toBe(1)
+  })
+
   it('partitions by project and month', async () => {
     const r = await rows<{ partition: string }>(
       "SELECT partition FROM system.parts WHERE database = 'lyraflow_test' AND table = 'events' AND active LIMIT 1",

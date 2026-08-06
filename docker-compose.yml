@@ -1,6 +1,12 @@
 services:
   lyraflow:
     image: ghcr.io/lyraflow/lyraflow:0
+    # `image:` and `build:` together: Compose uses the named image when it is
+    # available and builds from this checkout (tagging the result with that
+    # same name) when it is not. Until the image is published, `install.sh`'s
+    # `docker compose pull || docker compose build` is what makes a fresh clone
+    # work; once it is published, the pull wins and nothing here changes.
+    build: .
     restart: unless-stopped
     # Without an init process reaping PID 1, the kernel *ignores* an
     # unhandled SIGTERM sent to PID 1 instead of terminating it — so a

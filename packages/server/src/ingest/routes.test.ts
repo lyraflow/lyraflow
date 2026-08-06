@@ -107,6 +107,74 @@ describe('ingest routes', () => {
     expect(Number(rows[0]?.c)).toBe(1)
   })
 
+  // /v1/identify and /v1/page had no coverage at any level — only their
+  // registrations — on an API the project promises to keep backward compatible
+  // forever. Deleting either `app.post` line used to leave the suite green.
+
+  it('accepts an identify event and stores it as $identify', async () => {
+    const id = randomUUID()
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/identify',
+      headers: { 'x-lyraflow-write-key': 'wk_routes', 'user-agent': UA },
+      payload: { message_id: id, user_id: 'u-routes', traits: { plan: 'pro' } },
+    })
+    expect(res.statusCode).toBe(202)
+    await app.deps.buffer.flush()
+
+    const rs = await ch.query({
+      query: `SELECT event_name, user_id, properties['plan'] AS plan FROM events WHERE event_id = '${id}'`,
+      format: 'JSONEachRow',
+    })
+    const rows = await rs.json<{ event_name: string; user_id: string; plan: string }>()
+    // traits land in the same property maps as track properties, and the
+    // event name is synthesised — both are contract, not incidental.
+    expect(rows[0]).toEqual({ event_name: '$identify', user_id: 'u-routes', plan: 'pro' })
+  })
+
+  it('accepts a page event and uses its name as the event name', async () => {
+    const id = randomUUID()
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/page',
+      headers: { 'x-lyraflow-write-key': 'wk_routes', 'user-agent': UA },
+      payload: {
+        message_id: id,
+        anonymous_id: 'a-page',
+        name: 'Pricing',
+        context: { path: '/pricing' },
+      },
+    })
+    expect(res.statusCode).toBe(202)
+    await app.deps.buffer.flush()
+
+    const rs = await ch.query({
+      query: `SELECT event_name, path FROM events WHERE event_id = '${id}'`,
+      format: 'JSONEachRow',
+    })
+    const rows = await rs.json<{ event_name: string; path: string }>()
+    expect(rows[0]).toEqual({ event_name: 'Pricing', path: '/pricing' })
+  })
+
+  it('falls back to $page when a page event carries no name', async () => {
+    const id = randomUUID()
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/page',
+      headers: { 'x-lyraflow-write-key': 'wk_routes', 'user-agent': UA },
+      payload: { message_id: id, anonymous_id: 'a-page' },
+    })
+    expect(res.statusCode).toBe(202)
+    await app.deps.buffer.flush()
+
+    const rs = await ch.query({
+      query: `SELECT event_name FROM events WHERE event_id = '${id}'`,
+      format: 'JSONEachRow',
+    })
+    const rows = await rs.json<{ event_name: string }>()
+    expect(rows[0]?.event_name).toBe('$page')
+  })
+
   it('rejects an unknown write key with 401', async () => {
     const res = await track({ message_id: randomUUID(), anonymous_id: 'a', event: 'x' }, 'wk_bad')
     expect(res.statusCode).toBe(401)
@@ -295,6 +363,58 @@ describe('ingest routes (mocked deps)', () => {
     return app
   }
 
+  it('logs a failing dead-letter write rather than swallowing it', async () => {
+    // events_dead_letter is the only record of rejected data, so a
+    // persistently failing write makes bad-data debugging impossible. Not
+    // failing the request is right; being silent about it is not.
+    const lines: string[] = []
+    const app = Fastify({
+      logger: {
+        level: 'error',
+        stream: {
+          write: (line: string) => {
+            lines.push(line)
+          },
+        },
+      },
+    })
+    const readiness = new Readiness()
+    readiness.markReady()
+    registerIngestRoutes(app, {
+      buffer: new IngestBuffer<EventRow>({
+        flushRows: 1000,
+        flushIntervalMs: 60_000,
+        maxRows: 1000,
+        insert: async () => {},
+      }),
+      projects,
+      counters: new IngestCounters(fakePool),
+      cardinality: new CardinalityTracker(),
+      geo: new NullGeoResolver(),
+      readiness,
+      ch: {
+        insert: async () => {
+          throw new Error('clickhouse unreachable')
+        },
+      } as unknown as ClickHouseClient,
+    })
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': 'wk_mock', 'user-agent': UA },
+      payload: { message_id: 'not-a-uuid', event: 'x' }, // fails validation -> dead-letter path
+    })
+
+    expect(res.statusCode).toBe(202) // still must not fail the caller
+    // Catches the mutation of restoring the bare `catch {}`: no line is
+    // emitted, and a broken dead-letter path stays invisible forever.
+    const logged = lines.join('')
+    expect(logged).toContain('dead-letter write failed')
+    expect(logged).toContain('clickhouse unreachable')
+    await app.close()
+  })
+
   it('does not fail the request when a dead-letter write throws synchronously', async () => {
     const throwingCh = {
       insert: () => {
@@ -339,6 +459,35 @@ describe('ingest routes (mocked deps)', () => {
     expect(res.json()).toEqual({ accepted: 0, rejected: 3, throttled: 0 })
     expect(insertCalls).toHaveLength(1)
     expect(insertCalls[0]?.values).toHaveLength(3)
+    await mockedApp.close()
+  })
+
+  it('dead-letters a malformed batch envelope as one rejection without touching the items', async () => {
+    // The envelope-failure branch of /v1/batch (BatchPayload.safeParse
+    // failing) had no coverage. `batch: []` violates the .min(1) bound, so
+    // this exercises the branch that answers 202 with rejected: 1 and writes
+    // exactly one dead letter for the whole request. Deleting that branch's
+    // writeDeadLetters call, or folding it into the per-item loop, changes
+    // what this asserts.
+    const insertCalls: Array<{ values: unknown[] }> = []
+    const countingCh = {
+      insert: async (opts: { values: unknown[] }) => {
+        insertCalls.push(opts)
+      },
+    } as unknown as ClickHouseClient
+
+    const mockedApp = buildMockedApp({ ch: countingCh })
+    const res = await mockedApp.inject({
+      method: 'POST',
+      url: '/v1/batch',
+      headers: { 'x-lyraflow-write-key': 'wk_mock', 'user-agent': UA },
+      payload: { batch: [] },
+    })
+
+    expect(res.statusCode).toBe(202)
+    expect(res.json()).toEqual({ accepted: 0, rejected: 1, throttled: 0 })
+    expect(insertCalls).toHaveLength(1)
+    expect(insertCalls[0]?.values).toHaveLength(1)
     await mockedApp.close()
   })
 

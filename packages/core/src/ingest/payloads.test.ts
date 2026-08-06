@@ -57,4 +57,35 @@ describe('IngestPayload', () => {
     const r = IngestPayload.safeParse({ ...base, type: 'identify', traits: {} })
     expect(r.success).toBe(false)
   })
+
+  // PagePayload reached IngestPayload only through the `._def.schema` unwrap,
+  // which strips its `.refine()` — so nothing proved the page branch parsed at
+  // all, nor that superRefine re-applied the identifier guard to it.
+
+  it('accepts a page payload and defaults its name away rather than inventing one', () => {
+    const r = IngestPayload.safeParse({ ...base, type: 'page', context: { path: '/pricing' } })
+    expect(r.success).toBe(true)
+    // `name` stays optional here; the '$page' fallback is the row builder's
+    // job, not the schema's.
+    expect(r.success && r.data.type === 'page' && r.data.name).toBeUndefined()
+  })
+
+  it('accepts a named page payload with properties', () => {
+    const r = IngestPayload.parse({
+      ...base,
+      type: 'page',
+      name: 'Pricing',
+      properties: { variant: 'b' },
+    })
+    expect(r.type === 'page' && r.name).toBe('Pricing')
+    expect(r.type === 'page' && r.properties).toEqual({ variant: 'b' })
+  })
+
+  it('rejects a page payload with neither anonymous_id nor user_id', () => {
+    // The unwrap discards PagePayload's own `.refine()`, so this passes only
+    // because IngestPayload's superRefine re-applies it. Deleting the
+    // superRefine makes this the failing test.
+    const r = IngestPayload.safeParse({ message_id: base.message_id, type: 'page' })
+    expect(r.success).toBe(false)
+  })
 })

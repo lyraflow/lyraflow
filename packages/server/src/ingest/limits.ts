@@ -12,7 +12,12 @@ export type LimitReason =
 export type LimitResult = { ok: true } | { ok: false; reason: LimitReason; detail: string }
 
 /**
- * In-memory view of observed cardinality, rebuilt from event_schema on boot.
+ * In-memory view of cardinality observed *by this process since it started*.
+ * It starts empty on every boot and is never seeded from `event_schema`;
+ * warming it from stored schema is deferred to a later plan. The practical
+ * consequence: after a restart, a project that has already reached a cap gets
+ * a fresh budget until the tracker re-learns its existing names and keys from
+ * live traffic. That is a bounded, self-correcting overshoot, not a leak.
  *
  * Uncapped cardinality is the quiet failure mode of a public write endpoint:
  * unbounded distinct event names destroy the LowCardinality encoding on the

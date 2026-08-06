@@ -52,7 +52,11 @@ function buildDeadLetterRow(
  * ClickHouse. Dead letters skip IngestBuffer's batching by design (they are
  * already the exceptional path), so batching them here is this function's job.
  */
-async function writeDeadLetters(ch: ClickHouseClient, rows: DeadLetterRow[]): Promise<void> {
+async function writeDeadLetters(
+  ch: ClickHouseClient,
+  rows: DeadLetterRow[],
+  onError: (err: unknown, rows: DeadLetterRow[]) => void,
+): Promise<void> {
   if (rows.length === 0) return
   try {
     // A synchronous throw from insert() (closed client, malformed value) must
@@ -61,14 +65,29 @@ async function writeDeadLetters(ch: ClickHouseClient, rows: DeadLetterRow[]): Pr
     // insert() returns a promise at all. See the identical reasoning in
     // IngestBuffer's #flushBatch.
     await ch.insert({ table: 'events_dead_letter', format: 'JSONEachRow', values: rows })
-  } catch {
+  } catch (err) {
     // A failing dead-letter write must never fail the request. The events are
     // already lost; failing the caller would only add a broken site to it.
+    //
+    // It must not be silent either: events_dead_letter is the *only* record of
+    // rejected data, so a persistently failing write makes bad-data debugging
+    // impossible with no signal that anything is wrong. IngestBuffer and
+    // IngestCounters both surface their failures through an injected onError
+    // wired to the Fastify logger; this follows that convention.
+    try {
+      onError(err, rows)
+    } catch {
+      // A throwing logger is a bug in the logger, not a reason to fail a
+      // request that was already answered correctly.
+    }
   }
 }
 
 export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): void {
   const { buffer, projects, counters, cardinality, geo, readiness, ch } = deps
+
+  const onDeadLetterError = (err: unknown, rows: DeadLetterRow[]) =>
+    app.log.error({ err, rows: rows.length }, 'dead-letter write failed')
 
   async function authenticate(req: FastifyRequest, reply: FastifyReply) {
     if (readiness.draining) {
@@ -152,7 +171,7 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
 
       const body = { ...(req.body as Record<string, unknown>), type }
       const result = await accept(req, project.id, body)
-      if (result.deadLetter) await writeDeadLetters(ch, [result.deadLetter])
+      if (result.deadLetter) await writeDeadLetters(ch, [result.deadLetter], onDeadLetterError)
 
       if (result.outcome === 'overloaded') {
         return reply.code(503).header('retry-after', '5').send({ error: 'overloaded' })
@@ -174,9 +193,11 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
     const parsed = BatchPayload.safeParse(req.body)
     if (!parsed.success) {
       counters.record(project.id, 'rejected')
-      await writeDeadLetters(ch, [
-        buildDeadLetterRow(project.id, 'validation_failed', parsed.error.message, req.body),
-      ])
+      await writeDeadLetters(
+        ch,
+        [buildDeadLetterRow(project.id, 'validation_failed', parsed.error.message, req.body)],
+        onDeadLetterError,
+      )
       return reply.code(202).send({ accepted: 0, rejected: 1, throttled: 0 })
     }
 
@@ -196,12 +217,20 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
         // it into `rejected` here would tell the SDK to drop these events
         // forever instead of retrying them.
         //
-        // Retrying the whole batch is safe: message_id becomes event_id, and
-        // `events` is a ReplacingMergeTree keyed on the full sort key, so a
-        // replayed item with the same payload de-duplicates rather than
-        // double-counting. That is the design's reason for a
-        // client-generated message_id.
-        await writeDeadLetters(ch, deadLetters)
+        // Retrying the whole batch is safe because message_id becomes
+        // event_id and every query deduplicates by event_id — NOT because the
+        // storage engine collapses the replayed rows. `events` is a
+        // ReplacingMergeTree, but it only collapses when the entire ORDER BY
+        // tuple matches: (project_id, timestamp, anonymous_id, event_id). When
+        // a client omits `timestamp`, row.ts fills it with server wall-clock
+        // at receipt, so a retry seconds later has a different sort key and
+        // persists as a second physical row forever. The counts stay correct;
+        // the storage does not. A client that sends an explicit `timestamp`
+        // and replays it unchanged does get engine-level collapsing — see the
+        // API section of README.md, and the
+        // `retried event with a server-assigned timestamp` test in
+        // schema-clickhouse.test.ts, which pins this behaviour honestly.
+        await writeDeadLetters(ch, deadLetters, onDeadLetterError)
         // accept() already recorded item i itself as 'throttled'; the
         // remaining batch.length - i - 1 items were never attempted at all
         // (the loop stops here) and so never went through accept() to be
@@ -220,7 +249,7 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
       else rejected++
     }
 
-    await writeDeadLetters(ch, deadLetters)
+    await writeDeadLetters(ch, deadLetters, onDeadLetterError)
     // throttled is always present, even at 0: an SDK parsing a stable shape
     // shouldn't need to special-case the field's absence versus its value.
     return reply.code(202).send({ accepted, rejected, throttled: 0 })
