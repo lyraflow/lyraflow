@@ -15,6 +15,33 @@ function collector() {
   }
 }
 
+/**
+ * Like `collector()`, but each `insert()` call returns a promise that only
+ * settles when the test explicitly calls `resolveNext()`. This is what makes
+ * it possible to prove that a caller (e.g. `drain`) is actually waiting for
+ * the insert to finish, rather than just moving on because the collector
+ * happened to resolve synchronously.
+ */
+function deferredCollector() {
+  const inserted: Row[][] = []
+  const pending: Array<() => void> = []
+  return {
+    inserted,
+    insert: (rows: Row[]) =>
+      new Promise<void>((resolve) => {
+        pending.push(() => {
+          inserted.push(rows)
+          resolve()
+        })
+      }),
+    resolveNext: () => {
+      const next = pending.shift()
+      if (!next) throw new Error('no pending insert to resolve')
+      next()
+    },
+  }
+}
+
 beforeEach(() => vi.useFakeTimers())
 afterEach(() => vi.useRealTimers())
 
@@ -61,8 +88,30 @@ describe('IngestBuffer', () => {
     expect(b.depth).toBe(2)
   })
 
-  it('drains everything buffered before the deadline', async () => {
-    const c = collector()
+  it('reports overloaded once in-flight rows plus queued rows reach maxRows', () => {
+    // flushRows sits well below maxRows, unlike the test above — the one
+    // arrangement where a buffer that only checks #rows.length against
+    // maxRows would never reach 'overloaded' at all, because rows keep
+    // detaching into (unbounded, in this buggy version) in-flight batches
+    // before #rows itself gets big enough.
+    const b = new IngestBuffer<Row>({
+      flushRows: 2,
+      flushIntervalMs: 60_000,
+      maxRows: 4,
+      insert: () => new Promise(() => {}), // never resolves — a stuck ClickHouse
+    })
+    expect(b.add({ n: 1 })).toBe('accepted')
+    expect(b.add({ n: 2 })).toBe('accepted') // hits flushRows; batch detaches into #inFlight
+    expect(b.depth).toBe(2) // still held in memory — must still count
+    expect(b.add({ n: 3 })).toBe('accepted')
+    expect(b.add({ n: 4 })).toBe('accepted') // second batch also detaches into #inFlight
+    expect(b.depth).toBe(4)
+    expect(b.add({ n: 5 })).toBe('overloaded')
+    expect(b.depth).toBe(4)
+  })
+
+  it('drains everything buffered before the deadline, waiting for the insert to actually settle', async () => {
+    const c = deferredCollector()
     const b = new IngestBuffer<Row>({
       flushRows: 1000,
       flushIntervalMs: 60_000,
@@ -70,7 +119,22 @@ describe('IngestBuffer', () => {
       insert: c.insert,
     })
     for (let n = 0; n < 10; n++) b.add({ n })
-    const result = await b.drain(5000)
+
+    let settled = false
+    const draining = b.drain(5000).then((result) => {
+      settled = true
+      return result
+    })
+
+    // Nothing else is pending, so if drain() resolved without truly waiting
+    // for the insert to finish, `settled` would already be true here.
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    c.resolveNext()
+    const result = await draining
+
+    expect(settled).toBe(true)
     expect(result).toEqual({ flushed: 10, dropped: 0 })
     expect(c.inserted.flat()).toHaveLength(10)
     expect(b.depth).toBe(0)
@@ -97,13 +161,63 @@ describe('IngestBuffer', () => {
       insert: () => new Promise(() => {}), // never resolves
     })
     b.add({ n: 1 })
-    // drain()'s deadline uses a real setTimeout under the hood, which fake
-    // timers intercept: a bare `await` here would never observe it fire, so
+    // drain()'s deadline is itself driven by a setTimeout, so fake timers
+    // intercept it too: a bare `await` here would never observe it fire, so
     // we drive the clock forward explicitly to exercise the timeout path.
     const draining = b.drain(50)
     await vi.advanceTimersByTimeAsync(50)
     const result = await draining
     expect(result.dropped).toBe(1)
+  })
+
+  it('accounts for rows already in flight when draining, not just rows still queued', async () => {
+    const b = new IngestBuffer<Row>({
+      flushRows: 3,
+      flushIntervalMs: 60_000,
+      maxRows: 100,
+      insert: () => new Promise(() => {}), // never resolves
+    })
+    b.add({ n: 1 })
+    b.add({ n: 2 })
+    b.add({ n: 3 }) // hits flushRows; this batch of 3 is now in-flight, hung forever
+    b.add({ n: 4 })
+    b.add({ n: 5 }) // still queued when drain() is called
+
+    const draining = b.drain(1000)
+    await vi.advanceTimersByTimeAsync(1000)
+    const result = await draining
+
+    // A buffer that only snapshots #rows.length before draining would report
+    // dropped: 2 here (just rows 4 and 5) and silently lose the 3 rows that
+    // had already detached into an in-flight batch.
+    expect(result).toEqual({ flushed: 0, dropped: 5 })
+  })
+
+  it('drain correctly totals flushed rows across a batch already in flight and the final batch', async () => {
+    const c = deferredCollector()
+    const b = new IngestBuffer<Row>({
+      flushRows: 3,
+      flushIntervalMs: 60_000,
+      maxRows: 100,
+      insert: c.insert,
+    })
+    b.add({ n: 1 })
+    b.add({ n: 2 })
+    b.add({ n: 3 }) // hits flushRows; this batch of 3 is now in-flight
+    b.add({ n: 4 })
+    b.add({ n: 5 }) // still queued when drain() is called
+
+    const draining = b.drain(5000)
+    // Two inserts are now pending: the batch of 3 that was already in
+    // flight, and the batch of 2 that drain() flushed on entry. A buffer
+    // that mis-derives `flushed` from the pre-drain #rows.length snapshot
+    // (2, not 5) would report the wrong total even though every row made it.
+    c.resolveNext()
+    c.resolveNext()
+    const result = await draining
+
+    expect(result).toEqual({ flushed: 5, dropped: 0 })
+    expect(c.inserted.flat()).toHaveLength(5)
   })
 
   it('keeps accepting after an insert failure and reports it', async () => {
@@ -120,5 +234,68 @@ describe('IngestBuffer', () => {
     b.add({ n: 1 })
     await vi.waitFor(() => expect(errors).toHaveLength(1))
     expect(b.add({ n: 2 })).toBe('accepted')
+  })
+
+  it('keeps accepting after insert throws synchronously instead of returning a rejected promise', async () => {
+    const errors: unknown[] = []
+    const b = new IngestBuffer<Row>({
+      flushRows: 1,
+      flushIntervalMs: 60_000,
+      maxRows: 100,
+      insert: (_rows: Row[]): Promise<void> => {
+        throw new Error('client not connected') // synchronous throw, not a rejected promise
+      },
+      onError: (e) => errors.push(e),
+    })
+    b.add({ n: 1 })
+    await vi.waitFor(() => expect(errors).toHaveLength(1))
+    expect(b.add({ n: 2 })).toBe('accepted')
+  })
+
+  it('flush settles normally even if onError itself throws', async () => {
+    const b = new IngestBuffer<Row>({
+      flushRows: 1000, // call flush() ourselves instead of relying on the trigger
+      flushIntervalMs: 60_000,
+      maxRows: 100,
+      insert: async () => {
+        throw new Error('clickhouse down')
+      },
+      onError: () => {
+        throw new Error('logging backend also down')
+      },
+    })
+    b.add({ n: 1 })
+    await expect(b.flush()).resolves.toBeUndefined()
+  })
+
+  it('drain still returns a result even if onError itself throws', async () => {
+    const b = new IngestBuffer<Row>({
+      flushRows: 1,
+      flushIntervalMs: 60_000,
+      maxRows: 100,
+      insert: async () => {
+        throw new Error('clickhouse down')
+      },
+      onError: () => {
+        throw new Error('logging backend also down')
+      },
+    })
+    b.add({ n: 1 })
+    const result = await b.drain(1000)
+    expect(result).toEqual({ flushed: 0, dropped: 1 })
+  })
+
+  it('drops in-flight rows from depth once their insert settles', async () => {
+    const c = deferredCollector()
+    const b = new IngestBuffer<Row>({
+      flushRows: 1,
+      flushIntervalMs: 60_000,
+      maxRows: 100,
+      insert: c.insert,
+    })
+    b.add({ n: 1 }) // hits flushRows immediately; batch detaches into #inFlight
+    expect(b.depth).toBe(1)
+    c.resolveNext()
+    await vi.waitFor(() => expect(b.depth).toBe(0))
   })
 })
