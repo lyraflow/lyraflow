@@ -1,0 +1,66 @@
+# Distinct project name: the durability test runs `down`, which must not reach
+# the self-hosted stack or the test databases if any are running locally.
+name: lyraflow-ci
+
+services:
+  lyraflow:
+    build: .
+    # See docker-compose.yml's comment: without this, an unhandled SIGTERM to
+    # PID 1 is ignored by the kernel rather than terminating the container,
+    # which would let restart-durability.test.ts pass even with a broken or
+    # missing shutdown handler.
+    init: true
+    depends_on:
+      clickhouse: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    environment:
+      LYRAFLOW_POSTGRES_URL: postgres://lyraflow:lyraflow@postgres:5432/lyraflow
+      LYRAFLOW_CLICKHOUSE_URL: http://clickhouse:8123
+      LYRAFLOW_CLICKHOUSE_USER: lyraflow
+      LYRAFLOW_CLICKHOUSE_PASSWORD: lyraflow
+      LYRAFLOW_CLICKHOUSE_DB: lyraflow
+    ports: ["3000:3000"]
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+  # Both stores keep named volumes, mirroring docker-compose.yml. Without them
+  # the data would live in the containers' writable layers, and
+  # restart-durability.test.ts — which exercises the documented `down` + `up -d`
+  # upgrade, not `restart` — would wipe the events it is about to count and
+  # "pass" or "fail" for reasons that have nothing to do with the drain.
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    environment:
+      CLICKHOUSE_DB: lyraflow
+      CLICKHOUSE_USER: lyraflow
+      CLICKHOUSE_PASSWORD: lyraflow
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes: ["ci-clickhouse-data:/var/lib/clickhouse"]
+    ports: ["8123:8123"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- \"http://$$(hostname):8123/ping\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: lyraflow
+      POSTGRES_USER: lyraflow
+      POSTGRES_PASSWORD: lyraflow
+    volumes: ["ci-postgres-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lyraflow -d lyraflow -h \"$$(hostname)\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+volumes:
+  ci-clickhouse-data:
+  ci-postgres-data:

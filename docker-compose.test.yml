@@ -1,0 +1,45 @@
+# Distinct project name so `./install.sh` (project "lyraflow") cannot stop or
+# replace the containers your tests are talking to. Both stacks can run at once;
+# their published ports do not overlap.
+name: lyraflow-test
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    ports: ["8123:8123"]
+    environment:
+      CLICKHOUSE_DB: lyraflow_test
+      CLICKHOUSE_USER: lyraflow
+      CLICKHOUSE_PASSWORD: lyraflow
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    healthcheck:
+      # Probed on the container's own hostname, not 127.0.0.1/localhost: the
+      # image's init-phase temporary server (used to create the DB/user) also
+      # answers on loopback, so a loopback probe can report healthy before the
+      # real server has bound its external-facing port. The hostname form
+      # cannot reach that loopback-only temporary server, and also sidesteps
+      # localhost resolving to the IPv6 loopback address ClickHouse doesn't
+      # listen on in this environment.
+      test: ["CMD-SHELL", "wget -qO- \"http://$$(hostname):8123/ping\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+  postgres:
+    image: postgres:17-alpine
+    ports: ["5433:5432"]
+    environment:
+      POSTGRES_DB: lyraflow_test
+      POSTGRES_USER: lyraflow
+      POSTGRES_PASSWORD: lyraflow
+    healthcheck:
+      # See the clickhouse healthcheck comment above: -h forces the probe onto
+      # the container's own hostname so the entrypoint's init-phase server
+      # (started with listen_addresses='', socket-only) cannot answer it.
+      test: ["CMD-SHELL", "pg_isready -U lyraflow -d lyraflow_test -h \"$$(hostname)\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s

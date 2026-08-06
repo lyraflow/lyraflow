@@ -1,0 +1,77 @@
+services:
+  lyraflow:
+    image: ghcr.io/lyraflow/lyraflow:0
+    # `image:` and `build:` together: Compose uses the named image when it is
+    # available and builds from this checkout (tagging the result with that
+    # same name) when it is not. Until the image is published, `install.sh`'s
+    # `docker compose pull || docker compose build` is what makes a fresh clone
+    # work; once it is published, the pull wins and nothing here changes.
+    build: .
+    restart: unless-stopped
+    # Without an init process reaping PID 1, the kernel *ignores* an
+    # unhandled SIGTERM sent to PID 1 instead of terminating it — so a
+    # missing or broken shutdown handler would silently survive every
+    # restart/stop until SIGKILL, rather than surfacing as a failure.
+    init: true
+    depends_on:
+      clickhouse: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    environment:
+      LYRAFLOW_PORT: 3000
+      LYRAFLOW_POSTGRES_URL: postgres://lyraflow:${POSTGRES_PASSWORD}@postgres:5432/lyraflow
+      LYRAFLOW_CLICKHOUSE_URL: http://clickhouse:8123
+      LYRAFLOW_CLICKHOUSE_USER: lyraflow
+      LYRAFLOW_CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      LYRAFLOW_CLICKHOUSE_DB: lyraflow
+    ports: ["3000:3000"]
+    # Must exceed LYRAFLOW_DRAIN_DEADLINE_MS (25s default), or SIGKILL will
+    # interrupt the drain and accepted events will be lost on every upgrade.
+    stop_grace_period: 30s
+    # 127.0.0.1, never localhost: localhost can resolve to ::1 first, and the
+    # server binds 0.0.0.0 (IPv4 only), so a localhost probe fails permanently.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: lyraflow
+      CLICKHOUSE_USER: lyraflow
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes: ["clickhouse-data:/var/lib/clickhouse"]
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    # Probe the container's own hostname, not loopback: these images run an
+    # init-phase temporary server bound to loopback only, which would answer a
+    # loopback probe and let `--wait` return before the real server binds.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- \"http://$$(hostname):8123/ping\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: lyraflow
+      POSTGRES_USER: lyraflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lyraflow -d lyraflow -h \"$$(hostname)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+volumes:
+  clickhouse-data:
+  postgres-data:
