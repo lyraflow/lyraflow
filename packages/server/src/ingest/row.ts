@@ -39,7 +39,7 @@ export interface RowInput {
 }
 
 /** ClickHouse DateTime64(3) wants 'YYYY-MM-DD HH:MM:SS.mmm', not ISO-8601. */
-function chDateTime(d: Date): string {
+export function chDateTime(d: Date): string {
   return d.toISOString().replace('T', ' ').replace('Z', '')
 }
 

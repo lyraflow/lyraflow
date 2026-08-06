@@ -4,7 +4,10 @@ export interface GeoInfo {
   city: string
 }
 
-export const EMPTY_GEO: GeoInfo = { country: '', region: '', city: '' }
+// Frozen: this exact object is returned to every caller of resolve(). A
+// mutable shared instance would let one caller's edit corrupt every
+// subsequent event that flows through the null resolver.
+export const EMPTY_GEO: GeoInfo = Object.freeze({ country: '', region: '', city: '' })
 
 export interface GeoResolver {
   resolve(ip: string | undefined): GeoInfo

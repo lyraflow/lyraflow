@@ -35,6 +35,20 @@ export function buildApp(input: {
     trustProxy: true,
   })
 
+  // Rule 1: ingest never returns 5xx for bad data, and reserves 5xx for
+  // saturation/outage only — as 503, not 500. authenticate() awaits
+  // ProjectCache.byWriteKey, which rethrows on a cold cache during a
+  // Postgres outage; without this handler that unhandled rejection becomes
+  // Fastify's default 500. This is the backstop for that path and for any
+  // other unexpected throw under /v1/*.
+  app.setErrorHandler((err, req, reply) => {
+    if (req.url.startsWith('/v1/')) {
+      app.log.error({ err }, 'unhandled ingest error')
+      return reply.code(503).header('retry-after', '5').send({ error: 'unavailable' })
+    }
+    return reply.send(err)
+  })
+
   const buffer = new IngestBuffer<EventRow>({
     flushRows: config.flushRows,
     flushIntervalMs: config.flushIntervalMs,

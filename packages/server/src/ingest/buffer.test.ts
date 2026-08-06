@@ -258,9 +258,8 @@ describe('IngestBuffer', () => {
     // into #inFlight, with its insert() call started. A flush() that only
     // re-checks #rows (and finds it empty) would resolve immediately without
     // ever waiting for that insert to actually land — exactly the bug this
-    // proves against, using a real integration path: an ingest route
-    // configured with flushRows: 1, POST an event, then call flush() and
-    // expect the row to be queryable.
+    // proves against. insert() is gated on `gate` so the test can prove
+    // flush() is genuinely blocked on it, not just racing a fast resolve.
     let resolveInsertStarted!: () => void
     const insertStarted = new Promise<void>((resolve) => {
       resolveInsertStarted = resolve
