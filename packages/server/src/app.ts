@@ -1,5 +1,5 @@
 import type { ClickHouseClient, Pool } from '@lyraflow/db'
-import Fastify, { type FastifyInstance } from 'fastify'
+import Fastify, { type FastifyError, type FastifyInstance } from 'fastify'
 import { ProjectCache } from './auth/project-cache.js'
 import type { Config } from './config.js'
 import { type Readiness, registerHealth } from './health.js'
@@ -41,8 +41,19 @@ export function buildApp(input: {
   // Postgres outage; without this handler that unhandled rejection becomes
   // Fastify's default 500. This is the backstop for that path and for any
   // other unexpected throw under /v1/*.
-  app.setErrorHandler((err, req, reply) => {
+  //
+  // It must NOT touch errors Fastify itself already resolved correctly
+  // before any route handler ran — a malformed JSON body (400) or a body
+  // over bodyLimit (413) are genuine, deterministic client errors. Mapping
+  // those to 503 would tell the client to retry a request that will fail
+  // again every time, and would bury real client bugs under a false
+  // "server unavailable" signal. Only an unknown error, or one that already
+  // carries a 5xx status, is ours to convert.
+  app.setErrorHandler((err: FastifyError, req, reply) => {
     if (req.url.startsWith('/v1/')) {
+      if (err.statusCode !== undefined && err.statusCode < 500) {
+        return reply.send(err)
+      }
       app.log.error({ err }, 'unhandled ingest error')
       return reply.code(503).header('retry-after', '5').send({ error: 'unavailable' })
     }

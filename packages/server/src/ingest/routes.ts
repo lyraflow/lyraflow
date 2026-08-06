@@ -177,7 +177,7 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
       await writeDeadLetters(ch, [
         buildDeadLetterRow(project.id, 'validation_failed', parsed.error.message, req.body),
       ])
-      return reply.code(202).send({ accepted: 0, rejected: 1 })
+      return reply.code(202).send({ accepted: 0, rejected: 1, throttled: 0 })
     }
 
     const batch = parsed.data.batch
@@ -211,6 +211,8 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
     }
 
     await writeDeadLetters(ch, deadLetters)
-    return reply.code(202).send({ accepted, rejected })
+    // throttled is always present, even at 0: an SDK parsing a stable shape
+    // shouldn't need to special-case the field's absence versus its value.
+    return reply.code(202).send({ accepted, rejected, throttled: 0 })
   })
 }

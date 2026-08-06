@@ -154,7 +154,9 @@ describe('ingest routes', () => {
       },
     })
     expect(res.statusCode).toBe(202)
-    expect(res.json()).toEqual({ accepted: 1, rejected: 1 })
+    // throttled is always present (even at 0) so an SDK parsing a stable
+    // shape never has to special-case its absence.
+    expect(res.json()).toEqual({ accepted: 1, rejected: 1, throttled: 0 })
   })
 
   it('refuses new events with 503 once draining', async () => {
@@ -204,6 +206,44 @@ describe('ingest routes', () => {
       // The pool never established a real connection; end() may itself
       // reject on some platforms. Either way there is nothing left to clean up.
     })
+  })
+
+  it('returns 400 for a malformed JSON body, not 503', async () => {
+    // Fastify's own body parser throws this before any route handler runs,
+    // already carrying the correct 400. The /v1/* error handler must pass a
+    // sub-500 status straight through instead of converting it to 503 — bad
+    // JSON is a deterministic client error, not something retrying will fix.
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: {
+        'x-lyraflow-write-key': 'wk_routes',
+        'user-agent': UA,
+        'content-type': 'application/json',
+      },
+      payload: '{not valid json',
+    })
+    expect(res.statusCode).toBe(400)
+  })
+
+  it('returns 413 for a body over bodyLimit, not 503', async () => {
+    // Well-formed JSON, but its serialized size exceeds buildApp's
+    // bodyLimit (1_048_576 bytes) — Fastify rejects it before parsing, with
+    // a genuine 413. Retrying an oversized body will fail again every time,
+    // so this must not become 503 either.
+    const oversized = {
+      message_id: randomUUID(),
+      anonymous_id: 'a',
+      event: 'x',
+      properties: { blob: 'x'.repeat(2_000_000) },
+    }
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': 'wk_routes', 'user-agent': UA },
+      payload: oversized,
+    })
+    expect(res.statusCode).toBe(413)
   })
 })
 
@@ -296,7 +336,7 @@ describe('ingest routes (mocked deps)', () => {
     })
 
     expect(res.statusCode).toBe(202)
-    expect(res.json()).toEqual({ accepted: 0, rejected: 3 })
+    expect(res.json()).toEqual({ accepted: 0, rejected: 3, throttled: 0 })
     expect(insertCalls).toHaveLength(1)
     expect(insertCalls[0]?.values).toHaveLength(3)
     await mockedApp.close()
