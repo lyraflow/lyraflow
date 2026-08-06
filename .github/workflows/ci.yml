@@ -2,6 +2,9 @@ name: CI
 on:
   push: { branches: [main] }
   pull_request:
+  # Lets CI run on demand from the Actions tab, so a workflow change can be
+  # re-verified without pushing a throwaway commit.
+  workflow_dispatch:
 
 jobs:
   test:
