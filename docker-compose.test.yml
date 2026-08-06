@@ -1,3 +1,8 @@
+# Distinct project name so `./install.sh` (project "lyraflow") cannot stop or
+# replace the containers your tests are talking to. Both stacks can run at once;
+# their published ports do not overlap.
+name: lyraflow-test
+
 services:
   clickhouse:
     image: clickhouse/clickhouse-server:24.8-alpine

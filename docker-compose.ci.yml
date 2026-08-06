@@ -1,3 +1,7 @@
+# Distinct project name: the durability test runs `down`, which must not reach
+# the self-hosted stack or the test databases if any are running locally.
+name: lyraflow-ci
+
 services:
   lyraflow:
     build: .

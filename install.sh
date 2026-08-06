@@ -16,15 +16,23 @@ else
   )
 fi
 
-# The published image may not exist yet (or not for this architecture), and
-# `set -e` would abort the whole install on a failed pull. Fall back to
-# building from this checkout so a fresh clone works today; the moment the
-# image is published, the pull succeeds and the build is skipped.
-if ! docker compose pull; then
-  echo
-  echo "Could not pull the published image — building it from this checkout instead."
-  echo "(This is expected before the first release; it takes a few minutes.)"
-  docker compose build
+# Postgres and ClickHouse always exist upstream, so pull them normally — their
+# progress output is worth seeing on a slow connection.
+docker compose pull clickhouse postgres
+
+# The Lyraflow image may not be published yet (or not for this architecture),
+# and `set -e` would abort the install on a failed pull. Attempt it quietly:
+# a registry "denied" here is the expected case before the first release, and
+# the daemon prints ~25 lines of retries that look alarming for something that
+# is about to work fine. Fall back to building from this checkout. The moment
+# the image is published, the pull succeeds and the build is skipped.
+echo "Fetching the Lyraflow image..."
+if docker compose pull lyraflow >/dev/null 2>&1; then
+  echo "Pulled the published image."
+else
+  echo "No published image yet — building from this checkout instead."
+  echo "(Expected before the first release. The first build takes a few minutes.)"
+  docker compose build lyraflow
 fi
 
 docker compose up -d

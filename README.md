@@ -46,6 +46,16 @@ readiness. Then create a project and get your write key:
 docker compose exec lyraflow node packages/cli/dist/index.js create-project "My App"
 ```
 
+That prints two keys. The **write key** (`wk_…`) is the one the examples below
+use, so put it in your shell:
+
+```sh
+export LYRAFLOW_WRITE_KEY=wk_...   # the write key printed above
+```
+
+The **server key** (`sk_…`) is secret and shown only once. It is not needed for
+sending events; later releases use it for reading, deletion, and export.
+
 ## Sending your first event
 
 Everything below is the whole of v0.1's public surface. There is no UI and no
@@ -144,10 +154,13 @@ query, just not free. Long-lived retry queues should send `timestamp`.
 ## Upgrading
 
 ```sh
-docker compose pull
+docker compose pull || docker compose build
 docker compose down
 docker compose up -d
 ```
+
+The `|| docker compose build` covers the period before the first image is
+published; once it is, the pull succeeds and the build never runs.
 
 Migrations run automatically on boot, and accepted events are flushed before
 shutdown, so no events are lost across an upgrade.
