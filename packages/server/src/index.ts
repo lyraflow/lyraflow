@@ -4,7 +4,14 @@ import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow
 import { buildApp } from './app.js'
 import { loadConfig } from './config.js'
 import { Readiness } from './health.js'
+import { flushLogger } from './log-flush.js'
 import { installShutdownHandlers } from './shutdown.js'
+
+// Bounds every logger flush this file performs before a process.exit().
+// Long enough for pino's default async stdout destination to land a normal
+// line under Docker; short enough that a stalled destination delays exit by
+// at most this much rather than hanging the container.
+const LOG_FLUSH_TIMEOUT_MS = 1000
 
 const config = loadConfig(process.env)
 const pg = createPgPool(config.pgUrl)
@@ -27,6 +34,10 @@ installShutdownHandlers({
 // (a bad migration, a locked-out DB), so it goes through the already-
 // constructed pino logger as a fatal, structured log line rather than
 // surfacing as a raw unhandled top-level-await rejection dumped to stderr.
+// The flush before exit matters: pino's default stdout destination writes
+// asynchronously when stdout is a pipe (the normal case under Docker), and
+// process.exit() can otherwise terminate the process before this one line
+// — the entire reason this try/catch exists — actually reaches the log.
 const migrationsDir = join(import.meta.dirname, '..', '..', 'db', 'migrations')
 try {
   const { applied } = await migrate({
@@ -38,6 +49,7 @@ try {
   app.log.info({ applied }, 'migrations complete')
 } catch (err) {
   app.log.fatal({ err }, 'migrations failed')
+  await flushLogger(app.log, LOG_FLUSH_TIMEOUT_MS)
   process.exit(1)
 }
 

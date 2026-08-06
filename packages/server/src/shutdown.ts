@@ -3,6 +3,11 @@ import type { Readiness } from './health.js'
 import type { IngestBuffer } from './ingest/buffer.js'
 import type { IngestCounters } from './ingest/counters.js'
 import type { EventRow } from './ingest/row.js'
+import { flushLogger } from './log-flush.js'
+
+// See log-flush.ts and index.ts's identical constant: bounds how long a
+// flush can delay exit() before this module gives up and exits anyway.
+const LOG_FLUSH_TIMEOUT_MS = 1000
 
 export interface ShutdownOptions {
   app: FastifyInstance
@@ -46,6 +51,11 @@ export function installShutdownHandlers(opts: ShutdownOptions): () => Promise<vo
       // misleading at worst about where the safety actually comes from.
       await counters.flush()
       await app.close()
+      // Same reasoning as index.ts's migration-failure path: the line just
+      // above (the drain outcome — success or, more importantly, the
+      // "still buffered" error) is the one an operator needs, and
+      // process.exit() can otherwise beat pino's async stdout write to it.
+      await flushLogger(app.log, LOG_FLUSH_TIMEOUT_MS)
       exit(result.dropped > 0 ? 1 : 0)
     })()
     return running
@@ -61,8 +71,16 @@ export function installShutdownHandlers(opts: ShutdownOptions): () => Promise<vo
     // crash the process before the drain it was trying to protect finishes,
     // which is precisely the durability loss this function exists to avoid.
     process.on(signal, () => {
-      shutdown().catch((err: unknown) => {
+      // This callback is `async` — its `.catch()`-returned promise is never
+      // awaited by anyone, same as it would have been for a synchronous
+      // callback here. That's a pre-existing, already-accepted property of
+      // this exact call site (a synchronous `app.log.error` throw would
+      // have had the identical fate before this change), not something
+      // `async` introduces. flushLogger() itself never rejects, so it adds
+      // no new risk on top of what was already accepted here.
+      shutdown().catch(async (err: unknown) => {
         app.log.error({ err }, 'shutdown failed unexpectedly')
+        await flushLogger(app.log, LOG_FLUSH_TIMEOUT_MS)
         exit(1)
       })
     })

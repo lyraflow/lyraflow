@@ -208,6 +208,9 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
         // counted. Without this, the counter — and the Postgres quota table
         // it flushes into — would undercount by up to 500x under exactly the
         // saturation condition an operator relies on this metric to catch.
+        // When the overloaded item is the batch's last (i === batch.length -
+        // 1), this is record(..., 0) — a harmless zero-delta call that folds
+        // into IngestCounters' pending tally and no-ops through to Postgres.
         counters.record(project.id, 'throttled', batch.length - i - 1)
         const throttled = batch.length - i
         return reply.code(503).header('retry-after', '5').send({ accepted, rejected, throttled })
