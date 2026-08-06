@@ -4,7 +4,7 @@
 
 Lyraflow helps you understand the full path your customers take — from first touch to conversion, retention, and beyond — on infrastructure you control. Your customer data stays yours.
 
-> ⚠️ **Early days.** Lyraflow is in the design phase. There is no runnable code yet — this repository currently holds the project's foundation (structure, license, contribution guidelines). Watch the repo to follow along.
+> ⚠️ **Early days.** Lyraflow currently ships the ingest spine — you can self-host it, send events, and query them, but there is no UI yet (filtering, journeys, dashboards). Watch the repo to follow along.
 
 ## Why Lyraflow?
 
@@ -25,9 +25,37 @@ Note: this is a source-available license, not an [OSI-approved open source](http
 ## Repository layout
 
 ```
-packages/   # product packages (workspace — coming soon)
+packages/   # product packages (workspace)
 docs/       # product documentation
 ```
+
+## Running Lyraflow
+
+Requires Docker and Docker Compose.
+
+```sh
+git clone https://github.com/lyraflow/lyraflow.git
+cd lyraflow
+./install.sh
+```
+
+The script generates passwords into `.env`, starts the stack, and waits for
+readiness. Then create a project and get your write key:
+
+```sh
+docker compose exec lyraflow node packages/cli/dist/index.js create-project "My App"
+```
+
+### Upgrading
+
+```sh
+docker compose pull
+docker compose down
+docker compose up -d
+```
+
+Migrations run automatically on boot, and accepted events are flushed before
+shutdown, so no events are lost across an upgrade.
 
 ## Contributing
 

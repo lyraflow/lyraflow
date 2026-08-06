@@ -7,6 +7,10 @@ settings:
 importers:
 
   .:
+    dependencies:
+      '@lyraflow/db':
+        specifier: workspace:*
+        version: link:packages/db
     devDependencies:
       '@biomejs/biome':
         specifier: ^1.9.4
@@ -20,6 +24,15 @@ importers:
       vitest:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@22.20.1)
+
+  packages/cli:
+    dependencies:
+      '@lyraflow/core':
+        specifier: workspace:*
+        version: link:../core
+      '@lyraflow/db':
+        specifier: workspace:*
+        version: link:../db
 
   packages/core:
     dependencies:
