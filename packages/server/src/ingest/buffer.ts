@@ -99,9 +99,15 @@ export class IngestBuffer<T> {
     })
     const record: InFlightBatch<T> = { rows: batch, settled }
     this.#inFlight.add(record)
-    onRecord?.(record)
 
     try {
+      // Inside the try, not before it. `drain()` calls this method as
+      // `void this.#flushBatch(...)`, so anything that throws out of here
+      // becomes an unhandledRejection *during shutdown* — precisely when the
+      // durability guarantee is being cashed in. A caller's onRecord must be
+      // treated like any other failure on this path: the batch settles as
+      // 'dropped' and onError is told, rather than the process dying.
+      onRecord?.(record)
       // Calling insert() directly here — rather than chaining .catch() off
       // its return value — means a synchronous throw (a closed client, a
       // malformed row) is caught by this try too, not just a rejected

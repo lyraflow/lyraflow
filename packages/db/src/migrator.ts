@@ -176,13 +176,27 @@ function validateClickHouseMigration(m: MigrationFile): void {
   for (const stmt of splitStatements(m.sql)) validateClickHouseStatement(stmt, m)
 }
 
+/**
+ * A store directory that simply does not exist is legitimate — a deployment
+ * may ship Postgres migrations and no ClickHouse ones yet. *Any other* read
+ * failure is not: a permissions error, or a migrations directory left out of
+ * the image, would otherwise make loadStore return `[]`, and `migrate` would
+ * then report success against a schema it never created. That failure is
+ * silent at boot and only surfaces later as missing tables, so narrow the
+ * catch to ENOENT and let everything else escape.
+ */
+function isMissingDirectory(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException | null)?.code === 'ENOENT'
+}
+
 function loadStore(rootDir: string, store: Store): MigrationFile[] {
   const dir = join(rootDir, store)
   let entries: string[]
   try {
     entries = readdirSync(dir)
-  } catch {
-    return []
+  } catch (err) {
+    if (isMissingDirectory(err)) return []
+    throw err
   }
   return entries.flatMap((file) => {
     // Non-SQL files (e.g. .gitkeep) are not migrations; ignore them.

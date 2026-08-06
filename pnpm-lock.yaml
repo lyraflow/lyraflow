@@ -48,6 +48,9 @@ importers:
         specifier: ^8.13.0
         version: 8.22.0
     devDependencies:
+      '@lyraflow/core':
+        specifier: workspace:*
+        version: link:../core
       '@types/pg':
         specifier: ^8.11.0
         version: 8.20.4

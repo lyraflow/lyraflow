@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import { createHash, randomBytes } from 'node:crypto'
 import { join } from 'node:path'
 import { SCHEMA_VERSION } from '@lyraflow/core'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
+import { ProjectExistsError, createProject } from './create-project.js'
 
 function env(key: string): string {
   const v = process.env[key]
@@ -49,21 +49,24 @@ switch (command) {
       process.exit(2)
     }
     const { pg, ch } = clients()
-    const slug = name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-|-$/g, '')
-    const writeKey = `wk_${randomBytes(16).toString('hex')}`
-    const serverKey = `sk_${randomBytes(24).toString('hex')}`
-    await pg.query(
-      'INSERT INTO projects (name, slug, write_key, server_key_hash) VALUES ($1, $2, $3, $4)',
-      [name, slug, writeKey, createHash('sha256').update(serverKey).digest('hex')],
-    )
-    console.log(`Project "${name}" created.`)
-    console.log(`  Write key  (public, safe in browser JS): ${writeKey}`)
-    console.log(`  Server key (secret, shown once):         ${serverKey}`)
-    await pg.end()
-    await ch.close()
+    try {
+      const project = await createProject(pg, name)
+      console.log(`Project "${project.name}" created.`)
+      console.log(`  Write key  (public, safe in browser JS): ${project.writeKey}`)
+      console.log(`  Server key (secret, shown once):         ${project.serverKey}`)
+    } catch (err) {
+      if (!(err instanceof ProjectExistsError)) throw err
+      console.error(err.message)
+      // process.exitCode, not process.exit(1): exit() can truncate a stderr
+      // write that has not flushed yet (stderr is asynchronous when it is a
+      // pipe, which is exactly what `docker compose exec … | tee` gives you),
+      // and the message is the entire point of this branch. Closing the
+      // clients below lets the process end on its own with this code.
+      process.exitCode = 1
+    } finally {
+      await pg.end()
+      await ch.close()
+    }
     break
   }
 

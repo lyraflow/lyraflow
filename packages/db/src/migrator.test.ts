@@ -107,6 +107,28 @@ describe('loadMigrations', () => {
     expect(() => loadMigrations(root)).toThrow(/IF NOT EXISTS/i)
   })
 
+  it('returns no migrations for a store whose directory does not exist at all', () => {
+    // Legitimate: a build may ship Postgres migrations and no ClickHouse ones.
+    const root = mkdtempSync(join(tmpdir(), 'lyraflow-mig-'))
+    mkdirSync(join(root, 'postgres'), { recursive: true })
+    writeFileSync(join(root, 'postgres', '001_only.sql'), 'SELECT 1;')
+    expect(loadMigrations(root).map((m) => m.version)).toEqual([1])
+  })
+
+  it('throws — rather than reporting an empty migration set — when a store directory cannot be read', () => {
+    // A plain file where a directory is expected makes readdirSync fail with
+    // ENOTDIR, standing in for the real cases (bad permissions, a migrations
+    // directory left out of the image). The old bare `catch { return [] }`
+    // swallowed all of them, so migrate() reported success against a schema
+    // it had never created — silent at boot, visible only later as missing
+    // tables. Deleting the `if (isMissingDirectory(err))` guard makes this
+    // pass again, which is the mutation it catches.
+    const root = mkdtempSync(join(tmpdir(), 'lyraflow-mig-'))
+    mkdirSync(join(root, 'clickhouse'), { recursive: true })
+    writeFileSync(join(root, 'postgres'), 'this is a file, not a directory')
+    expect(() => loadMigrations(root)).toThrow(/ENOTDIR/)
+  })
+
   it('rejects a ClickHouse ALTER ... UPDATE/DELETE mutation outright', () => {
     const root = emptyMigrationsRoot()
     writeFileSync(
