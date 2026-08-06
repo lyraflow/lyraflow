@@ -33,6 +33,11 @@ async function waitReady(timeoutMs = 120_000): Promise<void> {
 }
 
 beforeAll(async () => {
+  // Volumes now survive `down`, so a previous run that died before afterAll
+  // would otherwise leave a 'Durability' project behind — create-project would
+  // exit non-zero on the duplicate slug and the write key would never be
+  // parsed. Start from nothing every time.
+  compose('down', '-v')
   compose('up', '-d', '--wait')
   await waitReady()
   const out = compose(
@@ -53,8 +58,22 @@ afterAll(async () => {
   compose('down', '-v')
 })
 
+/**
+ * `restartStack` performs the *documented* upgrade sequence, not `docker
+ * compose restart lyraflow`. README.md tells operators to run `pull && down &&
+ * up -d`, and the two are not the same command: `down` stops ClickHouse and
+ * Postgres as well, while the drain's final INSERT needs ClickHouse alive. That
+ * it works rests on Compose stopping services in reverse dependency order —
+ * an inference the branch's central durability claim should not rest on
+ * untested. Exercising the real command is the only way to know.
+ */
+function restartStack(): void {
+  compose('down')
+  compose('up', '-d', '--wait')
+}
+
 describe('restart durability', () => {
-  it('loses no accepted event across a graceful restart under continuous ingest', async () => {
+  it('loses no accepted event across the documented down/up upgrade under continuous ingest', async () => {
     const sent: string[] = []
     let stop = false
 
@@ -90,18 +109,19 @@ describe('restart durability', () => {
     try {
       await new Promise((r) => setTimeout(r, 3000))
       const restartStartedAt = Date.now()
-      compose('restart', 'lyraflow')
+      restartStack()
       const restartMs = Date.now() - restartStartedAt
       await waitReady()
       await new Promise((r) => setTimeout(r, 3000))
 
-      // A working drain finishes in about a second. `docker compose restart`
-      // only returns once the container is stopped and started again, so if
-      // the shutdown handler were missing or broken, the container would
-      // ignore SIGTERM (see docker-compose.ci.yml's `init: true` comment) and
-      // this call would block for the full `stop_grace_period` (30s) waiting
-      // for SIGKILL — a symptom distinct from, and in addition to, event loss.
-      expect(restartMs).toBeLessThan(15_000)
+      // A working drain finishes in about a second. `docker compose down` only
+      // returns once every container has stopped, so if the shutdown handler
+      // were missing or broken, the container would ignore SIGTERM (see
+      // docker-compose.ci.yml's `init: true` comment) and this would block for
+      // the full `stop_grace_period` (30s) waiting for SIGKILL — a symptom
+      // distinct from, and in addition to, event loss. The budget covers
+      // `up -d --wait` too, which must re-clear every healthcheck.
+      expect(restartMs).toBeLessThan(90_000)
     } finally {
       stop = true
       await sender

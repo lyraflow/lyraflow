@@ -29,5 +29,11 @@ Thumbs.db
 # Test coverage
 coverage/
 
-# Session tooling (local only)
+# Session tooling (local only). Ignored by the repository itself, deliberately,
+# rather than relying on any contributor's personal global gitignore: these
+# directories hold machine-local paths and scratch artifacts, and this is a
+# public repository where a single `git add -A` on a fresh clone would publish
+# them permanently.
 .remember/
+.claude/
+.superpowers/
