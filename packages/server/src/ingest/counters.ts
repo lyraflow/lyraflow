@@ -8,6 +8,13 @@ interface Tally {
   throttled: number
 }
 
+/** The project-month whose write failed, and the counts that were re-buffered for retry. */
+export interface CounterFailure {
+  projectId: number
+  month: string
+  tally: Readonly<Tally>
+}
+
 /**
  * Accumulates ingest outcomes in memory and folds them into Postgres
  * periodically. Silent throttling is indistinguishable from a broken
@@ -16,7 +23,10 @@ interface Tally {
 export class IngestCounters {
   #tallies = new Map<string, { projectId: number; month: string; tally: Tally }>()
 
-  constructor(private readonly pool: Pool) {}
+  constructor(
+    private readonly pool: Pool,
+    private readonly onError?: (err: unknown, failed: CounterFailure) => void,
+  ) {}
 
   record(projectId: number, kind: Kind, n = 1): void {
     const month = `${new Date().toISOString().slice(0, 7)}-01`
@@ -28,16 +38,22 @@ export class IngestCounters {
    * one bad write must not silently abandon the rest. A failed write is
    * folded back into the in-memory tally (merged with anything recorded in
    * the meantime, not overwriting it) so the next flush() retries it instead
-   * of losing the counts. If anything failed, flush() rejects at the end so
-   * the caller can observe and log it — the counts themselves are never
-   * silently dropped, only ever deferred to the next successful flush.
+   * of losing the counts.
+   *
+   * flush() itself never rejects. It's called fire-and-forget from a
+   * `setInterval` and awaited bare on a shutdown drain (see Task 12); an
+   * unhandled rejection there would, on this repo's pinned Node version,
+   * terminate the process — losing every event still held in IngestBuffer,
+   * not just these counters. That blast radius is far worse than the
+   * problem a rejection would have reported, so failures are surfaced
+   * through `onError` instead, mirroring the contract IngestBuffer already
+   * established for the same reason.
    */
   async flush(): Promise<void> {
     if (this.#tallies.size === 0) return
     const pending = [...this.#tallies.values()]
     this.#tallies.clear()
 
-    const failures: unknown[] = []
     for (const { projectId, month, tally } of pending) {
       try {
         await this.pool.query(
@@ -55,15 +71,16 @@ export class IngestCounters {
         target.accepted += tally.accepted
         target.rejected += tally.rejected
         target.throttled += tally.throttled
-        failures.push(err)
+        try {
+          // A throwing onError must not crash the process via an unhandled
+          // rejection from a fire-and-forget flush — that's a bug in the
+          // caller's error handler, not a reason to lose the durability
+          // guarantee.
+          this.onError?.(err, { projectId, month, tally })
+        } catch {
+          // Deliberately swallowed — see above.
+        }
       }
-    }
-
-    if (failures.length > 0) {
-      throw new AggregateError(
-        failures,
-        `${failures.length} of ${pending.length} ingest counter flush write(s) failed and were re-buffered for retry`,
-      )
     }
   }
 

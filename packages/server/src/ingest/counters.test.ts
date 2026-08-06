@@ -51,7 +51,7 @@ describe('IngestCounters', () => {
     await expect(c.flush()).resolves.toBeUndefined()
   })
 
-  it('re-buffers a failed write so a later successful flush still persists it', async () => {
+  it('re-buffers a failed write so a later successful flush still persists it, surfacing the failure via onError instead of rejecting', async () => {
     // Minimal fake satisfying only the `query` method IngestCounters calls;
     // cast through `unknown` since it doesn't implement pg's full Pool
     // surface. The first call fails to simulate a DB blip; later calls
@@ -67,14 +67,23 @@ describe('IngestCounters', () => {
       },
     } as unknown as Pool
 
-    const c = new IngestCounters(flaky)
+    const errors: unknown[] = []
+    const c = new IngestCounters(flaky, (err) => errors.push(err))
     c.record(projectId, 'accepted', 4)
-    await expect(c.flush()).rejects.toThrow()
+
+    // flush() must never reject — it's called fire-and-forget from a
+    // setInterval and awaited bare on a shutdown drain, so a rejection here
+    // would become an unhandled rejection and, on this repo's pinned Node
+    // version, terminate the process (losing every buffered event, not just
+    // these counters). Failure is observed through onError instead.
+    await expect(c.flush()).resolves.toBeUndefined()
+    expect(errors).toHaveLength(1)
 
     // Recording again before the retry proves the re-buffered tally merges
     // with new activity rather than being discarded or overwritten by it.
     c.record(projectId, 'accepted', 1)
     await c.flush()
+    expect(errors).toHaveLength(1) // the retry succeeds; no second failure
 
     const r = await pg.query<{ events_accepted: string }>(
       'SELECT events_accepted FROM ingest_counters WHERE project_id = $1',
@@ -83,5 +92,16 @@ describe('IngestCounters', () => {
     // 10 from the two earlier tests, plus the re-buffered 4, plus the 1
     // recorded during the outage window: 15.
     expect(Number(r.rows[0]?.events_accepted)).toBe(15)
+  })
+
+  it('flush settles normally even if onError itself throws', async () => {
+    const c = new IngestCounters(
+      { query: () => Promise.reject(new Error('connection reset')) } as unknown as Pool,
+      () => {
+        throw new Error('logging backend also down')
+      },
+    )
+    c.record(projectId, 'accepted', 1)
+    await expect(c.flush()).resolves.toBeUndefined()
   })
 })
