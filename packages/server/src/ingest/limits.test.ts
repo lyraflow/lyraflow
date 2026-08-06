@@ -52,4 +52,27 @@ describe('checkLimits', () => {
     const r = checkLimits(track('signup', { brand_new_key: 'v' }), tracker, 1)
     expect(r).toMatchObject({ ok: false, reason: 'property_key_cardinality' })
   })
+
+  it('still accepts an event whose property keys are all already known, at the cap', () => {
+    const tracker = new CardinalityTracker()
+    const keys = Array.from({ length: MAX_PROPERTY_KEYS_PER_EVENT_NAME }, (_, i) => `k${i}`)
+    tracker.observe(1, 'signup', keys)
+    expect(checkLimits(track('signup', { k0: 'v', k1: 'v' }), tracker, 1).ok).toBe(true)
+  })
+
+  it('rejects an event whose novel keys alone would push the per-event-name count past the cap, even though the pre-existing count is below it', () => {
+    const tracker = new CardinalityTracker()
+    // Chosen so existing + MAX_PROPERTIES_PER_EVENT lands exactly one over
+    // the cap: a single event can carry up to MAX_PROPERTIES_PER_EVENT brand
+    // new keys, which must be caught even though the pre-existing count
+    // (251) is nowhere near MAX_PROPERTY_KEYS_PER_EVENT_NAME (500) on its own.
+    const existingKeyCount = MAX_PROPERTY_KEYS_PER_EVENT_NAME - MAX_PROPERTIES_PER_EVENT + 1
+    const keys = Array.from({ length: existingKeyCount }, (_, i) => `k${i}`)
+    tracker.observe(1, 'signup', keys)
+    const properties = Object.fromEntries(
+      Array.from({ length: MAX_PROPERTIES_PER_EVENT }, (_, i) => [`new_${i}`, 'v']),
+    )
+    const r = checkLimits(track('signup', properties), tracker, 1)
+    expect(r).toMatchObject({ ok: false, reason: 'property_key_cardinality' })
+  })
 })

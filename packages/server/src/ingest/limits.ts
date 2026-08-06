@@ -95,13 +95,19 @@ export function checkLimits(
     }
   }
 
-  if (tracker.propertyKeyCount(projectId, name) >= MAX_PROPERTY_KEYS_PER_EVENT_NAME) {
-    const novel = keys.find((k) => !tracker.knowsPropertyKey(projectId, name, k))
-    if (novel) {
+  // A single event can carry up to MAX_PROPERTIES_PER_EVENT brand-new keys at
+  // once, so the cap must be enforced against existing + incoming novel keys
+  // together — checking only the pre-existing count would let one event push
+  // the real total hundreds over the limit before the guard ever engages.
+  const existingKeyCount = tracker.propertyKeyCount(projectId, name)
+  const novelKeys = keys.filter((k) => !tracker.knowsPropertyKey(projectId, name, k))
+  if (existingKeyCount + novelKeys.length > MAX_PROPERTY_KEYS_PER_EVENT_NAME) {
+    const novel = novelKeys[0]
+    if (novel !== undefined) {
       return {
         ok: false,
         reason: 'property_key_cardinality',
-        detail: `Event "${name}" already uses ${MAX_PROPERTY_KEYS_PER_EVENT_NAME} distinct property keys; "${novel}" was rejected`,
+        detail: `Event "${name}" would exceed the limit of ${MAX_PROPERTY_KEYS_PER_EVENT_NAME} distinct property keys; "${novel}" was rejected`,
       }
     }
   }
