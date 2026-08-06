@@ -79,23 +79,34 @@ describe('restart durability', () => {
       }
     })()
 
-    await new Promise((r) => setTimeout(r, 3000))
-    const restartStartedAt = Date.now()
-    compose('restart', 'lyraflow')
-    const restartMs = Date.now() - restartStartedAt
-    await waitReady()
-    await new Promise((r) => setTimeout(r, 3000))
+    // Everything that can throw ahead of `stop = true` (waitReady()'s
+    // timeout, the restartMs assertion) must not skip stopping the sender:
+    // without this try/finally, a thrown assertion leaves `stop` false
+    // forever, and the sender's `while (!stop)` loop — with its 20ms
+    // setTimeout — keeps running orphaned in the vitest worker after the
+    // test has already failed, risking a hung/force-killed worker in
+    // exactly the regression case (a hung container) this test exists to
+    // catch fastest.
+    try {
+      await new Promise((r) => setTimeout(r, 3000))
+      const restartStartedAt = Date.now()
+      compose('restart', 'lyraflow')
+      const restartMs = Date.now() - restartStartedAt
+      await waitReady()
+      await new Promise((r) => setTimeout(r, 3000))
 
-    // A working drain finishes in about a second. `docker compose restart`
-    // only returns once the container is stopped and started again, so if
-    // the shutdown handler were missing or broken, the container would
-    // ignore SIGTERM (see docker-compose.ci.yml's `init: true` comment) and
-    // this call would block for the full `stop_grace_period` (30s) waiting
-    // for SIGKILL — a symptom distinct from, and in addition to, event loss.
-    expect(restartMs).toBeLessThan(15_000)
+      // A working drain finishes in about a second. `docker compose restart`
+      // only returns once the container is stopped and started again, so if
+      // the shutdown handler were missing or broken, the container would
+      // ignore SIGTERM (see docker-compose.ci.yml's `init: true` comment) and
+      // this call would block for the full `stop_grace_period` (30s) waiting
+      // for SIGKILL — a symptom distinct from, and in addition to, event loss.
+      expect(restartMs).toBeLessThan(15_000)
+    } finally {
+      stop = true
+      await sender
+    }
 
-    stop = true
-    await sender
     await new Promise((r) => setTimeout(r, 3000))
 
     const rs = await ch.query({
