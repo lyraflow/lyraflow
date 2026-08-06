@@ -80,9 +80,19 @@ describe('restart durability', () => {
     })()
 
     await new Promise((r) => setTimeout(r, 3000))
+    const restartStartedAt = Date.now()
     compose('restart', 'lyraflow')
+    const restartMs = Date.now() - restartStartedAt
     await waitReady()
     await new Promise((r) => setTimeout(r, 3000))
+
+    // A working drain finishes in about a second. `docker compose restart`
+    // only returns once the container is stopped and started again, so if
+    // the shutdown handler were missing or broken, the container would
+    // ignore SIGTERM (see docker-compose.ci.yml's `init: true` comment) and
+    // this call would block for the full `stop_grace_period` (30s) waiting
+    // for SIGKILL — a symptom distinct from, and in addition to, event loss.
+    expect(restartMs).toBeLessThan(15_000)
 
     stop = true
     await sender

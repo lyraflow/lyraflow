@@ -7,14 +7,13 @@ settings:
 importers:
 
   .:
-    dependencies:
-      '@lyraflow/db':
-        specifier: workspace:*
-        version: link:packages/db
     devDependencies:
       '@biomejs/biome':
         specifier: ^1.9.4
         version: 1.9.4
+      '@lyraflow/db':
+        specifier: workspace:*
+        version: link:packages/db
       '@types/node':
         specifier: ^22.10.0
         version: 22.20.1

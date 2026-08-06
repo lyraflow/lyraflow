@@ -1,6 +1,11 @@
 services:
   lyraflow:
     build: .
+    # See docker-compose.yml's comment: without this, an unhandled SIGTERM to
+    # PID 1 is ignored by the kernel rather than terminating the container,
+    # which would let restart-durability.test.ts pass even with a broken or
+    # missing shutdown handler.
+    init: true
     depends_on:
       clickhouse: { condition: service_healthy }
       postgres: { condition: service_healthy }

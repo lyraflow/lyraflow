@@ -2,6 +2,11 @@ services:
   lyraflow:
     image: ghcr.io/lyraflow/lyraflow:0
     restart: unless-stopped
+    # Without an init process reaping PID 1, the kernel *ignores* an
+    # unhandled SIGTERM sent to PID 1 instead of terminating it — so a
+    # missing or broken shutdown handler would silently survive every
+    # restart/stop until SIGKILL, rather than surfacing as a failure.
+    init: true
     depends_on:
       clickhouse: { condition: service_healthy }
       postgres: { condition: service_healthy }

@@ -4,7 +4,7 @@
 
 Lyraflow helps you understand the full path your customers take — from first touch to conversion, retention, and beyond — on infrastructure you control. Your customer data stays yours.
 
-> ⚠️ **Early days.** Lyraflow currently ships the ingest spine — you can self-host it, send events, and query them, but there is no UI yet (filtering, journeys, dashboards). Watch the repo to follow along.
+> ⚠️ **Early days.** Lyraflow currently ships the ingest spine — you can self-host it, create a project, and send it events over the HTTP API. There is no query API and no UI yet (filtering, journeys, dashboards). Watch the repo to follow along.
 
 ## Why Lyraflow?
 
