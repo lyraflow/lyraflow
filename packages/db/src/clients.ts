@@ -1,5 +1,5 @@
 import { type ClickHouseClient, createClient } from '@clickhouse/client'
-import { Pool } from 'pg'
+import { Pool, type PoolClient } from 'pg'
 
 export interface ChConfig {
   url: string
@@ -21,4 +21,4 @@ export function createChClient(cfg: ChConfig): ClickHouseClient {
   })
 }
 
-export type { ClickHouseClient, Pool }
+export type { ClickHouseClient, Pool, PoolClient }
