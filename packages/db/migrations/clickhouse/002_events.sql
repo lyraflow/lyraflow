@@ -1,7 +1,9 @@
 -- 002_events: the append-only events table, its dead-letter sibling, and the
 -- device_index / event_schema derived structures. device_index and
--- event_schema are materialized views over `events` and must exist from the
--- very first insert -- a view added later would never see historical rows.
+-- event_schema are tables fed by materialized views over `events`, and must
+-- exist from the very first insert -- a materialized view added later would
+-- never see historical rows, so the tables it feeds would stay empty for
+-- everything ingested before it was created.
 
 CREATE TABLE IF NOT EXISTS events (
   project_id     UInt32,

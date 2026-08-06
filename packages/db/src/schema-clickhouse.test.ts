@@ -28,17 +28,10 @@ beforeAll(async () => {
   ]) {
     await ch.command({ query: `DROP TABLE IF EXISTS ${t}` })
   }
-  // migrator.test.ts's beforeEach drops `schema_migrations` before every one
-  // of its tests, including its final two (which use a fake pg client and so
-  // never recreate the real table again) — so when this file runs right
-  // after it in the shared suite, the table may not exist yet. Tolerate
-  // that ("undefined_table", Postgres error code 42P01): migrate() below
-  // recreates it via `CREATE TABLE IF NOT EXISTS` regardless.
-  try {
-    await pg.query('DELETE FROM schema_migrations WHERE store = $1', ['clickhouse'])
-  } catch (err) {
-    if ((err as { code?: string }).code !== '42P01') throw err
-  }
+  // Unconditional, like schema-postgres.test.ts: safe whether or not the
+  // table currently exists, since every migration (including 001_core.sql)
+  // is fully `IF NOT EXISTS` and migrate() recreates the ledger itself.
+  await pg.query('DROP TABLE IF EXISTS schema_migrations')
   const root = join(import.meta.dirname, '..', 'migrations')
   await migrate({ pg, ch, migrations: loadMigrations(root), appSchemaVersion: 999 })
 
@@ -109,15 +102,22 @@ describe('clickhouse schema', () => {
         },
       ],
     })
+    // FINAL applies the ReplacingMergeTree collapse deterministically at
+    // query time, so this assertion doesn't depend on a background merge
+    // having happened (unlike `count(DISTINCT event_id)`, which would read
+    // as "deduplicated" even under a plain MergeTree with two physical rows —
+    // see the Task 6 review fix report for the sanity check that proves this
+    // distinction). FINAL is avoided in production query paths for cost
+    // reasons; here, testing engine behaviour, it is exactly the right tool.
     const r = await rows<{ c: string }>(
-      "SELECT count(DISTINCT event_id) AS c FROM events WHERE event_name = 'import_started'",
+      "SELECT count() AS c FROM events FINAL WHERE event_name = 'import_started'",
     )
     expect(Number(r[0]?.c)).toBe(1)
   })
 
   it('partitions by project and month', async () => {
     const r = await rows<{ partition: string }>(
-      "SELECT partition FROM system.parts WHERE table = 'events' AND active LIMIT 1",
+      "SELECT partition FROM system.parts WHERE database = 'lyraflow_test' AND table = 'events' AND active LIMIT 1",
     )
     expect(r[0]?.partition).toContain('202608')
   })
@@ -139,5 +139,16 @@ describe('clickhouse schema', () => {
       "SELECT event_name, property_key, value_kind FROM event_schema WHERE property_key = 'rows'",
     )
     expect(r[0]).toMatchObject({ event_name: 'import_started', value_kind: 'number' })
+  })
+
+  // Without this, event_schema_str_mv (the string-keyed property branch) is
+  // created but never exercised by an assertion — deleting it entirely would
+  // still leave the suite green, since the only prior event_schema check
+  // filtered on the numeric branch (`property_key = 'rows'`).
+  it('records string-valued property keys in event_schema', async () => {
+    const r = await rows<{ event_name: string; property_key: string; value_kind: string }>(
+      "SELECT event_name, property_key, value_kind FROM event_schema WHERE property_key = 'source'",
+    )
+    expect(r[0]).toMatchObject({ event_name: 'import_started', value_kind: 'string' })
   })
 })

@@ -53,11 +53,6 @@ function createFakeClient(onQuery: (text: string) => { rows: unknown[] } | undef
   return { query, release }
 }
 
-beforeEach(async () => {
-  await pg.query('DROP TABLE IF EXISTS widgets, schema_migrations')
-  await ch.command({ query: 'DROP TABLE IF EXISTS gadgets' })
-})
-
 afterAll(async () => {
   await pg.end()
   await ch.close()
@@ -123,6 +118,20 @@ describe('loadMigrations', () => {
 })
 
 describe('migrate', () => {
+  // Scoped to this describe (and its nested ones below) rather than a
+  // file-level hook: every test here exercises the real Postgres/ClickHouse
+  // clients and needs a clean slate. The "connection lifecycle regression"
+  // tests further down use a fake `pg` client and never touch the real
+  // database, so they are a *sibling* describe below, deliberately outside
+  // this hook's scope — otherwise the drop here would run before them too,
+  // and since they never recreate `schema_migrations` for real, the table
+  // would be left dropped for whichever test file vitest runs next in the
+  // shared, `fileParallelism: false` suite (see the Task 6 review fix).
+  beforeEach(async () => {
+    await pg.query('DROP TABLE IF EXISTS widgets, schema_migrations')
+    await ch.command({ query: 'DROP TABLE IF EXISTS gadgets' })
+  })
+
   it('applies pending migrations to both stores', async () => {
     const migrations = loadMigrations(fixtureDir())
     const { applied } = await migrate({ pg, ch, migrations, appSchemaVersion: 2 })
@@ -281,41 +290,49 @@ describe('migrate', () => {
       }
     })
   })
+})
 
-  // --- IMPORTANT 2 & 3: connection lifecycle around the advisory lock and a failing rollback ---
+// --- IMPORTANT 2 & 3: connection lifecycle around the advisory lock and a failing rollback ---
 
-  describe('connection lifecycle regression (IMPORTANT 2 & 3)', () => {
-    it('releases the connection exactly once even when the advisory-unlock query fails', async () => {
-      const { query, release } = createFakeClient((text) => {
-        if (text.includes('SELECT version FROM schema_migrations')) return { rows: [] }
-        if (text.includes('pg_advisory_unlock')) throw new Error('connection lost')
-      })
-      const fakePg = { connect: async () => ({ query, release }) } as unknown as Pool
-
-      await expect(
-        migrate({ pg: fakePg, ch, migrations: [], appSchemaVersion: 0 }),
-      ).resolves.toEqual({ applied: [] })
-      expect(release).toHaveBeenCalledTimes(1)
+// Deliberately a sibling of `describe('migrate', ...)` above, not nested
+// inside it: every test here uses a fake `pg` client and never touches the
+// real database, so it must not inherit that describe's real-DB-cleanup
+// `beforeEach` — a prior version of this file had it nested, which meant the
+// real `schema_migrations` table got dropped before these fake-client tests
+// too and was never recreated after them, leaving it missing for whichever
+// database-backed test file vitest ran next in the shared,
+// `fileParallelism: false` suite (see the Task 6 review fix report).
+describe('connection lifecycle regression (IMPORTANT 2 & 3)', () => {
+  it('releases the connection exactly once even when the advisory-unlock query fails', async () => {
+    const { query, release } = createFakeClient((text) => {
+      if (text.includes('SELECT version FROM schema_migrations')) return { rows: [] }
+      if (text.includes('pg_advisory_unlock')) throw new Error('connection lost')
     })
+    const fakePg = { connect: async () => ({ query, release }) } as unknown as Pool
 
-    it('surfaces the original error — not a failing ROLLBACK — and destroys the connection when both fail', async () => {
-      const originalError = new Error('syntax error at or near THIS')
-      const rollbackError = new Error('current transaction is aborted')
-      const migrations: MigrationFile[] = [
-        { version: 1, name: 'broken', store: 'postgres', sql: 'THIS IS NOT VALID SQL;' },
-      ]
-      const { query, release } = createFakeClient((text) => {
-        if (text.includes('SELECT version FROM schema_migrations')) return { rows: [] }
-        if (text === 'THIS IS NOT VALID SQL;') throw originalError
-        if (text === 'ROLLBACK') throw rollbackError
-      })
-      const fakePg = { connect: async () => ({ query, release }) } as unknown as Pool
+    await expect(migrate({ pg: fakePg, ch, migrations: [], appSchemaVersion: 0 })).resolves.toEqual(
+      { applied: [] },
+    )
+    expect(release).toHaveBeenCalledTimes(1)
+  })
 
-      await expect(migrate({ pg: fakePg, ch, migrations, appSchemaVersion: 1 })).rejects.toBe(
-        originalError,
-      )
-      expect(release).toHaveBeenCalledTimes(1)
-      expect(release).toHaveBeenCalledWith(true)
+  it('surfaces the original error — not a failing ROLLBACK — and destroys the connection when both fail', async () => {
+    const originalError = new Error('syntax error at or near THIS')
+    const rollbackError = new Error('current transaction is aborted')
+    const migrations: MigrationFile[] = [
+      { version: 1, name: 'broken', store: 'postgres', sql: 'THIS IS NOT VALID SQL;' },
+    ]
+    const { query, release } = createFakeClient((text) => {
+      if (text.includes('SELECT version FROM schema_migrations')) return { rows: [] }
+      if (text === 'THIS IS NOT VALID SQL;') throw originalError
+      if (text === 'ROLLBACK') throw rollbackError
     })
+    const fakePg = { connect: async () => ({ query, release }) } as unknown as Pool
+
+    await expect(migrate({ pg: fakePg, ch, migrations, appSchemaVersion: 1 })).rejects.toBe(
+      originalError,
+    )
+    expect(release).toHaveBeenCalledTimes(1)
+    expect(release).toHaveBeenCalledWith(true)
   })
 })
