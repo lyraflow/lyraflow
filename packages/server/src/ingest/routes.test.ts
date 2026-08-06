@@ -372,4 +372,39 @@ describe('ingest routes (mocked deps)', () => {
     expect(res.json()).toEqual({ accepted: 1, rejected: 0, throttled: 2 })
     await mockedApp.close()
   })
+
+  it('counts every un-attempted batch item as throttled, matching the response body exactly', async () => {
+    const saturatingBuffer = new IngestBuffer<EventRow>({
+      flushRows: 1000,
+      flushIntervalMs: 60_000,
+      maxRows: 1, // first add() succeeds; every add() after reports 'overloaded'
+      insert: async () => {},
+    })
+    const counters = new IngestCounters(fakePool)
+
+    const mockedApp = buildMockedApp({ buffer: saturatingBuffer, counters })
+    const res = await mockedApp.inject({
+      method: 'POST',
+      url: '/v1/batch',
+      headers: { 'x-lyraflow-write-key': 'wk_mock', 'user-agent': UA },
+      payload: {
+        batch: [
+          { type: 'track', message_id: randomUUID(), anonymous_id: 'a', event: 'one' },
+          { type: 'track', message_id: randomUUID(), anonymous_id: 'a', event: 'two' },
+          { type: 'track', message_id: randomUUID(), anonymous_id: 'a', event: 'three' },
+        ],
+      },
+    })
+
+    const body = res.json() as { accepted: number; rejected: number; throttled: number }
+    // This equality is the invariant that matters: the metric/quota counter
+    // and the response the SDK sees must never disagree about how many
+    // events were throttled. accept() only counts the one item it actually
+    // attempted (item i) — the batch.length - i - 1 items the loop never
+    // reached must be recorded too, or a dashboard reads 1 while the SDK
+    // retries 2.
+    expect(counters.totals().throttled).toBe(body.throttled)
+    expect(body.throttled).toBe(2)
+    await mockedApp.close()
+  })
 })

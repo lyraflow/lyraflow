@@ -88,5 +88,13 @@ describe('installShutdownHandlers', () => {
     h.buffer.add({ n: 1 })
     await Promise.all([shutdown(), shutdown()])
     expect(inserted.flat()).toHaveLength(1)
+    // The row-count assertion above holds even without the memoization guard
+    // in this harness — IngestBuffer.drain() is itself a no-op once its
+    // queue is empty, so a second, un-memoized drain doesn't re-flush
+    // anything to duplicate. This assertion is the one that actually pins
+    // idempotency: counters.flush() is a plain spy with no such internal
+    // idempotency of its own, so a second, un-memoized shutdown() run calls
+    // it a second time and this fails at 2.
+    expect(h.counters.flush).toHaveBeenCalledTimes(1)
   })
 })

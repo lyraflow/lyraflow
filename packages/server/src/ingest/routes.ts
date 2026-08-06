@@ -202,6 +202,13 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
         // double-counting. That is the design's reason for a
         // client-generated message_id.
         await writeDeadLetters(ch, deadLetters)
+        // accept() already recorded item i itself as 'throttled'; the
+        // remaining batch.length - i - 1 items were never attempted at all
+        // (the loop stops here) and so never went through accept() to be
+        // counted. Without this, the counter — and the Postgres quota table
+        // it flushes into — would undercount by up to 500x under exactly the
+        // saturation condition an operator relies on this metric to catch.
+        counters.record(project.id, 'throttled', batch.length - i - 1)
         const throttled = batch.length - i
         return reply.code(503).header('retry-after', '5').send({ accepted, rejected, throttled })
       }
