@@ -23,6 +23,14 @@ export interface CounterFailure {
 export class IngestCounters {
   #tallies = new Map<string, { projectId: number; month: string; tally: Tally }>()
 
+  // Cumulative since process start, deliberately never touched by flush().
+  // #tallies above is a *pending-write* buffer: flush() drains and clears it
+  // on every successful (or re-buffered) round trip to Postgres, so it can't
+  // serve as a Prometheus counter — a metric built on it would reset every
+  // ~10s instead of only on process restart, which is not what a `_total`
+  // counter means. This field is that separate, monotonic record.
+  #totals: Tally = { accepted: 0, rejected: 0, throttled: 0 }
+
   constructor(
     private readonly pool: Pool,
     private readonly onError?: (err: unknown, failed: CounterFailure) => void,
@@ -31,6 +39,12 @@ export class IngestCounters {
   record(projectId: number, kind: Kind, n = 1): void {
     const month = `${new Date().toISOString().slice(0, 7)}-01`
     this.#getOrCreate(projectId, month)[kind] += n
+    this.#totals[kind] += n
+  }
+
+  /** Cumulative event outcomes since process start, for the `/metrics` endpoint. */
+  totals(): Readonly<Tally> {
+    return { ...this.#totals }
   }
 
   /**

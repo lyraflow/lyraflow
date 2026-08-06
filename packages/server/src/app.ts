@@ -9,6 +9,7 @@ import { NullGeoResolver } from './ingest/geo.js'
 import { CardinalityTracker } from './ingest/limits.js'
 import { registerIngestRoutes } from './ingest/routes.js'
 import type { EventRow } from './ingest/row.js'
+import { registerMetrics } from './metrics.js'
 
 export interface AppDeps {
   config: Config
@@ -75,6 +76,16 @@ export function buildApp(input: {
 
   app.decorate('deps', { config, pg, ch, readiness, buffer, counters } satisfies AppDeps)
   registerHealth(app, readiness)
+  // Sourced from IngestCounters, not an onResponse hook counting HTTP
+  // responses: /v1/batch answers with a single response for up to 500
+  // events, so a response-derived count would undercount by up to 500x and
+  // couldn't tell the accepted items in a batch from the rejected ones.
+  // IngestCounters.record() is already called once per event in
+  // registerIngestRoutes, at the exact granularity this metric needs.
+  registerMetrics(app, {
+    bufferDepth: () => buffer.depth,
+    totals: () => counters.totals(),
+  })
   registerIngestRoutes(app, {
     buffer,
     projects: new ProjectCache(pg, 60_000),
