@@ -67,6 +67,27 @@ describe('segments table', () => {
     ).rejects.toThrow(/unique|duplicate/i)
   })
 
+  it('allows the same name in a different project', async () => {
+    const other = await pg.query<{ id: string }>(
+      `INSERT INTO projects (name, slug, write_key, server_key_hash)
+       VALUES ('Neighbour', 'segments-neighbour', 'wk_neighbour', 'h') RETURNING id`,
+    )
+    const neighbour = Number(other.rows[0]?.id)
+    await pg.query(
+      `INSERT INTO segments (project_id, name, ast_version, filter)
+       VALUES ($1, 'Shared name', 1, '{}'::jsonb)`,
+      [projectId],
+    )
+    await expect(
+      pg.query(
+        `INSERT INTO segments (project_id, name, ast_version, filter)
+         VALUES ($1, 'Shared name', 1, '{}'::jsonb)`,
+        [neighbour],
+      ),
+    ).resolves.toBeDefined()
+    await pg.query('DELETE FROM projects WHERE id = $1', [neighbour])
+  })
+
   it('deletes a project segments when the project goes', async () => {
     const other = await pg.query<{ id: string }>(
       `INSERT INTO projects (name, slug, write_key, server_key_hash)
