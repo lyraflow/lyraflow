@@ -279,10 +279,14 @@ export async function ensureIdentityDictionaries(
   // only actually happens once a row has been added — rows are never removed,
   // so the count and the newest timestamp together change if and only if the
   // list grew.
+  // The invalidate_query still fires correctly now that a REPEAT deletion
+  // UPDATES a row rather than only inserting one. `suppressed_at` is always
+  // now(), so any write — insert or upsert — becomes the new max(), and the
+  // scalar changes. A reload is skipped only when nothing was written at all.
   try {
     await ch.command({
       query: `CREATE OR REPLACE DICTIONARY suppressed_persons (
-      project_id UInt32, person_id String, suppressed UInt8
+      project_id UInt32, person_id String, suppressed UInt8, suppressed_at DateTime
     )
     PRIMARY KEY project_id, person_id
     ${source(

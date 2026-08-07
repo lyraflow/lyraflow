@@ -645,4 +645,28 @@ describe('ensureIdentityDictionaries (live ClickHouse + Postgres)', () => {
     const [hit] = await hits.json<{ gone: number; here: number }>()
     expect(hit).toEqual({ gone: 1, here: 0 })
   })
+
+  it('exposes suppressed_at through the dictionary, not just presence', async () => {
+    const at = new Date(Date.now() - 3 * 3_600_000)
+    await pg.query(
+      `INSERT INTO suppressed_persons (project_id, person_id, suppressed_at)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (project_id, person_id) DO UPDATE SET suppressed_at = EXCLUDED.suppressed_at`,
+      [projectId, 'sup-dict-1', at],
+    )
+    await ensureIdentityDictionaries(ch, pgSource)
+    await ch.command({ query: `SYSTEM RELOAD DICTIONARY ${CH_DB}.suppressed_persons` })
+    const rs = await ch.query({
+      query: `SELECT
+                dictHas('${CH_DB}.suppressed_persons', ({p:UInt32}, {id:String})) AS present,
+                toUnixTimestamp(dictGetOrDefault('${CH_DB}.suppressed_persons',
+                  'suppressed_at', ({p:UInt32}, {id:String}), toDateTime(0))) AS at`,
+      query_params: { p: projectId, id: 'sup-dict-1' },
+      format: 'JSONEachRow',
+    })
+    const [row] = await rs.json<{ present: number; at: string }>()
+    expect(Number(row?.present)).toBe(1)
+    // Seconds resolution: the dictionary attribute is DateTime, not DateTime64.
+    expect(Number(row?.at)).toBe(Math.floor(at.getTime() / 1000))
+  })
 })
