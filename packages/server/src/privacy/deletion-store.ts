@@ -87,6 +87,9 @@ export class DeletionStore {
     at: Date,
   ): Promise<{ id: number; suppressedAt: Date }> {
     const client = await this.pool.connect()
+    // Set only if ROLLBACK itself fails, below, and passed to
+    // `client.release()` in `finally` — see that catch block for why.
+    let releaseErr: Error | undefined
     try {
       await client.query('BEGIN')
       const suppressedAt = await this.suppression.upsert(client, projectId, personId, at)
@@ -97,16 +100,30 @@ export class DeletionStore {
       await client.query('COMMIT')
       return { id: Number(r.rows[0]?.id), suppressedAt }
     } catch (err) {
-      // ROLLBACK itself can fail (a dead connection); that must not replace
-      // the original error, which is the one that explains what went wrong.
+      // ROLLBACK itself can fail (e.g. a dead connection); that must not
+      // replace the original error, which is the one that explains what
+      // went wrong — it is always what this method throws.
+      //
+      // But a rollback failure still has to be dealt with, and
+      // `client.release()` with NO argument does not do that: it returns
+      // the connection to the pool's IDLE list regardless of whether the
+      // transaction was ever rolled back. A connection released that way
+      // after a failed ROLLBACK goes back into circulation still inside an
+      // aborted transaction, and every query any later caller sends over it
+      // fails with "current transaction is aborted, commands ignored until
+      // end of transaction block" — permanently, for as long as the pool
+      // keeps handing that connection out. `client.release(err)`, called
+      // with a truthy argument, is what makes the pool DESTROY the
+      // connection instead of recycling it, which is what `finally` does
+      // below whenever `releaseErr` got set here.
       try {
         await client.query('ROLLBACK')
-      } catch {
-        /* the release below discards the connection either way */
+      } catch (rollbackErr) {
+        releaseErr = rollbackErr instanceof Error ? rollbackErr : new Error(String(rollbackErr))
       }
       throw err
     } finally {
-      client.release()
+      client.release(releaseErr)
     }
   }
 

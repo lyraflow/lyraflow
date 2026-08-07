@@ -38,7 +38,11 @@ beforeAll(async () => {
   // run, is fair game for every `claim()` call below. Wiping the whole table,
   // not just rows tied to this file's own projects, is what makes the claim
   // tests below deterministic rather than dependent on what else happens to
-  // be sitting in it.
+  // be sitting in it. This is only safe because vitest.config.ts sets
+  // `fileParallelism: false` — no other test file's `deletion_requests` rows
+  // are ever live at the same time as this file's. Tasks 6 and 7 will add
+  // route tests that touch this same table; if either ever needs to run
+  // concurrently with this file, this wipe needs to be scoped down first.
   await pg.query('DELETE FROM deletion_requests')
   const a = await pg.query<{ id: string }>(
     `INSERT INTO projects (name, slug, write_key, server_key_hash)
@@ -130,6 +134,60 @@ describe('DeletionStore', () => {
       // own `finally`; undo the spy before it can serve any other query.
       spy.mockRestore()
     }
+  })
+
+  it('destroys the connection, rather than recycling it, when ROLLBACK itself fails', async () => {
+    // `client.release()` with no argument returns the connection to the
+    // pool's IDLE list unconditionally — it does not check whether the
+    // transaction on it was ever rolled back. A connection released that
+    // way after a failed ROLLBACK goes back into circulation still inside
+    // an aborted transaction, and every later query anyone sends over it
+    // fails with "current transaction is aborted, commands ignored until
+    // end of transaction block" — permanently. Only `client.release(err)`,
+    // called with a truthy argument, makes the pool DESTROY the connection
+    // instead of recycling it.
+    //
+    // A fully synthetic client/pool, rather than a real `pg.connect()`
+    // client: reproducing a genuine ROLLBACK failure against live Postgres
+    // needs the connection itself to be broken (e.g. killing the backend
+    // mid-transaction), which is exactly the kind of thing that can't be
+    // done deterministically from here. What this test pins is
+    // `DeletionStore.request`'s own control flow — that a rollback failure
+    // is captured and reaches `release` — which a fake client observes
+    // exactly as well as a real one would, without needing a live
+    // connection to clean up afterwards.
+    const releaseCalls: unknown[] = []
+    const fakeClient = {
+      query: vi.fn((text: string, params?: unknown[]) => {
+        if (text === 'BEGIN' || text === 'COMMIT') return Promise.resolve({ rows: [] })
+        if (text.includes('INSERT INTO suppressed_persons')) {
+          return Promise.resolve({ rows: [{ suppressed_at: params?.[2] }] })
+        }
+        if (text.includes('INSERT INTO deletion_requests')) {
+          return Promise.reject(new Error('deliberate insert failure'))
+        }
+        if (text === 'ROLLBACK') {
+          return Promise.reject(new Error('deliberate rollback failure'))
+        }
+        throw new Error(`unexpected query in this test: ${text}`)
+      }),
+      release: vi.fn((err?: unknown) => {
+        releaseCalls.push(err)
+      }),
+    }
+    const fakePool = { connect: async () => fakeClient } as unknown as Pool
+    const storeWithFakeConnection = new DeletionStore(fakePool, suppression)
+
+    // The ORIGINAL error — the insert failure, not the rollback failure —
+    // is what must reach the caller; the rollback failure is dealt with
+    // separately, via `release`, below.
+    await expect(
+      storeWithFakeConnection.request(projectId, 'rollback-fails-1', new Date()),
+    ).rejects.toThrow('deliberate insert failure')
+
+    expect(releaseCalls).toHaveLength(1)
+    expect(releaseCalls[0]).toBeInstanceOf(Error)
+    expect((releaseCalls[0] as Error).message).toBe('deliberate rollback failure')
   })
 
   it('advances the boundary on a repeat request and files a second request', async () => {
