@@ -85,4 +85,42 @@ describe('segments table', () => {
     )
     expect(Number(r.rows[0]?.c)).toBe(0)
   })
+
+  it('reshapes a segments table left behind by an earlier migration', async () => {
+    await pg.query('DROP TABLE IF EXISTS segments')
+    await pg.query(`
+      CREATE TABLE segments (
+        id bigserial PRIMARY KEY,
+        project_id bigint NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        name text NOT NULL,
+        filter_tree jsonb NOT NULL,
+        ast_version integer NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now(),
+        UNIQUE (project_id, name)
+      )`)
+    await pg.query('DROP TABLE IF EXISTS schema_migrations')
+    await migrate({
+      pg,
+      ch,
+      migrations: loadMigrations(join(import.meta.dirname, '..', '..', 'migrations')),
+      appSchemaVersion: 999,
+    })
+    // Recreate the test project since migrations were replayed
+    await pg.query('DELETE FROM projects WHERE slug = $1', ['segments-table-test'])
+    const r = await pg.query<{ id: string }>(
+      `INSERT INTO projects (name, slug, write_key, server_key_hash)
+       VALUES ('Segments Table', 'segments-table-test', 'wk_segtable', 'h') RETURNING id`,
+    )
+    projectId = Number(r.rows[0]?.id)
+
+    const cols = await pg.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns WHERE table_name = 'segments'`,
+    )
+    const names = cols.rows.map((c) => c.column_name)
+    expect(names).toContain('filter')
+    expect(names).toContain('last_count')
+    expect(names).toContain('last_evaluated_at')
+    expect(names).not.toContain('filter_tree')
+  })
 })
