@@ -26,6 +26,14 @@ let app: FastifyInstance
 let otherProjectId: number
 
 const trait = { kind: 'trait', key: 'plan', operator: '=', value: 'trial' }
+// A second, much smaller cohort. Its purpose is a genuinely PARTIAL page:
+// nonzero, under MEMBER_PAGE_SIZE, and nowhere near the window ceiling — the
+// one shape the 'trial' cohort (sized to exactly MEMBER_PAGE_SIZE) never
+// produces. `canOfferNext`'s "page was full" clause has no other way to be
+// exercised, since a zero-row page short-circuits earlier (no `last` row to
+// build a cursor from) and never reaches that clause at all.
+const PARTIAL_PAGE_PEOPLE = 5
+const enterpriseTrait = { kind: 'trait', key: 'plan', operator: '=', value: 'enterprise' }
 
 const preview = (body: unknown, headers: Record<string, string> = {}) =>
   app.inject({
@@ -104,25 +112,37 @@ beforeAll(async () => {
   app = buildApp({ config, pg, ch, readiness })
   await app.ready()
 
-  // MEMBER_PAGE_SIZE real people matching `trait`, all with a real last_seen
-  // (so all sort ahead of the far-future hand-built cursors below). Without
-  // this, every members query in this file returns zero rows regardless of
-  // whether a guard is even present — a mutant that deletes the
-  // window-ceiling short-circuit would still pass, because there would be
-  // nothing for the unguarded query to (wrongly) return. Exactly
-  // MEMBER_PAGE_SIZE also lets one of the window-ceiling tests below observe
-  // a genuinely FULL page landing on the ceiling, not just an empty one.
+  // Two cohorts, one batch call. `plan: 'trial'` is sized to exactly
+  // MEMBER_PAGE_SIZE real people, all with a real last_seen (so all sort
+  // ahead of the far-future hand-built cursors below). Without this, every
+  // members query in this file returns zero rows regardless of whether a
+  // guard is even present — a mutant that deletes the window-ceiling
+  // short-circuit would still pass, because there would be nothing for the
+  // unguarded query to (wrongly) return. Exactly MEMBER_PAGE_SIZE also lets
+  // one of the window-ceiling tests below observe a genuinely FULL page
+  // landing on the ceiling, not just an empty one.
+  //
+  // `plan: 'enterprise'` is the much smaller PARTIAL_PAGE_PEOPLE cohort — see
+  // its comment above.
   await app.inject({
     method: 'POST',
     url: '/v1/batch',
     headers: { 'x-lyraflow-write-key': WRITE_KEY, 'user-agent': 'vitest' },
     payload: {
-      batch: Array.from({ length: MEMBER_PAGE_SIZE }, (_, i) => ({
-        type: 'identify',
-        message_id: randomUUID(),
-        user_id: `u-trial-${i}`,
-        traits: { plan: 'trial' },
-      })),
+      batch: [
+        ...Array.from({ length: MEMBER_PAGE_SIZE }, (_, i) => ({
+          type: 'identify',
+          message_id: randomUUID(),
+          user_id: `u-trial-${i}`,
+          traits: { plan: 'trial' },
+        })),
+        ...Array.from({ length: PARTIAL_PAGE_PEOPLE }, (_, i) => ({
+          type: 'identify',
+          message_id: randomUUID(),
+          user_id: `u-enterprise-${i}`,
+          traits: { plan: 'enterprise' },
+        })),
+      ],
     },
   })
   await app.deps.buffer.flush()
@@ -391,6 +411,26 @@ describe('POST /v1/segments/preview', () => {
     const body = res.json()
     expect(body.members).toHaveLength(MEMBER_PAGE_SIZE)
     expect(body.window_exhausted).toBe(true)
+    expect(body.next_cursor).toBeNull()
+  })
+
+  it('withholds next_cursor for a genuinely partial page, nowhere near the ceiling', async () => {
+    // Distinct from "offers a next_cursor for a full page under budget":
+    // that test's page is always exactly MEMBER_PAGE_SIZE, so removing the
+    // "page was full" clause from canOfferNext changes nothing there — a
+    // page of MEMBER_PAGE_SIZE members satisfies `=== MEMBER_PAGE_SIZE`
+    // whether or not the clause is even checked, and the review that asked
+    // for this test proved exactly that by deleting the clause and watching
+    // the suite stay green. The `enterprise` cohort is small and nowhere
+    // near MAX_MEMBER_PAGES, so this is a genuine "no more pages, and NOT
+    // because the ceiling tripped" case — the one shape that DOES depend on
+    // the clause.
+    const res = await preview({ ast_version: 1, filter: enterpriseTrait, include: ['members'] })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.members.length).toBeGreaterThan(0)
+    expect(body.members.length).toBeLessThan(MEMBER_PAGE_SIZE)
+    expect(body.window_exhausted).toBe(false)
     expect(body.next_cursor).toBeNull()
   })
 })

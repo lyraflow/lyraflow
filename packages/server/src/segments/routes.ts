@@ -60,6 +60,18 @@ const MAX_MEMBER_PAGES = Math.floor(MEMBER_WINDOW_MAX / MEMBER_PAGE_SIZE)
  * `lastSeen`/`personId`/`asOf`) — core's cursor tests deliberately pin that
  * shape ("nothing tenant-scoped can ride along"), and a page count and a
  * signature are not core's concern. This wraps it instead of widening it.
+ *
+ * This is a PRODUCT limit made tamper-evident, not a security boundary. The
+ * signing key is derived from the caller's own project secret (see
+ * `cursorSigningKey`), so the key holder — the operator paging their own
+ * data — can in principle derive it too; what actually protects the
+ * ClickHouse cluster is the per-query `LIMIT`, `SEGMENT_MAX_EXECUTION_SECONDS`
+ * and `SEGMENT_MAX_MEMORY_BYTES` (see execute.ts), none of which cursor
+ * forgery touches. Signing exists to stop the ACCIDENTAL and NAIVE path — a
+ * hand-rolled cursor, or a client library built against the documented
+ * shape — at zero infrastructure cost. Do not lean on it for anything where
+ * the caller's incentive to defeat it changes, e.g. billing, quotas, or
+ * export gating.
  */
 interface WalkCursor {
   cursor: Cursor
