@@ -7,7 +7,7 @@ Thanks for your interest in contributing! Lyraflow is in its earliest phase, so 
 > **Contributor License Agreement (CLA) — required.**
 > Lyraflow is fair-code licensed under the [Sustainable Use License](LICENSE.md), and a hosted cloud version is planned. To keep the project sustainable, all code contributors must sign a CLA granting Lyraflow the right to relicense contributed code (for example, for the cloud or enterprise offerings). This is the same model n8n and many other fair-code projects use.
 >
-> **Status:** the CLA flow is not wired up yet (TODO: add CLA assistant bot before accepting external PRs). Until then, please open an issue to discuss any code contribution first.
+> **Status: not in force yet, so please do not send code yet.** The agreement is drafted at [CLA.md](CLA.md) and the signing bot is committed at `.github/workflows/cla.yml`, but both are deliberately switched off until the text has had a legal review — asking you to sign a document that says it is a draft would be worse than asking nothing. Until it is live, please open an issue to discuss any code contribution rather than sending a pull request. Documentation fixes, bug reports, and issues are welcome now and need no CLA.
 
 ## How to contribute
 

@@ -1,0 +1,69 @@
+name: CLA
+
+# ADR: a signed CLA is required before any external contribution is merged.
+# Without it, contributed code reaches us under the Sustainable Use License
+# only, and cannot be included in a hosted or commercial offering.
+#
+# NOT ACTIVE YET. Both `if:` guards below check a repository variable that does
+# not exist, so every run is skipped. To turn it on:
+#
+#   1. Have a lawyer review CLA.md and remove its draft banner.
+#   2. Create a classic PAT with `repo` scope on an account that can push to
+#      this repository, and add it as the `CLA_SIGNATURES_TOKEN` secret.
+#   3. Create the repository variable `CLA_ENABLED` with the value `true`.
+#
+# Enabling it before step 1 asks contributors to sign a document that says it
+# is not in force, which is worse than having no CLA at all.
+
+# SECURITY: `pull_request_target` runs with this repository's secrets and write
+# permissions, while the triggering pull request comes from a fork the author
+# controls. That combination is only safe because this workflow NEVER CHECKS OUT
+# THE PULL REQUEST'S CODE — there is no `actions/checkout` step below, so no
+# attacker-controlled file is ever read or executed here.
+#
+# Do not add a checkout step to this workflow. Adding one — particularly with
+# `ref: ${{ github.event.pull_request.head.sha }}` — hands any fork author the
+# `CLA_SIGNATURES_TOKEN` and push access to this repository. Code that needs the
+# PR contents belongs in ci.yml, which runs on `pull_request` and has neither.
+#
+# The `github.event.comment.body` reference below is an equality comparison
+# inside an `if:` expression, never interpolated into a shell command.
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, closed, synchronize]
+
+permissions:
+  actions: write
+  contents: read       # signatures land on a branch of this repo, written by the PAT
+  pull-requests: write
+  statuses: write
+
+jobs:
+  cla:
+    runs-on: ubuntu-latest
+    # Two entry points reach this workflow: a PR event, and any issue comment
+    # anywhere in the repo. The comment filter keeps ordinary discussion from
+    # starting a run — only the signature sentence itself does.
+    if: >
+      vars.CLA_ENABLED == 'true' &&
+      (github.event_name == 'pull_request_target' ||
+       github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA')
+    steps:
+      - uses: contributor-assistant/github-action@v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signatures are written to a branch of this repository, so they need
+          # a token that can push. The default GITHUB_TOKEN cannot.
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.CLA_SIGNATURES_TOKEN }}
+        with:
+          path-to-document: https://github.com/lyraflow/lyraflow/blob/main/CLA.md
+          path-to-signatures: signatures/version1/cla.json
+          branch: cla-signatures
+          allowlist: cemhurturk,bot*,dependabot[bot]
+          # A signature is a legal act, so the wording is fixed and must match
+          # what CLA.md tells contributors to reply.
+          custom-pr-sign-comment: I have read the CLA Document and I hereby sign the CLA
+          lock-pullrequest-aftermerge: false
