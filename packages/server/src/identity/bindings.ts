@@ -1,3 +1,4 @@
+import type { BindEvent } from '@lyraflow/core'
 import type { Pool } from '@lyraflow/db'
 
 /**
@@ -280,6 +281,38 @@ export class IdentityBindings {
       [projectId, personIds],
     )
     return r.rows.map((x) => x.anonymous_id)
+  }
+
+  /**
+   * Every bind event on each of the given devices, ordered, keyed by device.
+   *
+   * Deliberately returns binds to ALL people, not only the caller's person.
+   * A device's windows are defined by its whole bind sequence: the bind that
+   * hands it to someone else is exactly what closes the previous owner's
+   * window. Filtering to one person would leave every window open to
+   * infinity, which is the union behaviour this exists to replace.
+   *
+   * `boundAt` is epoch milliseconds, matching @lyraflow/core's BindEvent, so
+   * the result can be handed to deriveTiling unchanged.
+   */
+  async bindEventsForDevices(
+    projectId: number,
+    anonymousIds: string[],
+  ): Promise<Map<string, BindEvent[]>> {
+    const out = new Map<string, BindEvent[]>()
+    if (anonymousIds.length === 0) return out
+    const r = await this.pool.query<{ anonymous_id: string; person_id: string; bound_at: Date }>(
+      `SELECT anonymous_id, person_id, bound_at FROM identity_bindings
+        WHERE project_id = $1 AND anonymous_id = ANY($2)
+        ORDER BY anonymous_id ASC, bound_at ASC, person_id ASC`,
+      [projectId, anonymousIds],
+    )
+    for (const row of r.rows) {
+      const list = out.get(row.anonymous_id) ?? []
+      list.push({ personId: row.person_id, boundAt: row.bound_at.getTime() })
+      out.set(row.anonymous_id, list)
+    }
+    return out
   }
 
   /** LRU insert: `Map` iterates in insertion order, and every write re-inserts
