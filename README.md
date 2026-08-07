@@ -335,6 +335,126 @@ as well. Per-device validity windows are not pushed into this query yet;
 until they are, treat these three fields as exact for a person whose devices
 were never shared, and as an upper bound where they were.
 
+## Segments
+
+A segment is a filter tree, and `POST /v1/segments/preview` answers one
+question about it: **how many people match?** It is server-key only — the
+write key ships in browser JavaScript, and a segment count is aggregate
+information about everyone in the project.
+
+```sh
+curl -i http://localhost:3000/v1/segments/preview \
+  -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY" \
+  -H 'content-type: application/json' \
+  -d '{
+    "ast_version": 1,
+    "filter": {
+      "kind": "group", "op": "and", "children": [
+        { "kind": "trait", "key": "plan", "operator": "=", "value": "trial" },
+        { "kind": "behavior", "event": "import_started", "aggregate": "count",
+          "operator": ">=", "value": 3,
+          "window": { "kind": "last", "n": 7, "unit": "days" } },
+        { "kind": "not", "child": {
+          "kind": "behavior", "event": "invite_teammate", "aggregate": "count",
+          "operator": ">=", "value": 1, "window": { "kind": "ever" } } }
+      ]
+    }
+  }'
+```
+
+That reads as *trial users who ran an import at least three times in the last
+seven days but never invited a teammate*, and the response is:
+
+```json
+{
+  "person_count": 128,
+  "warnings": [],
+  "as_of": "2026-08-07T09:30:00.000Z"
+}
+```
+
+`as_of` is the instant the count describes. Events become queryable within
+seconds rather than instantly, so a count is a recent answer, not a live one —
+the timestamp says which answer you got instead of implying it is current.
+
+### Node types
+
+| `kind` | Matches on |
+| --- | --- |
+| `group` | `and` / `or` over `children` |
+| `not` | negates one `child` |
+| `trait` | a trait set through `identify()` |
+| `context` | country, region, city, device_type, os, browser, referrer, or a `utm_*` value, with `scope` of `latest` or `first_touch` |
+| `lifecycle` | `first_seen` / `last_seen` |
+| `behavior` | an event name (or `*` for any), aggregated as `count`, `sum`, `min`, `max`, or `distinct`, over a `last` / `absolute` / `ever` window |
+
+Operators are `=`, `!=`, `>`, `>=`, `<`, `<=`, and `between`. `between` takes
+exactly two values; every other operator takes exactly one.
+
+One caveat on `context`: `referrer`, `utm_source`, `utm_medium` and
+`utm_campaign` are recorded **only** as first-touch, because for an
+acquisition attribute the original value is the one that means something. A
+`scope` of `latest` on those four returns the first-touch value rather than a
+different one. The other six fields record both.
+
+`ast_version` is required and must be `1`. A tree saved today carries the
+version it was written with, so a later release can migrate it rather than
+silently reinterpret it.
+
+### Warnings
+
+`warnings` is advisory — the query still ran. Each entry names the node
+responsible by path, so a builder UI can point at it:
+
+```json
+{
+  "person_count": 4210,
+  "warnings": [
+    { "path": "filter.children[1]",
+      "reason": "the `import_started` condition uses an `ever` window, which scans all history rather than a bounded window" }
+  ],
+  "as_of": "2026-08-07T09:30:00.000Z"
+}
+```
+
+### Limits
+
+A filter tree is bounded, because the endpoint is reachable by anyone holding
+the server key:
+
+| Limit | Value |
+| --- | --- |
+| Nesting depth | 10 |
+| Total nodes | 100 |
+| Behavioural conditions | 25 |
+
+Exceeding any of them is a `400` naming which one:
+
+```json
+{ "error": "filter tree is nested deeper than 10 levels", "code": "depth" }
+```
+
+A malformed tree is also a `400`, with a per-field path:
+
+```json
+{
+  "error": "invalid filter tree",
+  "detail": [{ "path": "filter.value", "message": "`between` requires exactly two values; other operators require one" }]
+}
+```
+
+A tree that is *valid* but too expensive to finish returns `422` — it exceeded
+the query's time or memory ceiling. Narrow a window, or drop an `ever`, and
+try again. `401` is a missing or invalid server key.
+
+### What this does not do yet
+
+Only counting is implemented. There is **no saved-segment API** — no way to
+name a segment, store it, or list stored ones — and **no way to retrieve the
+members** of a segment, only to count them. Segment membership is also not
+recomputed or tracked over time. Those are planned; none of them exist today.
+
+
 ## Upgrading
 
 ```sh
