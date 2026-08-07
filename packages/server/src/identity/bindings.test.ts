@@ -44,7 +44,7 @@ afterAll(async () => {
   await ch.close()
 })
 
-const at = (h: number, m = 0) => new Date(Date.UTC(2026, 7, 6, h, m))
+const at = (h: number, m = 0, s = 0, ms = 0) => new Date(Date.UTC(2026, 7, 6, h, m, s, ms))
 
 describe('IdentityBindings.bind', () => {
   it('writes a first binding as a bind event', async () => {
@@ -213,25 +213,45 @@ describe('IdentityBindings write path agrees with deriveTiling', () => {
 
   /**
    * Mirrors identity_bindings_dict_src's GREATEST/LEAST clamp to the range
-   * ClickHouse's DateTime can represent, *and* its -1 second adjustment on
-   * the finite (has-a-successor) upper bound. `deriveTiling` models a tile
-   * as half-open [from, to) — the next tile starts exactly where this one
-   * ends, no shared instant — but ClickHouse's RANGE(MIN ... MAX ...) is
-   * inclusive at both ends, so the view achieves the same half-open
-   * behaviour, discretised to its columns' one-second resolution, by
-   * subtracting a second from every finite `to` (see 003_identity.sql for
-   * the full reasoning, and resolve.test.ts's live 'does not misattribute
-   * an event landing within the same second as a rebind' for what regresses
-   * without it). The open (+Infinity) upper bound has no successor to butt
-   * up against, so it is left at its clamp, unadjusted — this is the "verify
-   * deriveTiling still mirrors the SQL" the Task 6 review asked for: the two
-   * were never in conflict, but the view's discretisation step was missing
-   * before this fix, and this function is what ties them back together.
+   * ClickHouse's DateTime can represent, its -1 second adjustment on the
+   * finite (has-a-successor) upper bound, AND its `WHERE valid_to >=
+   * valid_from` filter (see 003_identity.sql for the full reasoning behind
+   * all three).
+   *
+   * `deriveTiling` models a tile as half-open [from, to) — the next tile
+   * starts exactly where this one ends, no shared instant — but ClickHouse's
+   * RANGE(MIN ... MAX ...) is inclusive at both ends, so the view achieves
+   * the same half-open behaviour, discretised to its columns' one-second
+   * resolution, by subtracting a second from every finite `to` (see
+   * resolve.test.ts's live 'does not misattribute an event landing within
+   * the same second as a rebind' for what regresses without it). The open
+   * (+Infinity) upper bound has no successor to butt up against, so it is
+   * left at its clamp, unadjusted.
+   *
+   * That same -1s subtraction can invert a tile — two binds for one device
+   * inside the same wall-clock second, where the earlier is not the
+   * device's first-ever bind, produce a clamped `to < from`. The view drops
+   * that row entirely (`WHERE valid_to >= valid_from`) rather than clamping
+   * it to a zero-width sliver — a zero-width tile would sit at the same
+   * ClickHouse-truncated second as its successor's own truncated
+   * `valid_from`, reintroducing the exact same-instant tie the -1s fix
+   * exists to avoid. `null` here signals exactly that: "the view would not
+   * emit this row at all", not "clamp it to something small".
+   *
+   * This function is what ties `deriveTiling` and the SQL view back
+   * together and keeps them from drifting apart unnoticed — see
+   * ranges.ts's docstring. Missing the filter here left that promise only
+   * half kept: none of the four original fixtures below had binds under a
+   * second apart, so an inverted tile never reached this function, and
+   * `clampForView` returning one anyway (instead of `null`) would have gone
+   * uncaught. The 'sub-second binds' fixture exists specifically to
+   * exercise that path.
    */
-  function clampForView(b: Binding): { from: number; to: number } {
+  function clampForView(b: Binding): { from: number; to: number } | null {
     const to =
       b.to === Number.POSITIVE_INFINITY ? CH_MAX_MS : Math.min(b.to - ONE_SECOND_MS, CH_MAX_MS)
-    return { from: Math.max(b.from, EPOCH_MS), to }
+    const from = Math.max(b.from, EPOCH_MS)
+    return to >= from ? { from, to } : null
   }
 
   async function assertViewMatchesReference(anonymousId: string, events: BindEvent[]) {
@@ -250,10 +270,14 @@ describe('IdentityBindings write path agrees with deriveTiling', () => {
       to: row.valid_to.getTime(),
     }))
 
-    const expected = deriveTiling(events).map((b) => ({
-      personId: b.personId,
-      ...clampForView(b),
-    }))
+    // flatMap, not map: a tile clampForView reports as null (dropped by the
+    // view's own WHERE filter) must be absent from `expected`, not present
+    // as `null` or as a clamped-but-inverted row — mirroring the view
+    // exactly, including in row *count*, is the point.
+    const expected = deriveTiling(events).flatMap((b) => {
+      const clamped = clampForView(b)
+      return clamped ? [{ personId: b.personId, ...clamped }] : []
+    })
 
     expect(actual).toEqual(expected)
   }
@@ -288,6 +312,27 @@ describe('IdentityBindings write path agrees with deriveTiling', () => {
     await assertViewMatchesReference('retroactive', [
       { personId: 'bob', boundAt: at(20).getTime() },
       { personId: 'alice', boundAt: at(5).getTime() },
+    ])
+  })
+
+  // Task 6 review round 4: none of the four fixtures above has binds under a
+  // second apart, so clampForView's `null`-drop path (added for this fixture)
+  // was never actually exercised until now — an implementation that dropped
+  // that path back to always returning a clamped `{ from, to }` would have
+  // left every fixture above green. 'first-of-pair' is bound 0.4s after
+  // 'earlier-owner' — NOT the device's first tile, so its own bound_at, not
+  // the epoch clamp, becomes its valid_from — and 0.4s before
+  // 'second-of-pair', so the -1s discretisation inverts it: clamped
+  // to = (t1 + 400) - 1000 = t1 - 600, which is before its own from = t1.
+  // deriveTiling itself is untouched (its continuous [from, to) for
+  // 'first-of-pair' is a perfectly ordinary, non-empty [t1, t1+400ms)) — the
+  // inversion is purely an artifact of the view's one-second discretisation,
+  // which is exactly why this belongs here rather than in ranges.test.ts.
+  it('agrees on sub-second binds: the view drops the inverted tile, and this comparison must too', async () => {
+    await assertViewMatchesReference('subsecond', [
+      { personId: 'earlier-owner', boundAt: at(8).getTime() },
+      { personId: 'first-of-pair', boundAt: at(9, 0, 0, 0).getTime() },
+      { personId: 'second-of-pair', boundAt: at(9, 0, 0, 400).getTime() },
     ])
   })
 })

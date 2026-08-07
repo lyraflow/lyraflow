@@ -550,4 +550,61 @@ describe('ensureIdentityDictionaries (live ClickHouse + Postgres)', () => {
     expect(await lookup('2026-08-06 08:30:00')).toBe('earlier-owner')
     expect(await lookup('2026-08-06 09:00:01')).toBe('second-of-pair')
   })
+
+  /**
+   * Task 6 review round 4: the test above happens to hide something, because
+   * of the specific pair it uses. `.000`/`.500` never straddles a whole
+   * ClickHouse second boundary either way — `08:59:59` and `09:00:00` are
+   * adjacent integers, so the earlier tile's truncated valid_to and the
+   * later tile's truncated valid_from meet with no gap between them at all.
+   * A pair that straddles a *second boundary* instead — bound_at values on
+   * either side of a whole second, like `:00.900` and `:01.200` — leaves a
+   * real dead zone: nothing before the WHERE filter ever covered it either
+   * (the row it would have come from is exactly the one the filter drops),
+   * and neither surviving neighbour's tile reaches into it.
+   *
+   * Measured directly against a live ClickHouse rather than estimated: for
+   * binds at `09:00:00.900` and `09:00:01.200` (0.3s apart, straddling the
+   * `09:00:00`/`09:00:01` boundary), lookups at `08:59:59` and earlier
+   * resolve to the earlier owner, lookups at `09:00:01` and later resolve to
+   * the later owner, and every instant in between — the entire second
+   * `09:00:00`–`09:00:00.999` — falls through to the caller-supplied
+   * default. A full second, not the sub-instant gap the row's own
+   * millisecond-precision bound_at values would suggest: ClickHouse's
+   * DateTime columns have no sub-second component at all, so the boundary
+   * that matters is the whole second, not the millisecond. This is the same
+   * "brief gap, safe default, never a wrong person" behaviour
+   * 003_identity.sql's comment already documents in the abstract — this test
+   * pins the concrete, worst-case extent of it.
+   */
+  it('leaves a full one-second gap (not a wrong person) when a sub-second rebind straddles a whole-second boundary', async () => {
+    await ensureIdentityDictionaries(ch, pgSource)
+
+    await pg.query(
+      `INSERT INTO identity_bindings (project_id, anonymous_id, person_id, bound_at) VALUES
+         ($1, 'straddle-device', 'earlier-owner', '2026-08-06T08:00:00Z'),
+         ($1, 'straddle-device', 'first-of-pair', '2026-08-06T09:00:00.900Z'),
+         ($1, 'straddle-device', 'second-of-pair', '2026-08-06T09:00:01.200Z')`,
+      [projectId],
+    )
+    await ch.command({ query: `SYSTEM RELOAD DICTIONARY ${CH_DB}.identity_bindings` })
+
+    const lookup = async (at: string) => {
+      const rs = await ch.query({
+        query: `SELECT dictGetOrDefault('${CH_DB}.identity_bindings', 'person_id',
+                  (toUInt32(${projectId}), 'straddle-device'), toDateTime('${at}'),
+                  '__anonymous_default__') AS person`,
+        format: 'JSONEachRow',
+      })
+      const [row] = await rs.json<{ person: string }>()
+      return row?.person
+    }
+
+    // Last second still cleanly owned by the earlier owner.
+    expect(await lookup('2026-08-06 08:59:59')).toBe('earlier-owner')
+    // The entire dead second: neither neighbour, the safe default instead.
+    expect(await lookup('2026-08-06 09:00:00')).toBe('__anonymous_default__')
+    // First second cleanly owned by the later owner.
+    expect(await lookup('2026-08-06 09:00:01')).toBe('second-of-pair')
+  })
 })

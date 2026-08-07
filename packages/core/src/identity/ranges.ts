@@ -31,11 +31,16 @@ export interface Binding {
  * The view derives `to` as `lead(bound_at) - 1 second`, discretising this
  * function's exact, continuous boundary down to the smallest unit its own
  * column type can express, and filters out any tile that inverts as a result
- * (two binds for one device landing in the same wall-clock second). Neither
- * adaptation has a counterpart here — `bindings.test.ts`'s
- * `assertViewMatchesReference` is where the two are reconciled and kept from
- * drifting apart unnoticed; it applies the identical -1s discretisation
- * before comparing this function's output against the live view's.
+ * (two binds for one device landing in the same wall-clock second — see
+ * 003_identity.sql's `WHERE valid_to >= valid_from`). Neither adaptation has
+ * a counterpart here — `bindings.test.ts`'s `assertViewMatchesReference` is
+ * where the two are reconciled and kept from drifting apart unnoticed; its
+ * `clampForView` applies both the identical -1s discretisation AND the
+ * identical drop-if-inverted filter (as `null`, flattened away) before
+ * comparing this function's output against the live view's, exercised by a
+ * dedicated sub-second-binds fixture — the four original fixtures never
+ * produced an inverted tile, so that filter path went untested until it was
+ * added specifically for that shape (Task 6 review, round 4).
  *
  * The set of bind events is the source of truth; ranges are never stored or
  * patched, only derived fresh from the whole set every time. That makes the

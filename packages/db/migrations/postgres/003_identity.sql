@@ -107,11 +107,24 @@ CREATE INDEX IF NOT EXISTS person_aliases_canonical_idx
 -- ClickHouse-truncated second as its successor's own (equally truncated)
 -- valid_from — reintroducing, for this one pair, the exact same-instant tie
 -- range_lookup_strategy's undocumented 'min' behaviour that the -1s fix
--- above exists to avoid. Dropping the row instead leaves a brief (well
--- under 2 second) gap with no matching tile at all, which dictGetOrDefault
--- answers with its caller-supplied default (the event's own anonymous_id) —
--- the same safe, designed-for fallback an unbound device already gets, and
--- never a specific wrong person.
+-- above exists to avoid. Dropping the row instead leaves a gap with no
+-- matching tile at all, which dictGetOrDefault answers with its
+-- caller-supplied default (the event's own anonymous_id) — the same safe,
+-- designed-for fallback an unbound device already gets, and never a
+-- specific wrong person.
+--
+-- That gap's extent, stated plainly rather than left for the next reader to
+-- derive: ClickHouse's DateTime columns have no sub-second component, so
+-- what matters is whole seconds, not the sub-second bound_at values
+-- themselves. A same-second pair that does not straddle a whole-second
+-- boundary (e.g. bound_at .000 and .500 within the same second) leaves NO
+-- gap at all — the neighbouring tiles' truncated boundaries are already
+-- adjacent. A pair that straddles one (e.g. bound_at :00.900 and :01.200)
+-- leaves a full one-second gap — the entire contested second falls to the
+-- default, not just a sub-second sliver. Measured directly against a live
+-- ClickHouse, not assumed: see dictionaries.test.ts's live
+-- 'leaves a full one-second gap ... when a sub-second rebind straddles a
+-- whole-second boundary'.
 --
 -- This filter also closes a second, narrower gap without a dedicated guard:
 -- a successor bind at/near the Unix epoch could otherwise send valid_to
