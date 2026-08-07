@@ -13,6 +13,7 @@ import { CardinalityTracker } from './ingest/limits.js'
 import { registerIngestRoutes } from './ingest/routes.js'
 import type { EventRow } from './ingest/row.js'
 import { registerMetrics } from './metrics.js'
+import { SuppressionStore } from './privacy/suppression-store.js'
 import { registerSchemaRoutes } from './schema/routes.js'
 import { registerSegmentRoutes } from './segments/routes.js'
 
@@ -99,6 +100,7 @@ export function buildApp(input: {
   const projects = new ProjectCache(pg, 60_000)
   const bindings = new IdentityBindings(pg)
   const aliases = new PersonAliases(pg)
+  const suppression = new SuppressionStore(pg)
 
   registerIngestRoutes(app, {
     buffer,
@@ -111,7 +113,7 @@ export function buildApp(input: {
     bindings,
     aliases,
   })
-  registerPersonRoutes(app, { projects, readiness, ch, bindings, aliases })
+  registerPersonRoutes(app, { projects, readiness, ch, bindings, aliases, suppression })
   registerSegmentRoutes(app, { projects, readiness, ch, pg, database: config.ch.database })
   registerSchemaRoutes(app, { projects, readiness, ch })
 

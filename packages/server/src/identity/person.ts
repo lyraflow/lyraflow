@@ -1,9 +1,11 @@
+import { chDateTime } from '@lyraflow/core'
 import type { ClickHouseClient } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
 import type { ProjectCache } from '../auth/project-cache.js'
 import type { Readiness } from '../health.js'
 import { SERVER_KEY_HEADER, makeAuthenticator } from '../ingest/routes.js'
 import { parseChDateTime } from '../ingest/row.js'
+import type { SuppressionStore } from '../privacy/suppression-store.js'
 import type { PersonAliases } from './aliases.js'
 import type { IdentityBindings } from './bindings.js'
 import { MAX_PERSON_RANGE_CLAUSES, personEventsPredicate, resolvePersonScope } from './scope.js'
@@ -18,6 +20,7 @@ export interface PersonDeps {
   ch: ClickHouseClient
   bindings: IdentityBindings
   aliases: PersonAliases
+  suppression: SuppressionStore
 }
 
 interface PersonParams {
@@ -81,9 +84,14 @@ interface PersonEventsRow {
  * resolution, the device-id fallback, and the per-device windows — lives in
  * scope.ts's `resolvePersonScope`/`personEventsPredicate`, shared with the
  * export, the purge worker, and the deletion route's existence check.
+ *
+ * Also honours a deletion boundary, resolved from Postgres for the same
+ * zero-lag reason as the identity resolution above — see the comment on
+ * `boundary` inside the handler for why Postgres and not the ClickHouse
+ * suppression dictionary.
  */
 export function registerPersonRoutes(app: FastifyInstance, deps: PersonDeps): void {
-  const { projects, readiness, ch, bindings, aliases } = deps
+  const { projects, readiness, ch, bindings, aliases, suppression } = deps
 
   const authenticateServer = makeAuthenticator(
     readiness,
@@ -112,8 +120,26 @@ export function registerPersonRoutes(app: FastifyInstance, deps: PersonDeps): vo
     // from another project leak into this one's profile (see
     // person.test.ts's project-scoping test, which puts two projects in
     // genuine contention over the same id to catch exactly that).
+    const boundary = await suppression.boundaryFor(project.id, scope.group)
     const params: Record<string, unknown> = { projectId: project.id }
     const identity = personEventsPredicate(scope, params)
+    // Suppression, from Postgres rather than the ClickHouse dictionary — this
+    // route bypasses the dictionaries for zero identity lag, and a 1-5s
+    // dictionary LIFETIME would put that lag back on the one path where a
+    // person reads their own data. Postgres also makes a just-requested
+    // deletion take effect immediately, with no reload.
+    //
+    // Strictly greater than: the boundary is inclusive of the events it
+    // erases (`timestamp <= suppressed_at` is suppressed), matching the
+    // dictionary-side predicate in @lyraflow/core exactly. The two must agree
+    // on the boundary instant itself, or a segment count and a profile
+    // disagree by one event for anyone deleted at the same millisecond they
+    // acted.
+    let boundaryClause = ''
+    if (boundary) {
+      params.boundary = chDateTime(boundary)
+      boundaryClause = ' AND timestamp > {boundary:DateTime64(3)}'
+    }
 
     const rs = await ch.query({
       query: `
@@ -123,7 +149,7 @@ export function registerPersonRoutes(app: FastifyInstance, deps: PersonDeps): vo
           count(DISTINCT event_id) AS events
         FROM events
         WHERE project_id = {projectId:UInt32}
-          AND ${identity}
+          AND ${identity}${boundaryClause}
       `,
       query_params: params,
       format: 'JSONEachRow',
@@ -131,13 +157,15 @@ export function registerPersonRoutes(app: FastifyInstance, deps: PersonDeps): vo
     const [row] = await rs.json<PersonEventsRow>()
 
     // Zero matching events: nothing under this project has ever heard of
-    // this id. 404, not a 200 with zeroed-out fields — an id with no events
+    // this id, OR everything it ever did sits at or before its own deletion
+    // boundary. 404, not a 200 with zeroed-out fields — an id with no events
     // anywhere is not a profile to render, and a 404 lets a caller tell
     // "no such person" apart from "a real person who happens to have zero
     // events" without inspecting the body. In practice the latter is not
     // reachable through this endpoint anyway: `scope.group` always includes
     // the canonical id itself even with no bindings or merges, so the only
-    // way to land here with zero events is an id nothing has ever recorded.
+    // way to land here with zero events is an id nothing has ever recorded,
+    // or one entirely erased by the boundary above.
     //
     // Compared numerically, not `row.events === '0'`: ClickHouse's HTTP
     // interface quotes UInt64 values as JSON strings by default, but that is

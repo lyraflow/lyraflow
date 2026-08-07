@@ -173,6 +173,11 @@ function getPerson(id: string, headers: Record<string, string>) {
   })
 }
 
+/** Project A, server-key-authenticated — the deletion-boundary tests' own shorthand. */
+function read(id: string) {
+  return getPerson(id, { 'x-lyraflow-server-key': SERVER_KEY_A })
+}
+
 // Proves — rather than assumes from wall-clock timing — that the ClickHouse
 // identity_bindings dictionary does not yet know about a device's binding at
 // the moment of the read: queries the dictionary directly with a sentinel
@@ -914,6 +919,84 @@ describe('GET /v1/persons/:id', () => {
     // [710, ..), which includes the boundary instant itself.
     expect(incoming.json().events).toBe(2)
   })
+
+  // THE test for the deletion boundary itself, and for it taking effect with
+  // NO dictionary reload and NO sleep — this route resolves suppression from
+  // Postgres directly rather than the ClickHouse identity dictionary
+  // (person.ts's SuppressionStore comment explains why: a 1-5s LIFETIME
+  // would put identity lag back on the one path meant to be lag-free).
+  //
+  // Fixtures anchored to Date.now(), never absolute dates: the ingest path
+  // clamps client timestamps older than 24h, so a pinned date expires on a
+  // wall-clock schedule (this exact suite went red mid-afternoon on
+  // 2026-08-07 with no code change) — see BASE_MS's own docstring.
+  //
+  // Four events, not three: base, base+1h, base+2h (EXACTLY the boundary
+  // instant), base+3h. The boundary-instant event is what makes this test
+  // discriminate a strict `>` comparison from `>=` — with only the other
+  // three, both comparisons agree (none of them sits exactly on the
+  // boundary), so a `>=` regression would pass unnoticed. See the mutation
+  // proof below the SuppressionStore boundary code in person.ts, and Step 7
+  // of this task's brief.
+  it('hides events at or before the deletion boundary, immediately and without a reload', async () => {
+    const base = Date.now() - 6 * 3_600_000
+    const at = (offsetMs: number) =>
+      new Date(base + offsetMs).toISOString().replace('T', ' ').replace('Z', '')
+    const boundaryOffsetMs = 2 * 3_600_000
+
+    for (const offsetMs of [0, 3_600_000, boundaryOffsetMs, 3 * 3_600_000]) {
+      await insertEvent({
+        projectId: projectA,
+        userId: 'boundary-person',
+        timestamp: at(offsetMs),
+        eventName: 'boundary_event',
+      })
+    }
+
+    const before = await read('boundary-person')
+    expect(before.statusCode).toBe(200)
+    expect(before.json().events).toBe(4)
+
+    // Boundary between the second and third event. NO dictionary reload, and
+    // no sleep: this path reads Postgres directly, which is the whole reason
+    // it bypasses the dictionaries.
+    await pg.query(
+      'INSERT INTO suppressed_persons (project_id, person_id, suppressed_at) VALUES ($1,$2,$3)',
+      [projectA, 'boundary-person', new Date(base + boundaryOffsetMs)],
+    )
+
+    const after = await read('boundary-person')
+    expect(after.statusCode).toBe(200)
+    // 1, not 2: the event stamped EXACTLY at the boundary instant is hidden
+    // along with the two before it, strictly greater-than. A `>=` regression
+    // would keep it and report 2.
+    expect(after.json().events).toBe(1)
+    expect(new Date(after.json().first_seen).getTime()).toBe(base + 3 * 3_600_000)
+  })
+
+  // The 404-vs-empty-result decision this route already makes ("answers 404
+  // for an id with no known events, bindings, or aliases", above) extended to
+  // a person whose events all predate their own deletion boundary: the same
+  // answer as a person who never existed, which is the honest one — there is
+  // no subject left to describe.
+  //
+  // Needs its own event, timestamped well before the suppressed_at below —
+  // without one, this id already 404s with no suppression logic involved at
+  // all (zero events, same as the existing no-history test), which would not
+  // discriminate the boundary being honoured from it being ignored entirely.
+  it('404s a person whose entire history predates the boundary', async () => {
+    await insertEvent({
+      projectId: projectA,
+      userId: 'fully-erased',
+      timestamp: chAt(-60),
+      eventName: 'fully_erased_event',
+    })
+    await pg.query(
+      'INSERT INTO suppressed_persons (project_id, person_id, suppressed_at) VALUES ($1,$2,now())',
+      [projectA, 'fully-erased'],
+    )
+    expect((await read('fully-erased')).statusCode).toBe(404)
+  })
 })
 
 /**
@@ -967,6 +1050,12 @@ describe('GET /v1/persons/:id (mocked ClickHouse): parameter binding', () => {
       canonicalFor: async (_p: number, id: string) => id,
       mergedFrom: async () => [],
     } as unknown as PersonDeps['aliases']
+    // No suppression row for anyone in this test — its own concern is
+    // parameter binding, not the boundary, so this simply stays out of the
+    // way (see person.test.ts's dedicated boundary tests above).
+    const fakeSuppression = {
+      boundaryFor: async () => null,
+    } as unknown as PersonDeps['suppression']
 
     const mockedApp = Fastify()
     const readiness = new Readiness()
@@ -977,6 +1066,7 @@ describe('GET /v1/persons/:id (mocked ClickHouse): parameter binding', () => {
       ch: fakeCh,
       bindings: fakeBindings,
       aliases: fakeAliases,
+      suppression: fakeSuppression,
     })
 
     const res = await mockedApp.inject({
