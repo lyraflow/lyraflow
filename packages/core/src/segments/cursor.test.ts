@@ -42,6 +42,16 @@ describe('cursor', () => {
     expect(() => decodeCursor(old)).toThrow(CursorError)
   })
 
+  it('rejects a cursor with more elements than it should have', () => {
+    // Extra elements are not harmless: destructuring would bind the first
+    // three and silently discard the rest, so a cursor from a future format
+    // would be accepted and half-interpreted rather than rejected.
+    const tooLong = Buffer.from(
+      JSON.stringify(['2026-08-06 10:00:00.000', 'alice', '2026-08-07T00:00:00.000Z', 'extra']),
+    ).toString('base64url')
+    expect(() => decodeCursor(tooLong)).toThrow(CursorError)
+  })
+
   it('carries the walk instant so every page reports one as_of', () => {
     expect(decodeCursor(encodeCursor(cursor)).asOf).toBe('2026-08-07T00:00:00.000Z')
   })
