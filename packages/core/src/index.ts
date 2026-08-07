@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 5
+export const SCHEMA_VERSION = 6
 
 export * from './ingest/payloads.js'
 export * from './ingest/properties.js'
@@ -10,3 +10,4 @@ export * from './identity/resolve.js'
 export * from './segments/ast.js'
 export * from './segments/validate.js'
 export * from './segments/params.js'
+export * from './segments/base.js'
