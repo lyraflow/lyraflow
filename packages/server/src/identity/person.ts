@@ -1,3 +1,4 @@
+import { chDateTime, deriveTiling } from '@lyraflow/core'
 import type { ClickHouseClient } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
 import type { ProjectCache } from '../auth/project-cache.js'
@@ -6,6 +7,13 @@ import { SERVER_KEY_HEADER, makeAuthenticator } from '../ingest/routes.js'
 import { parseChDateTime } from '../ingest/row.js'
 import type { PersonAliases } from './aliases.js'
 import type { IdentityBindings } from './bindings.js'
+
+/**
+ * A person's windows are devices multiplied by rebinds, which is unbounded in
+ * principle. Past this many clauses the request is refused rather than
+ * widened: widening a range to fit is how the union behaviour comes back.
+ */
+export const MAX_PERSON_RANGE_CLAUSES = 200
 
 export interface PersonDeps {
   projects: ProjectCache
@@ -46,33 +54,31 @@ interface PersonEventsRow {
  * it is gated the same way /v1/alias is gated against mutating one: the
  * public, browser-shipped write key must not reach it.
  *
- * KNOWN DIVERGENCE — read this before changing anything below. This route
- * returns the UNION over every id ever associated with the person. It is NOT
- * the time-split resolution `resolvedPersonExpr` (resolve.ts) applies to
- * events, and the two can return different people for the same event row:
+ * TIME-AWARE, matching `resolvedPersonExpr` (resolve.ts) — this used to be a
+ * UNION over every id ever associated with the person, with no timestamp
+ * predicate at all, which is why a device shared or rebound between two
+ * people put its ENTIRE history into both profiles. That divergence carried
+ * across two plans (see person.test.ts's rewritten test for the full
+ * history) and is closed here by mirroring `resolvedPersonExpr`'s two
+ * stages directly in the query below:
  *
- *  - `devicesForAny` returns every device ever bound to the group, with no
- *    notion of when each binding was in force, and the ClickHouse query
- *    below carries no timestamp predicate at all. `resolvedPersonExpr`
- *    splits the same device by `toDateTime(timestamp)` against the range
- *    dictionary. So a device D bound to `alice` at t1 and rebound to `bob`
- *    at t2 puts D's ENTIRE event history into both profiles: alice's counts
- *    everything after t2, bob's counts everything before it. Both
- *    `first_seen`/`last_seen` windows are too wide and both `events` counts
- *    are too high, in opposite directions.
- *  - No rebind is needed for a narrower version of the same thing: an event
- *    carrying `user_id='bob'` with `anonymous_id='D'`, where D is bound to
- *    `alice`, resolves to `bob` in the dictionary (stage 1's `user_id != ''`
- *    short-circuit) but is counted for `alice` here, because D is in her id
- *    set.
+ *  - Stage 1: an event carrying its own non-empty `user_id` belongs to that
+ *    person, full stop — the `user_id IN {group:...}` branch.
+ *  - Stage 2: everything else resolves through the device it was recorded
+ *    on, but only for the [from, to) window that device was actually bound
+ *    to a member of this group — derived per device via `deriveTiling`
+ *    (`@lyraflow/core`), the same reference derivation
+ *    `identity_bindings_dict_src` (003_identity.sql) is required to agree
+ *    with. Guarded on `user_id = ''` so stage 1 keeps its short-circuit: an
+ *    event with its own `user_id` must never ALSO match here through the
+ *    device it happens to sit on, which is exactly how a fix for the wide
+ *    half of this defect can reintroduce the narrow half.
  *
- * The fix is to derive per-device validity windows into the predicate below,
- * which is the query work Plan 3 owns; it is deliberately NOT attempted here.
- * Until then the divergence is documented (README's *Reading a person*) and
- * pinned by an explicit test — person.test.ts's "counts a rebound device's
- * whole history for BOTH people", which asserts today's behaviour and names
- * what the time-split path would answer instead. If you fix this, that test
- * is what will fail, and it is meant to.
+ * `bindEventsForDevices` returns bind events for every person ever bound to
+ * each device, not just this group — a device's windows are defined by its
+ * whole bind sequence, and filtering to one person first would leave every
+ * window open to infinity, reintroducing the union. Windows are filtered to
+ * this group only after `deriveTiling` has seen the whole sequence.
  */
 export function registerPersonRoutes(app: FastifyInstance, deps: PersonDeps): void {
   const { projects, readiness, ch, bindings, aliases } = deps
@@ -163,14 +169,81 @@ export function registerPersonRoutes(app: FastifyInstance, deps: PersonDeps): vo
     // row order.
     const ids = Array.from(new Set([...group, ...devices])).sort()
 
-    // `ids` and `project.id` are both bound as query parameters, never
-    // interpolated into the SQL text — the id set traces back to a
-    // caller-supplied URL segment. project_id is bound independently and is
-    // not optional: events rows carry anonymous_id/user_id as plain text
-    // with no project qualifier baked in, so a dropped project_id filter
-    // would let an identical id from another project leak into this one's
-    // profile (see person.test.ts's project-scoping test, which puts two
-    // projects in genuine contention over the same id to catch exactly that).
+    // Every bind event on every device this group ever touched, keyed by
+    // device — scoped by project.id (see bindings.ts's bindEventsForDevices),
+    // which matters here specifically because `devices` is caller-influenced
+    // (it traces back to the group PersonAliases/IdentityBindings resolved
+    // for a caller-supplied id): an unscoped lookup could pull another
+    // project's bind rows for a device id that collides across projects (see
+    // person.test.ts's "does not leak another project's binds" test, which
+    // puts two projects in genuine contention on the SAME device id to catch
+    // exactly that).
+    const bindEvents = await bindings.bindEventsForDevices(project.id, devices)
+
+    // One [from, to) window per device per owner, derived through the same
+    // function 003_identity.sql's view is required to agree with. Keeping the
+    // derivation in one place is what "converge onto one implementation of
+    // the tiling" actually asks for; the two SQL shapes stay different
+    // because the two reads have different jobs.
+    const windows: Array<{ device: string; from: number; to: number }> = []
+    for (const [device, events] of bindEvents) {
+      for (const binding of deriveTiling(events)) {
+        if (group.includes(binding.personId)) {
+          windows.push({ device, from: binding.from, to: binding.to })
+        }
+      }
+    }
+
+    if (windows.length > MAX_PERSON_RANGE_CLAUSES) {
+      return reply.code(400).send({
+        error: 'person_history_too_fragmented',
+        detail: `this person spans ${windows.length} device windows, above the limit of ${MAX_PERSON_RANGE_CLAUSES}`,
+      })
+    }
+
+    // Stage 1's short-circuit, expressed as SQL: an event carrying a
+    // non-empty user_id belongs to that user, full stop. The device branch is
+    // therefore guarded on user_id = '' — without that guard an event with
+    // user_id='bob' sitting on alice's device is counted for BOTH, which is
+    // the narrower defect this convergence is also meant to fix.
+    //
+    // Every value reaching SQL is a bound parameter, `project.id` included —
+    // `group` traces back to a caller-supplied URL segment, and `device`
+    // traces back to whatever anonymous_id a client chose to send.
+    //
+    // `w.from`/`w.to` can be ±Infinity — the earliest tile a device ever had
+    // is unbounded below, and its current tile is unbounded above, which is
+    // the common case, not an edge one: a device with exactly one bind ever
+    // is both at once. `new Date(Infinity)` is an Invalid Date and
+    // `chDateTime` would throw formatting it, so an infinite bound omits its
+    // half of the range clause entirely rather than being clamped to some
+    // representable-but-arbitrary date — the same "no clause means no bound"
+    // shape `windowStart` uses for the segment compiler's `ever` window
+    // (@lyraflow/core's behaviour.ts).
+    const params: Record<string, unknown> = { projectId: project.id, group }
+    const clauses = windows.map((w, i) => {
+      params[`d${i}`] = w.device
+      const parts = [`anonymous_id = {d${i}:String}`]
+      if (Number.isFinite(w.from)) {
+        params[`f${i}`] = chDateTime(new Date(w.from))
+        parts.push(`timestamp >= {f${i}:DateTime64(3)}`)
+      }
+      if (Number.isFinite(w.to)) {
+        params[`t${i}`] = chDateTime(new Date(w.to))
+        parts.push(`timestamp < {t${i}:DateTime64(3)}`)
+      }
+      return `(${parts.join(' AND ')})`
+    })
+
+    const deviceBranch =
+      clauses.length > 0 ? ` OR (user_id = '' AND (${clauses.join(' OR ')}))` : ''
+
+    // `project.id` is bound independently and is not optional: events rows
+    // carry anonymous_id/user_id as plain text with no project qualifier
+    // baked in, so a dropped project_id filter would let an identical id
+    // from another project leak into this one's profile (see
+    // person.test.ts's project-scoping test, which puts two projects in
+    // genuine contention over the same id to catch exactly that).
     const rs = await ch.query({
       query: `
         SELECT
@@ -179,9 +252,9 @@ export function registerPersonRoutes(app: FastifyInstance, deps: PersonDeps): vo
           count(DISTINCT event_id) AS events
         FROM events
         WHERE project_id = {projectId:UInt32}
-          AND (anonymous_id IN {ids:Array(String)} OR user_id IN {ids:Array(String)})
+          AND (user_id IN {group:Array(String)}${deviceBranch})
       `,
-      query_params: { projectId: project.id, ids },
+      query_params: params,
       format: 'JSONEachRow',
     })
     const [row] = await rs.json<PersonEventsRow>()

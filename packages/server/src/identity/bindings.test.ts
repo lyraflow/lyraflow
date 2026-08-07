@@ -1,7 +1,7 @@
 import { join } from 'node:path'
 import { type BindEvent, type Binding, deriveTiling } from '@lyraflow/core'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { IdentityBindings, MAX_CACHED_BINDINGS } from './bindings.js'
 
 const pg = createPgPool('postgres://lyraflow:lyraflow@localhost:5433/lyraflow_test')
@@ -214,6 +214,69 @@ describe('IdentityBindings.bind', () => {
 
   it('exposes a documented cache cap', () => {
     expect(MAX_CACHED_BINDINGS).toBeGreaterThan(0)
+  })
+
+  it('returns every bind event on a device, including binds to other people', async () => {
+    // The other-person binds are what CLOSE a window. Returning only the
+    // requested person's binds would leave every window open to infinity and
+    // hand a rebound device's whole history back to its first owner.
+    await pg.query(
+      `INSERT INTO identity_bindings (project_id, anonymous_id, person_id, bound_at) VALUES
+         ($1, 'shared', 'alice', '2026-08-01T00:00:00Z'),
+         ($1, 'shared', 'bob',   '2026-08-05T00:00:00Z')`,
+      [projectId],
+    )
+    const events = await bindings.bindEventsForDevices(projectId, ['shared'])
+    const forDevice = events.get('shared') ?? []
+    expect(forDevice.map((e) => e.personId)).toEqual(['alice', 'bob'])
+    expect(forDevice[0]?.boundAt).toBe(Date.parse('2026-08-01T00:00:00Z'))
+  })
+
+  // The union-bug fixture above (alice, bob) happens to have person_id and
+  // bound_at agree on ordering, so it cannot tell "ORDER BY bound_at" apart
+  // from "ORDER BY person_id" — deleting `bound_at ASC` from the ORDER BY
+  // stays green against it. 'zed' before 'amy' inverts that: alphabetically
+  // amy < zed, but zed binds first, so only a genuine bound_at sort produces
+  // ['zed', 'amy'].
+  it('orders bind events by when they happened, not by person id', async () => {
+    await bindings.bind(projectId, 'order-check', 'zed', at(1))
+    await bindings.bind(projectId, 'order-check', 'amy', at(5))
+    const events = await bindings.bindEventsForDevices(projectId, ['order-check'])
+    expect(events.get('order-check')?.map((e) => e.personId)).toEqual(['zed', 'amy'])
+  })
+
+  // No earlier test passes more than one device to bindEventsForDevices, so
+  // nothing else here reaches the grouping logic (`out.get(...) ?? []` then
+  // `out.set(...)`) with two keys in play. A regression that merged every
+  // row into one bucket, or dropped a key, would pass the rest of this file
+  // as it stands.
+  it('keeps each device events separate when several are fetched at once', async () => {
+    await pg.query(
+      `INSERT INTO identity_bindings (project_id, anonymous_id, person_id, bound_at) VALUES
+         ($1, 'multi-a', 'ann', '2026-08-01T00:00:00Z'),
+         ($1, 'multi-a', 'bea', '2026-08-03T00:00:00Z'),
+         ($1, 'multi-b', 'cyd', '2026-08-02T00:00:00Z')`,
+      [projectId],
+    )
+    const events = await bindings.bindEventsForDevices(projectId, ['multi-a', 'multi-b'])
+    expect(events.size).toBe(2)
+    expect(events.get('multi-a')?.map((e) => e.personId)).toEqual(['ann', 'bea'])
+    expect(events.get('multi-b')?.map((e) => e.personId)).toEqual(['cyd'])
+  })
+
+  it('returns an empty map for no devices, without querying', async () => {
+    // Postgres's ANY('{}') matches nothing anyway, so a plain size===0
+    // assertion would stay green even if the empty-array guard were deleted
+    // and the query ran regardless — it would just come back empty. Spying
+    // on the pool is what actually pins "without querying", as the test name
+    // claims.
+    const spy = vi.spyOn(pg, 'query')
+    try {
+      expect((await bindings.bindEventsForDevices(projectId, [])).size).toBe(0)
+      expect(spy).not.toHaveBeenCalled()
+    } finally {
+      spy.mockRestore()
+    }
   })
 
   // NaN specifically, not just "some invalid value": `#remember` evicts with

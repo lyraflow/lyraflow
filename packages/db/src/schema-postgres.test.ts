@@ -63,12 +63,12 @@ describe('postgres schema', () => {
   it('stores a segment filter tree as jsonb with an ast_version', async () => {
     const p = await pg.query("SELECT id FROM projects WHERE slug = 'demo'")
     await pg.query(
-      `INSERT INTO segments (project_id, name, filter_tree, ast_version)
+      `INSERT INTO segments (project_id, name, filter, ast_version)
        VALUES ($1, 'Trial users', $2, 1)`,
       [p.rows[0].id, JSON.stringify({ type: 'group', op: 'and', children: [] })],
     )
-    const s = await pg.query('SELECT filter_tree, ast_version FROM segments LIMIT 1')
-    expect(s.rows[0].filter_tree.op).toBe('and')
+    const s = await pg.query('SELECT filter, ast_version FROM segments LIMIT 1')
+    expect(s.rows[0].filter.op).toBe('and')
     expect(s.rows[0].ast_version).toBe(1)
   })
 

@@ -1,4 +1,6 @@
+import { createHmac, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
+import { MEMBER_PAGE_SIZE, MEMBER_WINDOW_MAX, encodeCursor } from '@lyraflow/core'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -24,6 +26,14 @@ let app: FastifyInstance
 let otherProjectId: number
 
 const trait = { kind: 'trait', key: 'plan', operator: '=', value: 'trial' }
+// A second, much smaller cohort. Its purpose is a genuinely PARTIAL page:
+// nonzero, under MEMBER_PAGE_SIZE, and nowhere near the window ceiling — the
+// one shape the 'trial' cohort (sized to exactly MEMBER_PAGE_SIZE) never
+// produces. `canOfferNext`'s "page was full" clause has no other way to be
+// exercised, since a zero-row page short-circuits earlier (no `last` row to
+// build a cursor from) and never reaches that clause at all.
+const PARTIAL_PAGE_PEOPLE = 5
+const enterpriseTrait = { kind: 'trait', key: 'plan', operator: '=', value: 'enterprise' }
 
 const preview = (body: unknown, headers: Record<string, string> = {}) =>
   app.inject({
@@ -36,6 +46,35 @@ const preview = (body: unknown, headers: Record<string, string> = {}) =>
     },
     payload: body as never,
   })
+
+/**
+ * Mirrors routes.ts's cursorSigningKey/encodeWalkCursor exactly, so tests
+ * below can hand-build a cursor this route accepts as genuinely its own —
+ * needed to exercise the window ceiling without actually walking hundreds
+ * of real pages. `hashServerKey(SERVER_KEY)` is the same value the server
+ * itself resolves for this project via `project.serverKeyHash` (see
+ * ProjectCache#byServerKey); nothing here reaches into the server's
+ * internals, it recomputes what the server would compute from public
+ * inputs (the label) and one value the server already keeps.
+ *
+ * Any drift from routes.ts's algorithm would make every hand-built cursor
+ * below fail with 400 — a fast, loud failure mode, not a silently-wrong one.
+ */
+function signedWireCursor(
+  lastSeen: string,
+  personId: string,
+  asOf: string,
+  pagesServed: number,
+): string {
+  const key = createHmac('sha256', hashServerKey(SERVER_KEY))
+    .update('lyraflow.segment-cursor.v1')
+    .digest()
+  const payload = JSON.stringify([lastSeen, personId, asOf, pagesServed])
+  const signature = createHmac('sha256', key).update(payload).digest('base64url')
+  return Buffer.from(JSON.stringify([lastSeen, personId, asOf, pagesServed, signature])).toString(
+    'base64url',
+  )
+}
 
 beforeAll(async () => {
   await migrate({
@@ -72,6 +111,41 @@ beforeAll(async () => {
   readiness.markReady()
   app = buildApp({ config, pg, ch, readiness })
   await app.ready()
+
+  // Two cohorts, one batch call. `plan: 'trial'` is sized to exactly
+  // MEMBER_PAGE_SIZE real people, all with a real last_seen (so all sort
+  // ahead of the far-future hand-built cursors below). Without this, every
+  // members query in this file returns zero rows regardless of whether a
+  // guard is even present — a mutant that deletes the window-ceiling
+  // short-circuit would still pass, because there would be nothing for the
+  // unguarded query to (wrongly) return. Exactly MEMBER_PAGE_SIZE also lets
+  // one of the window-ceiling tests below observe a genuinely FULL page
+  // landing on the ceiling, not just an empty one.
+  //
+  // `plan: 'enterprise'` is the much smaller PARTIAL_PAGE_PEOPLE cohort — see
+  // its comment above.
+  await app.inject({
+    method: 'POST',
+    url: '/v1/batch',
+    headers: { 'x-lyraflow-write-key': WRITE_KEY, 'user-agent': 'vitest' },
+    payload: {
+      batch: [
+        ...Array.from({ length: MEMBER_PAGE_SIZE }, (_, i) => ({
+          type: 'identify',
+          message_id: randomUUID(),
+          user_id: `u-trial-${i}`,
+          traits: { plan: 'trial' },
+        })),
+        ...Array.from({ length: PARTIAL_PAGE_PEOPLE }, (_, i) => ({
+          type: 'identify',
+          message_id: randomUUID(),
+          user_id: `u-enterprise-${i}`,
+          traits: { plan: 'enterprise' },
+        })),
+      ],
+    },
+  })
+  await app.deps.buffer.flush()
 })
 
 afterAll(async () => {
@@ -150,5 +224,213 @@ describe('POST /v1/segments/preview', () => {
     const spoofed = await preview({ ast_version: 1, filter: trait, project_id: otherProjectId })
     expect(mine.statusCode).toBe(200)
     expect(spoofed.json().person_count).toBe(mine.json().person_count)
+  })
+
+  it('returns members only when asked, and is unchanged otherwise', async () => {
+    const without = await preview({ ast_version: 1, filter: trait })
+    expect(without.json().members).toBeUndefined()
+
+    const with_ = await preview({ ast_version: 1, filter: trait, include: ['members'] })
+    expect(with_.statusCode).toBe(200)
+    expect(Array.isArray(with_.json().members)).toBe(true)
+  })
+
+  it('reports the same as_of for every page of one walk, even across a cache eviction', async () => {
+    // Pages of one walk must not claim different moments. Continued with a
+    // REAL next_cursor (the fixture seeds a full first page, so page 1
+    // always offers one) rather than a hand-built one: this route now signs
+    // its cursors, so only a cursor it minted itself is accepted at all —
+    // see "rejects a cursor built with the public core encodeCursor" below.
+    // The eviction case is still what matters here: page 2's cursor was
+    // never cached before this call (a guaranteed miss), and as_of recovered
+    // from the cache would survive a cache HIT and only re-mint on a miss —
+    // this proves it does not, even on a guaranteed miss.
+    const first = await preview({ ast_version: 1, filter: trait, include: ['members'] })
+    const walkAsOf = first.json().as_of
+    expect(typeof walkAsOf).toBe('string')
+    const cursor = first.json().next_cursor
+    expect(typeof cursor).toBe('string')
+
+    const second = await preview({
+      ast_version: 1,
+      filter: trait,
+      include: ['members'],
+      cursor,
+    })
+    expect(second.statusCode).toBe(200)
+    expect(second.json().as_of).toBe(walkAsOf)
+  })
+
+  it('rejects a malformed cursor with 400', async () => {
+    const res = await preview({
+      ast_version: 1,
+      filter: trait,
+      include: ['members'],
+      cursor: 'not-a-cursor',
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toMatch(/cursor/i)
+  })
+
+  it("rejects a cursor built with the public core encodeCursor, not this route's own signed one", async () => {
+    // core's encodeCursor is exported and the brief sanctions its use for
+    // building test cursors — but this route mints its own signed cursors
+    // and must not treat a well-formed, UNSIGNED core cursor as one of its
+    // own. Without this, a caller could read lastSeen/personId off any
+    // response it already has and hand-roll an unbounded walk that never
+    // trips the window ceiling.
+    const bare = encodeCursor({
+      lastSeen: '2099-01-01 00:00:00.000',
+      personId: '',
+      asOf: new Date().toISOString(),
+    })
+    const res = await preview({
+      ast_version: 1,
+      filter: trait,
+      include: ['members'],
+      cursor: bare,
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toMatch(/cursor/i)
+  })
+
+  it('rejects a legitimately-issued cursor that has been tampered with', async () => {
+    // The exact forgery the signature exists to catch: take a cursor this
+    // server actually issued, and change the field the window ceiling is
+    // enforced against (pagesServed) without recomputing the signature —
+    // the way a caller trying to defeat the ceiling would, having decoded
+    // the wire format from the outside (it is base64url JSON, not opaque to
+    // inspection) but not knowing the per-project signing key.
+    const first = await preview({ ast_version: 1, filter: trait, include: ['members'] })
+    const real = first.json().next_cursor
+    expect(typeof real).toBe('string')
+
+    const decoded = JSON.parse(Buffer.from(real, 'base64url').toString('utf8'))
+    decoded[3] = 0
+    const tampered = Buffer.from(JSON.stringify(decoded)).toString('base64url')
+
+    const res = await preview({
+      ast_version: 1,
+      filter: trait,
+      include: ['members'],
+      cursor: tampered,
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toMatch(/cursor/i)
+  })
+
+  it('offers a next_cursor for a full page under budget', async () => {
+    // Nothing before this asserted next_cursor is ever actually offered —
+    // several tests receive a full page (the fixture seeds exactly
+    // MEMBER_PAGE_SIZE matching people) but none checked next_cursor itself,
+    // so a mutant that dropped the "page was full" clause from the
+    // next_cursor decision entirely would have passed the whole suite.
+    const res = await preview({ ast_version: 1, filter: trait, include: ['members'] })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.members).toHaveLength(MEMBER_PAGE_SIZE)
+    expect(body.window_exhausted).toBe(false)
+    expect(typeof body.next_cursor).toBe('string')
+  })
+
+  it('rejects an unknown include value rather than ignoring it', async () => {
+    // Silently ignoring an unrecognised option is how a caller ends up
+    // believing it asked for something it did not receive.
+    const res = await preview({ ast_version: 1, filter: trait, include: ['everything'] })
+    expect(res.statusCode).toBe(400)
+  })
+
+  it('returns an identical body on a cache hit', async () => {
+    const a = await preview({ ast_version: 1, filter: trait, include: ['members'] })
+    const b = await preview({ ast_version: 1, filter: trait, include: ['members'] })
+    expect(b.json()).toEqual(a.json())
+  })
+
+  it('refuses to paginate past the window ceiling', async () => {
+    // The fixture is far too small to walk a real MEMBER_WINDOW_MAX-row
+    // window (it would take MEMBER_WINDOW_MAX / MEMBER_PAGE_SIZE real pages
+    // to reach it), so this exercises the ceiling by construction: a
+    // properly SIGNED wire cursor (see signedWireCursor above) claiming the
+    // walk has already served the whole page budget. A real walk reaches
+    // exactly this state after its last allowed page; this jumps straight
+    // there rather than walking it. Signed, not hand-rolled unsigned JSON,
+    // because this route now rejects anything it did not itself sign — an
+    // unsigned version of this exact payload is covered by the malformed/
+    // forged-cursor tests above, which assert 400, not 200.
+    const pagesServedAtCeiling = MEMBER_WINDOW_MAX / MEMBER_PAGE_SIZE
+    const atCeiling = signedWireCursor(
+      '2099-01-01 00:00:00.000',
+      '',
+      new Date().toISOString(),
+      pagesServedAtCeiling,
+    )
+
+    const res = await preview({
+      ast_version: 1,
+      filter: trait,
+      include: ['members'],
+      cursor: atCeiling,
+    })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.window_exhausted).toBe(true)
+    expect(body.next_cursor).toBeNull()
+    expect(body.members).toEqual([])
+  })
+
+  it('flags window_exhausted on the page that spends the last of the budget, not only the page after', async () => {
+    // Distinct from the test above: that one starts already PAST the ceiling
+    // (pagesServed === the cap) and is refused before any query runs. This
+    // one starts one page short of it (pagesServed === cap - 1), so the
+    // query DOES run, and it is the resulting page — the one that spends the
+    // last of the budget — that must carry the flag, not a follow-up empty
+    // one. A mutant that only ever sets window_exhausted from the pre-query
+    // short-circuit would pass the test above but fail this one.
+    //
+    // The fixture seeds exactly MEMBER_PAGE_SIZE matching people, all
+    // sorting ahead of this far-future cursor, so this page comes back FULL
+    // — which is what proves next_cursor is withheld BECAUSE of the ceiling
+    // and not merely because the page happened to be partial. A mutant that
+    // drops the "window has room" clause from the next_cursor decision (and
+    // offers one on any full page, ceiling or not) fails only this
+    // assertion, not the ones above.
+    const oneShort = signedWireCursor(
+      '2099-01-01 00:00:00.000',
+      '',
+      new Date().toISOString(),
+      MEMBER_WINDOW_MAX / MEMBER_PAGE_SIZE - 1,
+    )
+
+    const res = await preview({
+      ast_version: 1,
+      filter: trait,
+      include: ['members'],
+      cursor: oneShort,
+    })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.members).toHaveLength(MEMBER_PAGE_SIZE)
+    expect(body.window_exhausted).toBe(true)
+    expect(body.next_cursor).toBeNull()
+  })
+
+  it('withholds next_cursor for a genuinely partial page, nowhere near the ceiling', async () => {
+    // Distinct from "offers a next_cursor for a full page under budget":
+    // that test's page is always exactly MEMBER_PAGE_SIZE, so removing the
+    // "page was full" clause from canOfferNext changes nothing there — a
+    // page of MEMBER_PAGE_SIZE members satisfies `=== MEMBER_PAGE_SIZE`
+    // whether or not the clause is even checked, and the review that asked
+    // for this test proved exactly that by deleting the clause and watching
+    // the suite stay green. The `enterprise` cohort is small and nowhere
+    // near MAX_MEMBER_PAGES, so this is a genuine "no more pages, and NOT
+    // because the ceiling tripped" case — the one shape that DOES depend on
+    // the clause.
+    const res = await preview({ ast_version: 1, filter: enterpriseTrait, include: ['members'] })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.members.length).toBeGreaterThan(0)
+    expect(body.members.length).toBeLessThan(MEMBER_PAGE_SIZE)
+    expect(body.window_exhausted).toBe(false)
+    expect(body.next_cursor).toBeNull()
   })
 })
