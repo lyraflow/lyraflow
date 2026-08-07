@@ -444,13 +444,19 @@ describe('/v1/segments CRUD and run', () => {
       payload: body as never,
     })
 
-  const runSaved = (id: number, body: unknown = {}) =>
+  const runSaved = (id: number | string, body: unknown = {}) =>
     app.inject({
       method: 'POST',
       url: `/v1/segments/${id}/preview`,
       headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
       payload: body as never,
     })
+
+  // Depth 12, one over MAX_TREE_DEPTH (10) — shape-valid (SegmentQuery.safeParse
+  // accepts it fine) but cap-invalid, the exact gap between "stores" and "runs".
+  let overCapFilter: unknown = trait
+  for (let i = 0; i < 12; i++)
+    overCapFilter = { kind: 'group', op: 'and', children: [overCapFilter] }
 
   it('creates, reads, lists and deletes a segment', async () => {
     const created = await create({ name: 'Trial users', ast_version: 1, filter: trait })
@@ -564,5 +570,67 @@ describe('/v1/segments CRUD and run', () => {
       headers: { 'x-lyraflow-server-key': SERVER_KEY },
     })
     expect(after.json().last_count).toBeNull()
+  })
+
+  it('rejects a non-numeric segment id with 400 on every :id route, not a 503', async () => {
+    // Number('not-a-number') is NaN; without a guard this reaches Postgres as
+    // a query parameter and trips the generic error handler into a 503 for a
+    // deterministic client error — every :id route needs its own guard, so
+    // this checks all four rather than trusting one to represent the rest.
+    const badId = 'not-a-number'
+
+    const get = await app.inject({
+      method: 'GET',
+      url: `/v1/segments/${badId}`,
+      headers: { 'x-lyraflow-server-key': SERVER_KEY },
+    })
+    expect(get.statusCode).toBe(400)
+
+    const patch = await app.inject({
+      method: 'PATCH',
+      url: `/v1/segments/${badId}`,
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: { name: 'whatever' } as never,
+    })
+    expect(patch.statusCode).toBe(400)
+
+    const del = await app.inject({
+      method: 'DELETE',
+      url: `/v1/segments/${badId}`,
+      headers: { 'x-lyraflow-server-key': SERVER_KEY },
+    })
+    expect(del.statusCode).toBe(400)
+
+    const run = await runSaved(badId)
+    expect(run.statusCode).toBe(400)
+  })
+
+  it('rejects an over-cap tree on create with 400', async () => {
+    // Shape-valid, cap-invalid: without write-time validation this would
+    // save with a 201 and then fail on every run thereafter.
+    const res = await create({ name: 'Over cap on create', ast_version: 1, filter: overCapFilter })
+    expect(res.statusCode).toBe(400)
+  })
+
+  it('rejects an over-cap tree on update, leaving the stored row unchanged', async () => {
+    const created = await create({ name: 'Valid then over-cap', ast_version: 1, filter: trait })
+    const id = created.json().id
+
+    const patch = await app.inject({
+      method: 'PATCH',
+      url: `/v1/segments/${id}`,
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: { ast_version: 1, filter: overCapFilter } as never,
+    })
+    expect(patch.statusCode).toBe(400)
+
+    // Rejected before persistence, not just before the response: the row
+    // still carries its original, valid filter rather than the rejected one.
+    const after = await app.inject({
+      method: 'GET',
+      url: `/v1/segments/${id}`,
+      headers: { 'x-lyraflow-server-key': SERVER_KEY },
+    })
+    expect(after.json().filter).toEqual(trait)
   })
 })

@@ -8,6 +8,7 @@ import {
   SegmentValidationError,
   compileSegment,
   treeHash,
+  validateTree,
 } from '@lyraflow/core'
 import type { ClickHouseClient, Pool } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
@@ -44,6 +45,22 @@ function toWire(s: StoredSegment) {
 
 const CreateBody = z.object({ name: z.string().min(1).max(200) })
 const PatchBody = z.object({ name: z.string().min(1).max(200).optional() })
+
+/**
+ * Parses the `:id` path param. A non-numeric or non-positive id is a
+ * malformed request, not a lookup miss — unlike the cross-project 404 case,
+ * there is no existence to leak by rejecting it outright, so this returns
+ * 400 rather than folding into the "not found" path. Without this guard,
+ * `Number('not-a-number')` is `NaN`, which reaches Postgres as a query
+ * parameter and trips the generic error handler into a 503 for what is a
+ * deterministic client error — exactly what app.ts's own error handler
+ * documents never doing, since it tells the client to retry something that
+ * will fail identically forever.
+ */
+function parseSegmentId(raw: string): number | null {
+  const id = Number(raw)
+  return Number.isInteger(id) && id > 0 ? id : null
+}
 
 /**
  * The preview options that sit alongside the tree. Parsed separately from
@@ -403,6 +420,18 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
     if (!meta.success || !query.success) {
       return reply.code(400).send({ error: 'invalid segment' })
     }
+    // Shape-valid is not cap-valid: SegmentQuery.safeParse only checks the
+    // AST's shape, never depth/node/behaviour caps. Without this, a tree
+    // that is shape-valid but over-cap would save with a 201 and then fail
+    // on every single run — a segment that looks fine until someone runs it.
+    try {
+      validateTree(query.data)
+    } catch (err) {
+      if (err instanceof SegmentValidationError) {
+        return reply.code(400).send({ error: err.message, code: err.code })
+      }
+      throw err
+    }
     try {
       const created = await store.create(project.id, meta.data.name, query.data)
       return reply.code(201).send(toWire(created))
@@ -415,8 +444,10 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
   app.get<{ Params: { id: string } }>('/v1/segments/:id', async (req, reply) => {
     const project = await authenticateServer(req, reply)
     if (!project) return
+    const id = parseSegmentId(req.params.id)
+    if (id === null) return reply.code(400).send({ error: 'invalid_segment_id' })
     try {
-      const found = await store.get(project.id, Number(req.params.id))
+      const found = await store.get(project.id, id)
       if (!found) return reply.code(404).send({ error: 'segment_not_found' })
       return reply.code(200).send(toWire(found))
     } catch (err) {
@@ -430,14 +461,30 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
   app.patch<{ Params: { id: string } }>('/v1/segments/:id', async (req, reply) => {
     const project = await authenticateServer(req, reply)
     if (!project) return
+    const id = parseSegmentId(req.params.id)
+    if (id === null) return reply.code(400).send({ error: 'invalid_segment_id' })
     const meta = PatchBody.safeParse(req.body)
     if (!meta.success) return reply.code(400).send({ error: 'invalid segment' })
     // A body carrying a tree updates the filter; one carrying only a name
     // does not, which is what keeps the snapshot on a rename (see
     // SegmentStore#update).
     const query = SegmentQuery.safeParse(req.body)
+    // Same cap check as create, and for the same reason — an update can
+    // swap in a fresh over-cap tree just as easily as a create can start
+    // with one. Skipped entirely for a rename-only body (query.success is
+    // false), which carries no tree to validate.
+    if (query.success) {
+      try {
+        validateTree(query.data)
+      } catch (err) {
+        if (err instanceof SegmentValidationError) {
+          return reply.code(400).send({ error: err.message, code: err.code })
+        }
+        throw err
+      }
+    }
     try {
-      const updated = await store.update(project.id, Number(req.params.id), {
+      const updated = await store.update(project.id, id, {
         name: meta.data.name,
         query: query.success ? query.data : undefined,
       })
@@ -455,7 +502,9 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
   app.delete<{ Params: { id: string } }>('/v1/segments/:id', async (req, reply) => {
     const project = await authenticateServer(req, reply)
     if (!project) return
-    const removed = await store.remove(project.id, Number(req.params.id))
+    const id = parseSegmentId(req.params.id)
+    if (id === null) return reply.code(400).send({ error: 'invalid_segment_id' })
+    const removed = await store.remove(project.id, id)
     if (!removed) return reply.code(404).send({ error: 'segment_not_found' })
     return reply.code(204).send()
   })
@@ -469,12 +518,14 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
   app.post<{ Params: { id: string } }>('/v1/segments/:id/preview', async (req, reply) => {
     const project = await authenticateServer(req, reply)
     if (!project) return
+    const id = parseSegmentId(req.params.id)
+    if (id === null) return reply.code(400).send({ error: 'invalid_segment_id' })
     const options = PreviewOptions.safeParse(req.body ?? {})
     if (!options.success) return reply.code(400).send({ error: 'invalid preview options' })
 
     let found: StoredSegment | null
     try {
-      found = await store.get(project.id, Number(req.params.id))
+      found = await store.get(project.id, id)
     } catch (err) {
       if (err instanceof StoredTreeError) {
         return reply.code(400).send({ error: err.message, ast_version: err.astVersion })
@@ -523,12 +574,15 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
       if (err instanceof SegmentTimeoutError) {
         return reply.code(422).send({ error: err.message })
       }
-      // A stored tree can fall outside today's caps (MAX_TREE_DEPTH and
-      // friends tightened after it was saved) even though it once parsed
-      // fine — the same "untrusted on read" situation StoredTreeError exists
-      // for, just caught one level down inside compileSegment (via runTree)
-      // instead of at hydration. Without this, a stale-but-parseable tree
-      // would surface as an unhandled 503 rather than a named 400.
+      // BACKSTOP, not the primary defence — create/update now call
+      // validateTree before persisting, so a NEW segment can no longer save
+      // over-cap. This stays for rows written before that check existed (or
+      // if the caps are tightened again later): a stored tree can still fall
+      // outside today's caps even though it once parsed fine, the same
+      // "untrusted on read" situation StoredTreeError exists for, just
+      // caught one level down inside compileSegment (via runTree) instead of
+      // at hydration. Do not delete this as redundant with the write-time
+      // check — it is not, for any row that predates it.
       if (err instanceof SegmentValidationError) {
         return reply.code(400).send({ error: err.message, code: err.code })
       }
