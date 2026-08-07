@@ -245,6 +245,25 @@ describe('IdentityBindings.bind', () => {
     expect(events.get('order-check')?.map((e) => e.personId)).toEqual(['zed', 'amy'])
   })
 
+  // No earlier test passes more than one device to bindEventsForDevices, so
+  // nothing else here reaches the grouping logic (`out.get(...) ?? []` then
+  // `out.set(...)`) with two keys in play. A regression that merged every
+  // row into one bucket, or dropped a key, would pass the rest of this file
+  // as it stands.
+  it('keeps each device events separate when several are fetched at once', async () => {
+    await pg.query(
+      `INSERT INTO identity_bindings (project_id, anonymous_id, person_id, bound_at) VALUES
+         ($1, 'multi-a', 'ann', '2026-08-01T00:00:00Z'),
+         ($1, 'multi-a', 'bea', '2026-08-03T00:00:00Z'),
+         ($1, 'multi-b', 'cyd', '2026-08-02T00:00:00Z')`,
+      [projectId],
+    )
+    const events = await bindings.bindEventsForDevices(projectId, ['multi-a', 'multi-b'])
+    expect(events.size).toBe(2)
+    expect(events.get('multi-a')?.map((e) => e.personId)).toEqual(['ann', 'bea'])
+    expect(events.get('multi-b')?.map((e) => e.personId)).toEqual(['cyd'])
+  })
+
   it('returns an empty map for no devices, without querying', async () => {
     // Postgres's ANY('{}') matches nothing anyway, so a plain size===0
     // assertion would stay green even if the empty-array guard were deleted
