@@ -162,7 +162,15 @@ function sanitizeDictionaryError(dictionaryName: string, password: string, err: 
   const summary = collapsed.length > 200 ? `${collapsed.slice(0, 200)}…` : collapsed
 
   const cause = new Error(summary)
-  if (type) cause.name = type
+  // `type` is read straight off the caught error (see above) and is
+  // untrusted the same way `.message` is — assigning it to `cause.name`
+  // unredacted would put the password back within reach of anything that
+  // reads `.name` (an own, enumerable property, unlike `.message`): a log
+  // serializer walking `cause`, `String(cause)`, or `cause.stack`'s first
+  // line all include `.name`. Redacted through the same function as
+  // everything else, not trusted to be safe just because it looks like a
+  // short enum value.
+  if (type) cause.name = redactPassword(type, password)
 
   return new Error(summary, { cause })
 }

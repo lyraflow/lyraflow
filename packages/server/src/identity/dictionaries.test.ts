@@ -87,30 +87,58 @@ describe('parsePgUrl', () => {
  */
 describe('ensureIdentityDictionaries sanitizes a failure before it can reach a logger', () => {
   /**
-   * Builds a single-line error shaped exactly like the ClickHouseError
-   * `@clickhouse/client` throws (`.message`, `.code`, `.type`) around a
-   * `SOURCE(POSTGRESQL(...))` clause containing `password`, escaped the same
-   * way `escapeSqlLiteral` in dictionaries.ts escapes it — `\` doubled,
-   * then `'` backslash-escaped. `tail` is appended after the password
-   * clause when present, or omitted (simulating a length-capped diagnostic
-   * that truncates mid-value, with no closing quote at all) when not.
+   * Builds an error shaped like the ClickHouseError `@clickhouse/client`
+   * throws (`.message`, `.code`, `.type`), around a well-formed
+   * `password '...'` clause: the escaped password value (escaped the same
+   * way `escapeSqlLiteral` in dictionaries.ts escapes it — `\` doubled, then
+   * `'` backslash-escaped), a genuine closing quote, and a bit more of a
+   * plausible `SOURCE(...)` clause after it.
    *
-   * Deliberately lean *before* the password: `sanitizeDictionaryError` caps
-   * its output at 200 characters (for a readable, single fatal log line),
-   * capped *after* redaction runs, never before — but a verbose preamble
-   * here would push the password itself past that 200-character mark, and
-   * the tests below would then pass even with redaction completely broken,
-   * for the same reason the multi-line fixture this replaced did: whatever
-   * comes after the cut point disappears regardless of whether it was ever
-   * actually redacted. Keeping the preamble short (verified below, in the
-   * mutation proof) makes these tests depend on `redactPassword` actually
-   * running, not on truncation coincidentally standing in for it.
+   * `opts.truncated` omits the closing quote — and everything after it —
+   * entirely, reproducing a diagnostic that was cut off mid-value. This
+   * matters precisely because `${escaped}` alone, without a trailing `'`,
+   * is indistinguishable from a value that just happens to be short: an
+   * earlier version of this fixture always appended a closing quote
+   * regardless of any option, so the "truncated echo" test below never
+   * actually exercised a message *without* one, and reverting the fallback
+   * regex's `('|$)` end-of-string branch back to requiring a literal `'`
+   * left every test in this file green (see the Task 5 round-3 fix report).
+   *
+   * Real ClickHouse HTTP error messages are single-line, so this fixture is
+   * too, and deliberately lean *before* the password: `sanitizeDictionaryError`
+   * caps its output at 200 characters, capped *after* redaction runs, never
+   * before — but a verbose preamble here would push the password itself past
+   * that mark, and the tests below would then pass even with redaction
+   * completely broken (an earlier, multi-line version of this fixture had
+   * the identical problem via first-line truncation instead of a character
+   * cap — see the same report).
    */
-  function chError(password: string, tail?: string): Error {
+  function chError(password: string, opts: { truncated?: boolean } = {}): Error {
     const escaped = password.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
-    const message = `Code: 62. Syntax error near SOURCE(POSTGRESQL(host 'postgres' password '${escaped}'${tail ?? ''}`
+    const rest = opts.truncated ? '' : `' db 'lyraflow_test' table 'identity_bindings_dict_src'))`
+    const message = `Code: 62. Syntax error near SOURCE(POSTGRESQL(host 'postgres' password '${escaped}${rest}`
     const err = new Error(message)
     Object.assign(err, { code: '62', type: 'SYNTAX_ERROR' })
+    return err
+  }
+
+  /**
+   * A distinct, realistic ClickHouse failure shape — an argument-validation
+   * error for the `postgresql` table function that `SOURCE(POSTGRESQL(...))`
+   * compiles down to — that echoes an argument value generically, without
+   * labelling it "password" at all. Deliberately *not* a `password '...'`
+   * clause: `redactPassword`'s clause-shaped fallback regex (pass 3) cannot
+   * match this shape no matter how it's written, so only the escaped-literal
+   * substitution (pass 2) can catch the leak here. Without a fixture like
+   * this, "drop the escaped-literal pass" was an untested mutation — every
+   * other fixture puts the escaped password directly after the literal word
+   * "password ", where pass 3 alone is already sufficient, so pass 2 was
+   * never actually exercised on its own (see the Task 5 round-3 fix report).
+   */
+  function chErrorArgumentEcho(escapedValue: string): Error {
+    const message = `Code: 36. DB::Exception: Bad arguments: 'postgresql' table function argument 4: '${escapedValue}'`
+    const err = new Error(message)
+    Object.assign(err, { code: '36', type: 'BAD_ARGUMENTS' })
     return err
   }
 
@@ -157,7 +185,7 @@ describe('ensureIdentityDictionaries sanitizes a failure before it can reach a l
   it('a single-line error with the password on that line is fully redacted', async () => {
     const LEAKED_PASSWORD = 'MY_LEAKED_SECRET_XYZ'
     const ch = fakeCh(() => {
-      throw chError(LEAKED_PASSWORD, `' db 'lyraflow_test' table 'identity_bindings_dict_src'))`)
+      throw chError(LEAKED_PASSWORD)
     })
     for (const text of await surfacesFor(ch, pgSourceWith(LEAKED_PASSWORD))) {
       expect(text).not.toContain(LEAKED_PASSWORD)
@@ -168,10 +196,13 @@ describe('ensureIdentityDictionaries sanitizes a failure before it can reach a l
   // A password containing `'` is exactly what a raw (unescaped) redaction
   // pass misses: the DDL — and therefore the error echo — carries the
   // *escaped* form `ab\'cd-SECRET-TAIL`, not the raw `ab'cd-SECRET-TAIL`.
+  // The clause sits in its normal `password '...'` position here, so this
+  // is primarily a test of the fallback regex's escape-awareness (pass 3);
+  // see the argument-echo test below for a shape that isolates pass 2.
   it('a password containing a single quote is fully redacted', async () => {
     const PASSWORD = `ab'cd-SECRET-TAIL`
     const ch = fakeCh(() => {
-      throw chError(PASSWORD, `' db 'lyraflow_test' table 'identity_bindings_dict_src'))`)
+      throw chError(PASSWORD)
     })
     for (const text of await surfacesFor(ch, pgSourceWith(PASSWORD))) {
       expect(text).not.toContain(PASSWORD)
@@ -180,18 +211,22 @@ describe('ensureIdentityDictionaries sanitizes a failure before it can reach a l
     }
   })
 
-  // A password containing `\` doubles under escaping (`\` -> `\\`); the
-  // fallback clause-matcher must not mistake the doubled backslash for an
-  // escaped quote and stop early.
-  it('a password containing a backslash is fully redacted', async () => {
+  // A password containing a literal `\` appears, escaped, outside a
+  // `password '...'` clause entirely — a shape the fallback regex (pass 3)
+  // cannot match by construction, since it requires the literal word
+  // "password" nearby. Only the escaped-literal substitution (pass 2) can
+  // catch this, which is the point: it is the one fixture in this file that
+  // actually fails if pass 2 is dropped while pass 3 is left correct (see
+  // the mutation matrix in the Task 5 round-3 fix report).
+  it('an escaped password appearing outside a "password \'...\'" clause is still redacted', async () => {
     const PASSWORD = 'back\\slash-SECRET-TAIL'
+    const escaped = PASSWORD.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
     const ch = fakeCh(() => {
-      throw chError(PASSWORD, `' db 'lyraflow_test' table 'identity_bindings_dict_src'))`)
+      throw chErrorArgumentEcho(escaped)
     })
     for (const text of await surfacesFor(ch, pgSourceWith(PASSWORD))) {
       expect(text).not.toContain(PASSWORD)
       expect(text).not.toContain('SECRET-TAIL')
-      expect(text).not.toMatch(/password\s*'/i)
     }
   })
 
@@ -199,16 +234,41 @@ describe('ensureIdentityDictionaries sanitizes a failure before it can reach a l
   // Task 5 fix report), and where the cut lands is not under this code's
   // control: a partial password with no closing quote is still a leak, and
   // `[^']*'` (requiring a real closing quote) would never match it at all.
+  // `{ truncated: true }` is what actually omits the closing quote here —
+  // without it, this fixture would (as it originally did) always terminate
+  // with a `'`, and this test would pass regardless of whether the fallback
+  // regex's end-of-string branch worked at all.
   it('a truncated echo with no closing quote is fully redacted, not left untouched', async () => {
     const LEAKED_PASSWORD = 'MY_LEAKED_SECRET_XYZ'
+    const PARTIAL = LEAKED_PASSWORD.slice(0, 12)
     const ch = fakeCh(() => {
-      // No trailing quote and no tail: the message ends mid-value, exactly
-      // as a length cap would produce.
-      throw chError(LEAKED_PASSWORD.slice(0, 12))
+      throw chError(PARTIAL, { truncated: true })
     })
     for (const text of await surfacesFor(ch, pgSourceWith(LEAKED_PASSWORD))) {
-      expect(text).not.toContain(LEAKED_PASSWORD.slice(0, 12))
+      expect(text).not.toContain(PARTIAL)
       expect(text).not.toMatch(/password\s*'/i)
+    }
+  })
+
+  // `type` is read straight off the caught error, same as `.message`, and
+  // is untrusted the same way: genuinely unlikely to carry the password via
+  // real `@clickhouse/client` output, but `.name` is an own, enumerable
+  // property (unlike `.message`), so an unredacted `cause.name = type`
+  // would put the password within reach of `JSON.stringify(cause)`,
+  // `String(cause)`, and `cause.stack`'s first line even though
+  // `thrown.message` itself stayed clean (`type` also feeds the outer
+  // message's `label`, which *does* go through `redactPassword` — so this
+  // fixture's `thrown.message` is redacted regardless, isolating the
+  // `cause.name` path specifically).
+  it('redacts the password even if it turns up in the ClickHouseError-shaped type field', async () => {
+    const LEAKED_PASSWORD = 'MY_LEAKED_SECRET_XYZ'
+    const ch = fakeCh(() => {
+      const err = new Error('Code: 1. DB::Exception: some unrelated failure')
+      Object.assign(err, { code: '1', type: `WEIRD_TYPE_${LEAKED_PASSWORD}` })
+      throw err
+    })
+    for (const text of await surfacesFor(ch, pgSourceWith(LEAKED_PASSWORD))) {
+      expect(text).not.toContain(LEAKED_PASSWORD)
     }
   })
 
