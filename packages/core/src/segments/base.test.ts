@@ -55,7 +55,25 @@ describe('baseCte', () => {
 
   it('takes latest context by last_seen and first touch by first_seen', () => {
     const { sql } = build()
-    expect(sql).toMatch(/argMax\(latest_country,\s*last_seen\)/)
-    expect(sql).toMatch(/argMin\(first_source,\s*first_seen\)/)
+    expect(sql).toMatch(/argMax\(m_latest_country,\s*m_last_seen\)/)
+    expect(sql).toMatch(/argMin\(m_first_source,\s*m_first_seen\)/)
+  })
+
+  /**
+   * A merged value must never be aliased back onto the column it reads.
+   * ClickHouse resolves the argument to the alias — a DateTime64 — rather
+   * than the underlying AggregateFunction column, and the query dies with
+   * "Illegal type DateTime64(3, 'UTC') of argument for aggregate function
+   * with Merge suffix". It only bites under a GROUP BY, so the shape tests
+   * and schema-clickhouse.test.ts both stay green while the compiled query
+   * cannot run at all. Found in Task 11 against a live server.
+   */
+  it('never aliases a merged value back onto its own column name', () => {
+    const { sql } = build()
+    const merges = [...sql.matchAll(/\w*Merge\((\w+)\)\s+AS\s+(\w+)/g)]
+    expect(merges.length).toBeGreaterThan(0)
+    for (const [, column, alias] of merges) {
+      expect(alias).not.toBe(column)
+    }
   })
 })

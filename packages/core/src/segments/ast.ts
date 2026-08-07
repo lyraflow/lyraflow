@@ -101,9 +101,22 @@ export const Context = z
   .and(valueFor(z.enum(COMPARISON_OPERATORS)))
 export type Context = z.infer<typeof Context>
 
+/**
+ * Lifecycle bounds are instants, so every value must be a parseable datetime.
+ * Enforced here rather than in the compiler because this is the API boundary:
+ * a caller that sends "yesterday" gets a field-level rejection, instead of the
+ * compiler calling `new Date` on it and formatting an Invalid Date into SQL.
+ */
 export const Lifecycle = z
   .object({ kind: z.literal('lifecycle'), field: z.enum(['first_seen', 'last_seen']) })
   .and(valueFor(z.enum(COMPARISON_OPERATORS)))
+  .refine(
+    (l) =>
+      (Array.isArray(l.value) ? l.value : [l.value]).every(
+        (v) => v !== null && !Number.isNaN(new Date(String(v)).getTime()),
+      ),
+    { message: 'lifecycle values must be datetimes', path: ['value'] },
+  )
 export type Lifecycle = z.infer<typeof Lifecycle>
 
 export type Group = { kind: 'group'; op: 'and' | 'or'; children: FilterNode[] }

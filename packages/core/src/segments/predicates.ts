@@ -1,6 +1,6 @@
 import type { Behavior, Context, FilterNode, Lifecycle, Trait } from './ast.js'
 import { CONTEXT_COLUMNS } from './base.js'
-import type { ChType, Params } from './params.js'
+import { type ChType, type Params, chDateTime } from './params.js'
 
 interface Ctx {
   params: Params
@@ -45,8 +45,24 @@ function contextExpr(n: Context, ctx: Ctx): string {
   return compare(column, n.operator, n.value, 'String', ctx.params)
 }
 
+/**
+ * Lifecycle bounds are instants, and the caller writes them as ISO-8601
+ * strings. They are reformatted into ClickHouse's DateTime64(3) literal
+ * shape here rather than bound as written — an ISO string's trailing `Z` is
+ * rejected by the parameter parser. The AST already refuses a value that is
+ * not a parseable datetime, so `new Date` cannot produce an invalid date at
+ * this point.
+ */
 function lifecycleExpr(n: Lifecycle, ctx: Ctx): string {
-  return compare(n.field, n.operator, n.value, 'DateTime64(3)', ctx.params)
+  const toCh = (v: unknown) => chDateTime(new Date(String(v)))
+  if (n.operator === 'between') {
+    const [lo, hi] = n.value as [string, string]
+    return (
+      `${n.field} BETWEEN ${ctx.params.add(toCh(lo), 'DateTime64(3)')}` +
+      ` AND ${ctx.params.add(toCh(hi), 'DateTime64(3)')}`
+    )
+  }
+  return `${n.field} ${n.operator} ${ctx.params.add(toCh(n.value), 'DateTime64(3)')}`
 }
 
 /**

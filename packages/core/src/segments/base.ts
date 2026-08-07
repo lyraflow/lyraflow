@@ -91,22 +91,29 @@ export function baseCte(opts: { database: string; projectId: number; params: Par
   const projectParam = params.add(projectId, 'UInt32')
   const resolved = resolvedPersonExpr({ database, alias: 'dev' })
 
-  const merges = DEVICE_MERGES.map(([col, fn]) => `${fn}(${col}) AS ${col}`).join(',\n      ')
+  const merges = DEVICE_MERGES.map(([col, fn]) => `${fn}(${col}) AS m_${col}`).join(',\n      ')
   const latest = DEVICE_MERGES.filter(([, fn]) => fn === 'argMaxMerge')
-    .map(([col]) => `argMax(${col}, last_seen) AS ${col}`)
+    .map(([col]) => `argMax(m_${col}, m_last_seen) AS ${col}`)
     .join(',\n      ')
   const first = DEVICE_MERGES.filter(([, fn]) => fn === 'argMinMerge')
-    .map(([col]) => `argMin(${col}, first_seen) AS ${col}`)
+    .map(([col]) => `argMin(m_${col}, m_first_seen) AS ${col}`)
     .join(',\n      ')
 
+  // Every merged value is aliased `m_<column>` rather than back onto the
+  // column's own name. Aliasing `minMerge(first_seen) AS first_seen` makes
+  // ClickHouse resolve the argument to the alias — a DateTime64 — instead of
+  // the underlying AggregateFunction column, and the query fails with
+  // "Illegal type DateTime64(3, 'UTC') of argument for aggregate function
+  // with Merge suffix". The same text works outside a GROUP BY, which is why
+  // schema-clickhouse.test.ts gets away with it and this does not.
   return `dev AS (
     SELECT
       project_id,
       anonymous_id,
       user_id,
-      minMerge(first_seen) AS first_seen,
+      minMerge(first_seen) AS m_first_seen,
       maxMerge(last_seen)  AS timestamp,
-      maxMerge(last_seen)  AS last_seen,
+      maxMerge(last_seen)  AS m_last_seen,
       ${merges}
     FROM device_index
     WHERE project_id = ${projectParam}
@@ -115,8 +122,8 @@ export function baseCte(opts: { database: string; projectId: number; params: Par
   base AS (
     SELECT
       ${resolved} AS ${RESOLVED_PERSON_ALIAS},
-      min(first_seen) AS first_seen,
-      max(last_seen)  AS last_seen,
+      min(m_first_seen) AS first_seen,
+      max(m_last_seen)  AS last_seen,
       ${latest},
       ${first}
     FROM dev

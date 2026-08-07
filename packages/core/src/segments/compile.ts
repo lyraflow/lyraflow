@@ -66,15 +66,15 @@ export function compileSegment(opts: {
   const traits = `traits AS (
     SELECT
       ${resolvedPersonExpr({ database, alias: 'tr' })} AS ${RESOLVED_PERSON_ALIAS},
-      CAST((groupArray(trait_key), groupArray(value_str)), 'Map(String, String)')  AS t_str,
-      CAST((groupArray(trait_key), groupArray(value_num)), 'Map(String, Float64)') AS t_num,
-      CAST((groupArray(trait_key), groupArray(has_num)),   'Map(String, UInt8)')   AS t_has_num
+      CAST((groupArray(trait_key), groupArray(m_value_str)), 'Map(String, String)')  AS t_str,
+      CAST((groupArray(trait_key), groupArray(m_value_num)), 'Map(String, Float64)') AS t_num,
+      CAST((groupArray(trait_key), groupArray(m_has_num)),   'Map(String, UInt8)')   AS t_has_num
     FROM (
       SELECT
         anonymous_id, user_id, project_id, trait_key,
-        argMaxMerge(value_str) AS value_str,
-        argMaxMerge(value_num) AS value_num,
-        argMaxMerge(has_num)   AS has_num,
+        argMaxMerge(value_str) AS m_value_str,
+        argMaxMerge(value_num) AS m_value_num,
+        argMaxMerge(has_num)   AS m_has_num,
         now() AS timestamp
       FROM person_traits
       WHERE project_id = ${params.add(projectId, 'UInt32')}

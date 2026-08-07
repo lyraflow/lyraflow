@@ -1,16 +1,11 @@
 import { RESOLVED_PERSON_ALIAS, resolvedPersonExpr } from '../identity/resolve.js'
 import type { Behavior, WherePredicate, Window } from './ast.js'
-import type { Params } from './params.js'
+import { type Params, chDateTime } from './params.js'
 
 export interface BehaviourPass {
   /** null when the tree has no behavioural nodes — the caller omits the join. */
   cte: string | null
   aliasFor: Map<Behavior, string>
-}
-
-/** ClickHouse DateTime64(3) literal text. */
-function chDateTime(d: Date): string {
-  return d.toISOString().replace('T', ' ').replace('Z', '')
 }
 
 /**
