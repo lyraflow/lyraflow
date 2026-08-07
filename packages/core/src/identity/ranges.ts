@@ -15,10 +15,27 @@ export interface Binding {
 }
 
 /**
- * Pure reference implementation of the tiling `identity_bindings_dict_src`
- * (see `003_identity.sql`) derives with a SQL window function. It exists so
- * the derivation's semantics can be property-tested exhaustively without a
- * database — the same reasoning that made the query compiler testable.
+ * Pure reference implementation of the *continuous-time* tiling
+ * `identity_bindings_dict_src` (see `003_identity.sql`) derives with a SQL
+ * window function. It exists so the derivation's semantics can be
+ * property-tested exhaustively without a database — the same reasoning that
+ * made the query compiler testable.
+ *
+ * IMPORTANT (as of the Task 6 review's round-2 fix): the two no longer match
+ * literally, and this function was deliberately left as-is rather than
+ * "fixed" to match — see that fix report for the full reasoning. This
+ * function's [from, to) is the correct, idealized model; the SQL view has to
+ * express that same idea inside a system this function doesn't have to deal
+ * with at all: ClickHouse's RANGE(MIN valid_from MAX valid_to) is inclusive
+ * at *both* ends, and its DateTime columns only carry one-second resolution.
+ * The view derives `to` as `lead(bound_at) - 1 second`, discretising this
+ * function's exact, continuous boundary down to the smallest unit its own
+ * column type can express, and filters out any tile that inverts as a result
+ * (two binds for one device landing in the same wall-clock second). Neither
+ * adaptation has a counterpart here — `bindings.test.ts`'s
+ * `assertViewMatchesReference` is where the two are reconciled and kept from
+ * drifting apart unnoticed; it applies the identical -1s discretisation
+ * before comparing this function's output against the live view's.
  *
  * The set of bind events is the source of truth; ranges are never stored or
  * patched, only derived fresh from the whole set every time. That makes the
@@ -29,7 +46,9 @@ export interface Binding {
  * identifies (for the same person or a different one) came in between.
  *
  * Ranges are half-open, [from, to), and always tile the timeline without
- * gaps, overlaps, or zero-width slivers. The earliest known event owns
+ * gaps, overlaps, or zero-width slivers — in this function's own continuous
+ * model; see the note above for how the SQL view necessarily departs from
+ * that once discretised to seconds. The earliest known event owns
  * [-Infinity, ...) — retroactive attachment, the whole journey feature:
  * signing up attaches every earlier anonymous event, no matter when the
  * identify that proves it arrives.

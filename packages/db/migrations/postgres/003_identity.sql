@@ -82,22 +82,65 @@ CREATE INDEX IF NOT EXISTS person_aliases_canonical_idx
 -- ClickHouse-representable clamp, unmodified — mirrored in
 -- `deriveTiling`/bindings.test.ts's `assertViewMatchesReference`, which
 -- applies the identical -1s adjustment only when a tile is not the last.
+--
+-- The outer WHERE below exists because that same -1s subtraction can invert
+-- a tile: two binds for one device inside the same wall-clock second, where
+-- the earlier is not the device's first-ever bind, produce
+-- valid_to = lead(bound_at) - 1s < valid_from = bound_at (e.g. binds at
+-- 09:00:00.000 and 09:00:00.500 give the earlier tile [09:00:00, 08:59:59]).
+-- Reachable from the write path: bindings.ts stores bound_at at millisecond
+-- precision, so two identify() calls landing in one ingest batch land here.
+--
+-- Checked empirically against a live ClickHouse (not assumed): loading such
+-- a row does NOT fail the dictionary — status stays LOADED, last_exception
+-- stays empty — but the row itself is never matched by any dictGet lookup
+-- (range_min > range_max can never satisfy range_min <= x <= range_max), so
+-- that person's tile silently vanishes and neighbouring lookups quietly
+-- absorb it. That is a narrower failure than the ±infinity/CANNOT_PARSE_DATETIME
+-- case this view's clamps already guard against above, but it is still
+-- exactly the "nothing visibly broken" failure class those guard against:
+-- the dictionary looks healthy, and a person who held a device for under a
+-- second becomes permanently unresolvable without anyone noticing.
+--
+-- Filtered out rather than clamped (e.g. GREATEST(valid_to, valid_from)):
+-- clamping would produce a *zero-width* tile sitting at the same
+-- ClickHouse-truncated second as its successor's own (equally truncated)
+-- valid_from — reintroducing, for this one pair, the exact same-instant tie
+-- range_lookup_strategy's undocumented 'min' behaviour that the -1s fix
+-- above exists to avoid. Dropping the row instead leaves a brief (well
+-- under 2 second) gap with no matching tile at all, which dictGetOrDefault
+-- answers with its caller-supplied default (the event's own anonymous_id) —
+-- the same safe, designed-for fallback an unbound device already gets, and
+-- never a specific wrong person.
+--
+-- This filter also closes a second, narrower gap without a dedicated guard:
+-- a successor bind at/near the Unix epoch could otherwise send valid_to
+-- below 1970-01-01, outside what ClickHouse's DateTime can represent at
+-- all. valid_from carries an unconditional GREATEST(..., epoch) clamp (see
+-- above), so it can never itself be earlier than epoch — meaning any row
+-- whose valid_to underflows before epoch necessarily has valid_to <
+-- valid_from already, and is caught by this same WHERE. No separate
+-- GREATEST guard is needed; a symmetric one has nothing left to do.
 CREATE OR REPLACE VIEW identity_bindings_dict_src AS
-SELECT
-  project_id,
-  anonymous_id,
-  person_id,
-  CASE WHEN lag(bound_at) OVER w IS NULL
-       THEN timestamptz '1970-01-01 00:00:00+00'
-       ELSE GREATEST(bound_at, timestamptz '1970-01-01 00:00:00+00')
-  END AS valid_from,
-  CASE WHEN lead(bound_at) OVER w IS NULL
-       THEN timestamptz '2106-02-07 06:28:15+00'
-       ELSE LEAST(lead(bound_at) OVER w - INTERVAL '1 second',
-                  timestamptz '2106-02-07 06:28:15+00')
-  END AS valid_to
-FROM identity_bindings
-WINDOW w AS (PARTITION BY project_id, anonymous_id ORDER BY bound_at);
+SELECT project_id, anonymous_id, person_id, valid_from, valid_to
+FROM (
+  SELECT
+    project_id,
+    anonymous_id,
+    person_id,
+    CASE WHEN lag(bound_at) OVER w IS NULL
+         THEN timestamptz '1970-01-01 00:00:00+00'
+         ELSE GREATEST(bound_at, timestamptz '1970-01-01 00:00:00+00')
+    END AS valid_from,
+    CASE WHEN lead(bound_at) OVER w IS NULL
+         THEN timestamptz '2106-02-07 06:28:15+00'
+         ELSE LEAST(lead(bound_at) OVER w - INTERVAL '1 second',
+                    timestamptz '2106-02-07 06:28:15+00')
+    END AS valid_to
+  FROM identity_bindings
+  WINDOW w AS (PARTITION BY project_id, anonymous_id ORDER BY bound_at)
+) tiled
+WHERE valid_to >= valid_from;
 
 CREATE OR REPLACE VIEW person_aliases_dict_src AS
 SELECT project_id, person_id, canonical_id FROM person_aliases;

@@ -449,4 +449,105 @@ describe('ensureIdentityDictionaries (live ClickHouse + Postgres)', () => {
       'person-b',
     )
   })
+
+  /**
+   * Task 6 review round 3: two binds inside the same wall-clock second, where
+   * the earlier one is not the device's first-ever bind, make
+   * identity_bindings_dict_src derive `valid_to = lead(bound_at) - 1s <
+   * valid_from` for the earlier of the pair (see 003_identity.sql's comment
+   * on the view for the full derivation) — reachable from the write path,
+   * since bindings.ts stores bound_at at millisecond precision and a batch
+   * can carry two identify() calls a few hundred milliseconds apart.
+   *
+   * Confirmed by hand against a live ClickHouse before the fix: the
+   * dictionary tolerated the resulting inverted row and stayed LOADED with
+   * an empty last_exception (never a FAILED/CANNOT_PARSE_DATETIME-style
+   * catastrophic failure) — but the row itself silently never matched any
+   * dictGet lookup, so the person who held the device for that sub-second
+   * window became permanently unresolvable without anything visibly
+   * breaking. The fix (an outer WHERE valid_to >= valid_from on the view)
+   * drops that row instead.
+   *
+   * IMPORTANT: I verified by temporarily reverting the view to confirm this
+   * — the status/last_exception and lookup assertions below, on their own,
+   * do NOT distinguish the fix from its absence. The inverted row was
+   * already unreachable by any dictGet lookup before the fix too (an
+   * inverted range_min > range_max can never satisfy range_min <= x <=
+   * range_max), so a plain equality-tolerant ClickHouse and the same lookup
+   * results were both already true pre-fix; reverting only the WHERE filter
+   * left every assertion below green. What actually distinguishes the two
+   * is whether the phantom row exists in identity_bindings_dict_src at all
+   * — the view assertion further down is the one this regression test
+   * depends on; the dictionary-health and lookup checks stay as a second,
+   * independent safety net against a *different* bad fix (e.g. clamping
+   * valid_to up to valid_from instead of filtering, which the migration's
+   * comment explains would reintroduce an ambiguous same-instant tie).
+   */
+  it('stays LOADED with an empty last_exception when two binds land in the same second, and resolves to the later person', async () => {
+    await ensureIdentityDictionaries(ch, pgSource)
+
+    // An earlier, unrelated bind first, so the first of the same-second pair
+    // is NOT the device's first-ever tile — only then does the -1s
+    // subtraction invert it (see 003_identity.sql). Two binds alone, with
+    // the first landing at the device's very first tile, would not
+    // reproduce this: that tile's valid_from is the epoch clamp, not its own
+    // bound_at, and the epoch is nowhere near the inverted range.
+    await pg.query(
+      `INSERT INTO identity_bindings (project_id, anonymous_id, person_id, bound_at) VALUES
+         ($1, 'same-second-device', 'earlier-owner', '2026-08-06T08:00:00Z'),
+         ($1, 'same-second-device', 'first-of-pair', '2026-08-06T09:00:00.000Z'),
+         ($1, 'same-second-device', 'second-of-pair', '2026-08-06T09:00:00.500Z')`,
+      [projectId],
+    )
+    // This is the assertion that actually pins the fix (see the comment
+    // above): the earlier of the same-second pair is dropped from the view
+    // entirely, because its own derived valid_to landed before its own
+    // valid_from. Reverting the WHERE filter puts 'first-of-pair' back here
+    // with valid_to < valid_from — this is the one check in this test that
+    // catches that regression; the dictionary-health and lookup checks
+    // below do not.
+    const viewRows = await pg.query<{ person_id: string; valid_from: Date; valid_to: Date }>(
+      `SELECT person_id, valid_from, valid_to FROM identity_bindings_dict_src
+       WHERE project_id = $1 AND anonymous_id = 'same-second-device' ORDER BY valid_from`,
+      [projectId],
+    )
+    expect(viewRows.rows.map((r) => r.person_id)).toEqual(['earlier-owner', 'second-of-pair'])
+    for (const r of viewRows.rows) {
+      expect(r.valid_to.getTime()).toBeGreaterThanOrEqual(r.valid_from.getTime())
+    }
+
+    await ch.command({ query: `SYSTEM RELOAD DICTIONARY ${CH_DB}.identity_bindings` })
+
+    const rs = await ch.query({
+      query: `SELECT status, last_exception FROM system.dictionaries
+              WHERE database = '${CH_DB}' AND name = 'identity_bindings'`,
+      format: 'JSONEachRow',
+    })
+    const [row] = await rs.json<{ status: string; last_exception: string }>()
+    expect(row?.status).toBe('LOADED')
+    expect(row?.last_exception).toBe('')
+
+    const lookup = async (at: string) => {
+      const lookupRs = await ch.query({
+        query: `SELECT dictGetOrDefault('${CH_DB}.identity_bindings', 'person_id',
+                  (toUInt32(${projectId}), 'same-second-device'), toDateTime('${at}'),
+                  '__unexpected_default__') AS person`,
+        format: 'JSONEachRow',
+      })
+      const [lookupRow] = await lookupRs.json<{ person: string }>()
+      return lookupRow?.person
+    }
+
+    // Any instant landing on the contested second resolves to the later of
+    // the two people who bound within it — never the earlier one (which
+    // would mean the -1s fix regressed to the pre-fix overlap bleed) and
+    // never the default (which would mean the WHERE filter degraded to
+    // dropping BOTH tiles, or something adjacent to them, rather than just
+    // the one genuinely inverted row).
+    expect(await lookup('2026-08-06 09:00:00')).toBe('second-of-pair')
+    // Sanity on both neighbours: the tile before the pair, and the tile
+    // starting cleanly after it, are both untouched by the filter.
+    expect(await lookup('2026-08-06 08:30:00')).toBe('earlier-owner')
+    expect(await lookup('2026-08-06 09:00:01')).toBe('second-of-pair')
+  })
 })
