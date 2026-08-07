@@ -172,6 +172,16 @@ because that receipt time is part of the table's sort key, the two rows never
 collapse — deduplicated only by querying `event_id` yourself, correct but not
 free. Long-lived retry queues should send `timestamp`.
 
+**That collapse has a 24-hour shelf life, and it expires silently.** The clamp
+above rewrites any `timestamp` more than 24 hours from server time to the
+boundary — a value computed from *now*, so it is different on every attempt.
+A queue that drains within 24 hours of the original event collapses as
+described. One that drains later does not: each retry is clamped to a
+different instant, lands as another permanent row, and is also misdated to the
+clamp boundary rather than when it happened. Nothing reports this. If your
+retry queue can outlive a day, aggregate by `event_id` and treat the engine
+collapse as an optimisation you do not have.
+
 ## Identity resolution
 
 v0.1 stitches a device's anonymous activity to the person it belongs to, and
@@ -239,6 +249,14 @@ repeats of an unchanged binding — an identical
 row and adds nothing. A `timestamp` that advances on every call does not
 help; it is the repetition, not the presence, of the value that collapses
 the write.
+
+**Keep that stable value inside the 24-hour clamp window.** Bindings are
+written at the event's *clamped* timestamp, so a fixed value — a session start
+time, say — stops collapsing once it is more than 24 hours old: the clamp
+rewrites it to a boundary computed from the current time, which moves on every
+call, and each repeat writes a fresh row again. A session pinned at login and
+still open two days later is the ordinary way to hit this. Re-pin the value at
+least daily, or use the once-per-session call, which has no such expiry.
 
 ### Merging two people
 
