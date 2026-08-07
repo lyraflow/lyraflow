@@ -1,5 +1,6 @@
 import type { CompiledQuery } from '@lyraflow/core'
 import type { ClickHouseClient } from '@lyraflow/db'
+import type { MemberRow } from './cache.js'
 
 /**
  * Ceilings, not suggestions. A segment query is reachable by an authenticated
@@ -17,11 +18,12 @@ export class SegmentTimeoutError extends Error {
   }
 }
 
-export async function runSegment(opts: {
-  client: ClickHouseClient
-  compiled: CompiledQuery
-}): Promise<number> {
-  const { client, compiled } = opts
+/**
+ * The one place a compiled segment reaches ClickHouse. Both output modes go
+ * through it so the ceilings and the error mapping cannot diverge — a second
+ * copy is how one mode ends up without a memory limit.
+ */
+async function execute<T>(client: ClickHouseClient, compiled: CompiledQuery): Promise<T[]> {
   try {
     const r = await client.query({
       query: compiled.sql,
@@ -36,8 +38,7 @@ export async function runSegment(opts: {
         timeout_overflow_mode: 'throw',
       },
     })
-    const rows = await r.json<{ person_count: string }>()
-    return Number(rows[0]?.person_count ?? 0)
+    return await r.json<T>()
   } catch (err) {
     // ClickHouse reports both ceilings as codes 159 (TIMEOUT_EXCEEDED) and
     // 241 (MEMORY_LIMIT_EXCEEDED). Both mean the same thing to a caller:
@@ -46,4 +47,19 @@ export async function runSegment(opts: {
     if (/Code: (159|241)/.test(message)) throw new SegmentTimeoutError()
     throw err
   }
+}
+
+export async function runSegment(opts: {
+  client: ClickHouseClient
+  compiled: CompiledQuery
+}): Promise<number> {
+  const rows = await execute<{ person_count: string }>(opts.client, opts.compiled)
+  return Number(rows[0]?.person_count ?? 0)
+}
+
+export async function runSegmentMembers(opts: {
+  client: ClickHouseClient
+  compiled: CompiledQuery
+}): Promise<MemberRow[]> {
+  return execute<MemberRow>(opts.client, opts.compiled)
 }

@@ -4,11 +4,11 @@
 // one that would notice the compiler emitting valid SQL that means the wrong
 // thing.
 import { join } from 'node:path'
-import { type FilterNode, compileSegment } from '@lyraflow/core'
+import { type Cursor, type FilterNode, compileSegment } from '@lyraflow/core'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { type PgDictionarySource, ensureIdentityDictionaries } from '../identity/dictionaries.js'
-import { runSegment } from './execute.js'
+import { runSegment, runSegmentMembers } from './execute.js'
 
 const CH_DB = 'lyraflow_test'
 const PROJECT = 7700
@@ -208,5 +208,93 @@ describe('runSegment (live ClickHouse)', () => {
     )
     await ch.command({ query: `SYSTEM RELOAD DICTIONARY ${CH_DB}.suppressed_persons` })
     await expect(count(trialTrait)).resolves.toBe(before - 1)
+
+    // Un-suppress: this file has no per-test isolation, only a per-run one in
+    // beforeAll, so a row left behind here would silently bleed into every
+    // test declared below — including the members-mode tests that assume
+    // alice is visible. Restoring the pre-test state here, not just at the
+    // end of the run, is what keeps declaration-order tests independent.
+    await pg.query(`DELETE FROM suppressed_persons WHERE project_id = $1 AND person_id = 'alice'`, [
+      PROJECT,
+    ])
+    await ch.command({ query: `SYSTEM RELOAD DICTIONARY ${CH_DB}.suppressed_persons` })
+  })
+
+  const listMembers = (filter: FilterNode, cursor?: Cursor) =>
+    runSegmentMembers({
+      client: ch,
+      compiled: compileSegment({
+        query: { ast_version: 1, filter } as never,
+        projectId: PROJECT,
+        database: CH_DB,
+        now: NOW,
+        select: 'members',
+        cursor,
+      }),
+    })
+
+  it('returns the people a segment matches, not merely valid SQL', async () => {
+    const rows = await listMembers(trialTrait)
+    expect(rows.map((r) => r.person_id).sort()).toEqual(['alice', 'bob'])
+  })
+
+  it('orders by last_seen descending', async () => {
+    const rows = await listMembers({
+      kind: 'lifecycle',
+      field: 'first_seen',
+      operator: '>',
+      value: '2020-01-01T00:00:00.000Z',
+    })
+    const seen = rows.map((r) => r.last_seen)
+    expect([...seen].sort().reverse()).toEqual(seen)
+  })
+
+  it('carries the context columns keyed by field name', async () => {
+    const [row] = await listMembers(trialTrait)
+    expect(row).toHaveProperty('country')
+    expect(row).toHaveProperty('utm_source')
+    // Traits are deliberately not returned.
+    expect(row).not.toHaveProperty('plan')
+  })
+
+  it('continues after a cursor without repeating the boundary row', async () => {
+    const all = await listMembers({
+      kind: 'lifecycle',
+      field: 'first_seen',
+      operator: '>',
+      value: '2020-01-01T00:00:00.000Z',
+    })
+    const first = all[0]
+    if (!first) throw new Error('fixture produced no rows')
+    const rest = await listMembers(
+      {
+        kind: 'lifecycle',
+        field: 'first_seen',
+        operator: '>',
+        value: '2020-01-01T00:00:00.000Z',
+      },
+      {
+        lastSeen: first.last_seen,
+        personId: first.person_id,
+        // Required by the Cursor type but never read by compileSegment —
+        // asOf is the HTTP layer's contract for pinning one instant across
+        // a walk, which this direct-compiler test never round-trips through.
+        asOf: NOW.toISOString(),
+      },
+    )
+    expect(rest.map((r) => r.person_id)).not.toContain(first.person_id)
+    expect(rest.length).toBe(all.length - 1)
+  })
+
+  it('excludes a suppressed person from a member list too', async () => {
+    // The guardrail must hold in the second output mode, not only in count.
+    await pg.query(
+      `INSERT INTO suppressed_persons (project_id, person_id) VALUES ($1, 'bob')
+       ON CONFLICT DO NOTHING`,
+      [PROJECT],
+    )
+    await ch.command({ query: `SYSTEM RELOAD DICTIONARY ${CH_DB}.suppressed_persons` })
+    const rows = await listMembers(trialTrait)
+    expect(rows.map((r) => r.person_id)).not.toContain('bob')
   })
 })
