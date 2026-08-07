@@ -11,8 +11,17 @@ import type { Pool } from '@lyraflow/db'
 export const MAX_CACHED_BINDINGS = 10_000
 
 /**
- * The one and only place this conflict resolution is expressed, and the
- * single source of truth every write goes through.
+ * The single source of truth every write in this package goes through.
+ *
+ * Not the only place the clause's text appears, and it cannot be: it is also
+ * quoted in 003_identity.sql's comment on the UNIQUE constraint it depends
+ * on, and restated as executable SQL in packages/db's schema-identity.test.ts.
+ * packages/db cannot import packages/server — the TypeScript project
+ * reference runs server→db, and reversing it would be a cycle `tsc -b`
+ * rejects — so that duplication is structural rather than an oversight. Treat
+ * the DB-side test as an independent restatement of the same resolution: it
+ * pins the clause against the schema without this module, and drifting apart
+ * from it is what it exists to catch.
  *
  * `LEAST` is `min`: commutative and idempotent, so two persons colliding on
  * the same instant converge to the same stored row whichever order they

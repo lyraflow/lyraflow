@@ -19,7 +19,9 @@ export interface Binding {
  * `identity_bindings_dict_src` (see `003_identity.sql`) derives with a SQL
  * window function. It exists so the derivation's semantics can be
  * property-tested exhaustively without a database — the same reasoning that
- * made the query compiler testable.
+ * keeps every other decision in this package (payload validation, timestamp
+ * clamping, bot detection, property coercion) a pure function with a
+ * database-free test file next to it.
  *
  * IMPORTANT (as of the Task 6 review's round-2 fix): the two no longer match
  * literally, and this function was deliberately left as-is rather than

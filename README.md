@@ -206,6 +206,13 @@ before it keep the first person, events from it onward follow the second.
 Resolution always follows the event's own (clamped) timestamp, never the time
 the `identify` request happened to arrive at the server.
 
+That time-split describes how an **event** is resolved to a person: it is the
+rule applied row by row to the `events` table, and it is what a query over
+those events sees. It is **not** how `GET /v1/persons/:id` counts a profile —
+that read takes a simpler union over every id, with no timestamp condition,
+and on a shared or rebound device the two deliberately disagree. *Reading a
+person* below states exactly how.
+
 ### Merging two people
 
 `POST /v1/alias` merges two known people — an id migration, a duplicate
@@ -226,7 +233,11 @@ ids already resolve to the same person. **Aliasing is not reversible in
 v0.1** — there is no `unalias`, and merging `A` into `B` and then `B` into
 `A` lands on `noop` rather than undoing the first merge. `400` for a missing
 or empty `from_user_id`/`to_user_id`; `401` for a missing or invalid server
-key.
+key. `503` with `retry-after: 5` — the merge runs in a `SERIALIZABLE`
+transaction, so two merges touching the same alias group at the same moment
+can make Postgres abort one of them (`40001`); the server answers `503`
+rather than pretending the merge happened. Retry the identical request — it
+is idempotent, and a merge that already succeeded answers `noop`.
 
 ### Reading a person
 
@@ -256,6 +267,22 @@ to Postgres rather than through ClickHouse's identity dictionaries, so it
 sees a binding or a merge the instant it is written, with no refresh delay.
 `404` for an id nothing has ever recorded an event under; `401` for a missing
 or invalid server key.
+
+**This read is a union over ids, not the time-split resolution.**
+`first_seen`, `last_seen` and `events` are computed over *every* id that has
+ever been associated with the person — the canonical id, every id merged into
+it, and every device ever bound to any of them — with no timestamp condition
+at all. Event resolution (see *Binding a device to a person* above) is
+time-ranged; this read is not. On a device that has been shared or rebound
+between two people the two therefore disagree, and disagree in opposite
+directions: each person's profile counts that device's *entire* history,
+including the other person's events on it, so both windows are too wide and
+both counts are too high. The same applies to a single event that carries a
+`user_id` of its own while sitting on a device bound to someone else — event
+resolution follows the `user_id`, this read counts it for the device's owner
+as well. Per-device validity windows are not pushed into this query yet;
+until they are, treat these three fields as exact for a person whose devices
+were never shared, and as an upper bound where they were.
 
 ## Upgrading
 

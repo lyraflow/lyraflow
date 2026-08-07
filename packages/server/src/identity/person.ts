@@ -45,6 +45,34 @@ interface PersonEventsRow {
  * rather than a second auth implementation — this reads a person's data, so
  * it is gated the same way /v1/alias is gated against mutating one: the
  * public, browser-shipped write key must not reach it.
+ *
+ * KNOWN DIVERGENCE — read this before changing anything below. This route
+ * returns the UNION over every id ever associated with the person. It is NOT
+ * the time-split resolution `resolvedPersonExpr` (resolve.ts) applies to
+ * events, and the two can return different people for the same event row:
+ *
+ *  - `devicesForAny` returns every device ever bound to the group, with no
+ *    notion of when each binding was in force, and the ClickHouse query
+ *    below carries no timestamp predicate at all. `resolvedPersonExpr`
+ *    splits the same device by `toDateTime(timestamp)` against the range
+ *    dictionary. So a device D bound to `alice` at t1 and rebound to `bob`
+ *    at t2 puts D's ENTIRE event history into both profiles: alice's counts
+ *    everything after t2, bob's counts everything before it. Both
+ *    `first_seen`/`last_seen` windows are too wide and both `events` counts
+ *    are too high, in opposite directions.
+ *  - No rebind is needed for a narrower version of the same thing: an event
+ *    carrying `user_id='bob'` with `anonymous_id='D'`, where D is bound to
+ *    `alice`, resolves to `bob` in the dictionary (stage 1's `user_id != ''`
+ *    short-circuit) but is counted for `alice` here, because D is in her id
+ *    set.
+ *
+ * The fix is to derive per-device validity windows into the predicate below,
+ * which is the query work Plan 3 owns; it is deliberately NOT attempted here.
+ * Until then the divergence is documented (README's *Reading a person*) and
+ * pinned by an explicit test — person.test.ts's "counts a rebound device's
+ * whole history for BOTH people", which asserts today's behaviour and names
+ * what the time-split path would answer instead. If you fix this, that test
+ * is what will fail, and it is meant to.
  */
 export function registerPersonRoutes(app: FastifyInstance, deps: PersonDeps): void {
   const { projects, readiness, ch, bindings, aliases } = deps

@@ -178,11 +178,27 @@ function sanitizeDictionaryError(dictionaryName: string, password: string, err: 
 /**
  * Creates the two identity dictionaries ClickHouse resolves against.
  *
- * They read the *_dict_src views rather than the tables directly: Postgres stores
- * true ±infinity bounds so the exclusion constraint stays natural, but ClickHouse
- * cannot parse those into DateTime — the dictionary fails to load entirely and
- * every lookup silently falls back to the anonymous id. The views clamp to the
- * representable DateTime range.
+ * They read the *_dict_src views rather than the tables directly, and this is
+ * the one place a reader learns why those views exist at all.
+ *
+ * There is no exclusion constraint and no stored range. `identity_bindings`
+ * stores bind *events* — one instant per row — and the validity window a
+ * device's person holds is derived fresh, every read, by
+ * `identity_bindings_dict_src`'s window function (see 003_identity.sql for
+ * that derivation and why events rather than ranges). Deriving it that way
+ * naturally produces unbounded ends: the earliest bind owns everything
+ * before it (retroactive attachment, the whole point), the latest owns
+ * everything after.
+ *
+ * Those unbounded ends are exactly what ClickHouse cannot take. A Postgres
+ * ±infinity timestamptz does not parse into DateTime — the dictionary fails
+ * to load outright (Code: 41, CANNOT_PARSE_DATETIME) and every lookup
+ * silently falls back to the event's own anonymous id, so identity
+ * resolution degrades to "nobody was ever identified" with nothing visibly
+ * broken. So the views never emit ±infinity at all: they write the two ends
+ * directly as the widest instants ClickHouse's DateTime can represent
+ * (1970-01-01T00:00:00Z and 2106-02-07T06:28:15Z), and drop any tile that
+ * the one-second discretisation inverts.
  *
  * Not a migration: the DDL below embeds the Postgres password, and migrations
  * are committed `.sql` files in a public repository. Running this at boot from
