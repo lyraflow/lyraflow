@@ -456,6 +456,37 @@ A tree that is *valid* but too expensive to finish returns `422` — it exceeded
 the query's time or memory ceiling. Narrow a window, or drop an `ever`, and
 try again. `401` is a missing or invalid server key.
 
+### Autocomplete: event and property names
+
+`GET /v1/schema/events` and `GET /v1/schema/properties` list the event names
+and property keys a project has actually recorded — the raw source a segment
+builder's autocomplete can be built on. Both are server-key only, for the same
+reason as `/v1/segments/preview`: a project's event taxonomy describes its
+product, and the browser-shipped write key must not be able to read it.
+
+```sh
+curl -s http://localhost:3000/v1/schema/events?q=import \
+  -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY"
+# {"events":[{"event_name":"import_started"}]}
+
+curl -s http://localhost:3000/v1/schema/properties?event=import_started \
+  -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY"
+# {"properties":[{"property_key":"rows","value_kind":"number"},{"property_key":"source","value_kind":"string"}]}
+```
+
+| Parameter | Applies to | Meaning |
+| --- | --- | --- |
+| `q` | both | prefix filter, matched against the event name or property key |
+| `event` | properties only | restrict to one event's properties |
+| `limit` | both | max rows to return, default 50, capped at 100 |
+
+`limit` above 100 is rejected with `400`, not silently truncated. Results are
+**name-ordered and unranked** — no frequency or recency signal, because
+`event_schema` carries no counts. Deliberately thin: prefix vs. fuzzy
+matching, and ranking by frequency, recency, or name, are questions for
+whichever builder UI ends up consuming this: this ships the raw read any of
+those can be built on top of, rather than a guess at one of them.
+
 ### What this does not do yet
 
 Only counting is implemented. There is **no saved-segment API** — no way to

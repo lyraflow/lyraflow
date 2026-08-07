@@ -13,6 +13,7 @@ import { CardinalityTracker } from './ingest/limits.js'
 import { registerIngestRoutes } from './ingest/routes.js'
 import type { EventRow } from './ingest/row.js'
 import { registerMetrics } from './metrics.js'
+import { registerSchemaRoutes } from './schema/routes.js'
 import { registerSegmentRoutes } from './segments/routes.js'
 
 export interface AppDeps {
@@ -112,6 +113,7 @@ export function buildApp(input: {
   })
   registerPersonRoutes(app, { projects, readiness, ch, bindings, aliases })
   registerSegmentRoutes(app, { projects, readiness, ch, pg, database: config.ch.database })
+  registerSchemaRoutes(app, { projects, readiness, ch })
 
   return app
 }
