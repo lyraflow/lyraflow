@@ -14,7 +14,7 @@ import { hashServerKey } from '../auth/project-cache.js'
 import { type Config, loadConfig } from '../config.js'
 import { Readiness } from '../health.js'
 import { type PgDictionarySource, ensureIdentityDictionaries } from './dictionaries.js'
-import { type PersonDeps, registerPersonRoutes } from './person.js'
+import { MAX_PERSON_RANGE_CLAUSES, type PersonDeps, registerPersonRoutes } from './person.js'
 
 const CH_DB = 'lyraflow_test'
 const CH = {
@@ -502,6 +502,63 @@ describe('GET /v1/persons/:id', () => {
     expect(resB.json().events).toBe(1)
   })
 
+  // The cap exists because a person's windows are devices multiplied by
+  // rebinds, which has no fixed bound — reachable by anyone holding the
+  // server key (see README's *Reading a person*). Would catch:
+  // MAX_PERSON_RANGE_CLAUSES or the 400 it guards being deleted or bypassed
+  // entirely, which — per the brief this task carries — is how the union
+  // behaviour this whole convergence removes would silently come back for a
+  // large enough person.
+  //
+  // Shape chosen deliberately: MAX_PERSON_RANGE_CLAUSES + 5 DISTINCT
+  // devices, each bound exactly ONCE, all to 'fragmented-person', rather
+  // than one device rebound many times. A device bound only once has
+  // exactly one tile ([-inf, +inf), owned by that bind's person) — so N
+  // such devices is exactly N windows, with no dependency on how many
+  // tiles deriveTiling collapses a single device's rebind sequence into or
+  // how many of those tiles land on this particular person. That keeps the
+  // fixture's window count exact and independent of tiling internals.
+  //
+  // A single INSERT ... SELECT ... FROM unnest(), not one row per
+  // `pg.query` call — this only needs to prove the cap trips, not exercise
+  // the write path bind() itself (already covered elsewhere), and a loop of
+  // 200+ round trips would make this test needlessly slow.
+  //
+  // This fixture is far larger than the rest of the file's, so it is
+  // cleaned up immediately rather than left for afterAll — nothing else in
+  // this file touches 'fragmented-person' or its devices, but there is no
+  // reason to leave ~200 rows sitting in Postgres for the remainder of the
+  // suite's run.
+  it('refuses a person whose history is too fragmented to bound', async () => {
+    const deviceIds = Array.from(
+      { length: MAX_PERSON_RANGE_CLAUSES + 5 },
+      (_, i) => `frag-device-${i}`,
+    )
+    await pg.query(
+      `INSERT INTO identity_bindings (project_id, anonymous_id, person_id, bound_at)
+       SELECT $1, d, 'fragmented-person', $3::timestamptz
+       FROM unnest($2::text[]) AS d`,
+      [projectA, deviceIds, isoAt(2000)],
+    )
+
+    try {
+      const res = await getPerson('fragmented-person', { 'x-lyraflow-server-key': SERVER_KEY_A })
+      expect(res.statusCode).toBe(400)
+      // Exact body, not just the status: pins the error code and the
+      // detail's actual window count (one per device, per the shape above),
+      // not merely "some 400 happened".
+      expect(res.json()).toEqual({
+        error: 'person_history_too_fragmented',
+        detail: `this person spans ${deviceIds.length} device windows, above the limit of ${MAX_PERSON_RANGE_CLAUSES}`,
+      })
+    } finally {
+      await pg.query(
+        `DELETE FROM identity_bindings WHERE project_id = $1 AND person_id = 'fragmented-person'`,
+        [projectA],
+      )
+    }
+  })
+
   // Would catch: sending `ids` straight from `[...group, ...devices]` without
   // deduping — identify({anonymous_id:'dup-id', user_id:'dup-id'}) makes
   // 'dup-id' both the canonical (via personId) and its own bound device, so
@@ -591,8 +648,10 @@ describe('GET /v1/persons/:id', () => {
     expect(body.person_id).toBe('ambiguous-second')
     // 'ambiguous-first' is deliberately absent: it is a different person, not
     // an alias of the second, so it is not part of this person's id set. The
-    // device is shared, so both profiles still count both events — the
-    // divergence pinned above.
+    // device is shared, so `ids` still names both — the assertion this test
+    // is actually about is person_id/ids above, not events, which this route
+    // now time-splits at the rebind (see the rebind-split test) rather than
+    // double-counting for both profiles.
     expect(body.ids.sort()).toEqual(['ambiguous-device', 'ambiguous-second'])
   })
 
