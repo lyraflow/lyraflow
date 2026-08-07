@@ -37,3 +37,11 @@ coverage/
 .remember/
 .claude/
 .superpowers/
+
+# Local Compose overrides, for the same reason as the block above. Compose
+# merges docker-compose.override.yml automatically, so it is where a machine's
+# own resource limits, ports, and mounts end up — details about someone's
+# hardware or network that do not belong in a public repository. Ignored here
+# rather than in one clone's .git/info/exclude, because a local exclude
+# protects exactly the machine it was typed on and no other.
+docker-compose.override.yml

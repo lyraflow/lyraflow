@@ -84,10 +84,25 @@ correctly afterwards.
 ```sh
 pnpm install
 docker compose -f docker-compose.test.yml up -d --wait   # Postgres + ClickHouse
+pnpm build        # required before the first `pnpm test` — see below
 pnpm test         # unit and integration tests
 pnpm lint         # biome check
 pnpm typecheck    # tsc -b
 ```
+
+**Build before the first test run, and after adding a migration.** Several tests import
+from `@lyraflow/core` by package name, which resolves to its *built* output — and `dist/`
+is not committed. On a fresh clone `pnpm test` therefore fails to resolve the import at
+all.
+
+The subtler case is a stale build. `schema-version.test.ts` compares the built
+`SCHEMA_VERSION` against the migration files on disk; adding a migration changes the files
+immediately, but the constant only changes when something emits. The failure reads
+"expected 5 to be 6", which looks like a broken test rather than a build that has not been
+re-run.
+
+`pnpm typecheck` (`tsc -b`) also emits and satisfies both, which is why the order in CI is
+lint, typecheck, then test.
 
 Most tests talk to those real containers rather than mocking the databases. The durability
 test is deliberately excluded from `pnpm test` — it builds an image and starts the full
@@ -96,6 +111,10 @@ stack, and takes minutes:
 ```sh
 pnpm build && pnpm vitest run --config vitest.durability.config.ts
 ```
+
+It starts its own stack from `docker-compose.ci.yml`, which binds the same host ports as
+the dev and test stacks (3000 and 8123). Stop those first, or it fails with "port is
+already allocated" — an environment clash that reads like a broken test.
 
 ## Non-negotiables in this codebase
 
