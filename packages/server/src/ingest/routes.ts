@@ -99,41 +99,54 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
   const onDeadLetterError = (err: unknown, rows: DeadLetterRow[]) =>
     app.log.error({ err, rows: rows.length }, 'dead-letter write failed')
 
-  async function authenticate(req: FastifyRequest, reply: FastifyReply) {
-    if (readiness.draining) {
-      reply.code(503).header('retry-after', '5').send({ error: 'draining' })
-      return null
+  /**
+   * Builds an authenticator for one key type. `authenticate` (write key) and
+   * `authenticateServer` (server key) previously duplicated this whole body,
+   * differing only in header name, lookup, and the two error codes — a shape
+   * that makes it structurally possible for the two to drift on the drain
+   * check (the one line rule 2 actually depends on staying identical between
+   * them). Parameterising it here makes that drift impossible instead of
+   * merely unlikely.
+   */
+  function makeAuthenticator(
+    headerName: string,
+    lookup: (key: string) => ReturnType<ProjectCache['byWriteKey']>,
+    missingCode: string,
+    invalidCode: string,
+  ) {
+    return async (req: FastifyRequest, reply: FastifyReply) => {
+      if (readiness.draining) {
+        reply.code(503).header('retry-after', '5').send({ error: 'draining' })
+        return null
+      }
+      const key = req.headers[headerName]
+      if (typeof key !== 'string' || key.length === 0) {
+        reply.code(401).send({ error: missingCode })
+        return null
+      }
+      const project = await lookup(key)
+      if (!project) {
+        reply.code(401).send({ error: invalidCode })
+        return null
+      }
+      return project
     }
-    const key = req.headers[WRITE_KEY_HEADER]
-    if (typeof key !== 'string' || key.length === 0) {
-      reply.code(401).send({ error: 'missing_write_key' })
-      return null
-    }
-    const project = await projects.byWriteKey(key)
-    if (!project) {
-      reply.code(401).send({ error: 'invalid_write_key' })
-      return null
-    }
-    return project
   }
 
-  async function authenticateServer(req: FastifyRequest, reply: FastifyReply) {
-    if (readiness.draining) {
-      reply.code(503).header('retry-after', '5').send({ error: 'draining' })
-      return null
-    }
-    const key = req.headers[SERVER_KEY_HEADER]
-    if (typeof key !== 'string' || key.length === 0) {
-      reply.code(401).send({ error: 'missing_server_key' })
-      return null
-    }
-    const project = await projects.byServerKey(key)
-    if (!project) {
-      reply.code(401).send({ error: 'invalid_server_key' })
-      return null
-    }
-    return project
-  }
+  const authenticate = makeAuthenticator(
+    WRITE_KEY_HEADER,
+    (key) => projects.byWriteKey(key),
+    'missing_write_key',
+    'invalid_write_key',
+  )
+  // Gates /v1/alias on the secret server key rather than the public write
+  // key — see SERVER_KEY_HEADER's docstring above for why.
+  const authenticateServer = makeAuthenticator(
+    SERVER_KEY_HEADER,
+    (key) => projects.byServerKey(key),
+    'missing_server_key',
+    'invalid_server_key',
+  )
 
   interface AcceptResult {
     outcome: 'accepted' | 'rejected' | 'overloaded'

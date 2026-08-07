@@ -89,6 +89,15 @@ function identify(body: Record<string, unknown>) {
   })
 }
 
+function batch(items: Record<string, unknown>[]) {
+  return app.inject({
+    method: 'POST',
+    url: '/v1/batch',
+    headers: { 'x-lyraflow-write-key': WRITE_KEY, 'user-agent': UA },
+    payload: { batch: items },
+  })
+}
+
 function aliasReq(body: Record<string, unknown>, headers: Record<string, string>) {
   return app.inject({
     method: 'POST',
@@ -160,14 +169,57 @@ describe('POST /v1/identify writes a binding', () => {
     expect(r.rows).toHaveLength(1)
     expect(r.rows[0]?.bound_at.getTime()).toBe(eventTime.getTime())
   })
+
+  // accept() is shared by /v1/identify and each item of /v1/batch, and the
+  // binding write lives inside accept() specifically so both paths get it.
+  // Would catch: the binding logic being moved into single()'s handler
+  // instead (or otherwise made reachable only from the standalone
+  // /v1/identify route), which would leave a batch-borne identify
+  // unbound while every other test in this file — all of which go through
+  // /v1/identify directly — stayed green.
+  it('writes a binding for an identify event carried inside /v1/batch', async () => {
+    const res = await batch([
+      {
+        type: 'identify',
+        message_id: randomUUID(),
+        anonymous_id: 'a-bind-batch',
+        user_id: 'u-bind-batch',
+        traits: {},
+      },
+    ])
+    expect(res.statusCode).toBe(202)
+    expect(res.json()).toEqual({ accepted: 1, rejected: 0, throttled: 0 })
+
+    const r = await pg.query<{ person_id: string }>(
+      'SELECT person_id FROM identity_bindings WHERE project_id = $1 AND anonymous_id = $2',
+      [projectId, 'a-bind-batch'],
+    )
+    expect(r.rows).toHaveLength(1)
+    expect(r.rows[0]?.person_id).toBe('u-bind-batch')
+  })
 })
 
 describe('POST /v1/alias', () => {
-  it('rejects a write key with 401 — aliasing requires the secret server key', async () => {
+  // THE test for rule 2: the public write key must not be accepted as a
+  // server key, even though it authenticates fine against /v1/track etc.
+  // Presented under x-lyraflow-server-key so this actually exercises
+  // authenticateServer's hashed byServerKey lookup (routes.ts) rather than
+  // its "header absent" branch — a write key's hash will never match a
+  // project's server_key_hash. Would catch: swapping projects.byServerKey
+  // for projects.byWriteKey (or any lookup that accepts a write key) in the
+  // /v1/alias handler. Verified below by making exactly that mutation.
+  it('rejects the write key presented as a server key with 401 — aliasing requires the secret server key, not the public write key', async () => {
     const res = await aliasReq(
       { from_user_id: 'alias-wk-a', to_user_id: 'alias-wk-b' },
-      { 'x-lyraflow-write-key': WRITE_KEY },
+      { 'x-lyraflow-server-key': WRITE_KEY },
     )
+    expect(res.statusCode).toBe(401)
+  })
+
+  // Would catch: the "no key at all" branch answering something other than
+  // 401, e.g. falling through to an unauthenticated call to aliases.alias().
+  it('rejects a request with no server key header at all', async () => {
+    const res = await aliasReq({ from_user_id: 'alias-nk-a', to_user_id: 'alias-nk-b' }, {})
     expect(res.statusCode).toBe(401)
   })
 
@@ -204,16 +256,35 @@ describe('POST /v1/alias', () => {
     expect(res.json()).toEqual({ status: 'noop' })
   })
 
-  // Would catch: indexing into req.body without a fallback (throws on a
-  // bodyless request, falling through to the generic /v1/* 503 handler
-  // instead of the 400 a malformed request here deserves), or the
-  // validation guard being dropped entirely.
-  it('rejects a malformed body with 400, given a valid server key', async () => {
+  // Would catch: the type/length validation guard (typeof/length checks on
+  // from_user_id/to_user_id) being dropped or weakened — req.body is a
+  // defined object here, so this does NOT exercise the `req.body ?? {}`
+  // fallback below; that is a separate failure mode covered next.
+  it('rejects a body missing to_user_id with 400, given a valid server key', async () => {
     const res = await aliasReq(
       { from_user_id: 'alias-bad' },
       { 'x-lyraflow-server-key': SERVER_KEY },
     )
     expect(res.statusCode).toBe(400)
+  })
+
+  // THE test for the `req.body ?? {}` fallback in routes.ts. A request with
+  // no payload and no content-type leaves req.body undefined — indexing
+  // into it directly throws, which the /v1/* error handler in app.ts (any
+  // uncaught throw under /v1/*) converts to a 503, not the 400 a genuinely
+  // malformed request here deserves. Would catch: removing `?? {}` (or
+  // narrowing it to only some falsy cases). Confirmed empirically: with the
+  // fallback removed, this specific case flips to 503; the previous test's
+  // payload ({ from_user_id: 'alias-bad' }) is unaffected either way since
+  // req.body is already a defined object there.
+  it('rejects a bodyless request (no payload, no content-type) with 400, not 503', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/alias',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY, 'user-agent': UA },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'invalid_body' })
   })
 })
 
