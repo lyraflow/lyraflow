@@ -1,4 +1,5 @@
 import { chDateTime, coalesceContiguous, deriveTiling } from '@lyraflow/core'
+import type { ClickHouseClient } from '@lyraflow/db'
 import type { PersonAliases } from './aliases.js'
 import type { IdentityBindings } from './bindings.js'
 
@@ -220,4 +221,91 @@ export function personEventsPredicate(
   })
   const deviceBranch = clauses.length > 0 ? ` OR (user_id = '' AND (${clauses.join(' OR ')}))` : ''
   return `(user_id IN {${prefix}group:Array(String)}${deviceBranch})`
+}
+
+interface PersonEventsRow {
+  first_seen: string
+  last_seen: string
+  // ClickHouse's HTTP interface quotes UInt64 values as JSON strings by
+  // default (avoids precision loss past 2^53) — see the identical parsing
+  // in schema-clickhouse.test.ts's count() assertions.
+  events: string
+}
+
+export interface PersonEventSummary {
+  /**
+   * Raw ClickHouse `DateTime64` strings — meaningless when `events` is 0
+   * (ClickHouse's `min`/`max` still return a row, just the type's zero
+   * value, not an absence). Parse with `parseChDateTime`
+   * (`ingest/row.ts`) before formatting for the wire.
+   */
+  firstSeen: string
+  lastSeen: string
+  /**
+   * `count(DISTINCT event_id)` — `events` is a ReplacingMergeTree, and a
+   * retried delivery is a permanent second row, not a de-duplicated one.
+   */
+  events: number
+}
+
+/**
+ * The query behind GET /v1/persons/:id and DELETE /v1/persons/:id's
+ * existence check: first-seen, last-seen, and a deduplicated event count
+ * for a resolved scope, through the exact same identity predicate
+ * (`personEventsPredicate`) both routes must never be allowed to drift
+ * apart on — a structural guess at "does this person exist" (e.g. "has a
+ * device binding") under-covers a real subject identified without ever
+ * being bound to a device, which is exactly the gap that put this function
+ * here instead of leaving each caller to build its own query.
+ *
+ * `opts.after`, when given, is a deletion boundary — the same clause the
+ * person read applies (`timestamp > after`, strictly greater than because
+ * the boundary itself is inclusive of the events it erases). Passing
+ * nothing at all — the deletion route's existence check — deliberately
+ * still sees suppressed rows: until the purge worker actually deletes them
+ * they are still sitting in ClickHouse, and 404ing a person whose data is
+ * merely HIDDEN, not yet erased, would misreport the one thing this
+ * endpoint exists to guarantee. It is also what keeps a repeat deletion
+ * request idempotent: an operator re-requesting after a purge exhausted its
+ * attempts, for a person with no activity since their first request, must
+ * not be told the person no longer exists.
+ */
+export async function personEventSummary(
+  ch: ClickHouseClient,
+  projectId: number,
+  scope: Pick<PersonScope, 'group' | 'windows'>,
+  opts: { after?: Date } = {},
+): Promise<PersonEventSummary> {
+  const params: Record<string, unknown> = { projectId }
+  const identity = personEventsPredicate(scope, params)
+
+  let afterClause = ''
+  if (opts.after) {
+    params.after = chDateTime(opts.after)
+    afterClause = ' AND timestamp > {after:DateTime64(3)}'
+  }
+
+  const rs = await ch.query({
+    query: `
+      SELECT
+        min(timestamp) AS first_seen,
+        max(timestamp) AS last_seen,
+        count(DISTINCT event_id) AS events
+      FROM events
+      WHERE project_id = {projectId:UInt32}
+        AND ${identity}${afterClause}
+    `,
+    query_params: params,
+    format: 'JSONEachRow',
+  })
+  const [row] = await rs.json<PersonEventsRow>()
+  return {
+    firstSeen: row?.first_seen ?? '',
+    lastSeen: row?.last_seen ?? '',
+    // Compared/returned numerically, not as the raw string: ClickHouse's
+    // HTTP interface quotes UInt64 values as JSON strings by default, but
+    // that is a server-side formatting setting, not a guarantee — a string
+    // comparison would stay coupled to it for no reason.
+    events: row ? Number(row.events) : 0,
+  }
 }

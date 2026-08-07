@@ -41,10 +41,12 @@ const SERVER_KEY_A = 'sk_privacy_routes_a'
 const WRITE_KEY_B = 'wk_privacy_routes_b'
 const SERVER_KEY_B = 'sk_privacy_routes_b'
 
-// The literal maxAttempts app.ts passes to registerPrivacyRoutes today (Task
-// 10 replaces it with the configured value) — the "failed" test below has to
-// exhaust the SAME number the running app is actually gated on.
+// The literal maxAttempts/leaseMs app.ts passes to registerPrivacyRoutes
+// today (Task 10 replaces both with configured values) — the "failed" and
+// lease-expiry tests below have to match the SAME numbers the running app
+// is actually gated on.
 const MAX_ATTEMPTS = 5
+const LEASE_MS = 600_000
 
 let app: FastifyInstance
 let projectA: number
@@ -141,16 +143,10 @@ async function identify(writeKey: string, body: Record<string, unknown>) {
 
 /**
  * Identifies `userId` WITH an anonymous/device id bound to it — the ordinary
- * browser-SDK shape, and deliberately not `identify()` with only `user_id`
- * (person.test.ts's own "server-side tracking" case, which writes NO
- * `identity_bindings` row at all). This route's existence check
- * (`scope.group.length === 1 && scope.devices.length === 0`) is
- * Postgres-only — unlike GET /v1/persons/:id, it never consults ClickHouse
- * — so a person with a real recorded event but no device binding of their
- * own would incorrectly 404 here despite GET finding them. See this file's
- * own report for that gap; every fixture below sidesteps it by giving each
- * identified person a device binding, which is the common case this route
- * is actually exercised against.
+ * browser-SDK shape. Most fixtures below use this one; the exception is
+ * "device-less" further down, which deliberately identifies with only
+ * `user_id` to prove the existence check does NOT depend on a device
+ * binding existing at all (see that test for the full story).
  */
 async function identifyWithDevice(writeKey: string, userId: string) {
   return identify(writeKey, {
@@ -158,6 +154,20 @@ async function identifyWithDevice(writeKey: string, userId: string) {
     anonymous_id: `anon-${userId}`,
     user_id: userId,
   })
+}
+
+/**
+ * `identify()` with ONLY `user_id` — no `anonymous_id` at all —
+ * person.test.ts's own documented "server-side tracking" case. This writes
+ * NO `identity_bindings` row (see aliases.ts/bindings.ts), so a person built
+ * this way has `group.length === 1` and `devices.length === 0`: the exact
+ * shape the route's existence check used to (wrongly) treat as "does not
+ * exist". A real `identify` event still lands in ClickHouse with
+ * `user_id` set directly, which is what `personEventSummary`'s
+ * `user_id IN {group}` branch matches regardless of any device binding.
+ */
+async function identifyWithoutDevice(writeKey: string, userId: string) {
+  return identify(writeKey, { message_id: randomUUID(), user_id: userId })
 }
 
 function aliasReq(serverKey: string, body: Record<string, unknown>) {
@@ -272,6 +282,25 @@ describe('DELETE /v1/persons/:id', () => {
     expect(res.json().error).toBe('person_not_found')
   })
 
+  it('accepts a deletion for a person identified without any device binding', async () => {
+    // The exact case that caught the structural-check bug: identify with
+    // ONLY user_id, so no identity_bindings row is ever written and
+    // scope.devices stays empty. GET still finds this person (their
+    // identify event carries user_id directly), so DELETE must too — a
+    // structural "has a device" guess would 404 a real subject GET can
+    // read, which is the compliance failure this test pins.
+    const userId = `device-less-${randomUUID()}`
+    await identifyWithoutDevice(WRITE_KEY_A, userId)
+
+    const read = await getPerson(userId, SERVER_KEY_A)
+    expect(read.statusCode).toBe(200)
+    expect(read.json().events).toBeGreaterThan(0)
+
+    const res = await deleteAs(userId, SERVER_KEY_A)
+    expect(res.statusCode).toBe(202)
+    expect(res.json().person_id).toBe(userId)
+  })
+
   it("does not accept a deletion for another project's person", async () => {
     // Same person id in two projects; delete under A; B's person read is
     // untouched and B has no request row.
@@ -360,6 +389,29 @@ describe('GET /v1/deletions/:id', () => {
     const res = await status(requestId, SERVER_KEY_A)
     expect(res.statusCode).toBe(200)
     expect(res.json().status).toBe('in_progress')
+    expect(res.json().completed_at).toBeNull()
+  })
+
+  it('reports pending again once a claimed lease has expired', async () => {
+    // A worker claimed this request and then, from the API's point of view,
+    // vanished — crashed, or is simply still mid-purge past its own lease
+    // window. `claimed_at` alone can't tell that apart from "genuinely in
+    // flight"; only the lease can. An operator polling this endpoint needs
+    // to see `pending` here, not `in_progress` forever — the same request
+    // is, in fact, claimable again the moment a worker calls claim().
+    const userId = `status-lease-expired-${randomUUID()}`
+    await identifyWithDevice(WRITE_KEY_A, userId)
+    const created = await deleteAs(userId, SERVER_KEY_A)
+    const requestId = created.json().request_id as number
+
+    await pg.query('UPDATE deletion_requests SET claimed_at = $2 WHERE id = $1', [
+      requestId,
+      new Date(Date.now() - LEASE_MS - 60_000),
+    ])
+
+    const res = await status(requestId, SERVER_KEY_A)
+    expect(res.statusCode).toBe(200)
+    expect(res.json().status).toBe('pending')
     expect(res.json().completed_at).toBeNull()
   })
 

@@ -119,9 +119,10 @@ export function buildApp(input: {
   registerPersonRoutes(app, { projects, readiness, ch, bindings, aliases, suppression })
   registerSegmentRoutes(app, { projects, readiness, ch, pg, database: config.ch.database })
   registerSchemaRoutes(app, { projects, readiness, ch })
-  // maxAttempts: 5 is the literal default `LYRAFLOW_PURGE_MAX_ATTEMPTS` will
-  // resolve to once config carries it — a later task wires the configured
-  // value through; nothing here reads it from config yet.
+  // maxAttempts: 5 and leaseMs: 600_000 are the literal defaults
+  // `LYRAFLOW_PURGE_MAX_ATTEMPTS` and `LYRAFLOW_PURGE_LEASE_MS` will resolve
+  // to once config carries them — a later task wires the configured values
+  // through; nothing here reads either from config yet.
   registerPrivacyRoutes(app, {
     projects,
     readiness,
@@ -132,6 +133,7 @@ export function buildApp(input: {
     deletions,
     suppression,
     maxAttempts: 5,
+    leaseMs: 600_000,
   })
 
   return app

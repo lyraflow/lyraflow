@@ -4,7 +4,7 @@ import type { ProjectCache } from '../auth/project-cache.js'
 import type { Readiness } from '../health.js'
 import type { PersonAliases } from '../identity/aliases.js'
 import type { IdentityBindings } from '../identity/bindings.js'
-import { resolvePersonScope } from '../identity/scope.js'
+import { personEventSummary, resolvePersonScope } from '../identity/scope.js'
 import { SERVER_KEY_HEADER, makeAuthenticator } from '../ingest/routes.js'
 import type { DeletionStore } from './deletion-store.js'
 import type { SuppressionStore } from './suppression-store.js'
@@ -21,6 +21,8 @@ export interface PrivacyDeps {
   suppression: SuppressionStore
   /** For the status endpoint's "failed" verdict; same value the worker uses. */
   maxAttempts: number
+  /** For the status endpoint's "in_progress" vs "pending" verdict; same value the worker uses. */
+  leaseMs: number
 }
 
 interface PersonParams {
@@ -53,7 +55,7 @@ function parseDeletionId(raw: string): number | null {
  * reachable with it would be a public erase button.
  */
 export function registerPrivacyRoutes(app: FastifyInstance, deps: PrivacyDeps): void {
-  const { projects, readiness, ch, bindings, aliases, deletions, maxAttempts } = deps
+  const { projects, readiness, ch, bindings, aliases, deletions, maxAttempts, leaseMs } = deps
 
   const authenticateServer = makeAuthenticator(
     readiness,
@@ -69,17 +71,29 @@ export function registerPrivacyRoutes(app: FastifyInstance, deps: PrivacyDeps): 
 
     // The exact same resolution GET /v1/persons/:id uses, including its
     // device-id fallback (scope.ts's step 4) — deletion covers exactly the
-    // subject that route describes. `group.length === 1 && devices.length
-    // === 0` on the RETURNED scope is "nothing this project has ever
-    // recorded for this id": no alias of its own, nothing merged into it,
-    // no device bound to it directly, and the device-id fallback inside
-    // resolvePersonScope also came up empty (had it found an owning
-    // device, that owner's own resolveGroup would have populated `devices`
-    // with at least that device). An id with no identity binding and no
-    // events is not a subject, and pre-emptively suppressing it would write
-    // rows nothing can ever purge.
+    // subject that route describes.
     const scope = await resolvePersonScope({ bindings, aliases }, project.id, req.params.id)
-    if (scope.group.length === 1 && scope.devices.length === 0) {
+
+    // The existence check GET /v1/persons/:id itself runs — "does this
+    // scope match any events" — via the SAME shared helper, not a
+    // structural guess at the identity graph's shape (e.g. "has a device
+    // binding"). A structural guess under-covers a real subject: a person
+    // identified with only a `user_id` (no `anonymous_id`) gets no
+    // `identity_bindings` row at all, so `group.length === 1 &&
+    // devices.length === 0` would 404 them even though they have a real,
+    // recorded event and GET finds it. See scope.ts's personEventSummary
+    // for the full argument.
+    //
+    // Deliberately NOT boundary-filtered (no `after` passed): until the
+    // purge worker actually deletes the rows, they are still sitting in
+    // ClickHouse, and 404ing a person whose data is merely SUPPRESSED —
+    // not yet erased — would misreport the one thing this endpoint exists
+    // to guarantee. It also keeps a repeat request idempotent: an operator
+    // re-requesting deletion after a purge exhausted its attempts, for a
+    // person with no activity since their first request, must still get a
+    // `202` and an advanced boundary, not a `404`.
+    const summary = await personEventSummary(ch, project.id, scope)
+    if (summary.events === 0) {
       return reply.code(404).send({ error: 'person_not_found' })
     }
 
@@ -146,17 +160,15 @@ export function registerPrivacyRoutes(app: FastifyInstance, deps: PrivacyDeps): 
       })
     }
 
-    // Claimed, not completed, and under the attempt cap: a worker has this
-    // request in hand right now. `DeletionRequest` carries no lease
-    // duration (PrivacyDeps has no `leaseMs` — only `maxAttempts`, per this
-    // route's own interface), so this cannot distinguish a claim genuinely
-    // in flight from one abandoned by a crashed worker whose lease has
-    // since expired but has not yet been reclaimed. That distinction does
-    // not change what a caller should do either way ("keep polling"), and a
-    // stale claim is transient: the next claim() call (worker-side, see
-    // DeletionStore.claim) picks it back up and refreshes `claimed_at` the
-    // moment its lease actually ages out.
-    if (found.claimedAt) {
+    // Claimed, not completed, under the attempt cap, and the lease has not
+    // yet aged out: a worker genuinely has this request in hand right now.
+    // `leaseMs` is the SAME value DeletionStore.claim() uses to decide
+    // whether a claim is still live (see DeletionStore.claim) — without it,
+    // "claimed" alone cannot tell a request truly in flight apart from one
+    // abandoned by a crashed process, and reporting the latter as
+    // `in_progress` forever is exactly the state an operator is trying to
+    // diagnose when they poll this endpoint.
+    if (found.claimedAt && Date.now() - found.claimedAt.getTime() < leaseMs) {
       return reply.code(200).send({
         status: 'in_progress',
         requested_at: found.requestedAt.toISOString(),
@@ -164,6 +176,11 @@ export function registerPrivacyRoutes(app: FastifyInstance, deps: PrivacyDeps): 
       })
     }
 
+    // Either never claimed, or claimed once and abandoned past its lease —
+    // both are "waiting for a worker to pick this up", the same `pending`
+    // a caller sees before the first claim. The next `claim()` call
+    // (worker-side) refreshes `claimed_at` the moment it takes the row
+    // again; nothing here needs to distinguish the two beyond that.
     return reply.code(200).send({
       status: 'pending',
       requested_at: found.requestedAt.toISOString(),
