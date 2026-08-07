@@ -816,6 +816,104 @@ describe('GET /v1/persons/:id', () => {
     expect(bodyB.ids.sort()).toEqual(['shared-canonical', 'tenant-b-device', 'tenant-b-old'])
     expect(bodyB.events).toBe(1)
   })
+
+  // THE test for the main use case the cap exists to protect, not merely the
+  // cap tripping. 'refuses a person whose history is too fragmented to
+  // bound' above deliberately uses MAX_PERSON_RANGE_CLAUSES + 5 DISTINCT
+  // devices, each bound once, specifically so it does not depend on tiling
+  // internals — but that shape never occurs for the ordinary customer this
+  // route serves. The real shape is the opposite: ONE device, ONE person,
+  // rebound to the SAME person over and over — a logged-in browser's repeat
+  // identify() on every page load (bindings.ts's GROWTH CHARACTERISTIC note:
+  // every identified page load writes a bind row, and the omitted-timestamp
+  // common case never collides on (device, instant), so it never
+  // deduplicates). Without coalescing contiguous same-person windows before
+  // the cap check, this many binds on ONE device produces this many windows,
+  // and a customer who has simply viewed more than MAX_PERSON_RANGE_CLAUSES
+  // pages while logged in gets a permanent 400 on their own profile.
+  //
+  // A single INSERT ... SELECT ... FROM unnest(), same reasoning as the
+  // fragmentation test above: this only needs the bind rows to exist, not to
+  // exercise bind() itself.
+  it('does not fragment a person whose history is one device rebound to itself many times', async () => {
+    const bindCount = MAX_PERSON_RANGE_CLAUSES + 5
+    const timestamps = Array.from({ length: bindCount }, (_, i) => isoAt(5000 + i))
+    await pg.query(
+      `INSERT INTO identity_bindings (project_id, anonymous_id, person_id, bound_at)
+       SELECT $1, 'repeat-identify-device', 'repeat-identify-person', t::timestamptz
+       FROM unnest($2::text[]) AS t`,
+      [projectA, timestamps],
+    )
+    // One real event, so a 200 has something non-zero to assert on rather
+    // than merely the absence of a 400.
+    await insertEvent({
+      projectId: projectA,
+      anonymousId: 'repeat-identify-device',
+      timestamp: chAt(5500),
+      eventName: 'repeat_identify_pre',
+    })
+
+    try {
+      const res = await getPerson('repeat-identify-person', {
+        'x-lyraflow-server-key': SERVER_KEY_A,
+      })
+      expect(res.statusCode).toBe(200)
+      expect(res.json().events).toBe(1)
+    } finally {
+      await pg.query(
+        `DELETE FROM identity_bindings WHERE project_id = $1 AND person_id = 'repeat-identify-person'`,
+        [projectA],
+      )
+    }
+  })
+
+  // Half-open windows, [from, to), pinned at the actual boundary instant —
+  // nothing else in this file sends an event stamped at EXACTLY a rebind's
+  // own timestamp. Would catch either half-open bound flipped to closed at
+  // the wrong end (the event landing in BOTH profiles, or NEITHER).
+  it('assigns an event stamped at exactly a rebind instant to the incoming owner only', async () => {
+    // Offsets kept inside the ingest clamp's 24h skew window (see isoAt's own
+    // docstring on BASE_MS): identify() timestamps go through the public HTTP
+    // path and clampTimestamp silently rewrites anything further than 24h
+    // from server time, which would substitute a DIFFERENT instant than the
+    // one asserted on below and defeat the whole test.
+    const device = 'boundary-instant-device'
+    await identify(WRITE_KEY_A, {
+      message_id: randomUUID(),
+      anonymous_id: device,
+      user_id: 'boundary-outgoing',
+      timestamp: isoAt(700),
+      traits: {},
+    })
+    await identify(WRITE_KEY_A, {
+      message_id: randomUUID(),
+      anonymous_id: device,
+      user_id: 'boundary-incoming',
+      timestamp: isoAt(710),
+      traits: {},
+    })
+    // Stamped at exactly offset 710, the rebind instant itself. Recorded
+    // with no user_id of its own so it resolves purely through the device's
+    // window (Stage 2), not Stage 1's user_id short-circuit.
+    await insertEvent({
+      projectId: projectA,
+      anonymousId: device,
+      timestamp: chAt(710),
+      eventName: 'boundary_instant_event',
+    })
+
+    const outgoing = await getPerson('boundary-outgoing', { 'x-lyraflow-server-key': SERVER_KEY_A })
+    expect(outgoing.statusCode).toBe(200)
+    // 1: only its own identify event. Its window is [.., 710) — half-open —
+    // so the boundary event at exactly offset 710 is NOT included.
+    expect(outgoing.json().events).toBe(1)
+
+    const incoming = await getPerson('boundary-incoming', { 'x-lyraflow-server-key': SERVER_KEY_A })
+    expect(incoming.statusCode).toBe(200)
+    // 2: its own identify event, plus the boundary event — its window is
+    // [710, ..), which includes the boundary instant itself.
+    expect(incoming.json().events).toBe(2)
+  })
 })
 
 /**

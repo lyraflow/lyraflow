@@ -148,4 +148,45 @@ describe('SegmentStore', () => {
     expect(await store.get(projectId, s.id)).toBeNull()
     expect(await store.remove(projectId, s.id)).toBe(false)
   })
+
+  it('lists every segment in name order', async () => {
+    await store.create(projectId, 'List: Zebra', trial)
+    await store.create(projectId, 'List: Aardvark', trial)
+    const names = (await store.list(projectId))
+      .map((s) => s.name)
+      .filter((n) => n.startsWith('List: '))
+    expect(names).toEqual(['List: Aardvark', 'List: Zebra'])
+  })
+
+  it('does not list another project segment', async () => {
+    await store.create(projectId, 'List: mine only', trial)
+    const names = (await store.list(otherProjectId)).map((s) => s.name)
+    expect(names).not.toContain('List: mine only')
+  })
+
+  // THE test for the finding this closes: get() correctly throws for a
+  // single unparseable row (see the two tests above it), but list() must
+  // not — one bad row aborting the ENTIRE list is exactly the situation
+  // ast_version was stored to make diagnosable, and it takes every OTHER
+  // segment in the project down with it. Without the fix, this throws
+  // StoredTreeError instead of returning.
+  it('marks a single unparseable row as stale rather than failing the whole list', async () => {
+    const good = await store.create(projectId, 'List: good segment', trial)
+    await pg.query(
+      `INSERT INTO segments (project_id, name, ast_version, filter)
+       VALUES ($1, 'List: bad segment', 99, $2::jsonb)`,
+      [projectId, JSON.stringify(trial.filter)],
+    )
+
+    const listed = await store.list(projectId)
+
+    const goodRow = listed.find((s) => s.id === good.id)
+    expect(goodRow?.filter).toEqual(trial.filter)
+    expect(goodRow && 'stale' in goodRow ? goodRow.stale : false).toBe(false)
+
+    const badRow = listed.find((s) => s.name === 'List: bad segment')
+    expect(badRow).toBeDefined()
+    expect(badRow?.filter).toBeNull()
+    expect(badRow && 'stale' in badRow && badRow.stale).toBe(true)
+  })
 })

@@ -13,6 +13,30 @@ export interface StoredSegment {
 }
 
 /**
+ * A row `list()` could not parse, surfaced instead of thrown. Same metadata
+ * as `StoredSegment` minus the tree itself — `filter: null` and `stale: true`
+ * mark it on the wire (see routes.ts's `toWire`) rather than the row simply
+ * being absent, so an operator can see it exists, still rename or delete it,
+ * and knows WHY it will not run. `get`/`create`/`update` still throw
+ * `StoredTreeError` for a single row looked up on its own — that behaviour is
+ * unchanged and correct; this type exists only for the "one bad row must not
+ * take the whole list down" case `list()` fixes.
+ */
+export interface StaleListedSegment {
+  id: number
+  name: string
+  astVersion: number
+  filter: null
+  stale: true
+  lastCount: number | null
+  lastEvaluatedAt: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export type ListedSegment = StoredSegment | StaleListedSegment
+
+/**
  * A stored tree failed to parse. Carries the version so the response can name
  * it — the whole point of storing `ast_version` is that this case is
  * diagnosable rather than a mystery 500.
@@ -77,13 +101,43 @@ export class SegmentStore {
     }
   }
 
-  async list(projectId: number): Promise<StoredSegment[]> {
+  /**
+   * Lists every segment in a project. Unlike `get`, a single row that fails
+   * to parse (see `#hydrate`) does NOT abort the whole response — that is
+   * precisely the situation `ast_version` was stored to make diagnosable,
+   * and a 400 for the whole list is the opposite of diagnosable: it takes
+   * down every OTHER segment in the project along with the bad one, so the
+   * operator cannot even see, rename, or delete the rows that are still
+   * fine. A row that fails to hydrate is returned as a `StaleListedSegment`
+   * instead (`filter: null`, `stale: true`) so the list still renders and
+   * the bad row is identifiable by id and name.
+   */
+  async list(projectId: number): Promise<ListedSegment[]> {
     const r = await this.pool.query<Row>(
       `SELECT id, name, ast_version, filter, last_count, last_evaluated_at, created_at, updated_at
          FROM segments WHERE project_id = $1 ORDER BY name ASC`,
       [projectId],
     )
-    return r.rows.map((row) => this.#hydrate(row))
+    return r.rows.map((row): ListedSegment => {
+      try {
+        return this.#hydrate(row)
+      } catch (err) {
+        if (err instanceof StoredTreeError) {
+          return {
+            id: Number(row.id),
+            name: row.name,
+            astVersion: row.ast_version,
+            filter: null,
+            stale: true,
+            lastCount: row.last_count === null ? null : Number(row.last_count),
+            lastEvaluatedAt: row.last_evaluated_at,
+            createdAt: row.created_at,
+            updatedAt: row.updated_at,
+          }
+        }
+        throw err
+      }
+    })
   }
 
   async get(projectId: number, id: number): Promise<StoredSegment | null> {

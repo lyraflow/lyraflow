@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { type BindEvent, type Binding, deriveTiling } from './ranges.js'
+import { type BindEvent, type Binding, coalesceContiguous, deriveTiling } from './ranges.js'
 
 const NEG = Number.NEGATIVE_INFINITY
 const POS = Number.POSITIVE_INFINITY
@@ -144,5 +144,75 @@ describe('deriveTiling', () => {
         { personId: 'bob', from: t(15), to: POS },
       ],
     )
+  })
+})
+
+describe('coalesceContiguous', () => {
+  it('merges repeat-identify tiles for one person on one device into a single window', () => {
+    // The exact shape a logged-in browser produces: N `identify()` calls for
+    // the same person, none of them collapsed by deriveTiling itself (see
+    // its own docstring), tiling the timeline as N boundary-touching tiles
+    // that all resolve to the same person.
+    const tiling = deriveTiling([
+      { personId: 'alice', boundAt: t(1) },
+      { personId: 'alice', boundAt: t(2) },
+      { personId: 'alice', boundAt: t(3) },
+    ])
+    expect(coalesceContiguous(tiling)).toEqual([{ personId: 'alice', from: NEG, to: POS }])
+  })
+
+  it('does not merge across a genuine rebind to a different person', () => {
+    const tiling = deriveTiling([
+      { personId: 'alice', boundAt: t(1) },
+      { personId: 'bob', boundAt: t(5) },
+    ])
+    expect(coalesceContiguous(tiling)).toEqual([
+      { personId: 'alice', from: NEG, to: t(5) },
+      { personId: 'bob', from: t(5), to: POS },
+    ])
+  })
+
+  it('merges only the contiguous run, leaving a later different-person tile separate', () => {
+    const tiling = deriveTiling([
+      { personId: 'alice', boundAt: t(1) },
+      { personId: 'alice', boundAt: t(2) },
+      { personId: 'alice', boundAt: t(3) },
+      { personId: 'bob', boundAt: t(9) },
+    ])
+    expect(coalesceContiguous(tiling)).toEqual([
+      { personId: 'alice', from: NEG, to: t(9) },
+      { personId: 'bob', from: t(9), to: POS },
+    ])
+  })
+
+  it('reunites a person who left and came back, as two separate windows either side of the gap', () => {
+    // alice -> bob -> alice again: the two alice tiles are NOT adjacent to
+    // each other (bob's tile sits between them), so this must stay three
+    // tiles, not collapse the two alice ones together across bob's.
+    const tiling = deriveTiling([
+      { personId: 'alice', boundAt: t(1) },
+      { personId: 'bob', boundAt: t(5) },
+      { personId: 'alice', boundAt: t(9) },
+    ])
+    expect(coalesceContiguous(tiling)).toEqual(tiling)
+  })
+
+  it('is a no-op on a single tile', () => {
+    const tiling = deriveTiling([{ personId: 'alice', boundAt: t(1) }])
+    expect(coalesceContiguous(tiling)).toEqual(tiling)
+  })
+
+  it('does not merge two same-person tiles that are not contiguous', () => {
+    // deriveTiling's own output is always gapless, so nothing it produces
+    // can exercise this branch — every caller today feeds coalesceContiguous
+    // gapless tiling. Hand-built here specifically to isolate the
+    // contiguity guard (`last.to === b.from`) from the personId guard
+    // covered above: same person on both tiles, but a genuine gap between
+    // them, which must NOT be bridged.
+    const gapped: Binding[] = [
+      { personId: 'alice', from: NEG, to: t(1) },
+      { personId: 'alice', from: t(5), to: POS },
+    ]
+    expect(coalesceContiguous(gapped)).toEqual(gapped)
   })
 })

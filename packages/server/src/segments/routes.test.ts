@@ -23,6 +23,7 @@ const SERVER_KEY = 'sk_segments_routes'
 const OTHER_SERVER_KEY = 'sk_segments_other'
 
 let app: FastifyInstance
+let projectId: number
 let otherProjectId: number
 
 const trait = { kind: 'trait', key: 'plan', operator: '=', value: 'trial' }
@@ -86,11 +87,12 @@ beforeAll(async () => {
   for (const slug of ['segments-routes-test', 'segments-routes-other']) {
     await pg.query('DELETE FROM projects WHERE slug = $1', [slug])
   }
-  await pg.query(
+  const mine = await pg.query<{ id: string }>(
     `INSERT INTO projects (name, slug, write_key, server_key_hash)
-     VALUES ('Segments Routes', 'segments-routes-test', $1, $2)`,
+     VALUES ('Segments Routes', 'segments-routes-test', $1, $2) RETURNING id`,
     [WRITE_KEY, hashServerKey(SERVER_KEY)],
   )
+  projectId = Number(mine.rows[0]?.id)
   const other = await pg.query<{ id: string }>(
     `INSERT INTO projects (name, slug, write_key, server_key_hash)
      VALUES ('Segments Other', 'segments-routes-other', $1, $2) RETURNING id`,
@@ -432,5 +434,329 @@ describe('POST /v1/segments/preview', () => {
     expect(body.members.length).toBeLessThan(MEMBER_PAGE_SIZE)
     expect(body.window_exhausted).toBe(false)
     expect(body.next_cursor).toBeNull()
+  })
+
+  // THE test for the segment cache actually being project-scoped, not merely
+  // looking like it from the code. The existing cross-project test above
+  // ("cannot be pointed at another project") runs both requests under the
+  // SAME server key, so it cannot catch a cache key that dropped its
+  // `${projectId}:` prefix — deleting that prefix from both countKey and
+  // pageKey in routes.ts passes the entire rest of this suite untouched.
+  // This one runs the identical tree under TWO DIFFERENT server keys: project
+  // A has the seeded `trial` cohort, project B (OTHER_SERVER_KEY) has none of
+  // it. A correctly scoped cache answers each from its own population; an
+  // unscoped one lets B's request hit A's cached entry and come back with
+  // A's count and A's member person ids.
+  it('keeps the segment cache scoped per project, not shared across an identical tree', async () => {
+    const a = await preview({ ast_version: 1, filter: trait, include: ['members'] })
+    expect(a.statusCode).toBe(200)
+    expect(a.json().person_count).toBe(MEMBER_PAGE_SIZE)
+    expect(a.json().members).toHaveLength(MEMBER_PAGE_SIZE)
+
+    const b = await preview(
+      { ast_version: 1, filter: trait, include: ['members'] },
+      { 'x-lyraflow-server-key': OTHER_SERVER_KEY },
+    )
+    expect(b.statusCode).toBe(200)
+    // Project B has none of project A's `plan: 'trial'` people. A leaked
+    // cache hit would return A's count (MEMBER_PAGE_SIZE) and A's member
+    // person ids here instead.
+    expect(b.json().person_count).toBe(0)
+    expect(b.json().members).toEqual([])
+  })
+
+  // THE test for the count cache's as_of, closing the gap the member path
+  // already closed. Deliberately spaced by a real, controlled delay rather
+  // than relying on two calls happening to land in the same millisecond: the
+  // broken implementation re-mints `as_of` via `new Date().toISOString()`
+  // on EVERY count-only call regardless of cache hit or miss, so without the
+  // delay this assertion could pass against broken code purely by executing
+  // fast enough. The delay makes the two timestamps provably different under
+  // the broken code and provably identical under the fix, which does not
+  // read the clock again on a hit at all.
+  it('a cache hit returns the identical as_of as the miss that populated it', async () => {
+    const countOnlyFilter = {
+      kind: 'trait',
+      key: 'plan',
+      operator: '=',
+      value: 'trial-asof-cache-test',
+    }
+    const miss = await preview({ ast_version: 1, filter: countOnlyFilter })
+    expect(miss.statusCode).toBe(200)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    const hit = await preview({ ast_version: 1, filter: countOnlyFilter })
+    expect(hit.statusCode).toBe(200)
+    expect(hit.json().as_of).toBe(miss.json().as_of)
+  })
+})
+
+describe('/v1/segments CRUD and run', () => {
+  const create = (body: unknown) =>
+    app.inject({
+      method: 'POST',
+      url: '/v1/segments',
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: body as never,
+    })
+
+  const runSaved = (id: number | string, body: unknown = {}) =>
+    app.inject({
+      method: 'POST',
+      url: `/v1/segments/${id}/preview`,
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: body as never,
+    })
+
+  // Depth 12, one over MAX_TREE_DEPTH (10) — shape-valid (SegmentQuery.safeParse
+  // accepts it fine) but cap-invalid, the exact gap between "stores" and "runs".
+  let overCapFilter: unknown = trait
+  for (let i = 0; i < 12; i++)
+    overCapFilter = { kind: 'group', op: 'and', children: [overCapFilter] }
+
+  it('creates, reads, lists and deletes a segment', async () => {
+    const created = await create({ name: 'Trial users', ast_version: 1, filter: trait })
+    expect(created.statusCode).toBe(201)
+    const id = created.json().id
+
+    const read = await app.inject({
+      method: 'GET',
+      url: `/v1/segments/${id}`,
+      headers: { 'x-lyraflow-server-key': SERVER_KEY },
+    })
+    expect(read.json().filter).toEqual(trait)
+
+    const list = await app.inject({
+      method: 'GET',
+      url: '/v1/segments',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY },
+    })
+    expect(list.json().segments.some((s: { id: number }) => s.id === id)).toBe(true)
+
+    const gone = await app.inject({
+      method: 'DELETE',
+      url: `/v1/segments/${id}`,
+      headers: { 'x-lyraflow-server-key': SERVER_KEY },
+    })
+    expect(gone.statusCode).toBe(204)
+  })
+
+  it('rejects a duplicate name with 409', async () => {
+    await create({ name: 'Only once', ast_version: 1, filter: trait })
+    const again = await create({ name: 'Only once', ast_version: 1, filter: trait })
+    expect(again.statusCode).toBe(409)
+  })
+
+  it('returns 404 for a segment id that belongs to another project', async () => {
+    // 404 rather than 403: a 403 confirms the id exists, which leaks the
+    // shape of another tenant's data.
+    const created = await create({ name: 'Private', ast_version: 1, filter: trait })
+    const id = created.json().id
+    const res = await app.inject({
+      method: 'GET',
+      url: `/v1/segments/${id}`,
+      headers: { 'x-lyraflow-server-key': OTHER_SERVER_KEY },
+    })
+    expect(res.statusCode).toBe(404)
+  })
+
+  it('runs a saved segment and updates its snapshot', async () => {
+    const created = await create({ name: 'Runnable', ast_version: 1, filter: trait })
+    const id = created.json().id
+
+    const before = await app.inject({
+      method: 'GET',
+      url: `/v1/segments/${id}`,
+      headers: { 'x-lyraflow-server-key': SERVER_KEY },
+    })
+    expect(before.json().last_count).toBeNull()
+
+    const run = await runSaved(id)
+    expect(run.statusCode).toBe(200)
+    expect(typeof run.json().person_count).toBe('number')
+
+    const after = await app.inject({
+      method: 'GET',
+      url: `/v1/segments/${id}`,
+      headers: { 'x-lyraflow-server-key': SERVER_KEY },
+    })
+    expect(after.json().last_count).toBe(run.json().person_count)
+    expect(after.json().last_evaluated_at).not.toBeNull()
+  })
+
+  it('updates the snapshot when members are requested too', async () => {
+    const created = await create({ name: 'Runnable with members', ast_version: 1, filter: trait })
+    const id = created.json().id
+    await runSaved(id, { include: ['members'] })
+    const after = await app.inject({
+      method: 'GET',
+      url: `/v1/segments/${id}`,
+      headers: { 'x-lyraflow-server-key': SERVER_KEY },
+    })
+    expect(after.json().last_count).not.toBeNull()
+  })
+
+  it('clears the snapshot when a PATCH changes the filter, but not on a rename', async () => {
+    const created = await create({ name: 'Editable', ast_version: 1, filter: trait })
+    const id = created.json().id
+    await runSaved(id)
+
+    const renamed = await app.inject({
+      method: 'PATCH',
+      url: `/v1/segments/${id}`,
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: { name: 'Editable (renamed)' } as never,
+    })
+    expect(renamed.json().last_count).not.toBeNull()
+
+    const filterChanged = await app.inject({
+      method: 'PATCH',
+      url: `/v1/segments/${id}`,
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: {
+        ast_version: 1,
+        filter: { kind: 'trait', key: 'plan', operator: '=', value: 'pro' },
+      } as never,
+    })
+    expect(filterChanged.statusCode).toBe(200)
+
+    const after = await app.inject({
+      method: 'GET',
+      url: `/v1/segments/${id}`,
+      headers: { 'x-lyraflow-server-key': SERVER_KEY },
+    })
+    expect(after.json().last_count).toBeNull()
+  })
+
+  it('rejects a non-numeric segment id with 400 on every :id route, not a 503', async () => {
+    // Number('not-a-number') is NaN; without a guard this reaches Postgres as
+    // a query parameter and trips the generic error handler into a 503 for a
+    // deterministic client error — every :id route needs its own guard, so
+    // this checks all four rather than trusting one to represent the rest.
+    const badId = 'not-a-number'
+
+    const get = await app.inject({
+      method: 'GET',
+      url: `/v1/segments/${badId}`,
+      headers: { 'x-lyraflow-server-key': SERVER_KEY },
+    })
+    expect(get.statusCode).toBe(400)
+
+    const patch = await app.inject({
+      method: 'PATCH',
+      url: `/v1/segments/${badId}`,
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: { name: 'whatever' } as never,
+    })
+    expect(patch.statusCode).toBe(400)
+
+    const del = await app.inject({
+      method: 'DELETE',
+      url: `/v1/segments/${badId}`,
+      headers: { 'x-lyraflow-server-key': SERVER_KEY },
+    })
+    expect(del.statusCode).toBe(400)
+
+    const run = await runSaved(badId)
+    expect(run.statusCode).toBe(400)
+  })
+
+  it('rejects an over-cap tree on create with 400', async () => {
+    // Shape-valid, cap-invalid: without write-time validation this would
+    // save with a 201 and then fail on every run thereafter.
+    const res = await create({ name: 'Over cap on create', ast_version: 1, filter: overCapFilter })
+    expect(res.statusCode).toBe(400)
+  })
+
+  it('rejects an over-cap tree on update, leaving the stored row unchanged', async () => {
+    const created = await create({ name: 'Valid then over-cap', ast_version: 1, filter: trait })
+    const id = created.json().id
+
+    const patch = await app.inject({
+      method: 'PATCH',
+      url: `/v1/segments/${id}`,
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: { ast_version: 1, filter: overCapFilter } as never,
+    })
+    expect(patch.statusCode).toBe(400)
+
+    // Rejected before persistence, not just before the response: the row
+    // still carries its original, valid filter rather than the rejected one.
+    const after = await app.inject({
+      method: 'GET',
+      url: `/v1/segments/${id}`,
+      headers: { 'x-lyraflow-server-key': SERVER_KEY },
+    })
+    expect(after.json().filter).toEqual(trait)
+  })
+
+  // THE test for the finding this closes. `SegmentQuery.safeParse` is used
+  // only to DETECT whether a tree was sent at all — without the fix, a body
+  // that carries `filter`/`ast_version` but fails to parse is
+  // indistinguishable from a rename-only body: `query.success` is false
+  // either way, `store.update` is called with `query: undefined`, its
+  // COALESCEs no-op, and the route answers 200 with the OLD filter silently
+  // unchanged. POST /v1/segments already 400s for the identical malformed
+  // body (see "rejects a malformed tree" on the preview route above, same
+  // payload shape); PATCH must match, not silently discard it.
+  it('rejects a malformed filter on PATCH with 400, not a silent no-op', async () => {
+    const created = await create({
+      name: 'Malformed patch is rejected, not dropped',
+      ast_version: 1,
+      filter: trait,
+    })
+    const id = created.json().id
+
+    const patch = await app.inject({
+      method: 'PATCH',
+      url: `/v1/segments/${id}`,
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: { ast_version: 1, filter: { kind: 'trait' } } as never,
+    })
+    expect(patch.statusCode).toBe(400)
+    expect(patch.json().error).toBeDefined()
+
+    const after = await app.inject({
+      method: 'GET',
+      url: `/v1/segments/${id}`,
+      headers: { 'x-lyraflow-server-key': SERVER_KEY },
+    })
+    expect(after.json().filter).toEqual(trait)
+  })
+
+  // THE test for the finding this closes: list() must not let one unparseable
+  // row take the other, perfectly fine segments in the project down with it.
+  // Without the fix, list() throws StoredTreeError for the whole request and
+  // GET /v1/segments answers 400 — hiding every OTHER segment in the project
+  // along with the bad one.
+  it('lists a project with one unparseable stored row, marking it rather than failing the list', async () => {
+    const good = await create({ name: 'List: still readable', ast_version: 1, filter: trait })
+
+    await pg.query(
+      `INSERT INTO segments (project_id, name, ast_version, filter)
+       VALUES ($1, 'List: unparseable stored row', 99, $2::jsonb)`,
+      [projectId, JSON.stringify(trait)],
+    )
+
+    const list = await app.inject({
+      method: 'GET',
+      url: '/v1/segments',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY },
+    })
+    expect(list.statusCode).toBe(200)
+    const segments = list.json().segments as Array<{
+      id: number
+      name: string
+      filter: unknown
+      stale: boolean
+    }>
+
+    const goodRow = segments.find((s) => s.id === good.json().id)
+    expect(goodRow?.filter).toEqual(trait)
+    expect(goodRow?.stale).toBe(false)
+
+    const badRow = segments.find((s) => s.name === 'List: unparseable stored row')
+    expect(badRow).toBeDefined()
+    expect(badRow?.filter).toBeNull()
+    expect(badRow?.stale).toBe(true)
   })
 })

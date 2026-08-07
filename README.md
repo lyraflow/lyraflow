@@ -4,7 +4,7 @@
 
 Lyraflow helps you understand the full path your customers take — from first touch to conversion, retention, and beyond — on infrastructure you control. Your customer data stays yours.
 
-> ⚠️ **Early days.** Lyraflow currently ships the ingest spine and identity resolution — you can self-host it, create a project, send it events, and stitch anonymous and known activity into one person. There is no query API and no UI yet (filtering, journeys, dashboards). Watch the repo to follow along.
+> ⚠️ **Early days.** Lyraflow currently ships the ingest spine, identity resolution, and a segment query API — you can self-host it, create a project, send it events, stitch anonymous and known activity into one person, and count or list the people matching a filter tree. There is no builder UI yet (segments, journeys, dashboards) and no journey/funnel analysis. Watch the repo to follow along.
 
 ## Why Lyraflow?
 
@@ -185,9 +185,10 @@ collapse as an optimisation you do not have.
 ## Identity resolution
 
 v0.1 stitches a device's anonymous activity to the person it belongs to, and
-lets you merge two people that turn out to be the same one. There is no
-filtering or segmentation on top of this yet — see the note at the top of
-this README.
+lets you merge two people that turn out to be the same one. Filtering and
+segmentation are built on top of it — see [Segments](#segments) below — but
+there is still no builder UI, journey analysis, or dashboards; see the note at
+the top of this README.
 
 ### Binding a device to a person
 
@@ -346,10 +347,11 @@ how the old union behaviour would come back.
 
 ## Segments
 
-A segment is a filter tree, and `POST /v1/segments/preview` answers one
-question about it: **how many people match?** It is server-key only — the
-write key ships in browser JavaScript, and a segment count is aggregate
-information about everyone in the project.
+A segment is a filter tree. `POST /v1/segments/preview` runs one ad hoc,
+without saving it; `POST /v1/segments` and friends (below) save one so it can
+be named, re-run, and listed. Every segment endpoint is server-key only — the
+write key ships in browser JavaScript, and a segment's count and membership
+are aggregate information about everyone in the project.
 
 ```sh
 curl -i http://localhost:3000/v1/segments/preview \
@@ -384,7 +386,67 @@ seven days but never invited a teammate*, and the response is:
 
 `as_of` is the instant the count describes. Events become queryable within
 seconds rather than instantly, so a count is a recent answer, not a live one —
-the timestamp says which answer you got instead of implying it is current.
+the timestamp says which answer you got instead of implying it is current. A
+repeated preview of the same tree within a short window can be served from an
+in-process cache; a cache hit still reports the `as_of` of the request that
+actually computed it, never a fresher-looking timestamp than the count itself.
+
+### Retrieving members, not just the count
+
+Add `"include": ["members"]` to get one bounded page of the people matching,
+alongside the same count:
+
+```sh
+curl -s http://localhost:3000/v1/segments/preview \
+  -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY" \
+  -H 'content-type: application/json' \
+  -d '{ "ast_version": 1, "filter": { "kind": "trait", "key": "plan", "operator": "=", "value": "trial" }, "include": ["members"] }'
+```
+
+```json
+{
+  "person_count": 128,
+  "warnings": [],
+  "as_of": "2026-08-07T09:30:00.000Z",
+  "members": [
+    { "person_id": "user-42", "first_seen": "2026-07-01T00:00:00.000Z",
+      "last_seen": "2026-08-06T09:30:00.000Z", "country": "US", "region": "CA",
+      "city": "San Francisco", "device_type": "desktop", "os": "macOS",
+      "browser": "Chrome", "referrer": "https://google.com",
+      "utm_source": "google", "utm_medium": "cpc", "utm_campaign": "launch" }
+  ],
+  "next_cursor": "eyJ...base64url...",
+  "window_exhausted": false
+}
+```
+
+Each member row carries `person_id`, `first_seen`, `last_seen`, and the ten
+`context` fields (see *Node types* below) at their **current** value — not the
+`first_touch` one, even for the four fields that are only ever recorded as
+first-touch (see the caveat below `context` for why `latest` reads the same
+value there). Traits are not returned: a per-person map of arbitrary size,
+multiplied by a hundred rows, is unbounded by construction.
+
+Pages are 100 rows, ordered `last_seen` descending. Pass the previous
+response's `next_cursor` back as `cursor` to continue:
+
+```sh
+curl -s http://localhost:3000/v1/segments/preview \
+  -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY" \
+  -H 'content-type: application/json' \
+  -d '{ "ast_version": 1, "filter": { "kind": "trait", "key": "plan", "operator": "=", "value": "trial" }, "include": ["members"], "cursor": "eyJ...base64url..." }'
+```
+
+`next_cursor` is `null` once there is no further page, or once the walk has
+served 1,000 rows (10 pages) — `window_exhausted: true` marks that second
+case specifically, so a caller can tell "you have seen everyone" apart from
+"there is more, but not through this endpoint". This is a **preview of a
+population, not an export of it**: there is no way to page past 1,000 rows,
+and no point-in-time snapshot of membership is kept — re-running the same
+segment later can return a different set as people's data changes. A cursor is
+opaque, signed for the project that issued it, and rejected with `400` if
+tampered with, built by hand, or replayed against a different project's server
+key.
 
 ### Node types
 
@@ -436,8 +498,10 @@ the server key:
 | Nesting depth | 10 |
 | Total nodes | 100 |
 | Behavioural conditions | 25 |
+| Member page size | 100 rows |
+| Member paging window | 1,000 rows (10 pages) per walk |
 
-Exceeding any of them is a `400` naming which one:
+Exceeding a tree limit is a `400` naming which one:
 
 ```json
 { "error": "filter tree is nested deeper than 10 levels", "code": "depth" }
@@ -454,14 +518,143 @@ A malformed tree is also a `400`, with a per-field path:
 
 A tree that is *valid* but too expensive to finish returns `422` — it exceeded
 the query's time or memory ceiling. Narrow a window, or drop an `ever`, and
-try again. `401` is a missing or invalid server key.
+try again. `401` is a missing or invalid server key. A malformed or tampered
+`cursor` is a `400` with an error mentioning `cursor`.
+
+### Saved segments
+
+A saved segment is a named, stored filter tree you can re-run without
+resending it, and see listed alongside your others. Create one with
+`POST /v1/segments`:
+
+```sh
+curl -i http://localhost:3000/v1/segments \
+  -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY" \
+  -H 'content-type: application/json' \
+  -d '{ "name": "Trial power users", "ast_version": 1,
+        "filter": { "kind": "trait", "key": "plan", "operator": "=", "value": "trial" } }'
+```
+
+```json
+{
+  "id": 17,
+  "name": "Trial power users",
+  "ast_version": 1,
+  "filter": { "kind": "trait", "key": "plan", "operator": "=", "value": "trial" },
+  "stale": false,
+  "last_count": null,
+  "last_evaluated_at": null,
+  "created_at": "2026-08-07T09:00:00.000Z",
+  "updated_at": "2026-08-07T09:00:00.000Z"
+}
+```
+
+The tree is validated against the exact same shape and cost limits as
+`/v1/segments/preview` — a `201` here is a guarantee it will also *run*
+cleanly later, not merely that it parsed. A duplicate name within the same
+project is a `409`.
+
+| Method & path | Does |
+| --- | --- |
+| `GET /v1/segments` | List every segment in the project, name-ordered |
+| `POST /v1/segments` | Create one |
+| `GET /v1/segments/:id` | Read one |
+| `PATCH /v1/segments/:id` | Rename it, replace its filter tree, or both |
+| `DELETE /v1/segments/:id` | Delete it — `204` |
+| `POST /v1/segments/:id/preview` | Run it and record the result |
+
+`PATCH` accepts `name`, or `ast_version` + `filter`, or both. Sending a filter
+clears the stored `last_count` / `last_evaluated_at` snapshot in the same
+statement, because a stored count describes the tree it came from; a
+rename-only `PATCH` leaves the snapshot untouched. A body that carries
+`ast_version` or `filter` at all but fails to parse as a valid tree is
+rejected with `400` and a field path, the same as a malformed body to
+`POST /v1/segments` — it is never treated as a rename-only request.
+
+`GET`, `PATCH`, and `DELETE` on a segment id that does not exist, or that
+belongs to another project, both answer `404` — never `403`, which would
+confirm the id exists. A non-numeric `:id` is a `400` naming
+`invalid_segment_id`, rather than a `503` from an unbound query parameter.
+
+`POST /v1/segments/:id/preview` runs the *stored* tree — it accepts the same
+`include`/`cursor` body as the ad hoc preview endpoint and returns the same
+shape, minus `warnings` (nothing to warn about a tree that already saved
+cleanly) — and then records `last_count` / `last_evaluated_at` on the segment,
+whichever output mode you asked for:
+
+```sh
+curl -s -X POST http://localhost:3000/v1/segments/17/preview \
+  -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY"
+# {"person_count":128,"as_of":"2026-08-07T09:30:00.000Z"}
+```
+
+**A row that predates today's AST or caps is marked, not hidden.** If a stored
+tree no longer parses — written by an older build, or against a schema
+version this release no longer understands — `GET`/`PATCH`/`POST .../preview`
+on that one segment return `400`:
+
+```json
+{ "error": "stored filter tree does not parse under ast_version 1", "ast_version": 1 }
+```
+
+but `GET /v1/segments` never fails the whole list for one bad row. That
+segment appears with `"filter": null, "stale": true` so you can still see it,
+rename it, or delete it, while every other segment in the list renders
+normally — every listed segment carries `stale` (`false` for an ordinary one)
+so a client can check the one field regardless of which route the row came
+from.
+
+### Autocomplete: event and property names
+
+`GET /v1/schema/events` and `GET /v1/schema/properties` list the event names
+and property keys a project has recorded — the raw source a segment builder's
+autocomplete can be built on. Both are server-key only, for the same reason as
+`/v1/segments/preview`: a project's event taxonomy describes its product, and
+the browser-shipped write key must not be able to read it.
+
+**Only events carrying at least one property are discoverable this way.** Both
+endpoints read from `event_schema`, which is fed by an `ARRAY JOIN` over each
+event's property map — an event with an empty map produces no rows at all, so
+it is invisible to `/v1/schema/events` too, not merely absent from
+`/v1/schema/properties`. A `retry_semantics` event with no properties will
+never show up in an events autocomplete built on this endpoint, even though it
+is sitting in `events` right now. If your product sends property-less events
+you want to filter or discover this way, give them at least one property.
+
+```sh
+curl -s http://localhost:3000/v1/schema/events?q=import \
+  -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY"
+# {"events":[{"event_name":"import_started"}]}
+
+curl -s http://localhost:3000/v1/schema/properties?event=import_started \
+  -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY"
+# {"properties":[{"property_key":"rows","value_kind":"number"},{"property_key":"source","value_kind":"string"}]}
+```
+
+| Parameter | Applies to | Meaning |
+| --- | --- | --- |
+| `q` | both | prefix filter, matched against the event name or property key |
+| `event` | properties only | restrict to one event's properties |
+| `limit` | both | max rows to return, default 50, capped at 100 |
+
+`limit` above 100 is rejected with `400`, not silently truncated. Results are
+**name-ordered and unranked** — no frequency or recency signal, because
+`event_schema` carries no counts. Deliberately thin: prefix vs. fuzzy
+matching, and ranking by frequency, recency, or name, are questions for
+whichever builder UI ends up consuming this: this ships the raw read any of
+those can be built on top of, rather than a guess at one of them.
 
 ### What this does not do yet
 
-Only counting is implemented. There is **no saved-segment API** — no way to
-name a segment, store it, or list stored ones — and **no way to retrieve the
-members** of a segment, only to count them. Segment membership is also not
-recomputed or tracked over time. Those are planned; none of them exist today.
+There is **no builder UI** — every segment above is built and run through the
+HTTP API directly, in JSON. There is **no export** of a segment's membership:
+the members endpoints are a bounded 1,000-row preview, not a way to pull an
+entire population out. There is **no point-in-time membership** — a saved
+segment stores its last count and when it was computed, not who was in it at
+that moment, so you cannot ask "who matched this segment last Tuesday".
+Membership is also not recomputed automatically on any schedule; a saved
+segment's snapshot only updates when you explicitly run it. Those are
+planned; none of them exist today.
 
 
 ## Upgrading

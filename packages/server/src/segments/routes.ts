@@ -8,8 +8,9 @@ import {
   SegmentValidationError,
   compileSegment,
   treeHash,
+  validateTree,
 } from '@lyraflow/core'
-import type { ClickHouseClient } from '@lyraflow/db'
+import type { ClickHouseClient, Pool } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { Project, ProjectCache } from '../auth/project-cache.js'
@@ -17,13 +18,78 @@ import type { Readiness } from '../health.js'
 import { SERVER_KEY_HEADER, makeAuthenticator } from '../ingest/routes.js'
 import { type MemberRow, SegmentCache } from './cache.js'
 import { SegmentTimeoutError, runSegment, runSegmentMembers } from './execute.js'
+import {
+  DuplicateNameError,
+  type ListedSegment,
+  SegmentStore,
+  type StoredSegment,
+  StoredTreeError,
+} from './store.js'
 
 export interface SegmentDeps {
   projects: ProjectCache
   readiness: Readiness
   ch: ClickHouseClient
+  pg: Pool
   /** The configured ClickHouse database; the dictionaries live in it. */
   database: string
+}
+
+/**
+ * Maps a stored segment to the wire shape — snake_case, like every other
+ * endpoint. Also accepts `ListedSegment` (see store.ts) — the shape `list()`
+ * returns for a row it could not parse — so a bad row surfaces on the wire as
+ * `filter: null, stale: true` rather than the whole list request 400ing.
+ * `stale` is always present, `false` for every ordinary row, so a client can
+ * check one field regardless of which route it came from.
+ */
+function toWire(s: StoredSegment | ListedSegment) {
+  return {
+    id: s.id,
+    name: s.name,
+    ast_version: s.astVersion,
+    filter: s.filter,
+    stale: 'stale' in s ? s.stale : false,
+    last_count: s.lastCount,
+    last_evaluated_at: s.lastEvaluatedAt,
+    created_at: s.createdAt,
+    updated_at: s.updatedAt,
+  }
+}
+
+const CreateBody = z.object({ name: z.string().min(1).max(200) })
+const PatchBody = z.object({ name: z.string().min(1).max(200).optional() })
+
+/**
+ * Whether a PATCH body claims to carry a filter tree at all, checked on the
+ * RAW body rather than on `SegmentQuery.safeParse(...).success`. Those two
+ * are not the same question: a body can fail to parse as a `SegmentQuery`
+ * either because it carries no tree fields (a legitimate rename-only PATCH)
+ * or because it carries a MALFORMED tree — and collapsing both to
+ * `query.success === false` is exactly how a malformed tree used to be
+ * treated as "no tree sent" (see the PATCH route below, and the finding this
+ * closes): `store.update` was called with `query: undefined`, its COALESCEs
+ * no-opped, and the route answered 200 with the OLD filter unchanged instead
+ * of rejecting the bad one.
+ */
+function bodyCarriesTreeFields(body: unknown): boolean {
+  return typeof body === 'object' && body !== null && ('ast_version' in body || 'filter' in body)
+}
+
+/**
+ * Parses the `:id` path param. A non-numeric or non-positive id is a
+ * malformed request, not a lookup miss — unlike the cross-project 404 case,
+ * there is no existence to leak by rejecting it outright, so this returns
+ * 400 rather than folding into the "not found" path. Without this guard,
+ * `Number('not-a-number')` is `NaN`, which reaches Postgres as a query
+ * parameter and trips the generic error handler into a 503 for what is a
+ * deterministic client error — exactly what app.ts's own error handler
+ * documents never doing, since it tells the client to retry something that
+ * will fail identically forever.
+ */
+function parseSegmentId(raw: string): number | null {
+  const id = Number(raw)
+  return Number.isInteger(id) && id > 0 ? id : null
 }
 
 /**
@@ -170,7 +236,7 @@ function decodeWalkCursor(s: string, key: Buffer): WalkCursor {
  * segment count is aggregate information about every person in the project.
  */
 export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): void {
-  const { projects, readiness, ch, database } = deps
+  const { projects, readiness, ch, pg, database } = deps
 
   const authenticateServer = makeAuthenticator(
     readiness,
@@ -181,6 +247,7 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
   )
 
   const cache = new SegmentCache()
+  const store = new SegmentStore(pg)
 
   /**
    * Runs a parsed tree and shapes the response.
@@ -213,9 +280,23 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
     // than a total that shrinks as the cursor advances, which is what
     // `count() OVER ()` would have produced (it counts rows remaining after
     // the cursor predicate, verified against a live server).
+    //
+    // A cache hit adopts the STORED as_of rather than the `asOf` minted above
+    // for this request — mirroring the member path below. `asOf` is minted
+    // before this cache is even consulted, so using it unconditionally would
+    // stamp a cache HIT (a count computed possibly seconds ago) with an
+    // instant no query actually ran at, silently over-claiming freshness on
+    // every hit within the TTL. Only a genuine miss's freshly-computed count
+    // gets the freshly-minted instant, because that is the one case where
+    // they actually describe the same moment.
     const countKey = `${projectId}:count:${hash}`
-    let count = cache.get(countKey)?.count
-    if (count === undefined) {
+    const cachedCount = cache.get(countKey)
+    let count: number
+    let countAsOf: string
+    if (cachedCount) {
+      count = cachedCount.count
+      countAsOf = cachedCount.asOf
+    } else {
       const compiled = compileSegment({
         query,
         projectId,
@@ -224,11 +305,18 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
         select: 'count',
       })
       count = await runSegment({ client: ch, compiled })
-      cache.set(countKey, { count, members: [], asOf })
+      countAsOf = asOf
+      cache.set(countKey, { count, members: [], asOf: countAsOf })
     }
 
     if (!opts.wantMembers) {
-      return { count, members: [] as MemberRow[], asOf, windowExhausted: false, pagesServed: 0 }
+      return {
+        count,
+        members: [] as MemberRow[],
+        asOf: countAsOf,
+        windowExhausted: false,
+        pagesServed: 0,
+      }
     }
 
     // The window ceiling, checked before any member query runs. A caller who
@@ -356,6 +444,207 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
       if (err instanceof CursorError) return reply.code(400).send({ error: 'invalid cursor' })
       if (err instanceof SegmentTimeoutError) {
         return reply.code(422).send({ error: err.message })
+      }
+      throw err
+    }
+  })
+
+  app.get('/v1/segments', async (req, reply) => {
+    const project = await authenticateServer(req, reply)
+    if (!project) return
+    // Unlike get/patch/run below, list() never throws StoredTreeError — a
+    // row that fails to parse comes back marked `stale: true` instead (see
+    // SegmentStore#list), so one bad row cannot take the rest of the list
+    // down with it.
+    const segments = await store.list(project.id)
+    return reply.code(200).send({ segments: segments.map(toWire) })
+  })
+
+  app.post('/v1/segments', async (req, reply) => {
+    const project = await authenticateServer(req, reply)
+    if (!project) return
+    const meta = CreateBody.safeParse(req.body)
+    const query = SegmentQuery.safeParse(req.body)
+    if (!meta.success || !query.success) {
+      return reply.code(400).send({ error: 'invalid segment' })
+    }
+    // Shape-valid is not cap-valid: SegmentQuery.safeParse only checks the
+    // AST's shape, never depth/node/behaviour caps. Without this, a tree
+    // that is shape-valid but over-cap would save with a 201 and then fail
+    // on every single run — a segment that looks fine until someone runs it.
+    try {
+      validateTree(query.data)
+    } catch (err) {
+      if (err instanceof SegmentValidationError) {
+        return reply.code(400).send({ error: err.message, code: err.code })
+      }
+      throw err
+    }
+    try {
+      const created = await store.create(project.id, meta.data.name, query.data)
+      return reply.code(201).send(toWire(created))
+    } catch (err) {
+      if (err instanceof DuplicateNameError) return reply.code(409).send({ error: err.message })
+      throw err
+    }
+  })
+
+  app.get<{ Params: { id: string } }>('/v1/segments/:id', async (req, reply) => {
+    const project = await authenticateServer(req, reply)
+    if (!project) return
+    const id = parseSegmentId(req.params.id)
+    if (id === null) return reply.code(400).send({ error: 'invalid_segment_id' })
+    try {
+      const found = await store.get(project.id, id)
+      if (!found) return reply.code(404).send({ error: 'segment_not_found' })
+      return reply.code(200).send(toWire(found))
+    } catch (err) {
+      if (err instanceof StoredTreeError) {
+        return reply.code(400).send({ error: err.message, ast_version: err.astVersion })
+      }
+      throw err
+    }
+  })
+
+  app.patch<{ Params: { id: string } }>('/v1/segments/:id', async (req, reply) => {
+    const project = await authenticateServer(req, reply)
+    if (!project) return
+    const id = parseSegmentId(req.params.id)
+    if (id === null) return reply.code(400).send({ error: 'invalid_segment_id' })
+    const meta = PatchBody.safeParse(req.body)
+    if (!meta.success) return reply.code(400).send({ error: 'invalid segment' })
+    // A body carrying a tree updates the filter; one carrying only a name
+    // does not, which is what keeps the snapshot on a rename (see
+    // SegmentStore#update).
+    const query = SegmentQuery.safeParse(req.body)
+    // A tree was SENT but did not parse: reject outright, with field paths,
+    // the same way POST /v1/segments would for the identical body. Without
+    // this, `query.success === false` for a malformed tree is
+    // indistinguishable below from "no tree in this body at all" — a
+    // rename-only PATCH — and the malformed tree would be silently dropped
+    // rather than rejected.
+    if (!query.success && bodyCarriesTreeFields(req.body)) {
+      return reply.code(400).send({
+        error: 'invalid filter tree',
+        detail: query.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
+      })
+    }
+    // Same cap check as create, and for the same reason — an update can
+    // swap in a fresh over-cap tree just as easily as a create can start
+    // with one. Skipped entirely for a rename-only body (query.success is
+    // false), which carries no tree to validate.
+    if (query.success) {
+      try {
+        validateTree(query.data)
+      } catch (err) {
+        if (err instanceof SegmentValidationError) {
+          return reply.code(400).send({ error: err.message, code: err.code })
+        }
+        throw err
+      }
+    }
+    try {
+      const updated = await store.update(project.id, id, {
+        name: meta.data.name,
+        query: query.success ? query.data : undefined,
+      })
+      if (!updated) return reply.code(404).send({ error: 'segment_not_found' })
+      return reply.code(200).send(toWire(updated))
+    } catch (err) {
+      if (err instanceof DuplicateNameError) return reply.code(409).send({ error: err.message })
+      if (err instanceof StoredTreeError) {
+        return reply.code(400).send({ error: err.message, ast_version: err.astVersion })
+      }
+      throw err
+    }
+  })
+
+  app.delete<{ Params: { id: string } }>('/v1/segments/:id', async (req, reply) => {
+    const project = await authenticateServer(req, reply)
+    if (!project) return
+    const id = parseSegmentId(req.params.id)
+    if (id === null) return reply.code(400).send({ error: 'invalid_segment_id' })
+    const removed = await store.remove(project.id, id)
+    if (!removed) return reply.code(404).send({ error: 'segment_not_found' })
+    return reply.code(204).send()
+  })
+
+  /**
+   * Runs a SAVED segment's stored tree and records the result on it. Reuses
+   * `runTree` — the same walk/cache/cursor machinery the ad-hoc preview route
+   * above uses — rather than a second implementation, so the two can never
+   * diverge on cursor signing, caching, or the window ceiling.
+   */
+  app.post<{ Params: { id: string } }>('/v1/segments/:id/preview', async (req, reply) => {
+    const project = await authenticateServer(req, reply)
+    if (!project) return
+    const id = parseSegmentId(req.params.id)
+    if (id === null) return reply.code(400).send({ error: 'invalid_segment_id' })
+    const options = PreviewOptions.safeParse(req.body ?? {})
+    if (!options.success) return reply.code(400).send({ error: 'invalid preview options' })
+
+    let found: StoredSegment | null
+    try {
+      found = await store.get(project.id, id)
+    } catch (err) {
+      if (err instanceof StoredTreeError) {
+        return reply.code(400).send({ error: err.message, ast_version: err.astVersion })
+      }
+      throw err
+    }
+    if (!found) return reply.code(404).send({ error: 'segment_not_found' })
+
+    // Already parsed once by #hydrate on the way out of the store — this
+    // reconstructs the SegmentQuery shape runTree expects rather than
+    // re-validating it.
+    const query = { ast_version: found.astVersion, filter: found.filter } as SegmentQuery
+    const wantMembers = options.data.include?.includes('members') ?? false
+    try {
+      const result = await runTree(project, query, {
+        wantMembers,
+        cursor: options.data.cursor,
+      })
+      // Both modes write the snapshot: the count is computed either way, so
+      // asking for members must not leave a staler snapshot behind than
+      // asking for a count would.
+      await store.recordRun(project.id, found.id, result.count, new Date(result.asOf))
+      const last = result.members.at(-1)
+      const canOfferNext =
+        wantMembers && result.members.length === MEMBER_PAGE_SIZE && !result.windowExhausted
+      return reply.code(200).send({
+        person_count: result.count,
+        as_of: result.asOf,
+        ...(wantMembers
+          ? {
+              members: result.members,
+              next_cursor:
+                canOfferNext && last
+                  ? encodeWalkCursor(
+                      { lastSeen: last.last_seen, personId: last.person_id, asOf: result.asOf },
+                      result.pagesServed,
+                      cursorSigningKey(project),
+                    )
+                  : null,
+              window_exhausted: result.windowExhausted,
+            }
+          : {}),
+      })
+    } catch (err) {
+      if (err instanceof CursorError) return reply.code(400).send({ error: 'invalid cursor' })
+      if (err instanceof SegmentTimeoutError) {
+        return reply.code(422).send({ error: err.message })
+      }
+      // BACKSTOP, not the primary defence — create/update now call
+      // validateTree before persisting, so a NEW segment can no longer save
+      // over-cap. This stays for rows written before that check existed (or
+      // if the caps are tightened again later): a stored tree can still fall
+      // outside today's caps even though it once parsed fine, the same
+      // "untrusted on read" situation StoredTreeError exists for, just
+      // caught one level down inside compileSegment (via runTree) instead of
+      // at hydration. Do not delete this as redundant with the write-time
+      // check — it is not, for any row that predates it.
+      if (err instanceof SegmentValidationError) {
+        return reply.code(400).send({ error: err.message, code: err.code })
       }
       throw err
     }
