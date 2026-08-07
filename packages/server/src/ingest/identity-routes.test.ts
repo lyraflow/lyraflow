@@ -299,6 +299,7 @@ describe('POST /v1/identify (mocked deps): a failing binding write', () => {
     slug: 'mocked',
     retentionMonths: 24,
     monthlyEventQuota: 1_000_000,
+    serverKeyHash: 'mocked-server-key-hash',
   }
   const projects = {
     byWriteKey: async (key: string) => (key === 'wk_mock' ? project : null),

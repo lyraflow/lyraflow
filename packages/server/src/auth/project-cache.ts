@@ -6,6 +6,19 @@ export interface Project {
   slug: string
   retentionMonths: number
   monthlyEventQuota: number
+  /**
+   * SHA-256 of the project's server key, at rest in Postgres. Nothing that
+   * serialises a `Project` to a response ever exists in this codebase, so it
+   * never crosses the wire — it is a per-project, server-side, stable value
+   * usable as an HMAC key without adding new configuration or key
+   * management (segment cursor signing is the first consumer; see
+   * routes.ts). Note for whoever reaches for it next: this does not defend
+   * against a caller who already holds that project's plaintext server key,
+   * since SHA-256 is a public, unkeyed function anyone can run locally —
+   * it only stops a caller who does not already hold a valid key for the
+   * project from forging a signature.
+   */
+  serverKeyHash: string
 }
 
 interface Entry {
@@ -139,9 +152,12 @@ export class ProjectCache {
         slug: string
         retention_months: number
         monthly_event_quota: string
-      }>(`SELECT id, slug, retention_months, monthly_event_quota FROM projects WHERE ${where}`, [
-        param,
-      ])
+        server_key_hash: string
+      }>(
+        `SELECT id, slug, retention_months, monthly_event_quota, server_key_hash
+         FROM projects WHERE ${where}`,
+        [param],
+      )
       const row = res.rows[0]
       const value: Project | null = row
         ? {
@@ -149,6 +165,7 @@ export class ProjectCache {
             slug: row.slug,
             retentionMonths: row.retention_months,
             monthlyEventQuota: Number(row.monthly_event_quota),
+            serverKeyHash: row.server_key_hash,
           }
         : null
       this.#store(cacheKey, value)

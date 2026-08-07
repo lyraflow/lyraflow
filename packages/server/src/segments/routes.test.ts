@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHmac, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { MEMBER_PAGE_SIZE, MEMBER_WINDOW_MAX, encodeCursor } from '@lyraflow/core'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
@@ -38,6 +38,35 @@ const preview = (body: unknown, headers: Record<string, string> = {}) =>
     },
     payload: body as never,
   })
+
+/**
+ * Mirrors routes.ts's cursorSigningKey/encodeWalkCursor exactly, so tests
+ * below can hand-build a cursor this route accepts as genuinely its own —
+ * needed to exercise the window ceiling without actually walking hundreds
+ * of real pages. `hashServerKey(SERVER_KEY)` is the same value the server
+ * itself resolves for this project via `project.serverKeyHash` (see
+ * ProjectCache#byServerKey); nothing here reaches into the server's
+ * internals, it recomputes what the server would compute from public
+ * inputs (the label) and one value the server already keeps.
+ *
+ * Any drift from routes.ts's algorithm would make every hand-built cursor
+ * below fail with 400 — a fast, loud failure mode, not a silently-wrong one.
+ */
+function signedWireCursor(
+  lastSeen: string,
+  personId: string,
+  asOf: string,
+  pagesServed: number,
+): string {
+  const key = createHmac('sha256', hashServerKey(SERVER_KEY))
+    .update('lyraflow.segment-cursor.v1')
+    .digest()
+  const payload = JSON.stringify([lastSeen, personId, asOf, pagesServed])
+  const signature = createHmac('sha256', key).update(payload).digest('base64url')
+  return Buffer.from(JSON.stringify([lastSeen, personId, asOf, pagesServed, signature])).toString(
+    'base64url',
+  )
+}
 
 beforeAll(async () => {
   await migrate({
@@ -187,26 +216,26 @@ describe('POST /v1/segments/preview', () => {
   })
 
   it('reports the same as_of for every page of one walk, even across a cache eviction', async () => {
-    // Pages of one walk must not claim different moments. Asserted with a
-    // hand-built cursor rather than by paginating a small fixture: the
-    // fixture may not fill a page, and `if (cursor) {...}` would then assert
-    // nothing at all while still passing. The eviction case is the one that
-    // matters — as_of recovered from the cache would survive a cache hit and
-    // silently re-mint on a miss.
+    // Pages of one walk must not claim different moments. Continued with a
+    // REAL next_cursor (the fixture seeds a full first page, so page 1
+    // always offers one) rather than a hand-built one: this route now signs
+    // its cursors, so only a cursor it minted itself is accepted at all —
+    // see "rejects a cursor built with the public core encodeCursor" below.
+    // The eviction case is still what matters here: page 2's cursor was
+    // never cached before this call (a guaranteed miss), and as_of recovered
+    // from the cache would survive a cache HIT and only re-mint on a miss —
+    // this proves it does not, even on a guaranteed miss.
     const first = await preview({ ast_version: 1, filter: trait, include: ['members'] })
     const walkAsOf = first.json().as_of
     expect(typeof walkAsOf).toBe('string')
+    const cursor = first.json().next_cursor
+    expect(typeof cursor).toBe('string')
 
-    const handmade = encodeCursor({
-      lastSeen: '2099-01-01 00:00:00.000',
-      personId: '',
-      asOf: walkAsOf,
-    })
     const second = await preview({
       ast_version: 1,
       filter: trait,
       include: ['members'],
-      cursor: handmade,
+      cursor,
     })
     expect(second.statusCode).toBe(200)
     expect(second.json().as_of).toBe(walkAsOf)
@@ -221,6 +250,67 @@ describe('POST /v1/segments/preview', () => {
     })
     expect(res.statusCode).toBe(400)
     expect(res.json().error).toMatch(/cursor/i)
+  })
+
+  it('rejects a cursor built with the public core encodeCursor, not this route\'s own signed one', async () => {
+    // core's encodeCursor is exported and the brief sanctions its use for
+    // building test cursors — but this route mints its own signed cursors
+    // and must not treat a well-formed, UNSIGNED core cursor as one of its
+    // own. Without this, a caller could read lastSeen/personId off any
+    // response it already has and hand-roll an unbounded walk that never
+    // trips the window ceiling.
+    const bare = encodeCursor({
+      lastSeen: '2099-01-01 00:00:00.000',
+      personId: '',
+      asOf: new Date().toISOString(),
+    })
+    const res = await preview({
+      ast_version: 1,
+      filter: trait,
+      include: ['members'],
+      cursor: bare,
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toMatch(/cursor/i)
+  })
+
+  it('rejects a legitimately-issued cursor that has been tampered with', async () => {
+    // The exact forgery the signature exists to catch: take a cursor this
+    // server actually issued, and change the field the window ceiling is
+    // enforced against (pagesServed) without recomputing the signature —
+    // the way a caller trying to defeat the ceiling would, having decoded
+    // the wire format from the outside (it is base64url JSON, not opaque to
+    // inspection) but not knowing the per-project signing key.
+    const first = await preview({ ast_version: 1, filter: trait, include: ['members'] })
+    const real = first.json().next_cursor
+    expect(typeof real).toBe('string')
+
+    const decoded = JSON.parse(Buffer.from(real, 'base64url').toString('utf8'))
+    decoded[3] = 0
+    const tampered = Buffer.from(JSON.stringify(decoded)).toString('base64url')
+
+    const res = await preview({
+      ast_version: 1,
+      filter: trait,
+      include: ['members'],
+      cursor: tampered,
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toMatch(/cursor/i)
+  })
+
+  it('offers a next_cursor for a full page under budget', async () => {
+    // Nothing before this asserted next_cursor is ever actually offered —
+    // several tests receive a full page (the fixture seeds exactly
+    // MEMBER_PAGE_SIZE matching people) but none checked next_cursor itself,
+    // so a mutant that dropped the "page was full" clause from the
+    // next_cursor decision entirely would have passed the whole suite.
+    const res = await preview({ ast_version: 1, filter: trait, include: ['members'] })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.members).toHaveLength(MEMBER_PAGE_SIZE)
+    expect(body.window_exhausted).toBe(false)
+    expect(typeof body.next_cursor).toBe('string')
   })
 
   it('rejects an unknown include value rather than ignoring it', async () => {
@@ -240,17 +330,20 @@ describe('POST /v1/segments/preview', () => {
     // The fixture is far too small to walk a real MEMBER_WINDOW_MAX-row
     // window (it would take MEMBER_WINDOW_MAX / MEMBER_PAGE_SIZE real pages
     // to reach it), so this exercises the ceiling by construction: a
-    // hand-built wire cursor claiming the walk has already served the whole
-    // page budget. A real walk reaches exactly this state after its last
-    // allowed page; this jumps straight there rather than walking it.
-    //
-    // The wire format is routes.ts's private extension of the core cursor —
-    // [lastSeen, personId, asOf, pagesServed] — built by hand here because
-    // it is not exported; encodeCursor (core) has no page-count field to set.
+    // properly SIGNED wire cursor (see signedWireCursor above) claiming the
+    // walk has already served the whole page budget. A real walk reaches
+    // exactly this state after its last allowed page; this jumps straight
+    // there rather than walking it. Signed, not hand-rolled unsigned JSON,
+    // because this route now rejects anything it did not itself sign — an
+    // unsigned version of this exact payload is covered by the malformed/
+    // forged-cursor tests above, which assert 400, not 200.
     const pagesServedAtCeiling = MEMBER_WINDOW_MAX / MEMBER_PAGE_SIZE
-    const atCeiling = Buffer.from(
-      JSON.stringify(['2099-01-01 00:00:00.000', '', new Date().toISOString(), pagesServedAtCeiling]),
-    ).toString('base64url')
+    const atCeiling = signedWireCursor(
+      '2099-01-01 00:00:00.000',
+      '',
+      new Date().toISOString(),
+      pagesServedAtCeiling,
+    )
 
     const res = await preview({
       ast_version: 1,
@@ -281,14 +374,12 @@ describe('POST /v1/segments/preview', () => {
     // drops the "window has room" clause from the next_cursor decision (and
     // offers one on any full page, ceiling or not) fails only this
     // assertion, not the ones above.
-    const oneShort = Buffer.from(
-      JSON.stringify([
-        '2099-01-01 00:00:00.000',
-        '',
-        new Date().toISOString(),
-        MEMBER_WINDOW_MAX / MEMBER_PAGE_SIZE - 1,
-      ]),
-    ).toString('base64url')
+    const oneShort = signedWireCursor(
+      '2099-01-01 00:00:00.000',
+      '',
+      new Date().toISOString(),
+      MEMBER_WINDOW_MAX / MEMBER_PAGE_SIZE - 1,
+    )
 
     const res = await preview({
       ast_version: 1,

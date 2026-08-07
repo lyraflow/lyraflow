@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from 'node:crypto'
 import {
   CursorError,
   MEMBER_PAGE_SIZE,
@@ -5,14 +6,13 @@ import {
   SegmentQuery,
   SegmentValidationError,
   compileSegment,
-  decodeCursor,
   treeHash,
   type Cursor,
 } from '@lyraflow/core'
 import type { ClickHouseClient } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import type { ProjectCache } from '../auth/project-cache.js'
+import type { Project, ProjectCache } from '../auth/project-cache.js'
 import type { Readiness } from '../health.js'
 import { SERVER_KEY_HEADER, makeAuthenticator } from '../ingest/routes.js'
 import { SegmentCache, type MemberRow } from './cache.js'
@@ -46,42 +46,72 @@ const MAX_MEMBER_PAGES = Math.floor(MEMBER_WINDOW_MAX / MEMBER_PAGE_SIZE)
 
 /**
  * The wire cursor: the tree position (`Cursor`, from @lyraflow/core) plus a
- * count of pages already served in this walk. The count is what lets
- * `MEMBER_WINDOW_MAX` be enforced — a caller cannot get a page budget past
- * the ceiling because the number they would need to lie about travels with
- * the walk itself, the same way `as_of` does and for the same reason: it must
- * survive a cache eviction, so it cannot be recovered from anywhere the cache
- * could have dropped it.
+ * count of pages already served in this walk, signed with an HMAC keyed per
+ * project (see `cursorSigningKey`). The count is what lets
+ * `MEMBER_WINDOW_MAX` be enforced; the signature is what stops a caller from
+ * lying about it. `lastSeen`/`personId` alone are not secret — a caller reads
+ * them straight off the response it already holds — so without a signature
+ * anyone could hand-build a "page 2" cursor with `pagesServed` fixed at 1
+ * forever and the ceiling would never trip. The signature is checked over
+ * the WHOLE payload, so `lastSeen`/`personId` cannot be swapped in for a
+ * different position either without invalidating it.
  *
  * The shared `Cursor` type from core stays untouched (still exactly
  * `lastSeen`/`personId`/`asOf`) — core's cursor tests deliberately pin that
- * shape ("nothing tenant-scoped can ride along"), and a page count is not
- * core's concern. This wraps it instead of widening it.
+ * shape ("nothing tenant-scoped can ride along"), and a page count and a
+ * signature are not core's concern. This wraps it instead of widening it.
  */
 interface WalkCursor {
   cursor: Cursor
   pagesServed: number
 }
 
-function encodeWalkCursor(cursor: Cursor, pagesServed: number): string {
+/**
+ * Derives a per-project HMAC key from `project.serverKeyHash` — already a
+ * per-project, server-side, stable secret this process holds for every
+ * authenticated request (see `Project.serverKeyHash`) — via a labelled
+ * subkey rather than the raw hash, so this specific use stays
+ * cryptographically independent of any other future use of the same stored
+ * value. Needs no new configuration or key management: nothing is generated
+ * or stored beyond what auth already required.
+ */
+function cursorSigningKey(project: Pick<Project, 'serverKeyHash'>): Buffer {
+  return createHmac('sha256', project.serverKeyHash)
+    .update('lyraflow.segment-cursor.v1')
+    .digest()
+}
+
+function signCursorPayload(payload: string, key: Buffer): string {
+  return createHmac('sha256', key).update(payload).digest('base64url')
+}
+
+/**
+ * Encodes this route's own wire cursor. Only this function ever produces one
+ * — see `decodeWalkCursor` for why nothing else, including core's public
+ * `encodeCursor`, is accepted back.
+ */
+function encodeWalkCursor(cursor: Cursor, pagesServed: number, key: Buffer): string {
+  const payload = JSON.stringify([cursor.lastSeen, cursor.personId, cursor.asOf, pagesServed])
+  const signature = signCursorPayload(payload, key)
   return Buffer.from(
-    JSON.stringify([cursor.lastSeen, cursor.personId, cursor.asOf, pagesServed]),
+    JSON.stringify([cursor.lastSeen, cursor.personId, cursor.asOf, pagesServed, signature]),
   ).toString('base64url')
 }
 
 /**
- * Decodes the wire cursor. A 4-element walk cursor (see `encodeWalkCursor`)
- * is the normal case; a bare 3-element core cursor — hand-built, or from a
- * client that predates page tracking — is also accepted and credited with
- * exactly one page served. That is the least progress consistent with asking
- * for a second page at all, so a bare cursor can only UNDER-count toward the
- * ceiling, never grant extra budget past it.
+ * Decodes and verifies the wire cursor. Anything that is not a validly
+ * signed cursor issued by THIS route for THIS project is rejected outright
+ * — including a well-formed, unsigned cursor built with core's public
+ * `encodeCursor`. That function's existence and export do not obligate this
+ * route to accept its output: this route mints its own cursors and a caller
+ * gets no credit for reconstructing something that merely looks like one.
  *
- * Every failure collapses to `CursorError`, same as `decodeCursor` — a
- * malformed walk cursor and a malformed tree cursor are indistinguishable to
- * a caller and should produce the same 400.
+ * Every failure — malformed base64/JSON, wrong shape, or a signature that
+ * does not verify — collapses to `CursorError`, same as core's
+ * `decodeCursor`: a caller cannot act differently on "not a cursor" than on
+ * "forged cursor", and the distinction would only ever reach a log.
  */
-function decodeWalkCursor(s: string): WalkCursor {
+function decodeWalkCursor(s: string, key: Buffer): WalkCursor {
   let parsed: unknown
   try {
     parsed = JSON.parse(Buffer.from(s, 'base64url').toString('utf8'))
@@ -89,21 +119,32 @@ function decodeWalkCursor(s: string): WalkCursor {
     throw new CursorError()
   }
   if (
-    Array.isArray(parsed) &&
-    parsed.length === 4 &&
-    typeof parsed[0] === 'string' &&
-    typeof parsed[1] === 'string' &&
-    typeof parsed[2] === 'string' &&
-    typeof parsed[3] === 'number' &&
-    Number.isInteger(parsed[3]) &&
-    parsed[3] >= 0
+    !Array.isArray(parsed) ||
+    parsed.length !== 5 ||
+    typeof parsed[0] !== 'string' ||
+    typeof parsed[1] !== 'string' ||
+    typeof parsed[2] !== 'string' ||
+    typeof parsed[3] !== 'number' ||
+    !Number.isInteger(parsed[3]) ||
+    parsed[3] < 0 ||
+    typeof parsed[4] !== 'string'
   ) {
-    return {
-      cursor: { lastSeen: parsed[0], personId: parsed[1], asOf: parsed[2] },
-      pagesServed: parsed[3],
-    }
+    throw new CursorError()
   }
-  return { cursor: decodeCursor(s), pagesServed: 1 }
+  const [lastSeen, personId, asOf, pagesServed, signature] = parsed
+  const payload = JSON.stringify([lastSeen, personId, asOf, pagesServed])
+  const expected = Buffer.from(signCursorPayload(payload, key))
+  const given = Buffer.from(signature)
+
+  // timingSafeEqual throws on a length mismatch instead of returning false —
+  // and a length mismatch already means "not a valid signature" — so it is
+  // handled explicitly rather than letting a short/long forged signature
+  // crash the request instead of 400ing it.
+  if (expected.length !== given.length || !timingSafeEqual(expected, given)) {
+    throw new CursorError()
+  }
+
+  return { cursor: { lastSeen, personId, asOf }, pagesServed }
 }
 
 /**
@@ -138,11 +179,13 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
    * different shapes under the same tree.
    */
   async function runTree(
-    projectId: number,
+    project: Project,
     query: SegmentQuery,
     opts: { wantMembers: boolean; cursor?: string },
   ) {
-    const walk = opts.cursor === undefined ? undefined : decodeWalkCursor(opts.cursor)
+    const projectId = project.id
+    const signingKey = cursorSigningKey(project)
+    const walk = opts.cursor === undefined ? undefined : decodeWalkCursor(opts.cursor, signingKey)
     const cursor = walk?.cursor
     const pagesServed = walk?.pagesServed ?? 0
     const hash = treeHash({ ast_version: query.ast_version, filter: query.filter })
@@ -266,7 +309,7 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
     const wantMembers = options.data.include?.includes('members') ?? false
 
     try {
-      const result = await runTree(project.id, parsed.data, {
+      const result = await runTree(project, parsed.data, {
         wantMembers,
         cursor: options.data.cursor,
       })
@@ -289,6 +332,7 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
                   ? encodeWalkCursor(
                       { lastSeen: last.last_seen, personId: last.person_id, asOf: result.asOf },
                       result.pagesServed,
+                      cursorSigningKey(project),
                     )
                   : null,
               window_exhausted: result.windowExhausted,

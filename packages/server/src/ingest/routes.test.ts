@@ -327,6 +327,7 @@ describe('ingest routes (mocked deps)', () => {
     slug: 'mocked',
     retentionMonths: 24,
     monthlyEventQuota: 1_000_000,
+    serverKeyHash: 'mocked-server-key-hash',
   }
 
   // Minimal fakes satisfying only the methods routes.ts actually calls; cast
