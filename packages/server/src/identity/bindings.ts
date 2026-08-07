@@ -115,6 +115,15 @@ export class IdentityBindings {
    * device. Single-person reads use this instead of the ClickHouse dictionary
    * (which is refreshed on a schedule), so they see the effect of an
    * identify() immediately rather than after the next refresh.
+   *
+   * Deliberately ignorant of person_aliases: this class owns identity_bindings
+   * only. A caller who needs the full alias-merged group (every id that was
+   * ever merged INTO `personId` via PersonAliases, not just devices bound
+   * directly to it) must resolve that group first and pass every member's id
+   * through {@link devicesForAny} — see identity/person.ts's read route,
+   * which is the one place that composes the two. `personId` here is treated
+   * as a single opaque id, not necessarily a canonical: this method makes no
+   * assumption about aliasing either way.
    */
   async personIdsFor(projectId: number, personId: string): Promise<string[]> {
     const r = await this.pool.query<{ anonymous_id: string }>(
@@ -123,6 +132,25 @@ export class IdentityBindings {
       [projectId, personId],
     )
     return [personId, ...r.rows.map((x) => x.anonymous_id)]
+  }
+
+  /**
+   * The plural counterpart to {@link personIdsFor}: every device bound to
+   * *any* of the given person ids, in one round trip. Exists for a caller
+   * that already has more than one person id in hand — e.g. a whole
+   * alias-merged group (a canonical plus every id merged into it) — and
+   * wants their combined device set without one personIdsFor call per
+   * member. Does not prefix the input ids onto the result the way
+   * personIdsFor does; the caller already has them.
+   */
+  async devicesForAny(projectId: number, personIds: string[]): Promise<string[]> {
+    if (personIds.length === 0) return []
+    const r = await this.pool.query<{ anonymous_id: string }>(
+      `SELECT DISTINCT anonymous_id FROM identity_bindings
+        WHERE project_id = $1 AND person_id = ANY($2)`,
+      [projectId, personIds],
+    )
+    return r.rows.map((x) => x.anonymous_id)
   }
 
   /** LRU insert: `Map` iterates in insertion order, and every write re-inserts

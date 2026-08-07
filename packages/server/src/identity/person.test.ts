@@ -74,11 +74,15 @@ beforeAll(async () => {
   projectB = await makeProject(SLUG_B, 'PersonRoutesB', WRITE_KEY_B, SERVER_KEY_B)
 
   // Created and loaded ONCE, before any of this file's own bindings exist,
-  // and never reloaded again below. Every test that binds a new id via
-  // /v1/identify and then reads it back is therefore implicitly proving the
-  // read did not consult this (now permanently stale, for these ids)
-  // dictionary — see the dedicated "no dictionary reload" test below for the
-  // sharpest version of that claim.
+  // and never reloaded again below. This makes it *likely* the dictionary
+  // stays unaware of ids this file binds later — LIFETIME(MIN 5 MAX 15)
+  // refreshes on a background thread, and this file finishes in well under a
+  // second — but "likely" is a timing assumption, not a guarantee: on a slow
+  // CI host a refresh could land between an identify() and the read that
+  // follows it. The dedicated "no dictionary reload" test below does not
+  // rely on that assumption; it asserts the dictionary's actual answer via
+  // dictGetOrDefault at the moment of the read, so it fails loudly instead of
+  // silently passing if a refresh ever does land mid-test.
   await ensureIdentityDictionaries(ch, pgSource)
   await ch.command({ query: `SYSTEM RELOAD DICTIONARY ${CH_DB}.identity_bindings` })
   await ch.command({ query: `SYSTEM RELOAD DICTIONARY ${CH_DB}.person_aliases` })
@@ -148,6 +152,23 @@ function getPerson(id: string, headers: Record<string, string>) {
   })
 }
 
+// Proves — rather than assumes from wall-clock timing — that the ClickHouse
+// identity_bindings dictionary does not yet know about a device's binding at
+// the moment of the read: queries the dictionary directly with a sentinel
+// fallback no real person_id would ever equal, so getting the sentinel back
+// means the dictionary has nothing for `anonymousId` (same
+// dictGetOrDefault shape dictionaries.test.ts's own live probe uses).
+async function dictionaryUnawareOf(projectId: number, anonymousId: string): Promise<boolean> {
+  const sentinel = '__dict_bypass_probe_unbound__'
+  const rs = await ch.query({
+    query: `SELECT dictGetOrDefault('${CH_DB}.identity_bindings', 'person_id',
+              (toUInt32(${projectId}), '${anonymousId}'), now(), '${sentinel}') AS person`,
+    format: 'JSONEachRow',
+  })
+  const [row] = await rs.json<{ person: string }>()
+  return row?.person === sentinel
+}
+
 async function insertEvent(opts: {
   projectId: number
   anonymousId?: string
@@ -178,8 +199,8 @@ async function insertEvent(opts: {
 describe('GET /v1/persons/:id', () => {
   // THE test for retroactive attachment — the product's premise (see the
   // task brief's "why this exists"). Would catch: querying only by the
-  // resolved canonical id instead of the full personIdsFor() set (the
-  // pre-identify event was recorded under the *anonymous* id, never the
+  // resolved canonical id instead of the full canonical-plus-devices set
+  // (the pre-identify event was recorded under the *anonymous* id, never the
   // user id); would catch dropping the `OR anonymous_id IN {ids}` half of
   // the WHERE clause entirely.
   it("includes an event sent under the person's anonymous_id before identify() was called", async () => {
@@ -225,6 +246,13 @@ describe('GET /v1/persons/:id', () => {
   // from the response, or the person_id/ids would come back wrong. Reading
   // straight from IdentityBindings/PersonAliases (Postgres) sees the write
   // immediately, with nothing to reload.
+  //
+  // The dictionaryUnawareOf() assertion below is the premise made explicit
+  // and checked, not assumed from how fast this file happens to run: without
+  // it, a background dictionary refresh landing between identify() and the
+  // read (plausible on a slow CI host, since LIFETIME(MIN 5 MAX 15) is not
+  // under this test's control) could silently make a dictGet-based
+  // implementation pass anyway.
   it('reflects a binding made moments ago, without any dictionary reload', async () => {
     await insertEvent({
       projectId: projectA,
@@ -241,7 +269,11 @@ describe('GET /v1/persons/:id', () => {
     })
     expect(res.statusCode).toBe(202)
 
-    // No SYSTEM RELOAD DICTIONARY call here or anywhere above — deliberately.
+    // The premise this test's name claims, checked rather than assumed: at
+    // this exact moment, the ClickHouse dictionary still has no answer for
+    // 'lag-anon' — no SYSTEM RELOAD DICTIONARY call has run since beforeAll.
+    expect(await dictionaryUnawareOf(projectA, 'lag-anon')).toBe(true)
+
     const personRes = await getPerson('lag-user', { 'x-lyraflow-server-key': SERVER_KEY_A })
     expect(personRes.statusCode).toBe(200)
     const body = personRes.json()
@@ -250,23 +282,36 @@ describe('GET /v1/persons/:id', () => {
     expect(body.ids.sort()).toEqual(['lag-anon', 'lag-user'])
   })
 
-  // Would catch: skipping the canonicalFor() step and calling
-  // personIdsFor() with the raw path id instead of its canonical — 'alias-a'
-  // has no device bindings of its own (only 'alias-b', the surviving
-  // canonical, does), so that mutation would come back with ids: ['alias-a']
-  // and events: 0 (a 404) instead of resolving through to 'alias-b'.
-  it('resolves a request for an aliased id to the canonical person and its devices', async () => {
+  // THE test for the alias-group defect: /v1/alias only ever writes to
+  // person_aliases, never repoints identity_bindings.person_id — so a device
+  // bound to an id *before* it gets merged away stays bound to that old id
+  // in Postgres forever. The fixture binds the device to 'alias-a' — the id
+  // that is about to be merged AWAY — and records a second event directly
+  // under user_id 'alias-a', both *before* the merge. Binding the device to
+  // the survivor 'alias-b' instead (as an earlier version of this test did)
+  // would make a buggy personIdsFor(canonical)-only implementation
+  // indistinguishable from a correct one: both would already find the
+  // device via the canonical alone, with no need to ever consult
+  // person_aliases for who merged into it. Would catch: PersonAliases'
+  // mergedFrom() being dropped from person.ts (or never called), which
+  // leaves 'alias-a' and 'alias-device' out of `ids` entirely and — since
+  // 'alias-b' has no events of its own — turns this into a 404 instead of a
+  // 200 with the full merged history. Would also catch: skipping
+  // canonicalFor() and computing the group from the raw path id instead of
+  // its canonical.
+  it("resolves an aliased id's pre-merge devices and events into the surviving canonical's profile", async () => {
     await identify(WRITE_KEY_A, {
       message_id: randomUUID(),
       anonymous_id: 'alias-device',
-      user_id: 'alias-b',
+      user_id: 'alias-a',
+      timestamp: '2026-08-06T10:00:00.000Z',
       traits: {},
     })
     await insertEvent({
       projectId: projectA,
-      anonymousId: 'alias-device',
-      timestamp: '2026-08-06 11:00:00.000',
-      eventName: 'alias_device_event',
+      userId: 'alias-a',
+      timestamp: '2026-08-06 10:30:00.000',
+      eventName: 'alias_pre_merge_event',
     })
 
     const aliasRes = await aliasReq(SERVER_KEY_A, {
@@ -275,14 +320,48 @@ describe('GET /v1/persons/:id', () => {
     })
     expect(aliasRes.statusCode).toBe(200)
 
-    const personRes = await getPerson('alias-a', { 'x-lyraflow-server-key': SERVER_KEY_A })
+    // Querying by the OLD id still resolves through canonicalFor to the
+    // survivor's full merged profile.
+    const byOldId = await getPerson('alias-a', { 'x-lyraflow-server-key': SERVER_KEY_A })
+    expect(byOldId.statusCode).toBe(200)
+    const bodyByOldId = byOldId.json()
+    expect(bodyByOldId.person_id).toBe('alias-b')
+    expect(bodyByOldId.ids.sort()).toEqual(['alias-a', 'alias-b', 'alias-device'])
+    // 2: the identify() call's own event (anonymous_id='alias-device',
+    // user_id='alias-a'), plus the explicit alias_pre_merge_event recorded
+    // directly under user_id='alias-a'.
+    expect(bodyByOldId.events).toBe(2)
+    expect(bodyByOldId.first_seen).toBe('2026-08-06T10:00:00.000Z')
+    expect(bodyByOldId.last_seen).toBe('2026-08-06T10:30:00.000Z')
+
+    // The reproduction from the review report: querying the SURVIVOR's own
+    // id must return the identical, complete profile — not a 404, which is
+    // exactly what 'alias-b' having no events of its own would previously
+    // produce (personIdsFor(canonical) alone finds nothing bound to
+    // 'alias-b').
+    const bySurvivorId = await getPerson('alias-b', { 'x-lyraflow-server-key': SERVER_KEY_A })
+    expect(bySurvivorId.statusCode).toBe(200)
+    expect(bySurvivorId.json()).toEqual(bodyByOldId)
+  })
+
+  // Would catch: sending `ids` straight from `[...group, ...devices]` without
+  // deduping — identify({anonymous_id:'dup-id', user_id:'dup-id'}) makes
+  // 'dup-id' both the canonical (via personId) and its own bound device, so
+  // an undeduped implementation returns `['dup-id','dup-id']` here, which
+  // fails the exact-array `toEqual` below (`.sort()` alone does not hide a
+  // duplicate — `['dup-id','dup-id']` stays two elements after sorting).
+  it('deduplicates ids when the anonymous_id and user_id coincide', async () => {
+    const res = await identify(WRITE_KEY_A, {
+      message_id: randomUUID(),
+      anonymous_id: 'dup-id',
+      user_id: 'dup-id',
+      traits: {},
+    })
+    expect(res.statusCode).toBe(202)
+
+    const personRes = await getPerson('dup-id', { 'x-lyraflow-server-key': SERVER_KEY_A })
     expect(personRes.statusCode).toBe(200)
-    const body = personRes.json()
-    expect(body.person_id).toBe('alias-b')
-    expect(body.ids.sort()).toEqual(['alias-b', 'alias-device'])
-    // 2: the identify() call's own event, plus the explicit
-    // alias_device_event inserted above.
-    expect(body.events).toBe(2)
+    expect(personRes.json().ids).toEqual(['dup-id'])
   })
 
   // Would catch: gating this route on projects.byWriteKey (or accepting
@@ -411,10 +490,11 @@ describe('GET /v1/persons/:id (mocked ClickHouse): parameter binding', () => {
           : null,
     } as unknown as PersonDeps['projects']
     const fakeBindings = {
-      personIdsFor: async (_p: number, id: string) => [id],
+      devicesForAny: async () => [],
     } as unknown as PersonDeps['bindings']
     const fakeAliases = {
       canonicalFor: async (_p: number, id: string) => id,
+      mergedFrom: async () => [],
     } as unknown as PersonDeps['aliases']
 
     const mockedApp = Fastify()

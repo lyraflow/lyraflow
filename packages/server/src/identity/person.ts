@@ -62,13 +62,34 @@ export function registerPersonRoutes(app: FastifyInstance, deps: PersonDeps): vo
     if (!project) return
 
     // Step 1: the canonical person for the requested id (PersonAliases).
-    // Step 2: every id known for that *canonical* — the canonical itself
-    // plus each device bound to it (IdentityBindings). Resolving step 2
-    // against the canonical, not the raw path id, matters: a caller who
-    // supplies an older id that has since been merged away must still see
-    // every device bound to the surviving canonical, not an empty set.
+    // Step 2: every id ever merged INTO that canonical (PersonAliases again)
+    // — not just the canonical itself. Step 3: every device bound to *any*
+    // id in that whole group (IdentityBindings), in one round trip.
+    //
+    // Step 2 is not optional. `/v1/alias` only ever writes to person_aliases;
+    // it never repoints identity_bindings.person_id. So a device bound to an
+    // id that later gets merged away stays bound to that old id in Postgres
+    // forever — querying IdentityBindings for the canonical alone would never
+    // find it, and neither would an event recorded with that old id as its
+    // raw user_id. Skipping step 2 previously meant a person's own profile
+    // could be *missing* history a segment query (which resolves through
+    // both dictionary stages unconditionally — see resolve.ts) would still
+    // count — the read path meant to be more authoritative than the lagging
+    // dictionary returning a strictly less complete answer than it. Every id
+    // in `group` below is treated equally: the canonical has no special
+    // status once resolved, it is simply one more member whose own devices
+    // must be included.
     const canonical = await aliases.canonicalFor(project.id, req.params.id)
-    const ids = await bindings.personIdsFor(project.id, canonical)
+    const mergedFrom = await aliases.mergedFrom(project.id, canonical)
+    const group = [canonical, ...mergedFrom]
+    const devices = await bindings.devicesForAny(project.id, group)
+    // Deduped and sorted: `group` and `devices` can overlap (e.g.
+    // identify({anonymous_id:'x', user_id:'x'}) binds a device id that is
+    // identical to the person id, which would otherwise put 'x' in `ids`
+    // twice), and neither query above carries an ORDER BY. The response is a
+    // set, not a log; nothing about it should depend on Postgres's incidental
+    // row order.
+    const ids = Array.from(new Set([...group, ...devices])).sort()
 
     // `ids` and `project.id` are both bound as query parameters, never
     // interpolated into the SQL text — the id set traces back to a
@@ -98,10 +119,16 @@ export function registerPersonRoutes(app: FastifyInstance, deps: PersonDeps): vo
     // anywhere is not a profile to render, and a 404 lets a caller tell
     // "no such person" apart from "a real person who happens to have zero
     // events" without inspecting the body. In practice the latter is not
-    // reachable through this endpoint anyway: personIdsFor always includes
-    // the canonical id itself even with no bindings, so the only way to land
-    // here with zero events is an id nothing has ever recorded.
-    if (!row || row.events === '0') {
+    // reachable through this endpoint anyway: `group` always includes the
+    // canonical id itself even with no bindings or merges, so the only way
+    // to land here with zero events is an id nothing has ever recorded.
+    //
+    // Compared numerically, not `row.events === '0'`: ClickHouse's HTTP
+    // interface quotes UInt64 values as JSON strings by default, but that is
+    // a server-side formatting setting, not a guarantee — a string literal
+    // comparison stays coupled to it for no reason, where Number(...) === 0
+    // does not care either way.
+    if (!row || Number(row.events) === 0) {
       return reply.code(404).send({ error: 'person_not_found' })
     }
 

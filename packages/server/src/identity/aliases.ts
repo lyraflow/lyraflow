@@ -29,6 +29,31 @@ export class PersonAliases {
     return r.rows[0]?.canonical_id ?? personId
   }
 
+  /**
+   * The reverse of {@link canonicalFor}: every id that has been merged INTO
+   * `canonicalId`, not counting `canonicalId` itself. Never includes
+   * `canonicalId` — alias() never writes a row whose person_id equals its
+   * own canonical_id (enforced by 003_identity.sql's
+   * `person_aliases_not_self` check, and by alias()'s own self-alias no-op),
+   * so a canonical with no incoming merges returns [].
+   *
+   * Exists for identity/person.ts's single-person read. canonicalFor alone
+   * only tells a caller where an id resolves *to*; a profile view for the
+   * canonical also needs every id that resolves *into* it, or an id (and any
+   * devices/events recorded under it) that existed before being merged away
+   * silently vanishes from the merged person's own history — the exact
+   * defect resolve.ts's stage-2 docstring already warns about for the
+   * dictionary-backed read path ("silently made /v1/alias a no-op for every
+   * event carrying the aliased id"), relocated to this one instead.
+   */
+  async mergedFrom(projectId: number, canonicalId: string): Promise<string[]> {
+    const r = await this.pool.query<{ person_id: string }>(
+      'SELECT person_id FROM person_aliases WHERE project_id = $1 AND canonical_id = $2',
+      [projectId, canonicalId],
+    )
+    return r.rows.map((x) => x.person_id)
+  }
+
   async alias(
     projectId: number,
     fromPersonId: string,
