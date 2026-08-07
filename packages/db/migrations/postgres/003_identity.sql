@@ -25,7 +25,31 @@ CREATE TABLE IF NOT EXISTS identity_bindings (
   --  DO UPDATE SET person_id = LEAST(identity_bindings.person_id, EXCLUDED.person_id)`
   -- — lexicographically smaller wins, arbitrary but identical regardless of
   -- which of the two events arrives first.
-  UNIQUE (project_id, anonymous_id, bound_at)
+  UNIQUE (project_id, anonymous_id, bound_at),
+  -- bound_at carries no sub-millisecond component. `Bound` in @lyraflow/core
+  -- is epoch milliseconds, so `deriveTiling` — the reference derivation this
+  -- schema's identity_bindings_dict_src view is required to agree with —
+  -- cannot represent a microsecond remainder at all. A row carrying one is a
+  -- row deriveTiling could never produce, and it would desync the two
+  -- derivations silently.
+  --
+  -- The server's write path already truncates (bindings.ts's BIND_SQL), but
+  -- that statement is unexported and reachable only through bind(), so the
+  -- truncation is unenforceable against a backfill, a psql session, or any
+  -- SQL-level import. Worse, the differential test that would notice the
+  -- desync writes THROUGH bind(), so it stays green while the table holds
+  -- rows it could never have produced. Enforcing it here is what closes that
+  -- gap; the application-side truncation stays as the thing that makes
+  -- ordinary writes satisfy it rather than fail.
+  --
+  -- date_trunc(text, timestamptz) is marked STABLE rather than IMMUTABLE
+  -- (Postgres does not enforce immutability in CHECK constraints, and does
+  -- accept this). Sound at this unit regardless: every timezone offset is a
+  -- whole number of seconds, so millisecond truncation gives the identical
+  -- answer in every session timezone. The 3-argument IMMUTABLE form is
+  -- avoided only because it would impose a Postgres 16 floor for no gain.
+  CONSTRAINT identity_bindings_bound_at_ms
+    CHECK (bound_at = date_trunc('millisecond', bound_at))
 );
 
 CREATE INDEX IF NOT EXISTS identity_bindings_person_idx

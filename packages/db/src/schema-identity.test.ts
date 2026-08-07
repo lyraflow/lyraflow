@@ -67,6 +67,29 @@ describe('identity_bindings', () => {
     )
   })
 
+  // The schema-level counterpart to bindings.ts's `date_trunc('millisecond',
+  // ...)` on write. That truncation lives inside an unexported SQL constant
+  // reachable only through IdentityBindings.bind(), so it cannot constrain a
+  // backfill, a psql session, or any other SQL-level import — and the
+  // differential test that would catch the resulting desync between
+  // deriveTiling and identity_bindings_dict_src writes through bind(), so it
+  // stays green regardless. This CHECK is what actually makes a microsecond
+  // row impossible.
+  //
+  // Would catch: the CHECK being dropped from 003_identity.sql (the insert
+  // succeeds instead of throwing).
+  it('rejects a bind event whose bound_at carries sub-millisecond precision', async () => {
+    await expect(bind('d-micro', 'u-micro', '2026-08-06T12:00:00.000001Z')).rejects.toThrow(
+      /identity_bindings_bound_at_ms/i,
+    )
+  })
+
+  // The positive half: a whole-millisecond value must still be accepted, so
+  // the constraint above cannot be "passing" by rejecting everything.
+  it('accepts a bind event at exact millisecond precision', async () => {
+    await expect(bind('d-ms', 'u-ms', '2026-08-06T12:00:00.123Z')).resolves.toBeTruthy()
+  })
+
   it('allows the same device id in a different project without conflict', async () => {
     const other = await pg.query<{ id: string }>(
       `INSERT INTO projects (name, slug, write_key, server_key_hash)
