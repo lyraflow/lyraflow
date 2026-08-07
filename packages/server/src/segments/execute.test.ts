@@ -85,6 +85,33 @@ beforeAll(async () => {
      VALUES ($1, 'Segments', 'segments-exec-test', 'wk_segments_exec', 'h')`,
     [PROJECT],
   )
+
+  // Self-healing, the same way person.test.ts and resolve.test.ts clear
+  // their own fixed project's rows at the top of beforeAll: unlike `events`,
+  // which is safe to reinsert idempotently across runs (dedup-by-event_id is
+  // exactly what "does not double-count a retried delivery" below proves),
+  // `device_index` and `person_traits` are populated by materialized views
+  // that fire at INSERT time and are never touched by an `events` DELETE.
+  // The tie-break test below inserts two extra people (dora/edgar) and tries
+  // to clean up after itself in a `finally`, but that `finally` only deletes
+  // their `events` rows — it cannot reach `device_index`/`person_traits`,
+  // since the base population (see base.ts) is built from `device_index`,
+  // not from `events`. Left behind, those two rows permanently inflate this
+  // project's base population on every subsequent standalone run of this
+  // file, regardless of whether a previous run's `finally` completed —
+  // demonstrated: population counts drift from 3 to 5 to 7 across repeated
+  // standalone runs without this. Clearing this project's rows here, before
+  // anything is reseeded, makes the file correct regardless of what any
+  // previous run left behind. `mutations_sync: '1'` is required because
+  // ClickHouse's `ALTER ... DELETE` mutations are asynchronous by default —
+  // without it, the seed insert immediately below could race the delete.
+  for (const table of ['events', 'device_index', 'person_traits']) {
+    await ch.command({
+      query: `ALTER TABLE ${table} DELETE WHERE project_id = ${PROJECT}`,
+      clickhouse_settings: { mutations_sync: '1' },
+    })
+  }
+
   await ensureIdentityDictionaries(ch, pgSource)
   await ch.command({ query: `SYSTEM RELOAD DICTIONARY ${CH_DB}.suppressed_persons` })
 
@@ -358,14 +385,13 @@ describe('runSegment (live ClickHouse)', () => {
       // direction would instead repeat dora.
       expect(rest.map((r) => r.person_id)).toEqual(['edgar'])
     } finally {
-      // Unlike the seed fixture's alice/bob/carol (fixed ids the whole file
-      // is built around) and the intentional duplicate row above, dora and
-      // edgar are TWO EXTRA distinct people this test alone introduces. This
-      // file has no per-test isolation and PROJECT (7700) is a fixed id
-      // never cleared at the top of beforeAll — left behind, they would
-      // silently inflate every population-count assertion in this file on
-      // its NEXT run (a real failure mode hit while writing this test: a
-      // clean run afterwards saw 5 people instead of 3).
+      // Best-effort, same-run tidiness only — this cannot be what makes the
+      // file safe to re-run, because it only reaches `events`, not
+      // `device_index`/`person_traits`, which is what the base population
+      // (see base.ts) actually reads. The real guarantee is the self-heal at
+      // the top of beforeAll, which clears this project's rows in all three
+      // tables regardless of whether this `finally` — or any previous run's
+      // — ever got here at all.
       await ch.command({
         query: `ALTER TABLE events DELETE WHERE project_id = ${PROJECT} AND event_id IN ('${dora}', '${edgar}')`,
       })
