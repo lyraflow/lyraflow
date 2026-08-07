@@ -66,6 +66,12 @@ try {
 // resolution degrades to the anonymous id silently. That is worse than not
 // starting, so this follows the exact same fatal-log-and-exit pattern as the
 // migration failure above rather than logging a warning and continuing.
+//
+// Logging `err` directly here is safe, not merely convenient:
+// ensureIdentityDictionaries() already strips the Postgres password out of
+// any failure before it rethrows (see sanitizeDictionaryError in
+// identity/dictionaries.ts), so this call site does not need to — and must
+// not — do any redaction of its own.
 try {
   await ensureIdentityDictionaries(ch, parsePgUrl(config.pgUrl))
   app.log.info('identity dictionaries ready')

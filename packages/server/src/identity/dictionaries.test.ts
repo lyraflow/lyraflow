@@ -1,6 +1,12 @@
 import { join } from 'node:path'
-import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import {
+  type ClickHouseClient,
+  createChClient,
+  createPgPool,
+  loadMigrations,
+  migrate,
+} from '@lyraflow/db'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { type PgDictionarySource, ensureIdentityDictionaries, parsePgUrl } from './dictionaries.js'
 
 describe('parsePgUrl', () => {
@@ -25,6 +31,106 @@ describe('parsePgUrl', () => {
   it('throws a message that names the variable but never echoes the url', () => {
     expect(() => parsePgUrl('not-a-url')).toThrow(/LYRAFLOW_POSTGRES_URL/)
     expect(() => parsePgUrl('not-a-url')).not.toThrow(/not-a-url/)
+  })
+})
+
+/**
+ * The DDL `ensureIdentityDictionaries` sends necessarily embeds the Postgres
+ * password in plain text (see the module docstring). `@clickhouse/client`
+ * can attach a chunk of the failing statement itself to `.message`: I
+ * confirmed this by hand against a live ClickHouse — a malformed
+ * `CREATE DICTIONARY` produces a `SYNTAX_ERROR` whose message echoes back
+ * raw, unparsed query text verbatim, including whatever followed the syntax
+ * error, which can be the `SOURCE(POSTGRESQL(... password '...' ...))`
+ * clause itself. `realisticClickHouseSyntaxError` below reproduces that
+ * exact observed shape (message text, `code`, `type`) rather than a made-up
+ * one, so this test exercises the real leak path, not a hypothetical one.
+ *
+ * A fake `ClickHouseClient` is used rather than the live test stack because
+ * this specific failure mode is network/version-dependent and slow to
+ * reproduce reliably on demand (see the identical reasoning for
+ * `createFakeClient` in packages/db/src/migrator.test.ts, which this
+ * mirrors). `ensureIdentityDictionaries` only ever calls `ch.command()`, so
+ * only that needs implementing; the `as unknown as ClickHouseClient` cast
+ * mirrors migrator.test.ts's `as unknown as Pool` for the same reason.
+ */
+describe('ensureIdentityDictionaries sanitizes a failure before it can reach a logger', () => {
+  const LEAKED_PASSWORD = 'MY_LEAKED_SECRET_XYZ'
+
+  function realisticClickHouseSyntaxError(): Error {
+    const err = new Error(
+      `Syntax error: failed at position 47 ('(') (line 1, col 47): (\n  a UInt32\n  PRIMARY KEY a\n  SOURCE(POSTGRESQL(host 'postgres' port 5432 user 'lyraflow' password '${LEAKED_PASSWORD}' db 'lyraflow_test' table 'identity_bi. Unmatched parentheses: (. `,
+    )
+    Object.assign(err, { code: '62', type: 'SYNTAX_ERROR' })
+    return err
+  }
+
+  function fakeCh(onCommand: (call: number) => void): ClickHouseClient {
+    let call = 0
+    return {
+      command: vi.fn(async () => {
+        call += 1
+        onCommand(call)
+      }),
+    } as unknown as ClickHouseClient
+  }
+
+  const pgSource: PgDictionarySource = {
+    host: 'postgres',
+    port: 5432,
+    user: 'lyraflow',
+    password: LEAKED_PASSWORD,
+    database: 'lyraflow_test',
+  }
+
+  // THE test for this fix: removing the redaction (e.g. reverting
+  // sanitizeDictionaryError to `throw err` — the coordinator's flagged bug)
+  // would make `thrown.message` equal `realisticClickHouseSyntaxError()`'s
+  // raw message, which contains `LEAKED_PASSWORD` verbatim and the substring
+  // `password '` — both assertions below would then fail. Checking `cause`
+  // and `JSON.stringify` separately also catches a narrower regression: code
+  // that sanitizes the top-level message but forwards the original error as
+  // `cause` unchanged (the exact "cause chain that carries the query" the
+  // coordinator called out).
+  it('never lets the password reach the thrown error, its cause, or JSON.stringify of either', async () => {
+    const ch = fakeCh(() => {
+      throw realisticClickHouseSyntaxError()
+    })
+
+    let thrown: Error | undefined
+    try {
+      await ensureIdentityDictionaries(ch, pgSource)
+    } catch (err) {
+      thrown = err as Error
+    }
+    expect(thrown).toBeDefined()
+
+    const surfaces = [
+      thrown?.message ?? '',
+      thrown?.cause instanceof Error ? thrown.cause.message : '',
+      JSON.stringify(thrown),
+      JSON.stringify(thrown?.cause),
+    ]
+    for (const text of surfaces) {
+      expect(text).not.toContain(LEAKED_PASSWORD)
+      expect(text).not.toMatch(/password\s*'/i)
+    }
+  })
+
+  // Losing which dictionary failed would still be safe, but would make a
+  // real fatal log line useless for triage — this pins that regression too.
+  it('names which dictionary failed', async () => {
+    const ch = fakeCh(() => {
+      throw realisticClickHouseSyntaxError()
+    })
+    await expect(ensureIdentityDictionaries(ch, pgSource)).rejects.toThrow(/identity_bindings/)
+  })
+
+  it('identifies the second dictionary by name when only it fails', async () => {
+    const ch = fakeCh((call) => {
+      if (call === 2) throw realisticClickHouseSyntaxError()
+    })
+    await expect(ensureIdentityDictionaries(ch, pgSource)).rejects.toThrow(/person_aliases/)
   })
 })
 
