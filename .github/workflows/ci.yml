@@ -8,8 +8,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # No `version:` here on purpose. package.json pins `packageManager`,
+      # and pnpm/action-setup errors out if both are set. The pin is the one
+      # that matters: an unpinned corepack fetches whatever pnpm is current,
+      # which has already broken this build once.
       - uses: pnpm/action-setup@v4
-        with: { version: 9 }
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: pnpm }
       - run: pnpm install --frozen-lockfile
@@ -22,8 +25,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # No `version:` here on purpose. package.json pins `packageManager`,
+      # and pnpm/action-setup errors out if both are set. The pin is the one
+      # that matters: an unpinned corepack fetches whatever pnpm is current,
+      # which has already broken this build once.
       - uses: pnpm/action-setup@v4
-        with: { version: 9 }
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: pnpm }
       - run: pnpm install --frozen-lockfile
