@@ -62,6 +62,14 @@ describe('SegmentStore', () => {
     await expect(store.create(projectId, 'Dupe', trial)).rejects.toBeInstanceOf(DuplicateNameError)
   })
 
+  it('refuses to rename a segment onto another segment name', async () => {
+    await store.create(projectId, 'Original', trial)
+    const other = await store.create(projectId, 'Renamable', trial)
+    await expect(store.update(projectId, other.id, { name: 'Original' })).rejects.toBeInstanceOf(
+      DuplicateNameError,
+    )
+  })
+
   it('allows the same name in a different project', async () => {
     await store.create(projectId, 'Shared name', trial)
     await expect(store.create(otherProjectId, 'Shared name', trial)).resolves.toBeDefined()
@@ -101,16 +109,33 @@ describe('SegmentStore', () => {
     expect(after?.lastEvaluatedAt).toBeNull()
   })
 
-  it('rejects a stored tree that no longer parses, naming the version', async () => {
-    // The row may predate an AST change or have been written by an older
-    // build. A stored tree is untrusted input on the way out.
+  it('rejects a stored tree whose ast_version is no longer understood', async () => {
+    // The version alone is disqualifying, regardless of the tree's contents —
+    // so this row carries a filter that WOULD parse under version 1.
     await pg.query(
       `INSERT INTO segments (project_id, name, ast_version, filter)
-       VALUES ($1, 'Ancient', 99, '{"kind":"nonsense"}'::jsonb)`,
+       VALUES ($1, 'Ancient version', 99, $2::jsonb)`,
+      [projectId, JSON.stringify(trial.filter)],
+    )
+    const r = await pg.query<{ id: string }>(
+      "SELECT id FROM segments WHERE project_id = $1 AND name = 'Ancient version'",
+      [projectId],
+    )
+    const id = Number(r.rows[0]?.id)
+    await expect(store.get(projectId, id)).rejects.toBeInstanceOf(StoredTreeError)
+  })
+
+  it('rejects a malformed stored tree even under the current ast_version', async () => {
+    // The half the combined test could not prove: a hydrate that checked only
+    // the version would let this through, and would admit a malformed tree
+    // for every row written by the current build.
+    await pg.query(
+      `INSERT INTO segments (project_id, name, ast_version, filter)
+       VALUES ($1, 'Malformed current', 1, '{"kind":"nonsense"}'::jsonb)`,
       [projectId],
     )
     const r = await pg.query<{ id: string }>(
-      "SELECT id FROM segments WHERE project_id = $1 AND name = 'Ancient'",
+      "SELECT id FROM segments WHERE project_id = $1 AND name = 'Malformed current'",
       [projectId],
     )
     const id = Number(r.rows[0]?.id)
