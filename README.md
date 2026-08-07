@@ -268,6 +268,12 @@ sees a binding or a merge the instant it is written, with no refresh delay.
 `404` for an id nothing has ever recorded an event under; `401` for a missing
 or invalid server key.
 
+If `:id` is a **device id** that has been bound to more than one person over
+time — a shared laptop — it resolves to the person bound **most recently**,
+and the profile you get back is that person's. There is no single right
+answer for a shared device, so this one is picked deliberately: it is the
+device's current owner.
+
 **This read is a union over ids, not the time-split resolution.**
 `first_seen`, `last_seen` and `events` are computed over *every* id that has
 ever been associated with the person — the canonical id, every id merged into

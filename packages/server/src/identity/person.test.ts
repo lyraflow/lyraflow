@@ -455,6 +455,80 @@ describe('GET /v1/persons/:id', () => {
     expect(personRes.json().ids).toEqual(['dup-id'])
   })
 
+  // THE test for `:id` being a DEVICE id, which README documents and which
+  // every other lookup this route composes (canonicalFor, mergedFrom,
+  // devicesForAny) is incapable of — all three are keyed on person_id.
+  // Without IdentityBindings.mostRecentPersonFor, 'lookup-device' resolves
+  // to itself and the route answers a plausible-looking, silently wrong 200:
+  // person_id 'lookup-device', ids ['lookup-device'].
+  //
+  // Would catch exactly that. Note the events count is NOT what discriminates
+  // here and deliberately is not relied on: both the correct and the
+  // device-blind answer match the same two rows, because the WHERE clause
+  // already covers anonymous_id. person_id and ids are the assertions that
+  // fail when the lookup is removed.
+  it('resolves a device id to the person it is bound to', async () => {
+    await insertEvent({
+      projectId: projectA,
+      anonymousId: 'lookup-device',
+      timestamp: '2026-08-06 16:00:00.000',
+      eventName: 'device_lookup_pre',
+    })
+    const res = await identify(WRITE_KEY_A, {
+      message_id: randomUUID(),
+      anonymous_id: 'lookup-device',
+      user_id: 'lookup-owner',
+      timestamp: '2026-08-06T16:30:00.000Z',
+      traits: {},
+    })
+    expect(res.statusCode).toBe(202)
+
+    const personRes = await getPerson('lookup-device', { 'x-lyraflow-server-key': SERVER_KEY_A })
+    expect(personRes.statusCode).toBe(200)
+    const body = personRes.json()
+    expect(body.person_id).toBe('lookup-owner')
+    expect(body.ids.sort()).toEqual(['lookup-device', 'lookup-owner'])
+    expect(body.events).toBe(2)
+    expect(body.first_seen).toBe('2026-08-06T16:00:00.000Z')
+    expect(body.last_seen).toBe('2026-08-06T16:30:00.000Z')
+  })
+
+  // The documented ambiguity: a device bound to more than one person over
+  // time has no single right answer, and this route returns the most recent
+  // binding — the device's current owner. Would catch: `ORDER BY bound_at
+  // DESC` flipped to ASC, or dropped altogether and left to Postgres's
+  // incidental row order, either of which can answer 'ambiguous-first'.
+  // Would also catch a LIMIT-less query feeding a person id array into a
+  // lookup that expects one.
+  it('resolves a device bound to several people to its most recently bound one', async () => {
+    await identify(WRITE_KEY_A, {
+      message_id: randomUUID(),
+      anonymous_id: 'ambiguous-device',
+      user_id: 'ambiguous-first',
+      timestamp: '2026-08-06T17:00:00.000Z',
+      traits: {},
+    })
+    await identify(WRITE_KEY_A, {
+      message_id: randomUUID(),
+      anonymous_id: 'ambiguous-device',
+      user_id: 'ambiguous-second',
+      timestamp: '2026-08-06T18:00:00.000Z',
+      traits: {},
+    })
+
+    const personRes = await getPerson('ambiguous-device', {
+      'x-lyraflow-server-key': SERVER_KEY_A,
+    })
+    expect(personRes.statusCode).toBe(200)
+    const body = personRes.json()
+    expect(body.person_id).toBe('ambiguous-second')
+    // 'ambiguous-first' is deliberately absent: it is a different person, not
+    // an alias of the second, so it is not part of this person's id set. The
+    // device is shared, so both profiles still count both events — the
+    // divergence pinned above.
+    expect(body.ids.sort()).toEqual(['ambiguous-device', 'ambiguous-second'])
+  })
+
   // Would catch: gating this route on projects.byWriteKey (or accepting
   // either header) instead of exclusively projects.byServerKey.
   it('rejects the public write key with 401', async () => {
@@ -659,6 +733,7 @@ describe('GET /v1/persons/:id (mocked ClickHouse): parameter binding', () => {
     } as unknown as PersonDeps['projects']
     const fakeBindings = {
       devicesForAny: async () => [],
+      mostRecentPersonFor: async () => null,
     } as unknown as PersonDeps['bindings']
     const fakeAliases = {
       canonicalFor: async (_p: number, id: string) => id,

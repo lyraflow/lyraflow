@@ -144,6 +144,44 @@ export class IdentityBindings {
   }
 
   /**
+   * The inverse direction of {@link devicesForAny}: given a DEVICE id, the
+   * person it currently belongs to, or null if this id was never a device in
+   * this project.
+   *
+   * Exists because `GET /v1/persons/:id` documents `:id` as "any id that has
+   * ever pointed at this person — a device id, the current canonical id, or
+   * an id since merged away", and every other lookup it composes
+   * (canonicalFor, mergedFrom, devicesForAny) is keyed on person_id. Without
+   * this, a device id resolved to itself and the route answered a
+   * plausible-looking, silently wrong 200 for a person that does not exist.
+   *
+   * AMBIGUITY, decided and documented rather than left to Postgres's row
+   * order: a device bound to several people over time (a shared laptop) has
+   * no single right answer, so this returns the MOST RECENTLY bound one — the
+   * device's current owner, which is what "who is using this browser" means
+   * to a caller holding only a device id. 404, or the union of all of them,
+   * would be defensible too, but not more so, and both are worse to consume.
+   * `ORDER BY bound_at DESC` is already total for one device
+   * (003_identity.sql's UNIQUE (project_id, anonymous_id, bound_at) admits
+   * exactly one row per instant), so this is deterministic without a
+   * tie-break; `person_id` is named as a secondary key anyway so that stays
+   * true if that constraint is ever relaxed.
+   *
+   * Both parameters are bound, never interpolated: `anonymousId` traces back
+   * to a caller-supplied URL path segment.
+   */
+  async mostRecentPersonFor(projectId: number, anonymousId: string): Promise<string | null> {
+    const r = await this.pool.query<{ person_id: string }>(
+      `SELECT person_id FROM identity_bindings
+        WHERE project_id = $1 AND anonymous_id = $2
+        ORDER BY bound_at DESC, person_id ASC
+        LIMIT 1`,
+      [projectId, anonymousId],
+    )
+    return r.rows[0]?.person_id ?? null
+  }
+
+  /**
    * The plural counterpart to {@link personIdsFor}: every device bound to
    * *any* of the given person ids, in one round trip. Exists for a caller
    * that already has more than one person id in hand — e.g. a whole

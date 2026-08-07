@@ -85,6 +85,24 @@ export function registerPersonRoutes(app: FastifyInstance, deps: PersonDeps): vo
     'invalid_server_key',
   )
 
+  /**
+   * Steps 1-3 of the resolution below, extracted because step 4 (the device
+   * lookup) has to run all three again against the person it discovers.
+   */
+  interface ResolvedGroup {
+    canonical: string
+    /** The canonical plus every id merged into it. */
+    group: string[]
+    /** Every device bound to any member of `group`. */
+    devices: string[]
+  }
+  async function resolveGroup(projectId: number, id: string): Promise<ResolvedGroup> {
+    const canonical = await aliases.canonicalFor(projectId, id)
+    const mergedFrom = await aliases.mergedFrom(projectId, canonical)
+    const group = [canonical, ...mergedFrom]
+    return { canonical, group, devices: await bindings.devicesForAny(projectId, group) }
+  }
+
   app.get<{ Params: PersonParams }>('/v1/persons/:id', async (req, reply) => {
     const project = await authenticateServer(req, reply)
     if (!project) return
@@ -107,10 +125,36 @@ export function registerPersonRoutes(app: FastifyInstance, deps: PersonDeps): vo
     // in `group` below is treated equally: the canonical has no special
     // status once resolved, it is simply one more member whose own devices
     // must be included.
-    const canonical = await aliases.canonicalFor(project.id, req.params.id)
-    const mergedFrom = await aliases.mergedFrom(project.id, canonical)
-    const group = [canonical, ...mergedFrom]
-    const devices = await bindings.devicesForAny(project.id, group)
+    const resolved = await resolveGroup(project.id, req.params.id)
+
+    // Step 4, and only when steps 1-3 all came back empty-handed: the
+    // requested id may be a DEVICE id rather than a person id. Everything
+    // above is keyed on person_id, so without this a device id resolves to
+    // itself and the route answers a plausible-looking but silently wrong
+    // 200 (`person_id: "visitor-1", ids: ["visitor-1"]`) — worse than a 404,
+    // because nothing in the response says it failed. README documents `:id`
+    // as accepting a device id; this lookup is what makes that true, rather
+    // than retreating in the docs.
+    //
+    // Gated on "no alias of its own, nothing merged into it, and no devices
+    // of its own" — `group.length === 1` covers the first two, since an id
+    // with an alias resolves to a canonical that has at least this id merged
+    // into it. That is exactly the state in which nothing has ever identified
+    // this id as a person. A real person id fails the gate the moment it has
+    // been identified against, including the
+    // identify({anonymous_id:'x', user_id:'x'}) case where the two ids
+    // coincide (that id IS one of its own devices, so `devices` is
+    // non-empty). So the device lookup can never shadow a real person, and
+    // costs one extra query only on a path that would otherwise 404.
+    //
+    // A device bound to several people over time resolves to the most
+    // recently bound — see mostRecentPersonFor for why that answer and not
+    // another.
+    const looksUnknown = resolved.group.length === 1 && resolved.devices.length === 0
+    const owner = looksUnknown
+      ? await bindings.mostRecentPersonFor(project.id, req.params.id)
+      : null
+    const { canonical, group, devices } = owner ? await resolveGroup(project.id, owner) : resolved
     // Deduped and sorted: `group` and `devices` can overlap (e.g.
     // identify({anonymous_id:'x', user_id:'x'}) binds a device id that is
     // identical to the person id, which would otherwise put 'x' in `ids`
