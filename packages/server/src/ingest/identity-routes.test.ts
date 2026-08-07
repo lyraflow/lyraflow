@@ -310,7 +310,6 @@ describe('POST /v1/identify (mocked deps): a failing binding write', () => {
     bind: async () => {
       throw new Error('identity_bindings write failed: pg unreachable')
     },
-    personIdsFor: async () => [],
     cacheSize: 0,
   } as unknown as IngestDeps['bindings']
   const fakeAliases = {

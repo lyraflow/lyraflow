@@ -289,7 +289,7 @@ describe('GET /v1/persons/:id', () => {
   // that is about to be merged AWAY — and records a second event directly
   // under user_id 'alias-a', both *before* the merge. Binding the device to
   // the survivor 'alias-b' instead (as an earlier version of this test did)
-  // would make a buggy personIdsFor(canonical)-only implementation
+  // would make a buggy devicesForAny([canonical])-only implementation
   // indistinguishable from a correct one: both would already find the
   // device via the canonical alone, with no need to ever consult
   // person_aliases for who merged into it. Would catch: PersonAliases'
@@ -337,7 +337,7 @@ describe('GET /v1/persons/:id', () => {
     // The reproduction from the review report: querying the SURVIVOR's own
     // id must return the identical, complete profile — not a 404, which is
     // exactly what 'alias-b' having no events of its own would previously
-    // produce (personIdsFor(canonical) alone finds nothing bound to
+    // produce (devicesForAny([canonical]) alone finds nothing bound to
     // 'alias-b').
     const bySurvivorId = await getPerson('alias-b', { 'x-lyraflow-server-key': SERVER_KEY_A })
     expect(bySurvivorId.statusCode).toBe(200)

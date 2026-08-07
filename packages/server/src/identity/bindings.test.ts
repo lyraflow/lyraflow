@@ -228,11 +228,15 @@ describe('IdentityBindings.bind', () => {
     expect(b.cacheSize).toBeLessThanOrEqual(4)
   })
 
-  it('resolves every id belonging to a person, for single-person reads', async () => {
+  // Replaces the personIdsFor test deleted with that method: devicesForAny is
+  // what the read route actually calls, and nothing covered its multi-device
+  // case directly.
+  it('collects every device bound to any member of a person group', async () => {
     await bindings.bind(projectId, 'phone', 'alice', at(12))
     await bindings.bind(projectId, 'laptop', 'alice', at(13))
-    const ids = await bindings.personIdsFor(projectId, 'alice')
-    expect(ids.sort()).toEqual(['alice', 'laptop', 'phone'])
+    await bindings.bind(projectId, 'tablet', 'alice-merged-away', at(13))
+    const devices = await bindings.devicesForAny(projectId, ['alice', 'alice-merged-away'])
+    expect(devices.sort()).toEqual(['laptop', 'phone', 'tablet'])
   })
 
   it('exposes a documented cache cap', () => {

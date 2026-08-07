@@ -17,11 +17,16 @@ const compose = (...args: string[]) =>
     stdio: 'pipe',
   })
 
+// The database this stack's docker-compose.ci.yml configures, named once so
+// the client connection and resolvedPersonExpr's dictionary qualification
+// cannot drift apart — the exact mismatch resolvedPersonExpr's now-required
+// `database` parameter exists to make impossible.
+const CH_DATABASE = 'lyraflow'
 const ch = createChClient({
   url: 'http://localhost:8123',
   username: 'lyraflow',
   password: 'lyraflow',
-  database: 'lyraflow',
+  database: CH_DATABASE,
 })
 
 const BASE = 'http://localhost:3000'
@@ -193,7 +198,7 @@ describe('restart durability', () => {
     // ensureIdentityDictionaries's docstring); that also makes them the one
     // piece of identity resolution with no migration ledger forcing it back
     // into existence, so this is the check that would actually catch it
-    // quietly going missing after an upgrade. resolvedPersonExpr() is the
+    // quietly going missing after an upgrade. resolvedPersonExpr is the
     // exact two-stage dictGetOrDefault expression the query layer resolves
     // identity through — a FAILED or still-empty dictionary answers every
     // lookup with the caller's own anonymous_id as its default (see
@@ -202,7 +207,7 @@ describe('restart durability', () => {
     if (!identifiedAt) throw new Error('identify() was never confirmed accepted')
     const resolvedRs = await ch.query({
       query: `
-        SELECT DISTINCT ${resolvedPersonExpr()} AS resolved
+        SELECT DISTINCT ${resolvedPersonExpr({ database: CH_DATABASE })} AS resolved
         FROM events
         WHERE event_name = 'ping' AND anonymous_id = '${ANON_ID}' AND timestamp < '${chDateTime(identifiedAt)}'
       `,

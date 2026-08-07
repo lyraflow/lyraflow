@@ -43,13 +43,26 @@ function assertSafeIdentifier(value: string, label: string): void {
  * a column expression is valid. It takes no caller-supplied *values* — only
  * `database`/`alias`, which select where the expression looks, not what it
  * returns — so nothing here is an injection surface for event data.
+ *
+ * `database` is REQUIRED and deliberately has no default. It used to default
+ * to 'lyraflow', which duplicated configuration that is already required
+ * elsewhere and could silently disagree with it: LYRAFLOW_CLICKHOUSE_DB has
+ * no default of its own (see config.ts), and `ensureIdentityDictionaries`
+ * creates both dictionaries UNQUALIFIED, i.e. in whatever database the
+ * client is connected to. An operator setting
+ * LYRAFLOW_CLICKHOUSE_DB=analytics therefore got dictionaries in `analytics.*`
+ * and an expression pointing at `lyraflow.*` — a lookup that resolves nobody,
+ * answered with dictGetOrDefault's fallback, so identity resolution degrades
+ * to "nobody was ever identified" with nothing visibly broken. Making the
+ * parameter required means a caller must pass the configured database, and
+ * Plan 3's query work cannot inherit the mismatch by omission.
  */
-export function resolvedPersonExpr(opts?: { database?: string; alias?: string }): string {
-  const db = opts?.database ?? 'lyraflow'
+export function resolvedPersonExpr(opts: { database: string; alias?: string }): string {
+  const db = opts.database
   assertSafeIdentifier(db, 'database')
 
-  const columnPrefix = opts?.alias ? `${opts.alias}.` : ''
-  if (opts?.alias !== undefined) assertSafeIdentifier(opts.alias, 'alias')
+  const columnPrefix = opts.alias ? `${opts.alias}.` : ''
+  if (opts.alias !== undefined) assertSafeIdentifier(opts.alias, 'alias')
 
   const bindingsDict = `'${db}.identity_bindings'`
   const aliasesDict = `'${db}.person_aliases'`

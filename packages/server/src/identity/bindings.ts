@@ -199,33 +199,9 @@ export class IdentityBindings {
   }
 
   /**
-   * Every id that resolves to this person — the canonical id plus each bound
-   * device. Single-person reads use this instead of the ClickHouse dictionary
-   * (which is refreshed on a schedule), so they see the effect of an
-   * identify() immediately rather than after the next refresh.
-   *
-   * Deliberately ignorant of person_aliases: this class owns identity_bindings
-   * only. A caller who needs the full alias-merged group (every id that was
-   * ever merged INTO `personId` via PersonAliases, not just devices bound
-   * directly to it) must resolve that group first and pass every member's id
-   * through {@link devicesForAny} — see identity/person.ts's read route,
-   * which is the one place that composes the two. `personId` here is treated
-   * as a single opaque id, not necessarily a canonical: this method makes no
-   * assumption about aliasing either way.
-   */
-  async personIdsFor(projectId: number, personId: string): Promise<string[]> {
-    const r = await this.pool.query<{ anonymous_id: string }>(
-      `SELECT DISTINCT anonymous_id FROM identity_bindings
-        WHERE project_id = $1 AND person_id = $2`,
-      [projectId, personId],
-    )
-    return [personId, ...r.rows.map((x) => x.anonymous_id)]
-  }
-
-  /**
-   * The inverse direction of {@link devicesForAny}: given a DEVICE id, the
-   * person it currently belongs to, or null if this id was never a device in
-   * this project.
+   * Given a DEVICE id, the person it currently belongs to, or null if this
+   * id was never a device in this project — the inverse direction of
+   * {@link devicesForAny}.
    *
    * Exists because `GET /v1/persons/:id` documents `:id` as "any id that has
    * ever pointed at this person — a device id, the current canonical id, or
@@ -261,13 +237,19 @@ export class IdentityBindings {
   }
 
   /**
-   * The plural counterpart to {@link personIdsFor}: every device bound to
-   * *any* of the given person ids, in one round trip. Exists for a caller
-   * that already has more than one person id in hand — e.g. a whole
-   * alias-merged group (a canonical plus every id merged into it) — and
-   * wants their combined device set without one personIdsFor call per
-   * member. Does not prefix the input ids onto the result the way
-   * personIdsFor does; the caller already has them.
+   * Every device bound to *any* of the given person ids, in one round trip.
+   * Takes a set rather than a single person because its only caller
+   * (identity/person.ts's read route) always has a whole alias-merged group
+   * in hand — a canonical plus every id merged into it — and needs their
+   * combined device set without one query per member.
+   *
+   * Does not prefix the input ids onto the result; the caller already has
+   * them, and treats them and the returned devices as one flat id set.
+   *
+   * Deliberately ignorant of person_aliases: this class owns
+   * identity_bindings only. Resolving which ids belong in `personIds` is
+   * PersonAliases' job, and identity/person.ts is the one place that
+   * composes the two.
    */
   async devicesForAny(projectId: number, personIds: string[]): Promise<string[]> {
     if (personIds.length === 0) return []

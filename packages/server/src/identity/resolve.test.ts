@@ -7,7 +7,7 @@ import { RESOLVED_PERSON_ALIAS, resolvedPersonExpr } from './resolve.js'
 
 describe('resolvedPersonExpr', () => {
   it('short-circuits on user_id but still applies the alias stage', () => {
-    const sql = resolvedPersonExpr()
+    const sql = resolvedPersonExpr({ database: 'lyraflow' })
     expect(sql).toContain("user_id != ''")
 
     // resolvedPersonExpr prepends a leading `/* ... */` documentation
@@ -40,7 +40,7 @@ describe('resolvedPersonExpr', () => {
   })
 
   it('passes the event timestamp as the range key so resolution is time-aware', () => {
-    expect(resolvedPersonExpr()).toContain('timestamp')
+    expect(resolvedPersonExpr({ database: 'lyraflow' })).toContain('timestamp')
   })
 
   // `toContain('anonymous_id)')` was vacuous: stage 1's key tuple is
@@ -52,16 +52,18 @@ describe('resolvedPersonExpr', () => {
   // Live test 4 in this file pins the same property behaviourally; this one
   // now at least discriminates on the shape.
   it('falls back to the anonymous id when no binding exists', () => {
-    expect(resolvedPersonExpr()).toContain('toDateTime(timestamp), anonymous_id)')
+    expect(resolvedPersonExpr({ database: 'lyraflow' })).toContain(
+      'toDateTime(timestamp), anonymous_id)',
+    )
   })
 
   // Beyond the brief: the `alias` option is part of the documented interface
-  // (resolvedPersonExpr(opts?: { database?: string; alias?: string })) but
+  // (resolvedPersonExpr(opts: { database: string; alias?: string })) but
   // untested by the brief's own Step 1 fixture. Plan 3's segment compiler
   // joins events under a table alias (e.g. `events e`), so every column this
   // expression touches must be qualifiable, not just the dictionary names.
   it('qualifies every column reference with the given table alias', () => {
-    const sql = resolvedPersonExpr({ alias: 'e' })
+    const sql = resolvedPersonExpr({ database: 'lyraflow', alias: 'e' })
     expect(sql).toContain('e.user_id')
     expect(sql).toContain('e.project_id')
     expect(sql).toContain('e.anonymous_id')
@@ -76,7 +78,7 @@ describe('resolvedPersonExpr', () => {
   })
 
   it('defaults to unqualified columns when no alias is given', () => {
-    const sql = resolvedPersonExpr()
+    const sql = resolvedPersonExpr({ database: 'lyraflow' })
     expect(sql).not.toMatch(/\w\.\w*user_id/)
   })
 
@@ -97,7 +99,9 @@ describe('resolvedPersonExpr', () => {
   })
 
   it('rejects a table alias that is not a safe identifier', () => {
-    expect(() => resolvedPersonExpr({ alias: 'e; DROP TABLE events; --' })).toThrow(/alias/i)
+    expect(() =>
+      resolvedPersonExpr({ database: 'lyraflow', alias: 'e; DROP TABLE events; --' }),
+    ).toThrow(/alias/i)
   })
 })
 
