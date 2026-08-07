@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import {
+  type Cursor,
   CursorError,
   MEMBER_PAGE_SIZE,
   MEMBER_WINDOW_MAX,
@@ -7,7 +8,6 @@ import {
   SegmentValidationError,
   compileSegment,
   treeHash,
-  type Cursor,
 } from '@lyraflow/core'
 import type { ClickHouseClient } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
@@ -15,7 +15,7 @@ import { z } from 'zod'
 import type { Project, ProjectCache } from '../auth/project-cache.js'
 import type { Readiness } from '../health.js'
 import { SERVER_KEY_HEADER, makeAuthenticator } from '../ingest/routes.js'
-import { SegmentCache, type MemberRow } from './cache.js'
+import { type MemberRow, SegmentCache } from './cache.js'
 import { SegmentTimeoutError, runSegment, runSegmentMembers } from './execute.js'
 
 export interface SegmentDeps {
@@ -33,7 +33,10 @@ export interface SegmentDeps {
  * it should be told, not left to infer.
  */
 const PreviewOptions = z.object({
-  include: z.array(z.enum(['members'])).max(1).optional(),
+  include: z
+    .array(z.enum(['members']))
+    .max(1)
+    .optional(),
   cursor: z.string().max(512).optional(),
 })
 
@@ -88,9 +91,7 @@ interface WalkCursor {
  * or stored beyond what auth already required.
  */
 function cursorSigningKey(project: Pick<Project, 'serverKeyHash'>): Buffer {
-  return createHmac('sha256', project.serverKeyHash)
-    .update('lyraflow.segment-cursor.v1')
-    .digest()
+  return createHmac('sha256', project.serverKeyHash).update('lyraflow.segment-cursor.v1').digest()
 }
 
 function signCursorPayload(payload: string, key: Buffer): string {

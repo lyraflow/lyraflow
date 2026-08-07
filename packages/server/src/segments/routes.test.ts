@@ -272,7 +272,7 @@ describe('POST /v1/segments/preview', () => {
     expect(res.json().error).toMatch(/cursor/i)
   })
 
-  it('rejects a cursor built with the public core encodeCursor, not this route\'s own signed one', async () => {
+  it("rejects a cursor built with the public core encodeCursor, not this route's own signed one", async () => {
     // core's encodeCursor is exported and the brief sanctions its use for
     // building test cursors — but this route mints its own signed cursors
     // and must not treat a well-formed, UNSIGNED core cursor as one of its
