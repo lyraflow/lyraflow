@@ -607,4 +607,42 @@ describe('ensureIdentityDictionaries (live ClickHouse + Postgres)', () => {
     // First second cleanly owned by the later owner.
     expect(await lookup('2026-08-06 09:00:01')).toBe('second-of-pair')
   })
+
+  /**
+   * The suppression dictionary the segment compiler injects its filter against.
+   *
+   * Both assertions are required, and the second is the one that matters.
+   * Plan 2 established that a FAILED dictionary answers every lookup with the
+   * caller's default rather than erroring — so a test that only checked
+   * `status = 'LOADED'` would pass just as happily against a dictionary that
+   * loads cleanly and contains nothing, which is precisely the shape of bug
+   * that would publish a deleted person's events.
+   */
+  it('creates a loaded suppression dictionary that dictHas can read', async () => {
+    await pg.query(
+      `INSERT INTO suppressed_persons (project_id, person_id)
+       VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+      [projectId, 'person-gone'],
+    )
+    await ensureIdentityDictionaries(ch, pgSource)
+    await ch.command({ query: `SYSTEM RELOAD DICTIONARY ${CH_DB}.suppressed_persons` })
+
+    const rs = await ch.query({
+      query: `SELECT status, last_exception FROM system.dictionaries
+              WHERE database = '${CH_DB}' AND name = 'suppressed_persons'`,
+      format: 'JSONEachRow',
+    })
+    const [status] = await rs.json<{ status: string; last_exception: string }>()
+    expect(status?.status).toBe('LOADED')
+    expect(status?.last_exception).toBe('')
+
+    const hits = await ch.query({
+      query: `SELECT
+                dictHas('${CH_DB}.suppressed_persons', (toUInt32(${projectId}), 'person-gone')) AS gone,
+                dictHas('${CH_DB}.suppressed_persons', (toUInt32(${projectId}), 'person-here')) AS here`,
+      format: 'JSONEachRow',
+    })
+    const [hit] = await hits.json<{ gone: number; here: number }>()
+    expect(hit).toEqual({ gone: 1, here: 0 })
+  })
 })
