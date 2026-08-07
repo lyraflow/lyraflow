@@ -201,4 +201,18 @@ describe('coalesceContiguous', () => {
     const tiling = deriveTiling([{ personId: 'alice', boundAt: t(1) }])
     expect(coalesceContiguous(tiling)).toEqual(tiling)
   })
+
+  it('does not merge two same-person tiles that are not contiguous', () => {
+    // deriveTiling's own output is always gapless, so nothing it produces
+    // can exercise this branch — every caller today feeds coalesceContiguous
+    // gapless tiling. Hand-built here specifically to isolate the
+    // contiguity guard (`last.to === b.from`) from the personId guard
+    // covered above: same person on both tiles, but a genuine gap between
+    // them, which must NOT be bridged.
+    const gapped: Binding[] = [
+      { personId: 'alice', from: NEG, to: t(1) },
+      { personId: 'alice', from: t(5), to: POS },
+    ]
+    expect(coalesceContiguous(gapped)).toEqual(gapped)
+  })
 })
