@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 4
+export const SCHEMA_VERSION = 5
 
 export * from './ingest/payloads.js'
 export * from './ingest/properties.js'

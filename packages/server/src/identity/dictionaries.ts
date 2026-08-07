@@ -229,9 +229,15 @@ export async function ensureIdentityDictionaries(
     throw new Error(`PgDictionarySource.port must be an integer, got ${String(pg.port)}`)
   }
 
-  const source = (table: string) =>
+  // `invalidateQuery`, when given, is a scalar Postgres query ClickHouse runs
+  // before each scheduled reload: an unchanged result means the reload is
+  // skipped entirely. It is interpolated into the DDL the same way `table` is
+  // — both are compile-time constants from this module, never caller data —
+  // and neither is ever built from a request.
+  const source = (table: string, invalidateQuery?: string) =>
     `SOURCE(POSTGRESQL(host '${escapeSqlLiteral(pg.host)}' port ${pg.port} user '${escapeSqlLiteral(pg.user)}' ` +
-    `password '${escapeSqlLiteral(pg.password)}' db '${escapeSqlLiteral(pg.database)}' table '${table}'))`
+    `password '${escapeSqlLiteral(pg.password)}' db '${escapeSqlLiteral(pg.database)}' table '${table}'` +
+    `${invalidateQuery ? ` invalidate_query '${escapeSqlLiteral(invalidateQuery)}'` : ''}))`
 
   try {
     await ch.command({
@@ -261,5 +267,32 @@ export async function ensureIdentityDictionaries(
     })
   } catch (err) {
     throw sanitizeDictionaryError('person_aliases', pg.password, err)
+  }
+
+  // The third dictionary: the people whose data must never reach a result set.
+  //
+  // LIFETIME is deliberately far shorter than the identity dictionaries' 5-15s.
+  // A stale identity dictionary shows slightly out-of-date stitching; a stale
+  // suppression dictionary shows data belonging to someone who asked for it to
+  // be deleted. The two are not comparable, so they do not share a refresh
+  // policy. The frequency is cheap because `invalidate_query` means a reload
+  // only actually happens once a row has been added — rows are never removed,
+  // so the count and the newest timestamp together change if and only if the
+  // list grew.
+  try {
+    await ch.command({
+      query: `CREATE OR REPLACE DICTIONARY suppressed_persons (
+      project_id UInt32, person_id String, suppressed UInt8
+    )
+    PRIMARY KEY project_id, person_id
+    ${source(
+      'suppressed_persons_dict_src',
+      "SELECT count(*)::text || ':' || coalesce(max(suppressed_at), 'epoch')::text FROM suppressed_persons",
+    )}
+    LAYOUT(COMPLEX_KEY_HASHED())
+    LIFETIME(MIN 1 MAX 5)`,
+    })
+  } catch (err) {
+    throw sanitizeDictionaryError('suppressed_persons', pg.password, err)
   }
 }
