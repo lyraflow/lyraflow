@@ -1,12 +1,25 @@
 import type { Pool } from '@lyraflow/db'
 
 /**
- * Cap on the device→person memo. identify() runs on every page load, so this
- * absorbs the repeat case without touching Postgres — but anonymous_id
- * arrives through an endpoint authenticated by a write key that is public by
- * design, so the memo must be bounded like everything else reachable from
- * ingest (see ProjectCache's MAX_NEGATIVE_ENTRIES for the same reasoning
- * applied to a different cache).
+ * Cap on the device→person memo.
+ *
+ * NOT what absorbs the repeat page load, despite what this comment used to
+ * claim. The memo is keyed on (project, device, *instant*), and `bind()`'s
+ * instant is the event's own timestamp — which, for the overwhelmingly
+ * common client that omits `timestamp`, is server receipt time and therefore
+ * distinct on every single request. So the memo misses by construction for
+ * exactly the case it was described as covering. What it does still cover is
+ * a genuinely identical bind event submitted twice: a retry of a request
+ * that carried an explicit `timestamp`, or a replayed batch.
+ *
+ * The repeat page load is suppressed one layer down instead, in Postgres —
+ * see BIND_SUPPRESSION_CLAUSE.
+ *
+ * Bounded regardless of how often it hits: anonymous_id arrives through an
+ * endpoint authenticated by a write key that is public by design, so any map
+ * keyed on it must be capped like everything else reachable from ingest (see
+ * ProjectCache's MAX_NEGATIVE_ENTRIES for the same reasoning applied to a
+ * different cache).
  */
 export const MAX_CACHED_BINDINGS = 10_000
 
@@ -36,14 +49,59 @@ export const MAX_CACHED_BINDINGS = 10_000
 export const BIND_CONFLICT_CLAUSE = `ON CONFLICT (project_id, anonymous_id, bound_at)
 DO UPDATE SET person_id = LEAST(identity_bindings.person_id, EXCLUDED.person_id)`
 
-// Only actually rewrites (and returns) the row when the conflict resolution
-// changes something: a repeat identify for the person already bound at this
-// instant is a genuine no-op, but a colliding *different* person at the same
-// instant always re-resolves via LEAST, even on the rare occasion that
-// re-resolution happens to land back on the value already stored. Postgres
-// omits a row from RETURNING when its DO UPDATE ... WHERE evaluates false,
-// which is exactly how `bind()` below tells 'written' from 'noop' without a
-// second round trip.
+/**
+ * Keeps identity_bindings from growing one row per identify() call forever.
+ *
+ * Without it, every identified page load writes a row: the memo above cannot
+ * help (its key contains the instant, which differs per request), and nothing
+ * else deduplicates. 100k identified pageviews/day is 100k rows/day in the
+ * table, in identity_bindings_dict_src's window function, and in every
+ * dictionary reload — and LIFETIME(MIN 5 MAX 15) reloads the whole thing into
+ * a range-hashed layout every 5-15 seconds.
+ *
+ * The suppression rule is: skip the insert when the person ALREADY IN FORCE
+ * on this device at this event's own instant is the person being bound.
+ * Correct because `deriveTiling` (and the SQL view mirroring it) would tile
+ * such an event as a boundary between two tiles owned by the SAME person —
+ * the split is invisible to every lookup, so the row buys nothing.
+ *
+ * "In force at this instant", not "the device's most recent bind" — that
+ * cheaper-sounding version is wrong for a late, out-of-order identify. With
+ * bob bound at 10:00 and alice at 20:00, a late identify placing alice at
+ * 15:00 must be written: it is genuinely new information (alice, not bob,
+ * held the device from 15:00), and comparing against the most recent bind
+ * (alice) would drop it and leave those five hours attributed to bob. See
+ * bindings.test.ts's "writes a late, out-of-order identify whose instant
+ * belongs to a different person".
+ *
+ * An event EARLIER than every stored bind is never suppressed by this clause
+ * (the subquery finds no row and `IS DISTINCT FROM NULL` is true). That is
+ * one redundant row in the rare case where the earliest stored bind is
+ * already the same person; correctness is unaffected either way, and it keeps
+ * the clause a single indexed lookup rather than a two-sided search.
+ */
+const BIND_SUPPRESSION_CLAUSE = `$3::text IS DISTINCT FROM (
+    SELECT prev.person_id
+      FROM identity_bindings prev
+     WHERE prev.project_id = $1::bigint
+       AND prev.anonymous_id = $2::text
+       AND prev.bound_at <= date_trunc('millisecond', $4::timestamptz)
+     ORDER BY prev.bound_at DESC
+     LIMIT 1
+  )`
+
+// INSERT ... SELECT ... WHERE rather than VALUES, so BIND_SUPPRESSION_CLAUSE
+// can gate the insert without a second round trip.
+//
+// The ON CONFLICT below only actually rewrites (and returns) the row when the
+// conflict resolution changes something: a repeat identify for the person
+// already bound at this instant is a genuine no-op, but a colliding
+// *different* person at the same instant always re-resolves via LEAST, even
+// on the rare occasion that re-resolution happens to land back on the value
+// already stored. Postgres omits a row from RETURNING when its
+// DO UPDATE ... WHERE evaluates false — and equally when the SELECT above
+// produced no row at all — which is how `bind()` below tells 'written' from
+// 'noop' without asking again.
 const BIND_SQL = `
   INSERT INTO identity_bindings (project_id, anonymous_id, person_id, bound_at)
   -- bound_at truncated to millisecond precision explicitly: Bound (in
@@ -52,8 +110,11 @@ const BIND_SQL = `
   -- non-zero microsecond remainder would be storing a row deriveTiling could
   -- never produce, since its ms-resolution Bound can't represent the
   -- difference — truncating here is what keeps the two derivations
-  -- comparable at all.
-  VALUES ($1, $2, $3, date_trunc('millisecond', $4::timestamptz))
+  -- comparable at all. 003_identity.sql carries the same rule as a CHECK, so
+  -- a backfill or a SQL-level import cannot bypass this statement and desync
+  -- the two.
+  SELECT $1::bigint, $2::text, $3::text, date_trunc('millisecond', $4::timestamptz)
+  WHERE ${BIND_SUPPRESSION_CLAUSE}
   ${BIND_CONFLICT_CLAUSE}
   WHERE identity_bindings.person_id <> EXCLUDED.person_id
   RETURNING person_id
@@ -82,6 +143,20 @@ export class IdentityBindings {
     private readonly pool: Pool,
     opts?: { cacheMax?: number },
   ) {
+    // Validated rather than taken on trust, for the same reason
+    // dictionaries.ts validates `port`: a NaN here does not fail loudly, it
+    // fails silently and in the worst possible direction. `#remember`'s
+    // eviction loop is `while (size >= this.#cacheMax)`, and `size >= NaN` is
+    // always false — so a NaN cap disables eviction entirely and turns a
+    // deliberately bounded cache, keyed on an id supplied through a public
+    // write key, into an unbounded one. A zero or negative cap is rejected
+    // too: it would evict on every write, leaving a cache that can never hold
+    // anything.
+    if (opts?.cacheMax !== undefined && (!Number.isInteger(opts.cacheMax) || opts.cacheMax < 1)) {
+      throw new Error(
+        `IdentityBindings: cacheMax must be a positive integer, got ${String(opts.cacheMax)}`,
+      )
+    }
     this.#cacheMax = opts?.cacheMax ?? MAX_CACHED_BINDINGS
   }
 
@@ -111,9 +186,13 @@ export class IdentityBindings {
     // same-instant collision this call lost, is the *other* person's id, not
     // the one passed in. Caching the argument instead would let a later call
     // with the losing id read back a false 'noop' against a row that no
-    // longer holds it. When no row comes back, the WHERE guard has already
-    // confirmed the stored value equals `personId`, so that is safe to cache
-    // directly.
+    // longer holds it.
+    //
+    // No row means one of the two no-op paths, and `personId` is the right
+    // thing to cache on both: either the ON CONFLICT guard confirmed the row
+    // at this instant already holds `personId`, or BIND_SUPPRESSION_CLAUSE
+    // confirmed `personId` is the person in force at this instant. In both
+    // cases an identical repeat of this call is a no-op again.
     const settled = result.rows[0]?.person_id ?? personId
     this.#remember(key, settled)
     return result.rows.length > 0 ? 'written' : 'noop'

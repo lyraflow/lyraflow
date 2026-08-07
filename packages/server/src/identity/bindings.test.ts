@@ -70,16 +70,69 @@ describe('IdentityBindings.bind', () => {
     expect(Number((r.rows[0] as { c: string }).c)).toBe(1)
   })
 
-  // Catches: a memo keyed on (project, device) alone — without the instant —
-  // that would wrongly treat this as a repeat and silently drop a genuine new
-  // bind event.
-  it('writes again for the same person at a different instant: a different instant is a new event', async () => {
+  // THE test for BIND_SUPPRESSION_CLAUSE, and for why identity_bindings does
+  // not grow one row per identify() call forever. A client that omits
+  // `timestamp` gets server receipt time, so every repeat identify from the
+  // same logged-in browser arrives at a NEW instant and misses the in-memory
+  // memo by construction — a fresh IdentityBindings here makes that explicit
+  // rather than relying on it, since an empty memo cannot be what produces
+  // the 'noop'. Only the SQL can.
+  //
+  // Catches: deleting the `WHERE $3::text IS DISTINCT FROM (...)` clause,
+  // which puts the second row back (count 2, and 'written' instead of
+  // 'noop').
+  it('suppresses a repeat identify for the person already in force on the device', async () => {
     expect(await bindings.bind(projectId, 'd1', 'alice', at(12))).toBe('written')
-    expect(await bindings.bind(projectId, 'd1', 'alice', at(13))).toBe('written')
+    const fresh = new IdentityBindings(pg)
+    expect(await fresh.bind(projectId, 'd1', 'alice', at(13))).toBe('noop')
     const r = await pg.query('SELECT count(*) c FROM identity_bindings WHERE project_id = $1', [
       projectId,
     ])
-    expect(Number((r.rows[0] as { c: string }).c)).toBe(2)
+    expect(Number((r.rows[0] as { c: string }).c)).toBe(1)
+  })
+
+  // The other half: suppression must not swallow a genuine rebind. Catches a
+  // suppression clause that compares nothing at all (skip every insert after
+  // the first), or one keyed on the device alone without the person.
+  it('still writes a genuine rebind to a different person', async () => {
+    expect(await bindings.bind(projectId, 'd1', 'alice', at(12))).toBe('written')
+    expect(await bindings.bind(projectId, 'd1', 'bob', at(13))).toBe('written')
+    const r = await pg.query<{ person_id: string }>(
+      'SELECT person_id FROM identity_bindings WHERE project_id = $1 ORDER BY bound_at',
+      [projectId],
+    )
+    expect(r.rows.map((x) => x.person_id)).toEqual(['alice', 'bob'])
+  })
+
+  // Replaces an earlier test that asserted a repeat identify for the same
+  // person at a LATER instant writes a second row. It deliberately no longer
+  // does (see the suppression test above), and that assertion was the wrong
+  // shape for the property it was named after anyway.
+  //
+  // The property that still needs pinning: neither the memo nor the
+  // suppression may be keyed on (project, device) alone, ignoring the
+  // instant. Here 'bob' holds d-late from 10:00 and 'alice' from 20:00, and
+  // then a LATE, out-of-order identify places alice at 15:00 — an instant at
+  // which BOB is the person in force. This must be written: it is genuinely
+  // new information (alice, not bob, held the device from 15:00), and without
+  // the row every event in [15:00, 20:00) resolves to bob.
+  //
+  // Catches: a memo keyed on (project, device) alone, which sees "alice
+  // again on d-late" and returns a false 'noop'. Catches equally the
+  // cheaper-sounding suppression the review sketched — comparing against the
+  // device's MOST RECENT bind (alice@20:00) rather than the one in force at
+  // the event's own instant (bob@10:00) — which suppresses this row and
+  // silently hands those five hours to bob.
+  it('writes a late, out-of-order identify whose instant belongs to a different person', async () => {
+    await bindings.bind(projectId, 'd-late', 'bob', at(10))
+    await bindings.bind(projectId, 'd-late', 'alice', at(20))
+    expect(await bindings.bind(projectId, 'd-late', 'alice', at(15))).toBe('written')
+    const r = await pg.query<{ person_id: string }>(
+      `SELECT person_id FROM identity_bindings
+        WHERE project_id = $1 AND anonymous_id = 'd-late' ORDER BY bound_at`,
+      [projectId],
+    )
+    expect(r.rows.map((x) => x.person_id)).toEqual(['bob', 'alice', 'alice'])
   })
 
   it('writes a second event for a different person on the same device at a different instant', async () => {
@@ -186,6 +239,18 @@ describe('IdentityBindings.bind', () => {
     expect(MAX_CACHED_BINDINGS).toBeGreaterThan(0)
   })
 
+  // NaN specifically, not just "some invalid value": `#remember` evicts with
+  // `while (size >= this.#cacheMax)`, and `size >= NaN` is always false, so a
+  // NaN cap silently disables eviction and makes a cache keyed on an id that
+  // arrives through a PUBLIC write key unbounded. Same class of defect
+  // dictionaries.ts's Number.isInteger check on `port` exists for.
+  // Catches: deleting the constructor guard (no throw).
+  it('rejects a cache cap that is not a positive integer', () => {
+    expect(() => new IdentityBindings(pg, { cacheMax: Number.NaN })).toThrow(/cacheMax/)
+    expect(() => new IdentityBindings(pg, { cacheMax: 0 })).toThrow(/cacheMax/)
+    expect(() => new IdentityBindings(pg, { cacheMax: 2.5 })).toThrow(/cacheMax/)
+  })
+
   // Requirement (b): bound_at is truncated to millisecond precision on write.
   // JS's Date can never itself carry a fractional millisecond (the spec's
   // TimeClip truncates at construction), so this is defense against a value
@@ -260,6 +325,48 @@ describe('IdentityBindings write path agrees with deriveTiling', () => {
     return to >= from ? { from, to } : null
   }
 
+  /**
+   * Mirrors `BIND_SUPPRESSION_CLAUSE` (and the ON CONFLICT resolution that
+   * runs after it): the set of rows `bind()` actually leaves in Postgres for
+   * this event list, applied in arrival order.
+   *
+   * Needed because the write path no longer stores every event it is handed.
+   * An event whose instant already belongs to the same person is skipped —
+   * it would tile as a boundary between two tiles owned by that one person,
+   * so it changes nothing and only costs a row (see the clause's docstring).
+   * `deriveTiling` still models the ideal, uncollapsed derivation and is
+   * deliberately unchanged; simulating the suppression HERE, on its input,
+   * keeps this comparison exact in row count as well as in bounds — which is
+   * the whole point of it — and makes the suppression rule itself something
+   * this differential test pins, rather than something it papers over.
+   *
+   * Faithful to the SQL on both branches:
+   *  - "person in force at this instant" is the stored row with the greatest
+   *    boundAt <= this event's, matching the clause's
+   *    `bound_at <= ... ORDER BY bound_at DESC LIMIT 1`. An event earlier
+   *    than every stored row finds none and is kept, exactly as
+   *    `IS DISTINCT FROM NULL` keeps it.
+   *  - a kept event landing on an instant already occupied resolves via
+   *    LEAST, matching BIND_CONFLICT_CLAUSE.
+   */
+  function afterWriteSuppression(events: BindEvent[]): BindEvent[] {
+    const stored = new Map<number, string>()
+    for (const e of events) {
+      let inForceAt: number | undefined
+      for (const boundAt of stored.keys()) {
+        if (boundAt <= e.boundAt && (inForceAt === undefined || boundAt > inForceAt)) {
+          inForceAt = boundAt
+        }
+      }
+      if (inForceAt !== undefined && stored.get(inForceAt) === e.personId) continue
+      const occupant = stored.get(e.boundAt)
+      stored.set(e.boundAt, occupant !== undefined && occupant < e.personId ? occupant : e.personId)
+    }
+    return [...stored.entries()]
+      .map(([boundAt, personId]) => ({ personId, boundAt }))
+      .sort((a, b) => a.boundAt - b.boundAt)
+  }
+
   async function assertViewMatchesReference(anonymousId: string, events: BindEvent[]) {
     for (const e of events) {
       await bindings.bind(projectId, anonymousId, e.personId, new Date(e.boundAt))
@@ -280,7 +387,7 @@ describe('IdentityBindings write path agrees with deriveTiling', () => {
     // view's own WHERE filter) must be absent from `expected`, not present
     // as `null` or as a clamped-but-inverted row — mirroring the view
     // exactly, including in row *count*, is the point.
-    const expected = deriveTiling(events).flatMap((b) => {
+    const expected = deriveTiling(afterWriteSuppression(events)).flatMap((b) => {
       const clamped = clampForView(b)
       return clamped ? [{ personId: b.personId, ...clamped }] : []
     })
@@ -304,12 +411,24 @@ describe('IdentityBindings write path agrees with deriveTiling', () => {
     ])
   })
 
-  it('agrees on repeated same-person events, uncollapsed', async () => {
+  // The one fixture the write-side suppression changes, and the reason
+  // `afterWriteSuppression` exists. p@05:00 is skipped — p is already in
+  // force from p@01:00 — so the view sees two rows, not three, and produces
+  // one p tile running to q's bind rather than two abutting p tiles. Nothing
+  // about resolution changes; that is exactly why the row is not worth
+  // storing. deriveTiling itself still refuses to collapse adjacent
+  // same-person events (see its docstring); the collapse here happens on its
+  // INPUT, modelling what Postgres actually holds.
+  it('agrees on repeated same-person events, with the redundant one suppressed on write', async () => {
     await assertViewMatchesReference('repeat', [
       { personId: 'p', boundAt: at(1).getTime() },
       { personId: 'p', boundAt: at(5).getTime() },
       { personId: 'q', boundAt: at(9).getTime() },
     ])
+    const r = await pg.query('SELECT count(*) c FROM identity_bindings WHERE anonymous_id = $1', [
+      'repeat',
+    ])
+    expect(Number((r.rows[0] as { c: string }).c)).toBe(2)
   })
 
   it('agrees when a late, out-of-order identify retroactively attaches earlier history', async () => {
