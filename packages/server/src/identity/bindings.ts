@@ -12,8 +12,10 @@ import type { Pool } from '@lyraflow/db'
  * a genuinely identical bind event submitted twice: a retry of a request
  * that carried an explicit `timestamp`, or a replayed batch.
  *
- * The repeat page load is suppressed one layer down instead, in Postgres —
- * see BIND_SUPPRESSION_CLAUSE.
+ * Nothing else absorbs the repeat page load either — it is a known,
+ * documented cost, not a mitigated one. See the GROWTH CHARACTERISTIC note on
+ * IdentityBindings below, and BIND_SQL's docstring for the write-side
+ * suppression that was tried and reverted.
  *
  * Bounded regardless of how often it hits: anonymous_id arrives through an
  * endpoint authenticated by a write key that is public by design, so any map
@@ -50,58 +52,54 @@ export const BIND_CONFLICT_CLAUSE = `ON CONFLICT (project_id, anonymous_id, boun
 DO UPDATE SET person_id = LEAST(identity_bindings.person_id, EXCLUDED.person_id)`
 
 /**
- * Keeps identity_bindings from growing one row per identify() call forever.
+ * WHY THERE IS NO WRITE-SIDE DEDUPLICATION HERE, and why adding one is
+ * harder than it looks. Read this before trying again.
  *
- * Without it, every identified page load writes a row: the memo above cannot
- * help (its key contains the instant, which differs per request), and nothing
- * else deduplicates. 100k identified pageviews/day is 100k rows/day in the
- * table, in identity_bindings_dict_src's window function, and in every
- * dictionary reload — and LIFETIME(MIN 5 MAX 15) reloads the whole thing into
- * a range-hashed layout every 5-15 seconds.
+ * Every identified page load writes a row (see GROWTH CHARACTERISTIC on the
+ * class below for what that costs). The obvious mitigation is to skip the
+ * insert when the person "already in force" on the device at this event's
+ * instant is the one being bound — such an event tiles as a boundary between
+ * two tiles owned by the same person, so at the moment of the write it is
+ * genuinely invisible to every lookup.
  *
- * The suppression rule is: skip the insert when the person ALREADY IN FORCE
- * on this device at this event's own instant is the person being bound.
- * Correct because `deriveTiling` (and the SQL view mirroring it) would tile
- * such an event as a boundary between two tiles owned by the SAME person —
- * the split is invisible to every lookup, so the row buys nothing.
+ * That was implemented, reviewed, and reverted. It is not order-invariant,
+ * and order-invariance is the entire reason this table stores bind events
+ * rather than ranges (see 003_identity.sql, and the class docstring below).
+ * "Invisible now" is not "invisible later": a subsequent insert can split the
+ * very tile whose interior the suppressed event was sitting in, and the
+ * suppressed event is no longer there to reclaim the far side. Reachable
+ * through the public /v1/identify endpoint, with no unusual input:
  *
- * "In force at this instant", not "the device's most recent bind" — that
- * cheaper-sounding version is wrong for a late, out-of-order identify. With
- * bob bound at 10:00 and alice at 20:00, a late identify placing alice at
- * 15:00 must be written: it is genuinely new information (alice, not bob,
- * held the device from 15:00), and comparing against the most recent bind
- * (alice) would drop it and leave those five hours attributed to bob. See
- * bindings.test.ts's "writes a late, out-of-order identify whose instant
- * belongs to a different person".
+ *   1. identify(alice) @10:00        -> written.        rows: alice@10
+ *   2. identify(alice) @20:00        -> alice in force  rows: alice@10
+ *                                       at 20:00, so
+ *                                       SUPPRESSED.
+ *   3. identify(bob)   @15:00 (late) -> bob != alice    rows: alice@10, bob@15
+ *                                       at 15:00, so
+ *                                       written.
  *
- * An event EARLIER than every stored bind is never suppressed by this clause
- * (the subquery finds no row and `IS DISTINCT FROM NULL` is true). That is
- * one redundant row in the rare case where the earliest stored bind is
- * already the same person; correctness is unaffected either way, and it keeps
- * the clause a single indexed lookup rather than a two-sided search.
+ * Tiling: alice[-inf,15), bob[15,+inf). Every event from 20:00 onward now
+ * resolves to bob — permanently, silently, and with no row anywhere recording
+ * that alice ever took the device back. With step 2 stored, the tiling is
+ * alice[-inf,15), bob[15,20), alice[20,+inf), which is correct.
+ *
+ * This is the exact mirror of the hazard that (correctly) ruled out the even
+ * cheaper "compare against the device's most recent bind" variant. Any future
+ * attempt must be order-invariant under arbitrary later inserts, which a
+ * point-in-time comparison at write time cannot be. Deduplicating downstream
+ * — collapsing adjacent same-person tiles inside
+ * identity_bindings_dict_src, where the whole event set is visible at once —
+ * is the direction that can work; the derivation there already sees every
+ * event, so it cannot be surprised by a later one.
  */
-const BIND_SUPPRESSION_CLAUSE = `$3::text IS DISTINCT FROM (
-    SELECT prev.person_id
-      FROM identity_bindings prev
-     WHERE prev.project_id = $1::bigint
-       AND prev.anonymous_id = $2::text
-       AND prev.bound_at <= date_trunc('millisecond', $4::timestamptz)
-     ORDER BY prev.bound_at DESC
-     LIMIT 1
-  )`
-
-// INSERT ... SELECT ... WHERE rather than VALUES, so BIND_SUPPRESSION_CLAUSE
-// can gate the insert without a second round trip.
-//
-// The ON CONFLICT below only actually rewrites (and returns) the row when the
-// conflict resolution changes something: a repeat identify for the person
-// already bound at this instant is a genuine no-op, but a colliding
-// *different* person at the same instant always re-resolves via LEAST, even
-// on the rare occasion that re-resolution happens to land back on the value
-// already stored. Postgres omits a row from RETURNING when its
-// DO UPDATE ... WHERE evaluates false — and equally when the SELECT above
-// produced no row at all — which is how `bind()` below tells 'written' from
-// 'noop' without asking again.
+// Only actually rewrites (and returns) the row when the conflict resolution
+// changes something: a repeat identify for the person already bound at this
+// instant is a genuine no-op, but a colliding *different* person at the same
+// instant always re-resolves via LEAST, even on the rare occasion that
+// re-resolution happens to land back on the value already stored. Postgres
+// omits a row from RETURNING when its DO UPDATE ... WHERE evaluates false,
+// which is exactly how `bind()` below tells 'written' from 'noop' without a
+// second round trip.
 const BIND_SQL = `
   INSERT INTO identity_bindings (project_id, anonymous_id, person_id, bound_at)
   -- bound_at truncated to millisecond precision explicitly: Bound (in
@@ -113,8 +111,7 @@ const BIND_SQL = `
   -- comparable at all. 003_identity.sql carries the same rule as a CHECK, so
   -- a backfill or a SQL-level import cannot bypass this statement and desync
   -- the two.
-  SELECT $1::bigint, $2::text, $3::text, date_trunc('millisecond', $4::timestamptz)
-  WHERE ${BIND_SUPPRESSION_CLAUSE}
+  VALUES ($1, $2, $3, date_trunc('millisecond', $4::timestamptz))
   ${BIND_CONFLICT_CLAUSE}
   WHERE identity_bindings.person_id <> EXCLUDED.person_id
   RETURNING person_id
@@ -128,14 +125,33 @@ const BIND_SQL = `
  * reads existing rows, computes a diff, and applies it. That is the point of
  * storing bind events rather than ranges (see 003_identity.sql): a set of
  * events has no order, so there is nothing here for arrival order to disturb,
- * and no read-modify-write race to guard against.
+ * and no read-modify-write race to guard against. Nothing in this class may
+ * decide what to write by inspecting what is already there — that is exactly
+ * what reintroduces order-dependence, and it is what sank the write-side
+ * suppression documented on BIND_SQL.
+ *
+ * GROWTH CHARACTERISTIC, unmitigated and deliberately so. Every identify()
+ * carrying an anonymous_id writes a row, including the repeat identify a
+ * logged-in browser sends on every page load. A client that omits
+ * `timestamp` gets server receipt time, so those repeats never collide on
+ * (device, instant) and never deduplicate. At 100k identified pageviews/day
+ * that is 100k rows/day, growing without bound, and each row is carried
+ * through identity_bindings_dict_src's window function and into every
+ * dictionary reload — which LIFETIME(MIN 5 MAX 15) performs every 5-15
+ * seconds, rebuilding the whole range-hashed layout each time. Operators
+ * sending high identified volume should expect this table to be the fastest
+ * growing thing in their Postgres, and should watch dictionary reload time
+ * alongside it. Mitigating it safely means collapsing adjacent same-person
+ * tiles in the derivation, where the full event set is visible; see
+ * BIND_SQL's docstring for why the write-side version is not an option.
  */
 export class IdentityBindings {
   // Keyed on (project, device, instant) → the person last confirmed bound at
   // that exact triple. The instant is part of the key, not just the device,
-  // because a different instant is a new bind event that must always reach
-  // Postgres — the memo may only skip a write when the *same* person is
-  // already bound at the *same* instant.
+  // because a different instant is a genuinely different bind event that
+  // must always reach Postgres — the memo may only skip a write when the
+  // *same* person is already bound at the *same* instant, which is the only
+  // claim that stays true no matter what else is written afterwards.
   #cache = new Map<string, string>()
   readonly #cacheMax: number
 
@@ -186,13 +202,18 @@ export class IdentityBindings {
     // same-instant collision this call lost, is the *other* person's id, not
     // the one passed in. Caching the argument instead would let a later call
     // with the losing id read back a false 'noop' against a row that no
-    // longer holds it.
+    // longer holds it. When no row comes back, the WHERE guard has already
+    // confirmed the stored value equals `personId`, so that is safe to cache
+    // directly.
     //
-    // No row means one of the two no-op paths, and `personId` is the right
-    // thing to cache on both: either the ON CONFLICT guard confirmed the row
-    // at this instant already holds `personId`, or BIND_SUPPRESSION_CLAUSE
-    // confirmed `personId` is the person in force at this instant. In both
-    // cases an identical repeat of this call is a no-op again.
+    // Both branches share the property that makes this memo safe at all: the
+    // cached value describes a row that DOES exist, at the exact instant in
+    // the key. A memo entry recording "this person would be the answer here"
+    // for an instant with no row behind it would not be — "the person in
+    // force at t" changes when a bind lands between the cached instant and
+    // t, so a later hit could return a stale 'noop' while the SQL would
+    // actually write. That is one of the reasons the reverted write-side
+    // suppression (see BIND_SQL) could not simply be cached through.
     const settled = result.rows[0]?.person_id ?? personId
     this.#remember(key, settled)
     return result.rows.length > 0 ? 'written' : 'noop'

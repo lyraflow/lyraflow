@@ -213,6 +213,33 @@ that read takes a simpler union over every id, with no timestamp condition,
 and on a shared or rebound device the two deliberately disagree. *Reading a
 person* below states exactly how.
 
+**Sizing note: every `identify` with an `anonymous_id` writes a row.** That
+includes the repeat `identify` a logged-in browser typically sends on every
+page load. Repeats are not deduplicated: if you omit `timestamp`, each call
+is stamped with server receipt time, so no two land on the same instant and
+nothing collapses them. At 100k identified pageviews/day that is 100k rows
+per day in Postgres' `identity_bindings`, growing without bound, and each row
+is also carried into the ClickHouse identity dictionaries — which reload in
+full every 5–15 seconds. If you send high identified volume, expect this to
+be the fastest-growing table in your Postgres, and watch dictionary reload
+time alongside it.
+
+This is a known cost in v0.1, not an oversight. A write-side suppression
+(skip the insert when the device is already bound to this person) was built
+and then reverted: it is not safe against a late, out-of-order `identify`,
+which can silently and permanently hand one person's later activity to
+another. Correctness won. A safe fix belongs in the range derivation rather
+than the write path; see `packages/server/src/identity/bindings.ts` for the
+full reasoning and the reproduction.
+
+Practical mitigation today: call `identify` once per session rather than once
+per page view. Alternatively, send a **stable** explicit `timestamp` for
+repeats of an unchanged binding — an identical
+(`anonymous_id`, `user_id`, `timestamp`) triple collapses onto the existing
+row and adds nothing. A `timestamp` that advances on every call does not
+help; it is the repetition, not the presence, of the value that collapses
+the write.
+
 ### Merging two people
 
 `POST /v1/alias` merges two known people — an id migration, a duplicate
