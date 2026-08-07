@@ -365,95 +365,141 @@ describe('GET /v1/persons/:id', () => {
     expect(bySurvivorId.json()).toEqual(bodyByOldId)
   })
 
-  // PINS A KNOWN DIVERGENCE — this test asserts what this endpoint does
-  // TODAY, which is not what event resolution does, and it exists so that
-  // gap is recoverable rather than a trap. See person.ts's route docstring
-  // and README's *Reading a person*.
-  //
-  // 'split-device' is bound to 'split-alice' at 08:00 and rebound to
-  // 'split-bob' at 10:00. Five events sit on that one device. The time-split
-  // resolution `resolvedPersonExpr` applies (proved live in resolve.test.ts's
-  // 'does not bleed across a rebind') would divide them 3/2: the 07:00 and
-  // 09:00 anonymous events and alice's own identify belong to alice, bob's
-  // identify and the 11:00 anonymous event belong to bob.
-  //
-  // This route divides them 5/5. It has no timestamp predicate at all:
-  // devicesForAny hands it every device ever bound to the person, and the
-  // ClickHouse query counts every event carrying any of those ids whenever
-  // it happened. So each profile absorbs the OTHER person's era on the
-  // shared device — including, for alice, an event whose own user_id says
-  // 'split-bob' (stage 1's `user_id != ''` short-circuit resolves that event
-  // to bob; this read counts it for alice anyway, because the device is in
-  // her id set). Both first_seen/last_seen windows are too wide and both
-  // counts are too high, in opposite directions.
-  //
-  // Would catch: per-device validity windows being pushed into the query
-  // (Plan 3's work) WITHOUT the docs and this comment being updated with
-  // them — the counts drop to 3 and 2 and this test fails, loudly, which is
-  // the intent. It is not asserting that 5/5 is correct; it is asserting
-  // that 5/5 is what ships today.
-  it("counts a rebound device's whole history for BOTH people — the documented divergence from event resolution", async () => {
+  /**
+   * Was: "counts a rebound device's whole history for BOTH people — the
+   * documented divergence from event resolution", asserting the UNION
+   * behaviour Plan 2 shipped deliberately (5/5 events for two people who
+   * never overlapped on the device) and Plan 3 deferred converging. That
+   * test was written to fail loudly the moment this convergence landed —
+   * this is that landing.
+   *
+   * A device shared by two people now splits at the rebind: each profile
+   * sees only the events that fell inside its own window, matching what
+   * `resolvedPersonExpr` (resolve.ts) already does for event-wide reads.
+   *
+   * Person names are chosen so alphabetical and chronological order
+   * disagree ('zed' bound first, 'amy' second) — see the suite's "Test
+   * discipline" note on the previous task's ordering test passing for the
+   * wrong reason because 'alice' happened to sort both ways at once. A
+   * from/to mix-up here would show up as the wrong person getting which
+   * count, not as a coincidentally-correct pass.
+   */
+  it('splits a rebound device history at the rebind, giving each person only their own', async () => {
+    // 'rebind-zed' holds the device first, 'rebind-amy' after — written
+    // straight to identity_bindings (bypassing /v1/identify) so the bind
+    // instants land exactly on chAt/isoAt offsets rather than server receipt
+    // time, which is what makes the "before/after the rebind" split
+    // deterministic below.
+    await pg.query(
+      `INSERT INTO identity_bindings (project_id, anonymous_id, person_id, bound_at) VALUES
+         ($1, 'rebind-device', 'rebind-zed', $2),
+         ($1, 'rebind-device', 'rebind-amy', $3)`,
+      [projectA, isoAt(700), isoAt(760)],
+    )
+    for (const timestamp of [chAt(710), chAt(730), chAt(780)]) {
+      await insertEvent({
+        projectId: projectA,
+        anonymousId: 'rebind-device',
+        timestamp,
+        eventName: 'rebind_x',
+      })
+    }
+
+    const auth = { 'x-lyraflow-server-key': SERVER_KEY_A }
+    // 710 and 730 fall before the 760 rebind, so they are zed's; 780 falls
+    // after, so it is amy's alone.
+    expect((await getPerson('rebind-zed', auth)).json().events).toBe(2)
+    expect((await getPerson('rebind-amy', auth)).json().events).toBe(1)
+  })
+
+  /**
+   * The narrower half of the same defect, and the one a fix for the wider
+   * half can reintroduce. An event carrying its own user_id belongs to that
+   * person, even when it sits on a device bound to someone else — this
+   * mirrors stage 1 of resolvedPersonExpr, which short-circuits on a
+   * non-empty user_id.
+   */
+  it('gives an event carrying its own user_id to that person, not the device owner', async () => {
+    await pg.query(
+      `INSERT INTO identity_bindings (project_id, anonymous_id, person_id, bound_at)
+       VALUES ($1, 'guard-device', 'guard-alice', $2)`,
+      [projectA, isoAt(800)],
+    )
     await insertEvent({
       projectId: projectA,
-      anonymousId: 'split-device',
-      timestamp: chAt(0),
-      eventName: 'split_before_any_bind',
+      anonymousId: 'guard-device',
+      timestamp: chAt(810),
+      eventName: 'guard_device_era',
+    })
+    await insertEvent({
+      projectId: projectA,
+      anonymousId: 'guard-device',
+      userId: 'guard-bob',
+      timestamp: chAt(820),
+      eventName: 'guard_own_user_id',
+    })
+
+    const auth = { 'x-lyraflow-server-key': SERVER_KEY_A }
+    expect((await getPerson('guard-alice', auth)).json().events).toBe(1)
+    expect((await getPerson('guard-bob', auth)).json().events).toBe(1)
+  })
+
+  // Would catch: `bindEventsForDevices` querying identity_bindings by
+  // anonymous_id alone, with no project_id filter — anonymous_id is
+  // caller-supplied and carries no project qualifier of its own, so an
+  // unscoped query can return another project's bind rows for a colliding
+  // device id. Same style as the devicesForAny contention test below: both
+  // projects bind the SAME device id ('contended-device') to a DIFFERENT
+  // person, so a leak is a wrong window, not just a wrong id string.
+  //
+  // Project B binds first (offset 850), project A second (offset 900).
+  // Project A alone gets a pre-A-bind event at offset 860 — after B's bind,
+  // before A's own. Correctly scoped, project A's device has exactly ONE
+  // bind ever, so its single tile is [-inf, +inf) and the offset-860 event
+  // belongs to tenant-a-person by retroactive attachment. If
+  // bindEventsForDevices leaked B's row into A's derivation, deriveTiling
+  // would see two binds for 'contended-device' (B's at 850, A's at 900) and
+  // split the timeline there — truncating tenant-a-person's tile to
+  // [900, +inf) and silently dropping the offset-860 event from A's own
+  // profile, undercounting rather than leaking B's literal data. That is
+  // the observable failure this test pins.
+  it("does not let a colliding device id absorb another project's binds or events", async () => {
+    await identify(WRITE_KEY_B, {
+      message_id: randomUUID(),
+      anonymous_id: 'contended-device',
+      user_id: 'tenant-b-person',
+      timestamp: isoAt(850),
+      traits: {},
     })
     await identify(WRITE_KEY_A, {
       message_id: randomUUID(),
-      anonymous_id: 'split-device',
-      user_id: 'split-alice',
-      timestamp: isoAt(60),
+      anonymous_id: 'contended-device',
+      user_id: 'tenant-a-person',
+      timestamp: isoAt(900),
       traits: {},
     })
     await insertEvent({
       projectId: projectA,
-      anonymousId: 'split-device',
-      timestamp: chAt(120),
-      eventName: 'split_alice_era',
-    })
-    await identify(WRITE_KEY_A, {
-      message_id: randomUUID(),
-      anonymous_id: 'split-device',
-      user_id: 'split-bob',
-      timestamp: isoAt(180),
-      traits: {},
-    })
-    await insertEvent({
-      projectId: projectA,
-      anonymousId: 'split-device',
-      timestamp: chAt(240),
-      eventName: 'split_bob_era',
+      anonymousId: 'contended-device',
+      timestamp: chAt(860),
+      eventName: 'contended_pre_bind',
     })
 
-    const alice = await getPerson('split-alice', { 'x-lyraflow-server-key': SERVER_KEY_A })
-    expect(alice.statusCode).toBe(200)
-    const aliceBody = alice.json()
-    expect(aliceBody.ids.sort()).toEqual(['split-alice', 'split-device'])
-    // 5, not the 3 the time-split resolution would give her: she also gets
-    // bob's identify (offset 180) and bob's era event (offset 240).
-    expect(aliceBody.events).toBe(5)
-    expect(aliceBody.first_seen).toBe(isoAt(0))
-    // offset 240 — three hours after she stopped owning the device (offset 60).
-    expect(aliceBody.last_seen).toBe(isoAt(240))
+    const resA = await getPerson('tenant-a-person', { 'x-lyraflow-server-key': SERVER_KEY_A })
+    expect(resA.statusCode).toBe(200)
+    const bodyA = resA.json()
+    // 2: the offset-860 pre-bind event, plus project A's own identify event
+    // at offset 900. A count of 1 here (offset-860 event missing) is exactly
+    // what an unscoped bindEventsForDevices produces.
+    expect(bodyA.events).toBe(2)
+    expect(bodyA.first_seen).toBe(isoAt(860))
+    expect(bodyA.last_seen).toBe(isoAt(900))
 
-    const bob = await getPerson('split-bob', { 'x-lyraflow-server-key': SERVER_KEY_A })
-    expect(bob.statusCode).toBe(200)
-    const bobBody = bob.json()
-    expect(bobBody.ids.sort()).toEqual(['split-bob', 'split-device'])
-    // 5, not 2: the mirror image — he gets everything from before he ever
-    // touched the device, including alice's own identify.
-    expect(bobBody.events).toBe(5)
-    // offset 0 — three hours before he was bound to it (offset 180).
-    expect(bobBody.first_seen).toBe(isoAt(0))
-    expect(bobBody.last_seen).toBe(isoAt(240))
-
-    // The divergence stated as an assertion rather than only as prose: the
-    // two profiles are identical on every event-derived field, even though
-    // the two people never overlapped on this device.
-    expect(bobBody.events).toBe(aliceBody.events)
-    expect(bobBody.first_seen).toBe(aliceBody.first_seen)
-    expect(bobBody.last_seen).toBe(aliceBody.last_seen)
+    const resB = await getPerson('tenant-b-person', { 'x-lyraflow-server-key': SERVER_KEY_B })
+    expect(resB.statusCode).toBe(200)
+    // 1: project B's own identify event alone — unaffected either way, this
+    // is the sanity check that project B's own profile stays correct too.
+    expect(resB.json().events).toBe(1)
   })
 
   // Would catch: sending `ids` straight from `[...group, ...devices]` without
@@ -722,10 +768,10 @@ describe('GET /v1/persons/:id', () => {
  */
 describe('GET /v1/persons/:id (mocked ClickHouse): parameter binding', () => {
   // Would catch: building the WHERE clause by interpolating the path id
-  // directly into the query string (e.g. template-literal-ing `ids` in)
+  // directly into the query string (e.g. template-literal-ing `group` in)
   // instead of passing it through `query_params` — the captured query text
   // would then contain the raw dangerous id (and, on a real ClickHouse
-  // server, the injected SQL would execute) rather than the `{ids:...}`
+  // server, the injected SQL would execute) rather than the `{group:...}`
   // placeholder this test asserts on.
   it('passes the path id to ClickHouse as a bound parameter, never interpolated into the query text', async () => {
     const dangerousId = "x'); DROP TABLE events; --"
@@ -755,6 +801,10 @@ describe('GET /v1/persons/:id (mocked ClickHouse): parameter binding', () => {
     const fakeBindings = {
       devicesForAny: async () => [],
       mostRecentPersonFor: async () => null,
+      // Called unconditionally once devices is known, even when it is empty
+      // (see person.ts) — without this the route throws before reaching the
+      // ClickHouse query this test actually exercises.
+      bindEventsForDevices: async () => new Map(),
     } as unknown as PersonDeps['bindings']
     const fakeAliases = {
       canonicalFor: async (_p: number, id: string) => id,
@@ -780,8 +830,8 @@ describe('GET /v1/persons/:id (mocked ClickHouse): parameter binding', () => {
 
     expect(res.statusCode).toBe(200)
     expect(capturedQuery).not.toContain('DROP TABLE')
-    expect(capturedQuery).toContain('{ids:Array(String)}')
-    expect(capturedParams.ids).toEqual([dangerousId])
+    expect(capturedQuery).toContain('{group:Array(String)}')
+    expect(capturedParams.group).toEqual([dangerousId])
     await mockedApp.close()
   })
 })

@@ -319,21 +319,30 @@ and the profile you get back is that person's. There is no single right
 answer for a shared device, so this one is picked deliberately: it is the
 device's current owner.
 
-**This read is a union over ids, not the time-split resolution.**
-`first_seen`, `last_seen` and `events` are computed over *every* id that has
-ever been associated with the person — the canonical id, every id merged into
-it, and every device ever bound to any of them — with no timestamp condition
-at all. Event resolution (see *Binding a device to a person* above) is
-time-ranged; this read is not. On a device that has been shared or rebound
-between two people the two therefore disagree, and disagree in opposite
-directions: each person's profile counts that device's *entire* history,
-including the other person's events on it, so both windows are too wide and
-both counts are too high. The same applies to a single event that carries a
-`user_id` of its own while sitting on a device bound to someone else — event
-resolution follows the `user_id`, this read counts it for the device's owner
-as well. Per-device validity windows are not pushed into this query yet;
-until they are, treat these three fields as exact for a person whose devices
-were never shared, and as an upper bound where they were.
+**This read is time-split, matching event resolution.** `first_seen`,
+`last_seen` and `events` are computed the same way *Binding a device to a
+person* (above) resolves an event: a device that has been shared or rebound
+between two people splits at the rebind, and each profile counts only the
+events that fell inside its own window on that device. An event that carries
+a `user_id` of its own belongs to that person regardless of which device it
+sits on, even during a stretch where the device itself was bound to someone
+else. `ids` is unaffected by any of this — it stays the full set of ids ever
+associated with the person, with no timestamp condition, because there is no
+notion of an id being "in force" only some of the time.
+
+A person's windows are their devices multiplied by however many times each
+was rebound, which has no fixed bound. Past 200 device windows the request is
+refused with `400`:
+
+```json
+{
+  "error": "person_history_too_fragmented",
+  "detail": "this person spans 214 device windows, above the limit of 200"
+}
+```
+
+rather than silently widening the query to fit — widening a window is exactly
+how the old union behaviour would come back.
 
 ## Segments
 
