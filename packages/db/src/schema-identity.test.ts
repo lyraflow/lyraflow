@@ -146,8 +146,17 @@ describe('identity_bindings', () => {
     // clamped to the epoch rather than left as its own real bound_at.
     expect(r.rows[0]?.person_id).toBe('u-early')
     expect(r.rows[0]?.valid_from.toISOString()).toBe('1970-01-01T00:00:00.000Z')
-    expect(r.rows[0]?.valid_to.toISOString()).toBe('2026-08-06T16:00:00.000Z')
-    // The latest event is open-ended, clamped to the ClickHouse DateTime max.
+    // valid_to is the successor's bound_at MINUS one second, not the
+    // bound_at itself: ClickHouse's RANGE(MIN valid_from MAX valid_to) is
+    // inclusive at both ends, so leaving this at the successor's exact
+    // bound_at would make this tile and u-late's overlap at that instant —
+    // and, once every event is floored to the second for the dictGet (see
+    // resolve.ts), for the whole second starting at it. See
+    // 003_identity.sql's comment on this view for the full reasoning.
+    expect(r.rows[0]?.valid_to.toISOString()).toBe('2026-08-06T15:59:59.000Z')
+    // The latest event is open-ended, clamped to the ClickHouse DateTime
+    // max — and NOT further adjusted by the -1 second above, since an
+    // open-ended tile has no successor to overlap with.
     expect(r.rows[1]?.person_id).toBe('u-late')
     expect(r.rows[1]?.valid_from.toISOString()).toBe('2026-08-06T16:00:00.000Z')
     expect(r.rows[1]?.valid_to.toISOString()).toBe('2106-02-07T06:28:15.000Z')

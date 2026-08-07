@@ -209,11 +209,29 @@ describe('IdentityBindings.bind', () => {
 describe('IdentityBindings write path agrees with deriveTiling', () => {
   const EPOCH_MS = Date.UTC(1970, 0, 1)
   const CH_MAX_MS = Date.parse('2106-02-07T06:28:15.000Z')
+  const ONE_SECOND_MS = 1000
 
-  /** Mirrors identity_bindings_dict_src's GREATEST/LEAST clamp to the range
-   * ClickHouse's DateTime can represent. */
+  /**
+   * Mirrors identity_bindings_dict_src's GREATEST/LEAST clamp to the range
+   * ClickHouse's DateTime can represent, *and* its -1 second adjustment on
+   * the finite (has-a-successor) upper bound. `deriveTiling` models a tile
+   * as half-open [from, to) — the next tile starts exactly where this one
+   * ends, no shared instant — but ClickHouse's RANGE(MIN ... MAX ...) is
+   * inclusive at both ends, so the view achieves the same half-open
+   * behaviour, discretised to its columns' one-second resolution, by
+   * subtracting a second from every finite `to` (see 003_identity.sql for
+   * the full reasoning, and resolve.test.ts's live 'does not misattribute
+   * an event landing within the same second as a rebind' for what regresses
+   * without it). The open (+Infinity) upper bound has no successor to butt
+   * up against, so it is left at its clamp, unadjusted — this is the "verify
+   * deriveTiling still mirrors the SQL" the Task 6 review asked for: the two
+   * were never in conflict, but the view's discretisation step was missing
+   * before this fix, and this function is what ties them back together.
+   */
   function clampForView(b: Binding): { from: number; to: number } {
-    return { from: Math.max(b.from, EPOCH_MS), to: Math.min(b.to, CH_MAX_MS) }
+    const to =
+      b.to === Number.POSITIVE_INFINITY ? CH_MAX_MS : Math.min(b.to - ONE_SECOND_MS, CH_MAX_MS)
+    return { from: Math.max(b.from, EPOCH_MS), to }
   }
 
   async function assertViewMatchesReference(anonymousId: string, events: BindEvent[]) {

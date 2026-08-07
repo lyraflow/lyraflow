@@ -9,23 +9,28 @@ describe('resolvedPersonExpr', () => {
   it('short-circuits on user_id but still applies the alias stage', () => {
     const sql = resolvedPersonExpr()
     expect(sql).toContain("user_id != ''")
-    // The stage-1 short-circuit is a valid optimisation, but omitting stage 2
-    // was the bug that silently made /v1/alias a no-op for every event
-    // carrying the aliased id. A nested `dictGetOrDefault` call for stage 2
-    // necessarily WRAPS stage 1 (stage 2 must apply to both the user_id and
-    // the device-resolved branches), which means the 'person_aliases'
-    // dictionary literal — the outermost call's own first argument — is
-    // always written before the nested 'identity_bindings' literal reads,
-    // textually, regardless of nesting. Deleting stage 2 entirely removes
-    // 'person_aliases' from the string altogether, which sql.indexOf reports
-    // as -1 — no longer greater than identity_bindings' (non-negative) index
-    // — so this assertion still catches that mutation. Read literally, it
-    // additionally asserts that stage 2 is the outermost operation (applies
-    // over the whole stage-1 result, not just one branch of it); the leading
-    // SQL comment naming both dictionaries in evaluation order exists so a
-    // human reading generated SQL (e.g. in ClickHouse's query_log) has the
-    // same "stage 1 feeds stage 2" story the docstring gives here.
-    expect(sql.indexOf('person_aliases')).toBeGreaterThan(sql.indexOf('identity_bindings'))
+
+    // resolvedPersonExpr prepends a leading `/* ... */` documentation
+    // comment that itself names both dictionaries (see resolve.ts) — useful
+    // in ClickHouse's query_log, but it means measuring indexOf against the
+    // *full* string (comment included) is vacuous: the comment mentions
+    // 'identity_bindings' before 'person_aliases' regardless of what the
+    // actual expression underneath does, so that comparison would still
+    // pass against an implementation with stage 2 deleted, or gated behind
+    // the same `user_id == ''` short-circuit that guards stage 1 (the
+    // historical /v1/alias-is-a-no-op bug, reproduced verbatim). An earlier
+    // version of this test made exactly that mistake — caught in review.
+    //
+    // Strip the comment first, so what follows is a claim about the code,
+    // not the prose describing it: the remaining text must literally BEGIN
+    // with the stage-2 dictGetOrDefault call — i.e. stage 2 is the
+    // outermost operation, applied over the whole stage-1 result rather
+    // than gated onto one branch of it — and 'identity_bindings' must
+    // appear nested *inside* that call's arguments, not merely somewhere in
+    // the string.
+    const code = sql.replace(/^\/\*.*?\*\/\s*/s, '')
+    expect(code.startsWith("dictGetOrDefault('lyraflow.person_aliases'")).toBe(true)
+    expect(code.indexOf('identity_bindings')).toBeGreaterThan(code.indexOf('person_aliases'))
   })
 
   it('qualifies both dictionaries with the database', () => {
@@ -132,6 +137,18 @@ describe('resolvedPersonExpr (live ClickHouse + Postgres)', () => {
   let projectId: number
 
   beforeAll(async () => {
+    // Full wipe, not just migrate(): see the identical comment in
+    // schema-identity.test.ts. Required here specifically because
+    // 003_identity.sql's identity_bindings_dict_src view was amended in
+    // place (the valid_to overlap fix) rather than superseded by a new
+    // migration — migrate() only skips versions it has already recorded, so
+    // against a test container that ran an earlier version of this suite, a
+    // stale `schema_migrations` row for version 3 would leave the
+    // pre-amendment (overlapping) view definition in place and this file's
+    // own sub-second rebind test would silently pass against a view that
+    // was never actually re-created.
+    await pg.query('DROP SCHEMA public CASCADE')
+    await pg.query('CREATE SCHEMA public')
     await migrate({
       pg,
       ch,
@@ -151,6 +168,13 @@ describe('resolvedPersonExpr (live ClickHouse + Postgres)', () => {
     await pg.query('DELETE FROM identity_bindings WHERE project_id = $1', [projectId])
     await pg.query('DELETE FROM person_aliases WHERE project_id = $1', [projectId])
     await pg.query('DELETE FROM projects WHERE slug = $1', ['resolve-expr-test'])
+    // Every query in this suite filters on this file's own fresh project_id,
+    // so leaving these rows behind is harmless today — but ClickHouse has no
+    // per-file DROP/CASCADE the way Postgres does above, so without this the
+    // events table grows by this suite's row count on every run, forever,
+    // and would eventually collide with a future test that (unlike this
+    // file) filters by event_name alone without a project_id qualifier.
+    await ch.command({ query: `ALTER TABLE events DELETE WHERE project_id = ${projectId}` })
     await pg.end()
     await ch.close()
   })
@@ -214,12 +238,14 @@ describe('resolvedPersonExpr (live ClickHouse + Postgres)', () => {
     return row?.person_id
   }
 
-  // 1. Retroactive attachment — the product's premise. Catches: dropping the
-  // RANGE(...)/COMPLEX_KEY_RANGE_HASHED lookup for a plain equality dictGet
-  // that only matches events at-or-after the bind's own bound_at (which
-  // would leave this event resolved to its own anonymous_id instead of the
-  // bound person); catches building the tiling with valid_from clamped to
-  // bound_at itself instead of retroactively to the epoch.
+  // 1. Retroactive attachment — the product's premise. At this point
+  // 'retro-device' has exactly one binding, so — unlike test 2 below — this
+  // alone would not distinguish a genuinely range-aware dictionary from a
+  // range-blind one that just answers every lookup with its one known
+  // person; that distinction is what test 2 (and the sub-second test after
+  // it) actually exercises. What this test does catch on its own: building
+  // the tiling with valid_from clamped to the bind's own bound_at instead of
+  // retroactively to the epoch (identity_bindings_dict_src's NULL-lag case).
   it('resolves an anonymous event from before the bind to the bound person', async () => {
     await insertEvent({
       anonymousId: 'retro-device',
@@ -257,6 +283,31 @@ describe('resolvedPersonExpr (live ClickHouse + Postgres)', () => {
     expect(await resolvedFor('rebind_after')).toBe('bob')
   })
 
+  // 2b. The same bleed, at the granularity that actually produces it in
+  // production. identity_bindings_dict_src derived valid_to as
+  // lead(bound_at) exactly, but ClickHouse's RANGE(MIN ... MAX ...) is
+  // inclusive at *both* ends, so the outgoing tile's valid_to and the
+  // incoming tile's valid_from land on the identical instant — and with
+  // range_lookup_strategy defaulting to 'min', the older (outgoing) tile
+  // wins the tie. toDateTime() (see resolve.ts) floors every event to the
+  // second, so the window this is wrong for is not one instant but a full
+  // second: any event timestamped in [bound_at, bound_at + 1s) resolves to
+  // the person being replaced, not the one taking over. This event lands
+  // 300ms after bob's bind — comfortably inside that window — and must
+  // resolve to bob, not alice.
+  it('does not misattribute an event landing within the same second as a rebind', async () => {
+    await bind('subsecond-device', 'alice', '2026-08-06 14:00:00+00')
+    await bind('subsecond-device', 'bob', '2026-08-06 15:00:00+00')
+    await insertEvent({
+      anonymousId: 'subsecond-device',
+      timestamp: '2026-08-06 15:00:00.300',
+      eventName: 'subsecond_after_rebind',
+    })
+    await reloadDictionaries()
+
+    expect(await resolvedFor('subsecond_after_rebind')).toBe('bob')
+  })
+
   // 3. Stage 2 applies to identified events — the case the original defect
   // missed, and the most important assertion in this file. 'x' never
   // touches identity_bindings at all (stage 1 is short-circuited by a
@@ -277,6 +328,33 @@ describe('resolvedPersonExpr (live ClickHouse + Postgres)', () => {
     await reloadDictionaries()
 
     expect(await resolvedFor('identified_aliased')).toBe('y')
+  })
+
+  // 3b. The other production path into stage 2: an anonymous event resolved
+  // by stage 1 to a device-bound person who has *since* been aliased away.
+  // Every other test in this file exercises stage 2 either through the
+  // user_id branch (test 3) or with no alias row present at all (tests 1,
+  // 2, 2b, 4) — none of them touch a stage-1 *output* feeding stage 2 as
+  // its input. Catches: stage 2's key tuple being built from the row's raw
+  // anonymous_id instead of stage 1's resolved value (would resolve to
+  // 'device-owner', never consulting the alias at all); the mirror image of
+  // test 3's mutation — stage 2 applied only on the *identified* branch and
+  // skipped on the device-resolved one (verified empirically: this reverts
+  // to 'device-owner' here while leaving test 3 green, exactly as test 3
+  // reverting to 'x' while leaving this one green shows the opposite gating
+  // — together the pair pins stage 2 to both branches independently, which
+  // neither test alone does).
+  it('resolves a device-bound person who has since been aliased to the canonical id', async () => {
+    await bind('aliased-device-owner', 'device-owner', '2026-08-06 08:00:00+00')
+    await alias('device-owner', 'canonical-owner')
+    await insertEvent({
+      anonymousId: 'aliased-device-owner',
+      timestamp: '2026-08-06 09:00:00.000',
+      eventName: 'device_resolved_then_aliased',
+    })
+    await reloadDictionaries()
+
+    expect(await resolvedFor('device_resolved_then_aliased')).toBe('canonical-owner')
   })
 
   // 4. Fallback. Catches: swapping dictGetOrDefault's default argument for
