@@ -4,7 +4,7 @@
 
 Lyraflow helps you understand the full path your customers take — from first touch to conversion, retention, and beyond — on infrastructure you control. Your customer data stays yours.
 
-> ⚠️ **Early days.** Lyraflow currently ships the ingest spine — you can self-host it, create a project, and send it events over the HTTP API. There is no query API and no UI yet (filtering, journeys, dashboards). Watch the repo to follow along.
+> ⚠️ **Early days.** Lyraflow currently ships the ingest spine and identity resolution — you can self-host it, create a project, send it events, and stitch anonymous and known activity into one person. There is no query API and no UI yet (filtering, journeys, dashboards). Watch the repo to follow along.
 
 ## Why Lyraflow?
 
@@ -53,18 +53,32 @@ use, so put it in your shell:
 export LYRAFLOW_WRITE_KEY=wk_...   # the write key printed above
 ```
 
-The **server key** (`sk_…`) is secret and shown only once. It is not needed for
-sending events; later releases use it for reading, deletion, and export.
+The **server key** (`sk_…`) is secret and shown only once — write it down. It
+is not needed for sending events; it authenticates `/v1/alias` and
+`GET /v1/persons/:id` (see *Identity resolution* below), and later releases
+use it for deletion and export too. The *Identity resolution* examples use it
+the same way:
+
+```sh
+export LYRAFLOW_SERVER_KEY=sk_...  # the server key printed above
+```
 
 ## Sending your first event
 
-Everything below is the whole of v0.1's public surface. There is no UI and no
-query API yet — events land in ClickHouse, and you read them with your own
-ClickHouse client until the query layer ships.
+Everything below is the whole of v0.1's public surface. There is still no UI
+and no general query API (filtering, journeys, dashboards) — events land in
+ClickHouse, and you read them with your own ClickHouse client until the query
+layer ships. What v0.1 does add is identity resolution: `/v1/identify` binds a
+device to a person, `/v1/alias` merges two known people, and
+`GET /v1/persons/:id` reads one person's stitched profile back out — see
+*Identity resolution* below.
 
-Ingest listens on port 3000. Every `/v1/*` request authenticates with the
-project's **write key** in the `x-lyraflow-write-key` header. That key is public
-by design: it is safe in browser JavaScript, and it can only write.
+Ingest listens on port 3000. Every ingest request — `/v1/track`, `/v1/page`,
+`/v1/identify`, `/v1/batch` — authenticates with the project's **write key**
+in the `x-lyraflow-write-key` header. That key is public by design: it is safe
+in browser JavaScript, and it can only write. `/v1/alias` and
+`GET /v1/persons/:id` are the exception: see *Identity resolution* below for
+why those two use the separate, secret server key instead.
 
 ```sh
 curl -i http://localhost:3000/v1/track \
@@ -142,14 +156,166 @@ describing how far it got; retry the whole batch.
 
 ### Retries
 
-Retry a `503` with the **same** `message_id`. Every query deduplicates by event
-id, so a replayed event is never double-counted.
+Retry a `503` with the **same** `message_id`; it becomes the event's id (see
+*Payload fields* above). A replayed event is never double-counted **as long as
+your query selects `DISTINCT event_id`** (or otherwise aggregates by it) — a
+plain `count(*)` can see it as two rows, and ClickHouse's `FINAL` modifier does
+not rescue that when the retry omitted `timestamp` (see below). There is no
+query API yet, so this is on you: it is the same discipline any ClickHouse
+client of this table needs.
 
 If you also send an explicit `timestamp` and replay it unchanged, the storage
-engine collapses the replayed rows outright, so the retry costs no extra disk.
-Omit `timestamp` and the server stamps each attempt with its own receipt time,
-which leaves the retried copy on disk as a duplicate row — correct in every
-query, just not free. Long-lived retry queues should send `timestamp`.
+engine's own row collapse — deterministic under `FINAL`, eventual otherwise —
+removes the duplicate outright, so the retry costs no extra disk. Omit
+`timestamp` and the server stamps each attempt with its own receipt time;
+because that receipt time is part of the table's sort key, the two rows never
+collapse — deduplicated only by querying `event_id` yourself, correct but not
+free. Long-lived retry queues should send `timestamp`.
+
+## Identity resolution
+
+v0.1 stitches a device's anonymous activity to the person it belongs to, and
+lets you merge two people that turn out to be the same one. There is no
+filtering or segmentation on top of this yet — see the note at the top of
+this README.
+
+### Binding a device to a person
+
+Send `/v1/identify` with both `anonymous_id` and `user_id` to bind the device
+to the person from that moment on:
+
+```sh
+curl -i http://localhost:3000/v1/identify \
+  -H 'content-type: application/json' \
+  -H "x-lyraflow-write-key: $LYRAFLOW_WRITE_KEY" \
+  -A 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36' \
+  -d '{
+    "message_id": "3fa5e3fd-3c8b-4b8b-9b8e-6e3f9e5b8a01",
+    "anonymous_id": "visitor-1",
+    "user_id": "user-42",
+    "traits": { "plan": "trial" }
+  }'
+```
+
+The first time a device is bound, every event ever recorded under that
+`anonymous_id` — before this `identify` call and after it — resolves to that
+person, not just events going forward. If the device is later bound to a
+*different* person (a shared computer, a re-identified session), the
+timeline splits at that second `identify` call's own timestamp: events
+before it keep the first person, events from it onward follow the second.
+Resolution always follows the event's own (clamped) timestamp, never the time
+the `identify` request happened to arrive at the server.
+
+That time-split describes how an **event** is resolved to a person: it is the
+rule applied row by row to the `events` table, and it is what a query over
+those events sees. It is **not** how `GET /v1/persons/:id` counts a profile —
+that read takes a simpler union over every id, with no timestamp condition,
+and on a shared or rebound device the two deliberately disagree. *Reading a
+person* below states exactly how.
+
+**Sizing note: every `identify` with an `anonymous_id` writes a row.** That
+includes the repeat `identify` a logged-in browser typically sends on every
+page load. Repeats are not deduplicated: if you omit `timestamp`, each call
+is stamped with server receipt time, so no two land on the same instant and
+nothing collapses them. At 100k identified pageviews/day that is 100k rows
+per day in Postgres' `identity_bindings`, growing without bound, and each row
+is also carried into the ClickHouse identity dictionaries — which reload in
+full every 5–15 seconds. If you send high identified volume, expect this to
+be the fastest-growing table in your Postgres, and watch dictionary reload
+time alongside it.
+
+This is a known cost in v0.1, not an oversight. A write-side suppression
+(skip the insert when the device is already bound to this person) was built
+and then reverted: it is not safe against a late, out-of-order `identify`,
+which can silently and permanently hand one person's later activity to
+another. Correctness won. A safe fix belongs in the range derivation rather
+than the write path; see `packages/server/src/identity/bindings.ts` for the
+full reasoning and the reproduction.
+
+Practical mitigation today: call `identify` once per session rather than once
+per page view. Alternatively, send a **stable** explicit `timestamp` for
+repeats of an unchanged binding — an identical
+(`anonymous_id`, `user_id`, `timestamp`) triple collapses onto the existing
+row and adds nothing. A `timestamp` that advances on every call does not
+help; it is the repetition, not the presence, of the value that collapses
+the write.
+
+### Merging two people
+
+`POST /v1/alias` merges two known people — an id migration, a duplicate
+signup — under the **server key**, not the write key: aliasing mutates
+identity for the whole project, so it must not be reachable with the public,
+browser-shipped key.
+
+```sh
+curl -i http://localhost:3000/v1/alias \
+  -H 'content-type: application/json' \
+  -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY" \
+  -A 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36' \
+  -d '{ "from_user_id": "user-42-old", "to_user_id": "user-42" }'
+```
+
+Answers `200` with `{"status":"merged"}`, or `{"status":"noop"}` if the two
+ids already resolve to the same person. **Aliasing is not reversible in
+v0.1** — there is no `unalias`, and merging `A` into `B` and then `B` into
+`A` lands on `noop` rather than undoing the first merge. `400` for a missing
+or empty `from_user_id`/`to_user_id`; `401` for a missing or invalid server
+key. `503` with `retry-after: 5` — the merge runs in a `SERIALIZABLE`
+transaction, so two merges touching the same alias group at the same moment
+can make Postgres abort one of them (`40001`); the server answers `503`
+rather than pretending the merge happened. Retry the identical request — it
+is idempotent, and a merge that already succeeded answers `noop`.
+
+### Reading a person
+
+`GET /v1/persons/:id` returns one person's stitched profile — also server-key
+only:
+
+```sh
+curl -i "http://localhost:3000/v1/persons/user-42" \
+  -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY" \
+  -A 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+```
+
+```json
+{
+  "person_id": "user-42",
+  "ids": ["user-42", "visitor-1"],
+  "first_seen": "2026-08-01T12:00:00.000Z",
+  "last_seen": "2026-08-06T09:30:00.000Z",
+  "events": 14
+}
+```
+
+`:id` can be any id that has ever pointed at this person — a device id, the
+current canonical id, or an id since merged away by `/v1/alias` — and the
+response always reflects the current, merged state. This read goes straight
+to Postgres rather than through ClickHouse's identity dictionaries, so it
+sees a binding or a merge the instant it is written, with no refresh delay.
+`404` for an id nothing has ever recorded an event under; `401` for a missing
+or invalid server key.
+
+If `:id` is a **device id** that has been bound to more than one person over
+time — a shared laptop — it resolves to the person bound **most recently**,
+and the profile you get back is that person's. There is no single right
+answer for a shared device, so this one is picked deliberately: it is the
+device's current owner.
+
+**This read is a union over ids, not the time-split resolution.**
+`first_seen`, `last_seen` and `events` are computed over *every* id that has
+ever been associated with the person — the canonical id, every id merged into
+it, and every device ever bound to any of them — with no timestamp condition
+at all. Event resolution (see *Binding a device to a person* above) is
+time-ranged; this read is not. On a device that has been shared or rebound
+between two people the two therefore disagree, and disagree in opposite
+directions: each person's profile counts that device's *entire* history,
+including the other person's events on it, so both windows are too wide and
+both counts are too high. The same applies to a single event that carries a
+`user_id` of its own while sitting on a device bound to someone else — event
+resolution follows the `user_id`, this read counts it for the device's owner
+as well. Per-device validity windows are not pushed into this query yet;
+until they are, treat these three fields as exact for a person whose devices
+were never shared, and as an upper bound where they were.
 
 ## Upgrading
 
@@ -163,7 +329,10 @@ The `|| docker compose build` covers the period before the first image is
 published; once it is, the pull succeeds and the build never runs.
 
 Migrations run automatically on boot, and accepted events are flushed before
-shutdown, so no events are lost across an upgrade.
+shutdown, so no events are lost across an upgrade. Identity bindings and
+aliases live in Postgres and survive the same way; the ClickHouse identity
+dictionaries are rebuilt from that data on every boot, not migrated, so a
+restart never leaves them stale or missing.
 
 ## Contributing
 

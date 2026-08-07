@@ -1,13 +1,15 @@
 import { BatchPayload, IngestPayload, isBot, parseUserAgent } from '@lyraflow/core'
 import type { ClickHouseClient } from '@lyraflow/db'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
-import type { ProjectCache } from '../auth/project-cache.js'
+import type { Project, ProjectCache } from '../auth/project-cache.js'
 import type { Readiness } from '../health.js'
+import type { PersonAliases } from '../identity/aliases.js'
+import type { IdentityBindings } from '../identity/bindings.js'
 import type { IngestBuffer } from './buffer.js'
 import type { IngestCounters } from './counters.js'
 import type { GeoResolver } from './geo.js'
 import { type CardinalityTracker, checkLimits } from './limits.js'
-import { type EventRow, chDateTime, toEventRow } from './row.js'
+import { type EventRow, chDateTime, parseChDateTime, toEventRow } from './row.js'
 
 export interface IngestDeps {
   buffer: IngestBuffer<EventRow>
@@ -17,9 +19,63 @@ export interface IngestDeps {
   geo: GeoResolver
   readiness: Readiness
   ch: ClickHouseClient
+  bindings: IdentityBindings
+  aliases: PersonAliases
 }
 
-const WRITE_KEY_HEADER = 'x-lyraflow-write-key'
+export const WRITE_KEY_HEADER = 'x-lyraflow-write-key'
+// Deliberately distinct from WRITE_KEY_HEADER: the write key is public (it
+// ships in browser JavaScript) and can only append events. Aliasing mutates
+// identity for the whole project and is not reversible in v0.1 (see
+// PersonAliases's docstring), so it is gated on the secret server key
+// instead — see `authenticateServer` below. GET /v1/persons/:id
+// (identity/person.ts) reads person data rather than mutating it, but is
+// gated the same way for the same underlying reason: it must not be
+// reachable with the public, browser-shipped write key.
+export const SERVER_KEY_HEADER = 'x-lyraflow-server-key'
+
+/**
+ * Builds an authenticator for one key type. `authenticate` (write key) and
+ * `authenticateServer` (server key) previously duplicated this whole body,
+ * differing only in header name, lookup, and the two error codes — a shape
+ * that makes it structurally possible for the two to drift on the drain
+ * check (the one line rule 2 actually depends on staying identical between
+ * them). Parameterising it here makes that drift impossible instead of
+ * merely unlikely.
+ *
+ * Exported at module scope (rather than nested inside registerIngestRoutes)
+ * so identity/person.ts's GET /v1/persons/:id can build its own
+ * server-key-gated authenticator through the exact same logic instead of
+ * duplicating it a third time. `readiness` is an explicit parameter for
+ * that reason: registerIngestRoutes's version used to close over its own
+ * `deps.readiness` implicitly, which only worked because every caller lived
+ * inside that one function.
+ */
+export function makeAuthenticator(
+  readiness: Readiness,
+  headerName: string,
+  lookup: (key: string) => Promise<Project | null>,
+  missingCode: string,
+  invalidCode: string,
+) {
+  return async (req: FastifyRequest, reply: FastifyReply) => {
+    if (readiness.draining) {
+      reply.code(503).header('retry-after', '5').send({ error: 'draining' })
+      return null
+    }
+    const key = req.headers[headerName]
+    if (typeof key !== 'string' || key.length === 0) {
+      reply.code(401).send({ error: missingCode })
+      return null
+    }
+    const project = await lookup(key)
+    if (!project) {
+      reply.code(401).send({ error: invalidCode })
+      return null
+    }
+    return project
+  }
+}
 
 interface DeadLetterRow {
   project_id: number
@@ -84,28 +140,27 @@ async function writeDeadLetters(
 }
 
 export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): void {
-  const { buffer, projects, counters, cardinality, geo, readiness, ch } = deps
+  const { buffer, projects, counters, cardinality, geo, readiness, ch, bindings, aliases } = deps
 
   const onDeadLetterError = (err: unknown, rows: DeadLetterRow[]) =>
     app.log.error({ err, rows: rows.length }, 'dead-letter write failed')
 
-  async function authenticate(req: FastifyRequest, reply: FastifyReply) {
-    if (readiness.draining) {
-      reply.code(503).header('retry-after', '5').send({ error: 'draining' })
-      return null
-    }
-    const key = req.headers[WRITE_KEY_HEADER]
-    if (typeof key !== 'string' || key.length === 0) {
-      reply.code(401).send({ error: 'missing_write_key' })
-      return null
-    }
-    const project = await projects.byWriteKey(key)
-    if (!project) {
-      reply.code(401).send({ error: 'invalid_write_key' })
-      return null
-    }
-    return project
-  }
+  const authenticate = makeAuthenticator(
+    readiness,
+    WRITE_KEY_HEADER,
+    (key) => projects.byWriteKey(key),
+    'missing_write_key',
+    'invalid_write_key',
+  )
+  // Gates /v1/alias on the secret server key rather than the public write
+  // key — see SERVER_KEY_HEADER's docstring above for why.
+  const authenticateServer = makeAuthenticator(
+    readiness,
+    SERVER_KEY_HEADER,
+    (key) => projects.byServerKey(key),
+    'missing_server_key',
+    'invalid_server_key',
+  )
 
   interface AcceptResult {
     outcome: 'accepted' | 'rejected' | 'overloaded'
@@ -161,6 +216,32 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
       ...Object.keys(row.properties_num),
     ])
     counters.record(projectId, 'accepted')
+
+    // identify carrying both ids ties a device to a person. Only identify
+    // requires user_id, so this branch is unreachable for track/page, and
+    // anonymous_id is the one optional field left to check. Binds at the
+    // event's own (clamped) timestamp — row.timestamp, not `new Date()` —
+    // because a late-delivered identify must bind at the instant it
+    // happened, not the instant it arrived; identity resolution is
+    // time-ranged and depends on this (see IdentityBindings.bind).
+    if (parsed.data.type === 'identify' && parsed.data.anonymous_id) {
+      try {
+        await bindings.bind(
+          projectId,
+          parsed.data.anonymous_id,
+          parsed.data.user_id,
+          parseChDateTime(row.timestamp),
+        )
+      } catch (err) {
+        // The event is already accepted into the buffer. A failing binding
+        // write must not turn a good, already-accepted event into an error
+        // for the customer's site — same rule 1 reasoning as
+        // writeDeadLetters above. It must not be silent either, so this
+        // follows the same onError-through-the-Fastify-logger convention.
+        app.log.error({ err }, 'identity binding write failed')
+      }
+    }
+
     return { outcome: 'accepted' }
   }
 
@@ -253,5 +334,39 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
     // throttled is always present, even at 0: an SDK parsing a stable shape
     // shouldn't need to special-case the field's absence versus its value.
     return reply.code(202).send({ accepted, rejected, throttled: 0 })
+  })
+
+  interface AliasBody {
+    from_user_id?: unknown
+    to_user_id?: unknown
+  }
+
+  // Not an ingest endpoint: aliasing performs the mutation directly rather
+  // than accepting-then-processing an event, so — unlike /v1/track,
+  // /v1/identify, /v1/page and /v1/batch — a malformed request here is a
+  // genuine client error, answered with a real 4xx rather than a
+  // universal 202.
+  app.post('/v1/alias', async (req, reply) => {
+    const project = await authenticateServer(req, reply)
+    if (!project) return
+
+    // req.body is undefined for a bodyless request (unlike the ingest
+    // routes above, which always spread it into an object); guard before
+    // indexing rather than letting that throw and fall through to the
+    // generic /v1/* 503 handler for what is really a 400.
+    const body = (req.body ?? {}) as AliasBody
+    const fromUserId = body.from_user_id
+    const toUserId = body.to_user_id
+    if (
+      typeof fromUserId !== 'string' ||
+      fromUserId.length === 0 ||
+      typeof toUserId !== 'string' ||
+      toUserId.length === 0
+    ) {
+      return reply.code(400).send({ error: 'invalid_body' })
+    }
+
+    const result = await aliases.alias(project.id, fromUserId, toUserId)
+    return reply.code(200).send({ status: result })
   })
 }

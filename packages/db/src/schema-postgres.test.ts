@@ -12,10 +12,19 @@ const ch = createChClient({
 })
 
 beforeAll(async () => {
-  await pg.query(`
-    DROP TABLE IF EXISTS ingest_counters, saved_views, segments, sessions,
-                         admin_user, api_keys, projects, schema_migrations CASCADE
-  `)
+  // A hand-maintained table list here is a trap: a table added by a later
+  // migration (e.g. identity_bindings, added by 003) but left off this list
+  // survives the wipe. It isn't in the list, so it isn't dropped — but any
+  // FK it holds to a table that WAS dropped (projects) is severed by the
+  // CASCADE anyway. schema_migrations then gets dropped too, so the next
+  // migrate() sees a clean ledger and reruns every migration — but
+  // `CREATE TABLE IF NOT EXISTS` on the surviving table no-ops and never
+  // restores the FK it just lost. The table is left silently unconstrained.
+  // Dropping and recreating the whole schema removes every object
+  // unconditionally, so there is never a "table survives, its FK doesn't"
+  // state, and this test file needs no maintenance when new tables arrive.
+  await pg.query('DROP SCHEMA public CASCADE')
+  await pg.query('CREATE SCHEMA public')
   const root = join(import.meta.dirname, '..', 'migrations')
   await migrate({ pg, ch, migrations: loadMigrations(root), appSchemaVersion: 999 })
 })

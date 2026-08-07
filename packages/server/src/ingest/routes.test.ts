@@ -338,6 +338,11 @@ describe('ingest routes (mocked deps)', () => {
   } as unknown as IngestDeps['projects']
   const fakePool = { query: async () => ({ rows: [] }) } as unknown as Pool
   const okCh = { insert: async () => {} } as unknown as ClickHouseClient
+  // None of the fixtures in this file exercise identify with both ids, so
+  // these fakes only need to satisfy IngestDeps's shape — identity-routes.test.ts
+  // is where bindings/aliases behaviour is actually exercised.
+  const bindings = { bind: async () => 'noop' as const } as unknown as IngestDeps['bindings']
+  const aliases = { alias: async () => 'noop' as const } as unknown as IngestDeps['aliases']
 
   function buildMockedApp(overrides: Partial<IngestDeps> = {}) {
     const app = Fastify({ logger: false })
@@ -357,6 +362,8 @@ describe('ingest routes (mocked deps)', () => {
       geo: new NullGeoResolver(),
       readiness,
       ch: okCh,
+      bindings,
+      aliases,
       ...overrides,
     }
     registerIngestRoutes(app, deps)
@@ -397,6 +404,8 @@ describe('ingest routes (mocked deps)', () => {
           throw new Error('clickhouse unreachable')
         },
       } as unknown as ClickHouseClient,
+      bindings,
+      aliases,
     })
 
     const res = await app.inject({

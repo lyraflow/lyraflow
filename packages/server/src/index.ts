@@ -4,6 +4,7 @@ import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow
 import { buildApp } from './app.js'
 import { loadConfig } from './config.js'
 import { Readiness } from './health.js'
+import { ensureIdentityDictionaries, parsePgUrl } from './identity/dictionaries.js'
 import { flushLogger } from './log-flush.js'
 import { installShutdownHandlers } from './shutdown.js'
 
@@ -49,6 +50,33 @@ try {
   app.log.info({ applied }, 'migrations complete')
 } catch (err) {
   app.log.fatal({ err }, 'migrations failed')
+  await flushLogger(app.log, LOG_FLUSH_TIMEOUT_MS)
+  process.exit(1)
+}
+
+// Identity dictionaries are created here rather than as a migration: the DDL
+// embeds the Postgres password, and migrations are committed .sql files in a
+// public repository. Creating them at boot from credentials already in the
+// process environment keeps the secret out of git, and `CREATE OR REPLACE
+// DICTIONARY` also picks up a rotated password, which a one-shot migration
+// would not.
+//
+// Fail closed: a dictionary that never loads still answers every dictGet
+// with the caller's default (see identity/dictionaries.ts), so identity
+// resolution degrades to the anonymous id silently. That is worse than not
+// starting, so this follows the exact same fatal-log-and-exit pattern as the
+// migration failure above rather than logging a warning and continuing.
+//
+// Logging `err` directly here is safe, not merely convenient:
+// ensureIdentityDictionaries() already strips the Postgres password out of
+// any failure before it rethrows (see sanitizeDictionaryError in
+// identity/dictionaries.ts), so this call site does not need to — and must
+// not — do any redaction of its own.
+try {
+  await ensureIdentityDictionaries(ch, parsePgUrl(config.pgUrl))
+  app.log.info('identity dictionaries ready')
+} catch (err) {
+  app.log.fatal({ err }, 'could not create identity dictionaries')
   await flushLogger(app.log, LOG_FLUSH_TIMEOUT_MS)
   process.exit(1)
 }

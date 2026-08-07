@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { toEventRow } from './row.js'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { chDateTime, parseChDateTime, toEventRow } from './row.js'
 
 const now = new Date('2026-08-06T12:00:00.000Z')
 
@@ -89,5 +89,45 @@ describe('toEventRow', () => {
     })
     expect(row.trusted).toBe(1)
     expect(row.anonymous_id).toBe('')
+  })
+})
+
+describe('parseChDateTime', () => {
+  const originalTz = process.env.TZ
+
+  // Forced to a non-UTC, non-zero offset for every test in this block. A
+  // string with no timezone designator (what chDateTime produces) is parsed
+  // by JS's Date as *local* time when the designator is absent — so on a
+  // host whose local zone already happens to be UTC (the common case for CI
+  // runners), an implementation that forgot to re-append 'Z' would produce
+  // an identical result to a correct one, and no assertion here could ever
+  // tell the two apart. Forcing a real offset makes that class of bug
+  // observable regardless of which machine or CI runner executes this file.
+  beforeEach(() => {
+    process.env.TZ = 'America/New_York'
+  })
+  afterEach(() => {
+    process.env.TZ = originalTz
+  })
+
+  // Would catch: parseChDateTime built without re-appending 'Z' (or with a
+  // fixed offset instead of 'Z'), which would parse the string as local
+  // time in whatever zone the process happens to be running in — America/
+  // New_York is UTC-4 in March (EDT), so that mutation is off by exactly
+  // 4 hours here, nowhere close to a rounding or flakiness margin. Uses a
+  // literal instant, not one derived from Date.now(), so the assertion is
+  // reproducible independent of when the suite runs.
+  it('is UTC-anchored regardless of the host default timezone', () => {
+    const expectedMs = Date.UTC(2026, 2, 15, 9, 42, 17, 321) // 2026-03-15T09:42:17.321Z
+    expect(parseChDateTime('2026-03-15 09:42:17.321').getTime()).toBe(expectedMs)
+  })
+
+  // Would catch: chDateTime and parseChDateTime drifting out of sync on the
+  // separator/format between them (e.g. one using 'T' and the other still
+  // expecting a space) — a regression neither function's own isolated
+  // correctness would surface.
+  it('round-trips an arbitrary instant through chDateTime and back exactly', () => {
+    const original = new Date('2026-03-15T09:42:17.321Z')
+    expect(parseChDateTime(chDateTime(original)).getTime()).toBe(original.getTime())
   })
 })

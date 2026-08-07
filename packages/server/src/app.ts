@@ -3,6 +3,9 @@ import Fastify, { type FastifyError, type FastifyInstance } from 'fastify'
 import { ProjectCache } from './auth/project-cache.js'
 import type { Config } from './config.js'
 import { type Readiness, registerHealth } from './health.js'
+import { PersonAliases } from './identity/aliases.js'
+import { IdentityBindings } from './identity/bindings.js'
+import { registerPersonRoutes } from './identity/person.js'
 import { IngestBuffer } from './ingest/buffer.js'
 import { IngestCounters } from './ingest/counters.js'
 import { NullGeoResolver } from './ingest/geo.js'
@@ -86,15 +89,27 @@ export function buildApp(input: {
     bufferDepth: () => buffer.depth,
     totals: () => counters.totals(),
   })
+  // Shared across both route registrations below, not one instance per
+  // registration: registerPersonRoutes's reads must see the same
+  // authoritative state (and the same ProjectCache) the write path just
+  // wrote through, and constructing a second ProjectCache would also double
+  // the Postgres load an identical key lookup produces.
+  const projects = new ProjectCache(pg, 60_000)
+  const bindings = new IdentityBindings(pg)
+  const aliases = new PersonAliases(pg)
+
   registerIngestRoutes(app, {
     buffer,
-    projects: new ProjectCache(pg, 60_000),
+    projects,
     counters,
     cardinality: new CardinalityTracker(),
     geo: new NullGeoResolver(),
     readiness,
     ch,
+    bindings,
+    aliases,
   })
+  registerPersonRoutes(app, { projects, readiness, ch, bindings, aliases })
 
   return app
 }
