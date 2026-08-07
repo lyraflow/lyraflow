@@ -43,8 +43,16 @@ describe('resolvedPersonExpr', () => {
     expect(resolvedPersonExpr()).toContain('timestamp')
   })
 
+  // `toContain('anonymous_id)')` was vacuous: stage 1's key tuple is
+  // `(project_id, anonymous_id)`, which already ends in that exact substring,
+  // so the assertion passed with the fallback argument replaced by `''`.
+  // dictGetOrDefault's default is its LAST argument, immediately after the
+  // range key, so anchoring on `toDateTime(timestamp), anonymous_id)` is a
+  // claim about the default specifically — the key tuple cannot supply it.
+  // Live test 4 in this file pins the same property behaviourally; this one
+  // now at least discriminates on the shape.
   it('falls back to the anonymous id when no binding exists', () => {
-    expect(resolvedPersonExpr()).toContain('anonymous_id)')
+    expect(resolvedPersonExpr()).toContain('toDateTime(timestamp), anonymous_id)')
   })
 
   // Beyond the brief: the `alias` option is part of the documented interface

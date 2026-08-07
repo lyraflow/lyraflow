@@ -344,6 +344,97 @@ describe('GET /v1/persons/:id', () => {
     expect(bySurvivorId.json()).toEqual(bodyByOldId)
   })
 
+  // PINS A KNOWN DIVERGENCE — this test asserts what this endpoint does
+  // TODAY, which is not what event resolution does, and it exists so that
+  // gap is recoverable rather than a trap. See person.ts's route docstring
+  // and README's *Reading a person*.
+  //
+  // 'split-device' is bound to 'split-alice' at 08:00 and rebound to
+  // 'split-bob' at 10:00. Five events sit on that one device. The time-split
+  // resolution `resolvedPersonExpr` applies (proved live in resolve.test.ts's
+  // 'does not bleed across a rebind') would divide them 3/2: the 07:00 and
+  // 09:00 anonymous events and alice's own identify belong to alice, bob's
+  // identify and the 11:00 anonymous event belong to bob.
+  //
+  // This route divides them 5/5. It has no timestamp predicate at all:
+  // devicesForAny hands it every device ever bound to the person, and the
+  // ClickHouse query counts every event carrying any of those ids whenever
+  // it happened. So each profile absorbs the OTHER person's era on the
+  // shared device — including, for alice, an event whose own user_id says
+  // 'split-bob' (stage 1's `user_id != ''` short-circuit resolves that event
+  // to bob; this read counts it for alice anyway, because the device is in
+  // her id set). Both first_seen/last_seen windows are too wide and both
+  // counts are too high, in opposite directions.
+  //
+  // Would catch: per-device validity windows being pushed into the query
+  // (Plan 3's work) WITHOUT the docs and this comment being updated with
+  // them — the counts drop to 3 and 2 and this test fails, loudly, which is
+  // the intent. It is not asserting that 5/5 is correct; it is asserting
+  // that 5/5 is what ships today.
+  it("counts a rebound device's whole history for BOTH people — the documented divergence from event resolution", async () => {
+    await insertEvent({
+      projectId: projectA,
+      anonymousId: 'split-device',
+      timestamp: '2026-08-06 07:00:00.000',
+      eventName: 'split_before_any_bind',
+    })
+    await identify(WRITE_KEY_A, {
+      message_id: randomUUID(),
+      anonymous_id: 'split-device',
+      user_id: 'split-alice',
+      timestamp: '2026-08-06T08:00:00.000Z',
+      traits: {},
+    })
+    await insertEvent({
+      projectId: projectA,
+      anonymousId: 'split-device',
+      timestamp: '2026-08-06 09:00:00.000',
+      eventName: 'split_alice_era',
+    })
+    await identify(WRITE_KEY_A, {
+      message_id: randomUUID(),
+      anonymous_id: 'split-device',
+      user_id: 'split-bob',
+      timestamp: '2026-08-06T10:00:00.000Z',
+      traits: {},
+    })
+    await insertEvent({
+      projectId: projectA,
+      anonymousId: 'split-device',
+      timestamp: '2026-08-06 11:00:00.000',
+      eventName: 'split_bob_era',
+    })
+
+    const alice = await getPerson('split-alice', { 'x-lyraflow-server-key': SERVER_KEY_A })
+    expect(alice.statusCode).toBe(200)
+    const aliceBody = alice.json()
+    expect(aliceBody.ids.sort()).toEqual(['split-alice', 'split-device'])
+    // 5, not the 3 the time-split resolution would give her: she also gets
+    // bob's identify (10:00) and bob's era event (11:00).
+    expect(aliceBody.events).toBe(5)
+    expect(aliceBody.first_seen).toBe('2026-08-06T07:00:00.000Z')
+    // 11:00 — three hours after she stopped owning the device.
+    expect(aliceBody.last_seen).toBe('2026-08-06T11:00:00.000Z')
+
+    const bob = await getPerson('split-bob', { 'x-lyraflow-server-key': SERVER_KEY_A })
+    expect(bob.statusCode).toBe(200)
+    const bobBody = bob.json()
+    expect(bobBody.ids.sort()).toEqual(['split-bob', 'split-device'])
+    // 5, not 2: the mirror image — he gets everything from before he ever
+    // touched the device, including alice's own identify.
+    expect(bobBody.events).toBe(5)
+    // 07:00 — three hours before he was bound to it.
+    expect(bobBody.first_seen).toBe('2026-08-06T07:00:00.000Z')
+    expect(bobBody.last_seen).toBe('2026-08-06T11:00:00.000Z')
+
+    // The divergence stated as an assertion rather than only as prose: the
+    // two profiles are identical on every event-derived field, even though
+    // the two people never overlapped on this device.
+    expect(bobBody.events).toBe(aliceBody.events)
+    expect(bobBody.first_seen).toBe(aliceBody.first_seen)
+    expect(bobBody.last_seen).toBe(aliceBody.last_seen)
+  })
+
   // Would catch: sending `ids` straight from `[...group, ...devices]` without
   // deduping — identify({anonymous_id:'dup-id', user_id:'dup-id'}) makes
   // 'dup-id' both the canonical (via personId) and its own bound device, so
@@ -447,6 +538,83 @@ describe('GET /v1/persons/:id', () => {
     expect(bodyB.events).toBe(2)
     expect(bodyB.first_seen).toBe('2026-01-01T00:00:00.000Z')
     expect(bodyB.last_seen).toBe('2026-01-02T00:00:00.000Z')
+  })
+
+  // THE test for project scoping on the two POSTGRES queries this route
+  // composes — PersonAliases.mergedFrom and IdentityBindings.devicesForAny —
+  // which the ClickHouse-scoping test above does not touch at all. It uses
+  // 'shared-user', an id with no bindings and no aliases, so both Postgres
+  // queries return empty for both projects and `project_id = $1` can be
+  // deleted from either with the whole suite still green.
+  //
+  // That is not merely a wrong count. `ids` is returned to the caller
+  // (person.ts's response body), so a dropped filter discloses ANOTHER
+  // TENANT'S person and device ids inside a 200 response.
+  //
+  // The fixture puts the two projects in genuine contention on BOTH queries
+  // at once. The two need contention of different shapes, and a fixture that
+  // supplies only one of them leaves the other mutation green (confirmed the
+  // hard way — an earlier version of this test contended only on mergedFrom,
+  // and deleting devicesForAny's filter passed):
+  //   - mergedFrom is keyed on canonical_id, so both projects merge into the
+  //     SAME canonical ('shared-canonical') from DIFFERENT person ids
+  //     ('tenant-a-old' vs 'tenant-b-old'). Reusing one person id across both
+  //     projects would make an unscoped mergedFrom return the same string
+  //     twice, which dedupes away and hides the leak entirely.
+  //   - devicesForAny is keyed on person_id, so both projects must bind a
+  //     device to a person id that is actually IN the queried group. Binding
+  //     each project's device to its own merged-away id would not do it:
+  //     'tenant-b-old' is never in project A's group, so B's device would
+  //     stay invisible to A even unscoped. Both therefore bind a DIFFERENT
+  //     device id to the SAME 'shared-canonical'.
+  //
+  // Verified by deleting `project_id = $1` from each query in turn:
+  //   - aliases.ts mergedFrom      -> A's ids gain 'tenant-b-old'.
+  //   - bindings.ts devicesForAny  -> A's ids gain 'tenant-b-device'.
+  // Both fail the exact-array assertions below.
+  it("does not leak another project's merged-away person ids or bound devices", async () => {
+    await identify(WRITE_KEY_A, {
+      message_id: randomUUID(),
+      anonymous_id: 'tenant-a-device',
+      user_id: 'shared-canonical',
+      timestamp: '2026-08-06T14:00:00.000Z',
+      traits: {},
+    })
+    await identify(WRITE_KEY_B, {
+      message_id: randomUUID(),
+      anonymous_id: 'tenant-b-device',
+      user_id: 'shared-canonical',
+      timestamp: '2026-08-06T14:00:00.000Z',
+      traits: {},
+    })
+    const mergedA = await aliasReq(SERVER_KEY_A, {
+      from_user_id: 'tenant-a-old',
+      to_user_id: 'shared-canonical',
+    })
+    expect(mergedA.statusCode).toBe(200)
+    const mergedB = await aliasReq(SERVER_KEY_B, {
+      from_user_id: 'tenant-b-old',
+      to_user_id: 'shared-canonical',
+    })
+    expect(mergedB.statusCode).toBe(200)
+
+    const resA = await getPerson('shared-canonical', { 'x-lyraflow-server-key': SERVER_KEY_A })
+    expect(resA.statusCode).toBe(200)
+    const bodyA = resA.json()
+    expect(bodyA.person_id).toBe('shared-canonical')
+    // Exact array, not a `toContain` pair: only an exact comparison fails on
+    // an EXTRA id appearing, which is the whole failure mode here.
+    expect(bodyA.ids.sort()).toEqual(['shared-canonical', 'tenant-a-device', 'tenant-a-old'])
+    // 1: project A's own identify event. Project B's identical-shaped event
+    // stays out of the count too.
+    expect(bodyA.events).toBe(1)
+
+    const resB = await getPerson('shared-canonical', { 'x-lyraflow-server-key': SERVER_KEY_B })
+    expect(resB.statusCode).toBe(200)
+    const bodyB = resB.json()
+    expect(bodyB.person_id).toBe('shared-canonical')
+    expect(bodyB.ids.sort()).toEqual(['shared-canonical', 'tenant-b-device', 'tenant-b-old'])
+    expect(bodyB.events).toBe(1)
   })
 })
 

@@ -163,9 +163,15 @@ describe('IdentityBindings.bind', () => {
     expect(r.rows[0]?.person_id).toBe('alice') // lexicographically smaller of alice/bob
   })
 
-  it('bounds its cache so unknown device ids cannot grow it without limit', async () => {
+  // Both halves matter. The upper bound alone was vacuous: deleting
+  // `#remember`'s body entirely leaves the cache permanently at 0, which
+  // satisfies `<= 4` perfectly while removing the memo this test is named
+  // after. The lower bound is what makes the cap a claim about a cache that
+  // actually holds something.
+  it('populates its cache, and bounds it so unknown device ids cannot grow it without limit', async () => {
     const b = new IdentityBindings(pg, { cacheMax: 4 })
     for (let i = 0; i < 20; i++) await b.bind(projectId, `flood-${i}`, `p-${i}`, at(12))
+    expect(b.cacheSize).toBeGreaterThan(0)
     expect(b.cacheSize).toBeLessThanOrEqual(4)
   })
 
