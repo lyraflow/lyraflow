@@ -111,7 +111,7 @@ export function buildApp(input: {
     aliases,
   })
   registerPersonRoutes(app, { projects, readiness, ch, bindings, aliases })
-  registerSegmentRoutes(app, { projects, readiness, ch, database: config.ch.database })
+  registerSegmentRoutes(app, { projects, readiness, ch, pg, database: config.ch.database })
 
   return app
 }

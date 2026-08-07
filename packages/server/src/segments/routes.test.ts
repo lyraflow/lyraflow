@@ -434,3 +434,135 @@ describe('POST /v1/segments/preview', () => {
     expect(body.next_cursor).toBeNull()
   })
 })
+
+describe('/v1/segments CRUD and run', () => {
+  const create = (body: unknown) =>
+    app.inject({
+      method: 'POST',
+      url: '/v1/segments',
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: body as never,
+    })
+
+  const runSaved = (id: number, body: unknown = {}) =>
+    app.inject({
+      method: 'POST',
+      url: `/v1/segments/${id}/preview`,
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: body as never,
+    })
+
+  it('creates, reads, lists and deletes a segment', async () => {
+    const created = await create({ name: 'Trial users', ast_version: 1, filter: trait })
+    expect(created.statusCode).toBe(201)
+    const id = created.json().id
+
+    const read = await app.inject({
+      method: 'GET',
+      url: `/v1/segments/${id}`,
+      headers: { 'x-lyraflow-server-key': SERVER_KEY },
+    })
+    expect(read.json().filter).toEqual(trait)
+
+    const list = await app.inject({
+      method: 'GET',
+      url: '/v1/segments',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY },
+    })
+    expect(list.json().segments.some((s: { id: number }) => s.id === id)).toBe(true)
+
+    const gone = await app.inject({
+      method: 'DELETE',
+      url: `/v1/segments/${id}`,
+      headers: { 'x-lyraflow-server-key': SERVER_KEY },
+    })
+    expect(gone.statusCode).toBe(204)
+  })
+
+  it('rejects a duplicate name with 409', async () => {
+    await create({ name: 'Only once', ast_version: 1, filter: trait })
+    const again = await create({ name: 'Only once', ast_version: 1, filter: trait })
+    expect(again.statusCode).toBe(409)
+  })
+
+  it('returns 404 for a segment id that belongs to another project', async () => {
+    // 404 rather than 403: a 403 confirms the id exists, which leaks the
+    // shape of another tenant's data.
+    const created = await create({ name: 'Private', ast_version: 1, filter: trait })
+    const id = created.json().id
+    const res = await app.inject({
+      method: 'GET',
+      url: `/v1/segments/${id}`,
+      headers: { 'x-lyraflow-server-key': OTHER_SERVER_KEY },
+    })
+    expect(res.statusCode).toBe(404)
+  })
+
+  it('runs a saved segment and updates its snapshot', async () => {
+    const created = await create({ name: 'Runnable', ast_version: 1, filter: trait })
+    const id = created.json().id
+
+    const before = await app.inject({
+      method: 'GET',
+      url: `/v1/segments/${id}`,
+      headers: { 'x-lyraflow-server-key': SERVER_KEY },
+    })
+    expect(before.json().last_count).toBeNull()
+
+    const run = await runSaved(id)
+    expect(run.statusCode).toBe(200)
+    expect(typeof run.json().person_count).toBe('number')
+
+    const after = await app.inject({
+      method: 'GET',
+      url: `/v1/segments/${id}`,
+      headers: { 'x-lyraflow-server-key': SERVER_KEY },
+    })
+    expect(after.json().last_count).toBe(run.json().person_count)
+    expect(after.json().last_evaluated_at).not.toBeNull()
+  })
+
+  it('updates the snapshot when members are requested too', async () => {
+    const created = await create({ name: 'Runnable with members', ast_version: 1, filter: trait })
+    const id = created.json().id
+    await runSaved(id, { include: ['members'] })
+    const after = await app.inject({
+      method: 'GET',
+      url: `/v1/segments/${id}`,
+      headers: { 'x-lyraflow-server-key': SERVER_KEY },
+    })
+    expect(after.json().last_count).not.toBeNull()
+  })
+
+  it('clears the snapshot when a PATCH changes the filter, but not on a rename', async () => {
+    const created = await create({ name: 'Editable', ast_version: 1, filter: trait })
+    const id = created.json().id
+    await runSaved(id)
+
+    const renamed = await app.inject({
+      method: 'PATCH',
+      url: `/v1/segments/${id}`,
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: { name: 'Editable (renamed)' } as never,
+    })
+    expect(renamed.json().last_count).not.toBeNull()
+
+    const filterChanged = await app.inject({
+      method: 'PATCH',
+      url: `/v1/segments/${id}`,
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: {
+        ast_version: 1,
+        filter: { kind: 'trait', key: 'plan', operator: '=', value: 'pro' },
+      } as never,
+    })
+    expect(filterChanged.statusCode).toBe(200)
+
+    const after = await app.inject({
+      method: 'GET',
+      url: `/v1/segments/${id}`,
+      headers: { 'x-lyraflow-server-key': SERVER_KEY },
+    })
+    expect(after.json().last_count).toBeNull()
+  })
+})

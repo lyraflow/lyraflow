@@ -9,7 +9,7 @@ import {
   compileSegment,
   treeHash,
 } from '@lyraflow/core'
-import type { ClickHouseClient } from '@lyraflow/db'
+import type { ClickHouseClient, Pool } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { Project, ProjectCache } from '../auth/project-cache.js'
@@ -17,14 +17,33 @@ import type { Readiness } from '../health.js'
 import { SERVER_KEY_HEADER, makeAuthenticator } from '../ingest/routes.js'
 import { type MemberRow, SegmentCache } from './cache.js'
 import { SegmentTimeoutError, runSegment, runSegmentMembers } from './execute.js'
+import { DuplicateNameError, SegmentStore, type StoredSegment, StoredTreeError } from './store.js'
 
 export interface SegmentDeps {
   projects: ProjectCache
   readiness: Readiness
   ch: ClickHouseClient
+  pg: Pool
   /** The configured ClickHouse database; the dictionaries live in it. */
   database: string
 }
+
+/** Maps a stored segment to the wire shape — snake_case, like every other endpoint. */
+function toWire(s: StoredSegment) {
+  return {
+    id: s.id,
+    name: s.name,
+    ast_version: s.astVersion,
+    filter: s.filter,
+    last_count: s.lastCount,
+    last_evaluated_at: s.lastEvaluatedAt,
+    created_at: s.createdAt,
+    updated_at: s.updatedAt,
+  }
+}
+
+const CreateBody = z.object({ name: z.string().min(1).max(200) })
+const PatchBody = z.object({ name: z.string().min(1).max(200).optional() })
 
 /**
  * The preview options that sit alongside the tree. Parsed separately from
@@ -170,7 +189,7 @@ function decodeWalkCursor(s: string, key: Buffer): WalkCursor {
  * segment count is aggregate information about every person in the project.
  */
 export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): void {
-  const { projects, readiness, ch, database } = deps
+  const { projects, readiness, ch, pg, database } = deps
 
   const authenticateServer = makeAuthenticator(
     readiness,
@@ -181,6 +200,7 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
   )
 
   const cache = new SegmentCache()
+  const store = new SegmentStore(pg)
 
   /**
    * Runs a parsed tree and shapes the response.
@@ -356,6 +376,161 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
       if (err instanceof CursorError) return reply.code(400).send({ error: 'invalid cursor' })
       if (err instanceof SegmentTimeoutError) {
         return reply.code(422).send({ error: err.message })
+      }
+      throw err
+    }
+  })
+
+  app.get('/v1/segments', async (req, reply) => {
+    const project = await authenticateServer(req, reply)
+    if (!project) return
+    try {
+      const segments = await store.list(project.id)
+      return reply.code(200).send({ segments: segments.map(toWire) })
+    } catch (err) {
+      if (err instanceof StoredTreeError) {
+        return reply.code(400).send({ error: err.message, ast_version: err.astVersion })
+      }
+      throw err
+    }
+  })
+
+  app.post('/v1/segments', async (req, reply) => {
+    const project = await authenticateServer(req, reply)
+    if (!project) return
+    const meta = CreateBody.safeParse(req.body)
+    const query = SegmentQuery.safeParse(req.body)
+    if (!meta.success || !query.success) {
+      return reply.code(400).send({ error: 'invalid segment' })
+    }
+    try {
+      const created = await store.create(project.id, meta.data.name, query.data)
+      return reply.code(201).send(toWire(created))
+    } catch (err) {
+      if (err instanceof DuplicateNameError) return reply.code(409).send({ error: err.message })
+      throw err
+    }
+  })
+
+  app.get<{ Params: { id: string } }>('/v1/segments/:id', async (req, reply) => {
+    const project = await authenticateServer(req, reply)
+    if (!project) return
+    try {
+      const found = await store.get(project.id, Number(req.params.id))
+      if (!found) return reply.code(404).send({ error: 'segment_not_found' })
+      return reply.code(200).send(toWire(found))
+    } catch (err) {
+      if (err instanceof StoredTreeError) {
+        return reply.code(400).send({ error: err.message, ast_version: err.astVersion })
+      }
+      throw err
+    }
+  })
+
+  app.patch<{ Params: { id: string } }>('/v1/segments/:id', async (req, reply) => {
+    const project = await authenticateServer(req, reply)
+    if (!project) return
+    const meta = PatchBody.safeParse(req.body)
+    if (!meta.success) return reply.code(400).send({ error: 'invalid segment' })
+    // A body carrying a tree updates the filter; one carrying only a name
+    // does not, which is what keeps the snapshot on a rename (see
+    // SegmentStore#update).
+    const query = SegmentQuery.safeParse(req.body)
+    try {
+      const updated = await store.update(project.id, Number(req.params.id), {
+        name: meta.data.name,
+        query: query.success ? query.data : undefined,
+      })
+      if (!updated) return reply.code(404).send({ error: 'segment_not_found' })
+      return reply.code(200).send(toWire(updated))
+    } catch (err) {
+      if (err instanceof DuplicateNameError) return reply.code(409).send({ error: err.message })
+      if (err instanceof StoredTreeError) {
+        return reply.code(400).send({ error: err.message, ast_version: err.astVersion })
+      }
+      throw err
+    }
+  })
+
+  app.delete<{ Params: { id: string } }>('/v1/segments/:id', async (req, reply) => {
+    const project = await authenticateServer(req, reply)
+    if (!project) return
+    const removed = await store.remove(project.id, Number(req.params.id))
+    if (!removed) return reply.code(404).send({ error: 'segment_not_found' })
+    return reply.code(204).send()
+  })
+
+  /**
+   * Runs a SAVED segment's stored tree and records the result on it. Reuses
+   * `runTree` — the same walk/cache/cursor machinery the ad-hoc preview route
+   * above uses — rather than a second implementation, so the two can never
+   * diverge on cursor signing, caching, or the window ceiling.
+   */
+  app.post<{ Params: { id: string } }>('/v1/segments/:id/preview', async (req, reply) => {
+    const project = await authenticateServer(req, reply)
+    if (!project) return
+    const options = PreviewOptions.safeParse(req.body ?? {})
+    if (!options.success) return reply.code(400).send({ error: 'invalid preview options' })
+
+    let found: StoredSegment | null
+    try {
+      found = await store.get(project.id, Number(req.params.id))
+    } catch (err) {
+      if (err instanceof StoredTreeError) {
+        return reply.code(400).send({ error: err.message, ast_version: err.astVersion })
+      }
+      throw err
+    }
+    if (!found) return reply.code(404).send({ error: 'segment_not_found' })
+
+    // Already parsed once by #hydrate on the way out of the store — this
+    // reconstructs the SegmentQuery shape runTree expects rather than
+    // re-validating it.
+    const query = { ast_version: found.astVersion, filter: found.filter } as SegmentQuery
+    const wantMembers = options.data.include?.includes('members') ?? false
+    try {
+      const result = await runTree(project, query, {
+        wantMembers,
+        cursor: options.data.cursor,
+      })
+      // Both modes write the snapshot: the count is computed either way, so
+      // asking for members must not leave a staler snapshot behind than
+      // asking for a count would.
+      await store.recordRun(project.id, found.id, result.count, new Date(result.asOf))
+      const last = result.members.at(-1)
+      const canOfferNext =
+        wantMembers && result.members.length === MEMBER_PAGE_SIZE && !result.windowExhausted
+      return reply.code(200).send({
+        person_count: result.count,
+        as_of: result.asOf,
+        ...(wantMembers
+          ? {
+              members: result.members,
+              next_cursor:
+                canOfferNext && last
+                  ? encodeWalkCursor(
+                      { lastSeen: last.last_seen, personId: last.person_id, asOf: result.asOf },
+                      result.pagesServed,
+                      cursorSigningKey(project),
+                    )
+                  : null,
+              window_exhausted: result.windowExhausted,
+            }
+          : {}),
+      })
+    } catch (err) {
+      if (err instanceof CursorError) return reply.code(400).send({ error: 'invalid cursor' })
+      if (err instanceof SegmentTimeoutError) {
+        return reply.code(422).send({ error: err.message })
+      }
+      // A stored tree can fall outside today's caps (MAX_TREE_DEPTH and
+      // friends tightened after it was saved) even though it once parsed
+      // fine — the same "untrusted on read" situation StoredTreeError exists
+      // for, just caught one level down inside compileSegment (via runTree)
+      // instead of at hydration. Without this, a stale-but-parseable tree
+      // would surface as an unhandled 503 rather than a named 400.
+      if (err instanceof SegmentValidationError) {
+        return reply.code(400).send({ error: err.message, code: err.code })
       }
       throw err
     }
