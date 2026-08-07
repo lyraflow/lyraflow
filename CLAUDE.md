@@ -34,15 +34,25 @@ their own infrastructure; their data stays theirs.
 
 ## Current status
 
-**v0.1 — ingest and identity resolution.** The HTTP ingest path is real and running: you
-can self-host the stack, create a project, and send it events. Identity resolution now
-exists too: `/v1/identify` binds an anonymous device to a known person, `/v1/alias` merges
-two known people (server-key only, not reversible), and `GET /v1/persons/:id` reads one
-person's stitched profile back out — the identity part (which ids belong to the person)
-resolves zero-lag, straight from Postgres, bypassing ClickHouse's identity dictionaries.
-There is still **no UI and no general query API** — no filtering, segments, or journeys —
-events land in ClickHouse and are read with a ClickHouse client until the query layer
-ships. Deletion/GDPR tooling and the dashboard are later plans.
+**v0.1 — ingest, identity, and segmentation.** The HTTP ingest path is real and running:
+you can self-host the stack, create a project, and send it events. Identity resolution
+exists: `/v1/identify` binds an anonymous device to a known person, `/v1/alias` merges two
+known people (server-key only, not reversible), and `GET /v1/persons/:id` reads one
+person's stitched profile — resolved zero-lag straight from Postgres, bypassing
+ClickHouse's identity dictionaries, and time-split so a device shared between two people
+attributes each event to whoever held it at that moment.
+
+Segmentation ships too. A nested filter tree compiles into one ClickHouse query behind
+`POST /v1/segments/preview`, which returns a count and optionally a bounded page of
+matching people. Segments can be saved, listed, updated and re-run, and
+`/v1/schema/events` and `/v1/schema/properties` expose what a project has recorded, for
+autocomplete.
+
+There is still **no UI**, no person deletion or export, and no reporting layer — funnels,
+cohorts and retention are v0.2. `README.md` documents the whole public surface; keep it
+accurate when the API changes, because it is the only thing standing between a new
+self-hoster and a working install. It has drifted twice; both times a shipped endpoint
+went undocumented because the task that added it had no documentation step.
 
 `README.md` documents the endpoints and payload shape; keep it accurate when the API
 changes, because it is the only thing standing between a new self-hoster and a working
@@ -116,6 +126,46 @@ It starts its own stack from `docker-compose.ci.yml`, which binds the same host 
 the dev and test stacks (3000 and 8123). Stop those first, or it fails with "port is
 already allocated" — an environment clash that reads like a broken test.
 
+## Writing tests here
+
+A test counts only once it has been shown to fail against the broken implementation. That
+rule is easy to satisfy badly, so:
+
+- **Mutate the narrowest unit, and the exact line the test claims to protect.** Reverting a
+  wrapper proves the wrapper runs, not that the logic inside it does anything.
+- **Mutate compound conditions one clause at a time.** Deleting a whole `if (a || b)`
+  proves nothing about `b`. Several conditions in this codebase were provably untested
+  while looking covered, because every mutation flipped the entire guard.
+- **Ask whether there is a second, easier way for the test to pass.** Real examples caught
+  here: an assertion that the compiled SQL contained `person_id` (present in *every*
+  query, so the whole feature could be replaced by a literal); an assertion made against
+  the test file's own fixture object, which could not fail for any implementation; and an
+  ordering test that passed because one fixture name sorted first both alphabetically and
+  chronologically.
+- **A mutation that breaks everything proves nothing** about the specific test you are
+  checking. If your mutation fails unrelated tests too, narrow it.
+
+### Tests share live databases
+
+Most tests talk to one Postgres and one ClickHouse, and Vitest runs files sequentially and
+`it` blocks in declaration order.
+
+- **Clean up at the top of `beforeAll`, not only in `afterAll` or a `finally`.** A file
+  that tidies up on the way out is still dirty if a previous run crashed, and cleanup that
+  deletes from `events` will not remove rows a materialised view already propagated into
+  `device_index` or `person_traits`.
+- **A green full suite does not prove per-file hygiene.** Later files drop and re-migrate
+  the shared tables, which papers over leaked fixtures. If you change a test's fixtures,
+  run that file **standalone, three times**, and confirm it passes every time. A real bug
+  survived review here because it was verified with a full-suite run.
+
+### Fixture timestamps must be relative
+
+The ingest path clamps any client timestamp older than 24 hours to `now − 24h`. A fixture
+pinned to an absolute date therefore **expires on a wall-clock schedule**: the suite was
+green one morning and red the same afternoon, with no code change, because the fixtures
+had aged past the clamp. Anchor fixtures to `Date.now()` and derive offsets from it.
+
 ## Non-negotiables in this codebase
 
 These are defects the branch was repeatedly bitten by. Do not add another instance:
@@ -126,7 +176,28 @@ These are defects the branch was repeatedly bitten by. Do not add another instan
 - Flush the logger before `process.exit()` — or prefer `process.exitCode` and let the
   process end on its own.
 - Anything reachable from the public ingest port must be bounded. It is authenticated by
-  a key that is public by design, so an unauthenticated caller can reach it.
+  a key that is public by design, so an unauthenticated caller can reach it. The same
+  applies to server-key routes: page sizes, window ceilings, cache entries, and result
+  limits all need a bound, not a convention.
+- **Every migration bumps `SCHEMA_VERSION`** in `packages/core/src/index.ts` and the
+  expectation in `version.test.ts`. `schema-version.test.ts` ties the constant to the
+  highest migration on disk and exists because forgetting costs an operator a crash loop
+  on their *second* boot, long after the mistake.
+- **Migrations are additive, and an applied one is never amended.** `migrate()` skips any
+  version already in `schema_migrations`, so editing a shipped file cannot reach the
+  deployments that ran it — it changes only fresh installs, which is the worst of both.
+  If an earlier migration created something wrong, fix it forward in a new one.
+- **Aggregate by `event_id`.** `events` is `ReplacingMergeTree` ordered by a key that
+  includes `timestamp`, so a retried delivery that omitted `timestamp` is stored as a
+  permanent second row. Any count that does not deduplicate over-counts retries.
+- **`project_id` is injected by the compiler from the authenticated key, never sourced
+  from a request**, and the suppression filter is injected the same way. There is no AST
+  node or request field that can express or remove either — that is what makes them
+  guarantees rather than conventions, and it must stay true on every new route and in
+  every new query path.
+- **Every value reaching SQL is a bound parameter.** Identifiers that cannot be
+  parameters — column names, aggregate function names — come from a fixed compile-time
+  allowlist, never from request data.
 
 ## License and its consequences
 
