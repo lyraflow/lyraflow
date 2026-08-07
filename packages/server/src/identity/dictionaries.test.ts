@@ -32,6 +32,28 @@ describe('parsePgUrl', () => {
     expect(() => parsePgUrl('not-a-url')).toThrow(/LYRAFLOW_POSTGRES_URL/)
     expect(() => parsePgUrl('not-a-url')).not.toThrow(/not-a-url/)
   })
+
+  // The WHATWG URL parser reports an IPv6 host bracketed (`[::1]`) — correct
+  // per the URL spec, but not a valid ClickHouse POSTGRESQL source `host`.
+  it('strips the brackets from an IPv6 host', () => {
+    expect(parsePgUrl('postgres://u:p@[::1]:5432/lyraflow').host).toBe('::1')
+  })
+
+  // `username`/`password` were already decoded; `pathname` was not, so a
+  // database name containing a space or other reserved character arrived
+  // percent-encoded instead of literal.
+  it('percent-decodes the database name', () => {
+    expect(parsePgUrl('postgres://u:p@db/lyra%20flow').database).toBe('lyra flow')
+  })
+
+  // `new URL()` accepts a lone, malformed `%` in userinfo without complaint
+  // (percent-encoding is only validated on decode) — so this exercises a
+  // failure `new URL()` itself cannot catch. Before this was fixed,
+  // `decodeURIComponent` ran outside the try and this threw a raw
+  // `URIError: URI malformed` instead of the documented, value-free message.
+  it('reports a malformed percent-encoding through the same named message, not a raw URIError', () => {
+    expect(() => parsePgUrl('postgres://u:p%@db/lyraflow')).toThrow(/LYRAFLOW_POSTGRES_URL/)
+  })
 })
 
 /**
@@ -42,25 +64,52 @@ describe('parsePgUrl', () => {
  * `CREATE DICTIONARY` produces a `SYNTAX_ERROR` whose message echoes back
  * raw, unparsed query text verbatim, including whatever followed the syntax
  * error, which can be the `SOURCE(POSTGRESQL(... password '...' ...))`
- * clause itself. `realisticClickHouseSyntaxError` below reproduces that
- * exact observed shape (message text, `code`, `type`) rather than a made-up
- * one, so this test exercises the real leak path, not a hypothetical one.
+ * clause itself. Real ClickHouse HTTP error messages are single-line, so
+ * every fixture below is single-line too — an earlier version of this suite
+ * used a fixture with the password after several `\n`s, which meant
+ * `sanitizeDictionaryError`'s (then-present) first-line-only truncation
+ * removed the password from the tested output *before redaction ever ran*.
+ * The tests still passed with `redactPassword`'s body replaced by `return
+ * text` — the truncation coincidentally did redaction's job for it. A
+ * single-line fixture removes that confound: the password can only be gone
+ * from the output because `redactPassword` actually removed it.
  *
  * A fake `ClickHouseClient` is used rather than the live test stack because
- * this specific failure mode is network/version-dependent and slow to
- * reproduce reliably on demand (see the identical reasoning for
- * `createFakeClient` in packages/db/src/migrator.test.ts, which this
- * mirrors). `ensureIdentityDictionaries` only ever calls `ch.command()`, so
- * only that needs implementing; the `as unknown as ClickHouseClient` cast
- * mirrors migrator.test.ts's `as unknown as Pool` for the same reason.
+ * these specific failure shapes (a quote or backslash inside the password,
+ * a truncated echo) are awkward or impossible to force live without
+ * bypassing `escapeSqlLiteral` itself (see the Task 5 fix report for why
+ * that's deliberately not done here). `ensureIdentityDictionaries` only
+ * ever calls `ch.command()`, so only that needs implementing; the
+ * `as unknown as ClickHouseClient` cast mirrors `createFakeClient`'s
+ * `as unknown as Pool` in packages/db/src/migrator.test.ts, used there for
+ * the identical reason (a failure mode too slow/flaky to reproduce live on
+ * every run).
  */
 describe('ensureIdentityDictionaries sanitizes a failure before it can reach a logger', () => {
-  const LEAKED_PASSWORD = 'MY_LEAKED_SECRET_XYZ'
-
-  function realisticClickHouseSyntaxError(): Error {
-    const err = new Error(
-      `Syntax error: failed at position 47 ('(') (line 1, col 47): (\n  a UInt32\n  PRIMARY KEY a\n  SOURCE(POSTGRESQL(host 'postgres' port 5432 user 'lyraflow' password '${LEAKED_PASSWORD}' db 'lyraflow_test' table 'identity_bi. Unmatched parentheses: (. `,
-    )
+  /**
+   * Builds a single-line error shaped exactly like the ClickHouseError
+   * `@clickhouse/client` throws (`.message`, `.code`, `.type`) around a
+   * `SOURCE(POSTGRESQL(...))` clause containing `password`, escaped the same
+   * way `escapeSqlLiteral` in dictionaries.ts escapes it — `\` doubled,
+   * then `'` backslash-escaped. `tail` is appended after the password
+   * clause when present, or omitted (simulating a length-capped diagnostic
+   * that truncates mid-value, with no closing quote at all) when not.
+   *
+   * Deliberately lean *before* the password: `sanitizeDictionaryError` caps
+   * its output at 200 characters (for a readable, single fatal log line),
+   * capped *after* redaction runs, never before — but a verbose preamble
+   * here would push the password itself past that 200-character mark, and
+   * the tests below would then pass even with redaction completely broken,
+   * for the same reason the multi-line fixture this replaced did: whatever
+   * comes after the cut point disappears regardless of whether it was ever
+   * actually redacted. Keeping the preamble short (verified below, in the
+   * mutation proof) makes these tests depend on `redactPassword` actually
+   * running, not on truncation coincidentally standing in for it.
+   */
+  function chError(password: string, tail?: string): Error {
+    const escaped = password.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+    const message = `Code: 62. Syntax error near SOURCE(POSTGRESQL(host 'postgres' password '${escaped}'${tail ?? ''}`
+    const err = new Error(message)
     Object.assign(err, { code: '62', type: 'SYNTAX_ERROR' })
     return err
   }
@@ -75,44 +124,90 @@ describe('ensureIdentityDictionaries sanitizes a failure before it can reach a l
     } as unknown as ClickHouseClient
   }
 
-  const pgSource: PgDictionarySource = {
-    host: 'postgres',
-    port: 5432,
-    user: 'lyraflow',
-    password: LEAKED_PASSWORD,
-    database: 'lyraflow_test',
+  function pgSourceWith(password: string): PgDictionarySource {
+    return { host: 'postgres', port: 5432, user: 'lyraflow', password, database: 'lyraflow_test' }
   }
 
-  // THE test for this fix: removing the redaction (e.g. reverting
-  // sanitizeDictionaryError to `throw err` — the coordinator's flagged bug)
-  // would make `thrown.message` equal `realisticClickHouseSyntaxError()`'s
-  // raw message, which contains `LEAKED_PASSWORD` verbatim and the substring
-  // `password '` — both assertions below would then fail. Checking `cause`
-  // and `JSON.stringify` separately also catches a narrower regression: code
-  // that sanitizes the top-level message but forwards the original error as
-  // `cause` unchanged (the exact "cause chain that carries the query" the
-  // coordinator called out).
-  it('never lets the password reach the thrown error, its cause, or JSON.stringify of either', async () => {
-    const ch = fakeCh(() => {
-      throw realisticClickHouseSyntaxError()
-    })
-
+  /** Every surface a caller (or a log serializer walking `cause`) could read
+   * the thrown error through. */
+  async function surfacesFor(ch: ClickHouseClient, pg: PgDictionarySource): Promise<string[]> {
     let thrown: Error | undefined
     try {
-      await ensureIdentityDictionaries(ch, pgSource)
+      await ensureIdentityDictionaries(ch, pg)
     } catch (err) {
       thrown = err as Error
     }
     expect(thrown).toBeDefined()
-
-    const surfaces = [
+    return [
       thrown?.message ?? '',
       thrown?.cause instanceof Error ? thrown.cause.message : '',
       JSON.stringify(thrown),
       JSON.stringify(thrown?.cause),
     ]
-    for (const text of surfaces) {
+  }
+
+  // THE test for this fix, and the one the review's own reproduction pins:
+  // reverting `sanitizeDictionaryError` to forward `err` unredacted, *or*
+  // reducing `redactPassword`'s body to `return text` (an identity
+  // function — proven below, under "mutation proof"), makes
+  // `thrown.message` contain `LEAKED_PASSWORD` verbatim and the substring
+  // `password '`. Checking `cause` and `JSON.stringify` separately also
+  // catches a narrower regression: code that sanitizes the top-level message
+  // but forwards the original error as `cause` unchanged.
+  it('a single-line error with the password on that line is fully redacted', async () => {
+    const LEAKED_PASSWORD = 'MY_LEAKED_SECRET_XYZ'
+    const ch = fakeCh(() => {
+      throw chError(LEAKED_PASSWORD, `' db 'lyraflow_test' table 'identity_bindings_dict_src'))`)
+    })
+    for (const text of await surfacesFor(ch, pgSourceWith(LEAKED_PASSWORD))) {
       expect(text).not.toContain(LEAKED_PASSWORD)
+      expect(text).not.toMatch(/password\s*'/i)
+    }
+  })
+
+  // A password containing `'` is exactly what a raw (unescaped) redaction
+  // pass misses: the DDL — and therefore the error echo — carries the
+  // *escaped* form `ab\'cd-SECRET-TAIL`, not the raw `ab'cd-SECRET-TAIL`.
+  it('a password containing a single quote is fully redacted', async () => {
+    const PASSWORD = `ab'cd-SECRET-TAIL`
+    const ch = fakeCh(() => {
+      throw chError(PASSWORD, `' db 'lyraflow_test' table 'identity_bindings_dict_src'))`)
+    })
+    for (const text of await surfacesFor(ch, pgSourceWith(PASSWORD))) {
+      expect(text).not.toContain(PASSWORD)
+      expect(text).not.toContain('SECRET-TAIL')
+      expect(text).not.toMatch(/password\s*'/i)
+    }
+  })
+
+  // A password containing `\` doubles under escaping (`\` -> `\\`); the
+  // fallback clause-matcher must not mistake the doubled backslash for an
+  // escaped quote and stop early.
+  it('a password containing a backslash is fully redacted', async () => {
+    const PASSWORD = 'back\\slash-SECRET-TAIL'
+    const ch = fakeCh(() => {
+      throw chError(PASSWORD, `' db 'lyraflow_test' table 'identity_bindings_dict_src'))`)
+    })
+    for (const text of await surfacesFor(ch, pgSourceWith(PASSWORD))) {
+      expect(text).not.toContain(PASSWORD)
+      expect(text).not.toContain('SECRET-TAIL')
+      expect(text).not.toMatch(/password\s*'/i)
+    }
+  })
+
+  // ClickHouse caps this diagnostic's length (confirmed by hand — see the
+  // Task 5 fix report), and where the cut lands is not under this code's
+  // control: a partial password with no closing quote is still a leak, and
+  // `[^']*'` (requiring a real closing quote) would never match it at all.
+  it('a truncated echo with no closing quote is fully redacted, not left untouched', async () => {
+    const LEAKED_PASSWORD = 'MY_LEAKED_SECRET_XYZ'
+    const ch = fakeCh(() => {
+      // No trailing quote and no tail: the message ends mid-value, exactly
+      // as a length cap would produce.
+      throw chError(LEAKED_PASSWORD.slice(0, 12))
+    })
+    for (const text of await surfacesFor(ch, pgSourceWith(LEAKED_PASSWORD))) {
+      expect(text).not.toContain(LEAKED_PASSWORD.slice(0, 12))
       expect(text).not.toMatch(/password\s*'/i)
     }
   })
@@ -121,16 +216,33 @@ describe('ensureIdentityDictionaries sanitizes a failure before it can reach a l
   // real fatal log line useless for triage — this pins that regression too.
   it('names which dictionary failed', async () => {
     const ch = fakeCh(() => {
-      throw realisticClickHouseSyntaxError()
+      throw chError('irrelevant')
     })
-    await expect(ensureIdentityDictionaries(ch, pgSource)).rejects.toThrow(/identity_bindings/)
+    await expect(ensureIdentityDictionaries(ch, pgSourceWith('irrelevant'))).rejects.toThrow(
+      /identity_bindings/,
+    )
   })
 
   it('identifies the second dictionary by name when only it fails', async () => {
     const ch = fakeCh((call) => {
-      if (call === 2) throw realisticClickHouseSyntaxError()
+      if (call === 2) throw chError('irrelevant')
     })
-    await expect(ensureIdentityDictionaries(ch, pgSource)).rejects.toThrow(/person_aliases/)
+    await expect(ensureIdentityDictionaries(ch, pgSourceWith('irrelevant'))).rejects.toThrow(
+      /person_aliases/,
+    )
+  })
+
+  // Fails before any DDL is built at all — proven separately from the
+  // sanitization tests above because there is no `ch.command()` call (and
+  // therefore no ClickHouse error) for this one; it is a precondition check
+  // on the input itself.
+  it('rejects a non-integer port before building any DDL', async () => {
+    const ch = fakeCh(() => {
+      throw new Error('ch.command should never be reached')
+    })
+    await expect(
+      ensureIdentityDictionaries(ch, { ...pgSourceWith('x'), port: Number.NaN }),
+    ).rejects.toThrow(/port must be an integer/)
   })
 })
 

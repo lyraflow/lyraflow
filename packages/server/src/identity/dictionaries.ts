@@ -11,23 +11,51 @@ export interface PgDictionarySource {
 /**
  * The error deliberately names the variable and never echoes its value — the URL
  * contains the database password, and this runs on a startup path that logs.
+ *
+ * `decodeURIComponent` runs *inside* the try, alongside `new URL()`: a lone
+ * `%` (or any other malformed percent-encoding) in the username, password,
+ * or path makes `decodeURIComponent` throw `URIError: URI malformed`, and
+ * that must surface through the same named, value-free message as a
+ * structurally invalid URL — not as a raw, uncaught `URIError`.
  */
 export function parsePgUrl(url: string): PgDictionarySource {
   let parsed: URL
+  let user: string
+  let password: string
+  let database: string
   try {
     parsed = new URL(url)
+    user = decodeURIComponent(parsed.username)
+    password = decodeURIComponent(parsed.password)
+    // The path segment is percent-encoded exactly like userinfo is — e.g. a
+    // database literally named "lyra flow" arrives as `/lyra%20flow` — but
+    // unlike `username`/`password`, `pathname` was previously used raw.
+    database = decodeURIComponent(parsed.pathname.slice(1))
   } catch {
     throw new Error('LYRAFLOW_POSTGRES_URL is not a valid connection URL')
   }
-  if (!parsed.hostname || !parsed.pathname.slice(1)) {
+  if (!parsed.hostname || !database) {
     throw new Error('LYRAFLOW_POSTGRES_URL is missing a host or database name')
   }
+  // The WHATWG URL parser reports an IPv6 host's `hostname` bracketed, e.g.
+  // `[::1]` — required in a URL to separate the address's own colons from
+  // the port's, but not a valid ClickHouse POSTGRESQL source `host` value.
+  // Left bracketed, `ensureIdentityDictionaries` would build a well-formed
+  // SOURCE(...) clause that ClickHouse's Postgres driver simply cannot
+  // connect with; since dictionary loading is lazy (see dictionaries.test.ts
+  // for the confirmation), `CREATE OR REPLACE DICTIONARY` would still
+  // succeed, boot would still succeed, and only a later `dictGet` would
+  // discover the dictionary never actually loaded.
+  const host =
+    parsed.hostname.startsWith('[') && parsed.hostname.endsWith(']')
+      ? parsed.hostname.slice(1, -1)
+      : parsed.hostname
   return {
-    host: parsed.hostname,
+    host,
     port: parsed.port ? Number(parsed.port) : 5432,
-    user: decodeURIComponent(parsed.username),
-    password: decodeURIComponent(parsed.password),
-    database: parsed.pathname.slice(1),
+    user,
+    password,
+    database,
   }
 }
 
@@ -38,21 +66,42 @@ function escapeSqlLiteral(v: string): string {
 const REDACTED = '[redacted]'
 
 /**
- * Blanks out every trace of the password from a piece of diagnostic text:
- * first the literal value wherever it occurs verbatim, then — because the
- * first pass is a "should always catch it" guarantee, not a proof — anything
- * shaped like the DDL's own `password '...'` clause, regardless of what
- * actually ends up between the quotes. The second pass also removes the word
- * "password" itself, not just the value, so a redacted message never
- * contains the telltale `password '` sequence that would tell a reader a
- * secret used to be there. Applied to the full, untruncated text before any
- * truncation happens elsewhere — truncating first and hoping the password
- * lands past the cut point is exactly the "probably fine" reasoning this
- * exists to not rely on.
+ * Blanks out every trace of the password from a piece of diagnostic text.
+ * Three independent passes, each covering what the others can miss on their
+ * own — a security review of an earlier version of this function found real
+ * holes in the first and third when used alone:
+ *
+ *  1. The literal password value, wherever it appears verbatim.
+ *  2. The *escaped* form `escapeSqlLiteral` puts into the DDL — distinct
+ *     from (1) whenever the password itself contains a `'` or `\`. The DDL
+ *     always contains this escaped form, never the raw one, so a raw-only
+ *     pass leaves it — and the secret inside it — completely untouched.
+ *  3. A `password '...'` clause matcher that does not require either exact
+ *     string above to still be intact. `(?:\\.|[^'\\])*` walks the value
+ *     the same way the escaping scheme itself does: `\\.` consumes an
+ *     escaped backslash or escaped quote as a single unit, so an internal
+ *     `\'` from pass (2)'s own escaping is never mistaken for the value's
+ *     real closing quote (naively matching `[^']*'` terminates right there
+ *     and leaves everything after it — including the rest of the secret —
+ *     unredacted). `('|$)` accepts either that genuine closing quote or the
+ *     end of the string, so a length-capped diagnostic that truncates
+ *     mid-value (confirmed by hand: ClickHouse caps this diagnostic's
+ *     length, and where the cut lands is not something this code controls)
+ *     is still fully redacted instead of leaking whatever fragment survived
+ *     the cut.
+ *
+ * Applied to the fully-assembled message exactly once (see
+ * `sanitizeDictionaryError`), not field-by-field — so nothing that ends up
+ * in the final message, including the ClickHouse-supplied `code`/`type`,
+ * depends on being independently guaranteed clean.
  */
 function redactPassword(text: string, password: string): string {
-  const literalRedacted = password.length > 0 ? text.split(password).join(REDACTED) : text
-  return literalRedacted.replace(/password\s*'[^']*'/gi, REDACTED)
+  const escaped = escapeSqlLiteral(password)
+  let out = text
+  if (password.length > 0) out = out.split(password).join(REDACTED)
+  if (escaped.length > 0) out = out.split(escaped).join(REDACTED)
+  out = out.replace(/password\s*'(?:\\.|[^'\\])*('|$)/gi, REDACTED)
+  return out
 }
 
 /**
@@ -75,28 +124,47 @@ function redactPassword(text: string, password: string): string {
  * in a future version) is never read, because nothing here reads the error
  * object generically; only these two named fields are ever pulled off it.
  * The result's `cause`, if set, is a fresh `Error` built from the same
- * redacted, truncated summary as the message — never the original error
- * object — so the `cause` chain cannot become a second copy of the leak.
+ * fully-redacted summary as the message — never the original error object —
+ * so the `cause` chain cannot become a second copy of the leak.
  */
 function sanitizeDictionaryError(dictionaryName: string, password: string, err: unknown): Error {
   const rawMessage = err instanceof Error ? err.message : String(err)
-  const redacted = redactPassword(rawMessage, password)
-  const firstLine = (redacted.split('\n')[0] ?? redacted).trim()
-  const summary = firstLine.length > 200 ? `${firstLine.slice(0, 200)}…` : firstLine
 
+  // ClickHouseError (thrown by @clickhouse/client for a server-side
+  // failure) carries `code` and `type` as plain string/number properties;
+  // read only those two, never anything else the error object might carry.
   const code =
     err instanceof Error && 'code' in err ? String((err as { code: unknown }).code) : undefined
   const type =
     err instanceof Error && 'type' in err ? String((err as { type: unknown }).type) : undefined
   const label = [type, code ? `code ${code}` : undefined].filter(Boolean).join(', ')
 
+  // Assembled in full — including the `code`/`type` label — *before*
+  // redaction runs, and redacted exactly once, immediately below, rather
+  // than redacting `rawMessage` alone and trusting that `label` (built from
+  // fields read off the same untrusted error object) could never itself
+  // carry the password.
+  const assembled = `Failed to load the "${dictionaryName}" dictionary${label ? ` (${label})` : ''}: ${rawMessage}`
+  const redacted = redactPassword(assembled, password)
+
+  // Whitespace-collapsing and length-capping happen strictly *after* this
+  // point, on text that is already fully redacted — never before it. Taking
+  // only a message's first line (or its first N characters) ahead of
+  // redaction was exactly the earlier version of this function's bug: a
+  // password sitting on a later line, or past the cut point, would never
+  // reach `redactPassword` at all and would be dropped by truncation, not by
+  // redaction — which looks identical in a passing test but leaves a
+  // differently-shaped real failure completely unredacted. So collapsing and
+  // capping here exist purely to keep a fatal log line short and single-line;
+  // they carry none of the safety responsibility, which belongs to
+  // `redactPassword` alone, applied to the complete, untruncated text.
+  const collapsed = redacted.replace(/\s+/g, ' ').trim()
+  const summary = collapsed.length > 200 ? `${collapsed.slice(0, 200)}…` : collapsed
+
   const cause = new Error(summary)
   if (type) cause.name = type
 
-  return new Error(
-    `Failed to load the "${dictionaryName}" dictionary${label ? ` (${label})` : ''}: ${summary}`,
-    { cause },
-  )
+  return new Error(summary, { cause })
 }
 
 /**
@@ -125,6 +193,18 @@ export async function ensureIdentityDictionaries(
   ch: ClickHouseClient,
   pg: PgDictionarySource,
 ): Promise<void> {
+  // `port` is interpolated unquoted below (it is a number, not a SQL string
+  // literal, so `escapeSqlLiteral` does not apply to it). `parsePgUrl` always
+  // produces a safe integer, but `PgDictionarySource` is a public interface —
+  // dictionaries.test.ts's own live-service test builds one by hand — and a
+  // non-integer value (a stray `NaN`, or a value carrying its own quotes)
+  // would land in the DDL unescaped, which is exactly the kind of malformed
+  // statement `sanitizeDictionaryError` exists to be the *last* line of
+  // defence against, not the only one. Fail before any DDL is built at all.
+  if (!Number.isInteger(pg.port)) {
+    throw new Error(`PgDictionarySource.port must be an integer, got ${String(pg.port)}`)
+  }
+
   const source = (table: string) =>
     `SOURCE(POSTGRESQL(host '${escapeSqlLiteral(pg.host)}' port ${pg.port} user '${escapeSqlLiteral(pg.user)}' ` +
     `password '${escapeSqlLiteral(pg.password)}' db '${escapeSqlLiteral(pg.database)}' table '${table}'))`
