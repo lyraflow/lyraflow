@@ -19,6 +19,32 @@ describe('canonicalJson', () => {
   it('distinguishes values that JSON.stringify would not', () => {
     expect(canonicalJson({ a: 1 })).not.toBe(canonicalJson({ a: '1' }))
   })
+
+  it('rejects a Date value', () => {
+    expect(() => canonicalJson({ a: new Date('2024-01-01') })).toThrow(
+      /canonicalJson accepts only plain JSON data/
+    )
+  })
+
+  it('rejects a Map value', () => {
+    expect(() => canonicalJson({ a: new Map([['x', 1]]) })).toThrow(
+      /canonicalJson accepts only plain JSON data/
+    )
+  })
+
+  it('rejects a nested non-plain object', () => {
+    expect(() => canonicalJson({ a: { b: new Date('2024-01-01') } })).toThrow(
+      /canonicalJson accepts only plain JSON data/
+    )
+  })
+
+  it('accepts an Object.create(null) object', () => {
+    const nullProtoObj = Object.create(null)
+    nullProtoObj.a = 1
+    nullProtoObj.b = 2
+    expect(() => canonicalJson(nullProtoObj)).not.toThrow()
+    expect(canonicalJson(nullProtoObj)).toEqual(canonicalJson({ b: 2, a: 1 }))
+  })
 })
 
 describe('treeHash', () => {
