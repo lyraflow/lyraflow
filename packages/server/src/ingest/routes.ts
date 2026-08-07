@@ -1,7 +1,7 @@
 import { BatchPayload, IngestPayload, isBot, parseUserAgent } from '@lyraflow/core'
 import type { ClickHouseClient } from '@lyraflow/db'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
-import type { ProjectCache } from '../auth/project-cache.js'
+import type { Project, ProjectCache } from '../auth/project-cache.js'
 import type { Readiness } from '../health.js'
 import type { PersonAliases } from '../identity/aliases.js'
 import type { IdentityBindings } from '../identity/bindings.js'
@@ -23,13 +23,59 @@ export interface IngestDeps {
   aliases: PersonAliases
 }
 
-const WRITE_KEY_HEADER = 'x-lyraflow-write-key'
+export const WRITE_KEY_HEADER = 'x-lyraflow-write-key'
 // Deliberately distinct from WRITE_KEY_HEADER: the write key is public (it
 // ships in browser JavaScript) and can only append events. Aliasing mutates
 // identity for the whole project and is not reversible in v0.1 (see
 // PersonAliases's docstring), so it is gated on the secret server key
-// instead — see `authenticateServer` below.
-const SERVER_KEY_HEADER = 'x-lyraflow-server-key'
+// instead — see `authenticateServer` below. GET /v1/persons/:id
+// (identity/person.ts) reads person data rather than mutating it, but is
+// gated the same way for the same underlying reason: it must not be
+// reachable with the public, browser-shipped write key.
+export const SERVER_KEY_HEADER = 'x-lyraflow-server-key'
+
+/**
+ * Builds an authenticator for one key type. `authenticate` (write key) and
+ * `authenticateServer` (server key) previously duplicated this whole body,
+ * differing only in header name, lookup, and the two error codes — a shape
+ * that makes it structurally possible for the two to drift on the drain
+ * check (the one line rule 2 actually depends on staying identical between
+ * them). Parameterising it here makes that drift impossible instead of
+ * merely unlikely.
+ *
+ * Exported at module scope (rather than nested inside registerIngestRoutes)
+ * so identity/person.ts's GET /v1/persons/:id can build its own
+ * server-key-gated authenticator through the exact same logic instead of
+ * duplicating it a third time. `readiness` is an explicit parameter for
+ * that reason: registerIngestRoutes's version used to close over its own
+ * `deps.readiness` implicitly, which only worked because every caller lived
+ * inside that one function.
+ */
+export function makeAuthenticator(
+  readiness: Readiness,
+  headerName: string,
+  lookup: (key: string) => Promise<Project | null>,
+  missingCode: string,
+  invalidCode: string,
+) {
+  return async (req: FastifyRequest, reply: FastifyReply) => {
+    if (readiness.draining) {
+      reply.code(503).header('retry-after', '5').send({ error: 'draining' })
+      return null
+    }
+    const key = req.headers[headerName]
+    if (typeof key !== 'string' || key.length === 0) {
+      reply.code(401).send({ error: missingCode })
+      return null
+    }
+    const project = await lookup(key)
+    if (!project) {
+      reply.code(401).send({ error: invalidCode })
+      return null
+    }
+    return project
+  }
+}
 
 interface DeadLetterRow {
   project_id: number
@@ -99,41 +145,8 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
   const onDeadLetterError = (err: unknown, rows: DeadLetterRow[]) =>
     app.log.error({ err, rows: rows.length }, 'dead-letter write failed')
 
-  /**
-   * Builds an authenticator for one key type. `authenticate` (write key) and
-   * `authenticateServer` (server key) previously duplicated this whole body,
-   * differing only in header name, lookup, and the two error codes — a shape
-   * that makes it structurally possible for the two to drift on the drain
-   * check (the one line rule 2 actually depends on staying identical between
-   * them). Parameterising it here makes that drift impossible instead of
-   * merely unlikely.
-   */
-  function makeAuthenticator(
-    headerName: string,
-    lookup: (key: string) => ReturnType<ProjectCache['byWriteKey']>,
-    missingCode: string,
-    invalidCode: string,
-  ) {
-    return async (req: FastifyRequest, reply: FastifyReply) => {
-      if (readiness.draining) {
-        reply.code(503).header('retry-after', '5').send({ error: 'draining' })
-        return null
-      }
-      const key = req.headers[headerName]
-      if (typeof key !== 'string' || key.length === 0) {
-        reply.code(401).send({ error: missingCode })
-        return null
-      }
-      const project = await lookup(key)
-      if (!project) {
-        reply.code(401).send({ error: invalidCode })
-        return null
-      }
-      return project
-    }
-  }
-
   const authenticate = makeAuthenticator(
+    readiness,
     WRITE_KEY_HEADER,
     (key) => projects.byWriteKey(key),
     'missing_write_key',
@@ -142,6 +155,7 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
   // Gates /v1/alias on the secret server key rather than the public write
   // key — see SERVER_KEY_HEADER's docstring above for why.
   const authenticateServer = makeAuthenticator(
+    readiness,
     SERVER_KEY_HEADER,
     (key) => projects.byServerKey(key),
     'missing_server_key',
