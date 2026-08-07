@@ -72,6 +72,45 @@ export interface Binding {
  * of "patch the prior result" bookkeeping that made an earlier version of
  * this derivation lossy and order-dependent.
  */
+/**
+ * Merges adjacent tiles that belong to the same person into one.
+ *
+ * This is deliberately NOT the widening this package's callers are forbidden
+ * from doing (see MAX_PERSON_RANGE_CLAUSES in packages/server's person.ts):
+ * widening stretches a range past an actual gap or a different owner to make
+ * something fit a budget, which changes what the range means. Merging
+ * `alice[10,20)` with `alice[20,30)` changes nothing — the boundary between
+ * them is a same-person handoff (a repeat `identify()` for the person already
+ * in force), so their union is EXACTLY `alice[10,30)`, not an approximation
+ * of it. `deriveTiling` above deliberately leaves these adjacent — see its
+ * own docstring — because collapsing them at derivation time is exactly the
+ * "patch the prior result" bookkeeping that made an earlier version lossy.
+ * This function does the equivalent merge afterwards, once the whole tiling
+ * is in hand, which is safe precisely because it never looks at anything
+ * `deriveTiling` did not already establish as a true, gapless boundary.
+ *
+ * Only merges a TRUE handoff: the same `personId` AND `to === from` on
+ * adjacent tiles. A gap cannot occur (`deriveTiling`'s tiling is always
+ * gapless), and a different person in between always breaks the merge, so
+ * this can only ever shrink the tile count, never change which person owns
+ * which instant.
+ *
+ * Input must already be in `deriveTiling`'s output order (ascending `from`);
+ * this does not re-sort.
+ */
+export function coalesceContiguous(bindings: Binding[]): Binding[] {
+  const out: Binding[] = []
+  for (const b of bindings) {
+    const last = out[out.length - 1]
+    if (last && last.personId === b.personId && last.to === b.from) {
+      last.to = b.to
+    } else {
+      out.push({ ...b })
+    }
+  }
+  return out
+}
+
 export function deriveTiling(events: BindEvent[]): Binding[] {
   // Resolve same-instant ties before sorting: two events at the identical
   // boundAt collapse to one, keeping the lexicographically smaller personId.

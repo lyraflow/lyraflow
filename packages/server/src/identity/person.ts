@@ -1,4 +1,4 @@
-import { chDateTime, deriveTiling } from '@lyraflow/core'
+import { chDateTime, coalesceContiguous, deriveTiling } from '@lyraflow/core'
 import type { ClickHouseClient } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
 import type { ProjectCache } from '../auth/project-cache.js'
@@ -180,14 +180,37 @@ export function registerPersonRoutes(app: FastifyInstance, deps: PersonDeps): vo
     // exactly that).
     const bindEvents = await bindings.bindEventsForDevices(project.id, devices)
 
-    // One [from, to) window per device per owner, derived through the same
-    // function 003_identity.sql's view is required to agree with. Keeping the
-    // derivation in one place is what "converge onto one implementation of
-    // the tiling" actually asks for; the two SQL shapes stay different
-    // because the two reads have different jobs.
+    // One [from, to) window per device per CONTIGUOUS owner, derived through
+    // the same function 003_identity.sql's view is required to agree with.
+    // Keeping the derivation in one place is what "converge onto one
+    // implementation of the tiling" actually asks for; the two SQL shapes
+    // stay different because the two reads have different jobs.
+    //
+    // coalesceContiguous runs on every device's tiling before it is filtered
+    // to this group. `deriveTiling` deliberately never collapses adjacent
+    // same-person tiles (see its own docstring) — a logged-in browser's every
+    // page load writes a fresh bind row (bindings.ts's GROWTH CHARACTERISTIC
+    // note), each carrying a distinct server-receipt instant, so one device
+    // used by one person for N page loads tiles as N boundary-touching,
+    // same-person tiles rather than one. Left uncollapsed, that is N windows
+    // per device instead of 1, and MAX_PERSON_RANGE_CLAUSES below turns a
+    // routine 201st page view into a permanent 400 for that customer.
+    //
+    // This is NOT the widening MAX_PERSON_RANGE_CLAUSES exists to forbid.
+    // Widening stretches a range across an actual gap or a different owner to
+    // make something fit a budget, changing what the range means. Merging
+    // alice[10,20) with alice[20,30) changes nothing: the boundary between
+    // them is a same-person handoff, so their union IS EXACTLY alice[10,30) —
+    // no approximation, no information lost. coalesceContiguous only ever
+    // merges a true handoff (same personId, touching boundary); a gap can't
+    // occur (deriveTiling's tiling is always gapless) and a different person
+    // in between always breaks the merge, so this can only shrink the window
+    // count, never change which person owns which instant. See
+    // coalesceContiguous's own docstring in @lyraflow/core for the full
+    // argument.
     const windows: Array<{ device: string; from: number; to: number }> = []
     for (const [device, events] of bindEvents) {
-      for (const binding of deriveTiling(events)) {
+      for (const binding of coalesceContiguous(deriveTiling(events))) {
         if (group.includes(binding.personId)) {
           windows.push({ device, from: binding.from, to: binding.to })
         }
