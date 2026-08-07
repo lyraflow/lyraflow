@@ -1,4 +1,5 @@
 import { RESOLVED_PERSON_ALIAS, resolvedPersonExpr } from '../identity/resolve.js'
+import { notSuppressedExpr } from '../privacy/suppression.js'
 import type { Behavior, WherePredicate, Window } from './ast.js'
 import { type Params, chDateTime } from './params.js'
 
@@ -147,6 +148,25 @@ export function behaviourCte(opts: {
 
   const resolved = resolvedPersonExpr({ database, alias: 'e' })
 
+  // Per-event suppression, applied between the deduplicated scan and the
+  // GROUP BY. It cannot go inside the inner subquery: `resolved` reads the
+  // identity dictionaries against `e`'s own columns and only exists once the
+  // subquery is aliased. It must not go inside each countIf either — that
+  // would put a privacy rule in one clause per behavioural node, kept in
+  // agreement by discipline, which is exactly the shape the spec forbids.
+  //
+  // `resolved` is therefore evaluated twice per row (here and in the SELECT).
+  // ClickHouse folds the identical subexpression; the alternative — a third
+  // nesting level to compute it once — costs more in readability than it
+  // saves.
+  const notSuppressed = notSuppressedExpr({
+    database,
+    projectId,
+    params,
+    person: resolved,
+    instant: 'e.timestamp',
+  })
+
   return {
     cte: `beh AS (
     SELECT
@@ -159,6 +179,7 @@ export function behaviourCte(opts: {
       WHERE project_id = ${projectParam}${scanBound}
       LIMIT 1 BY project_id, event_id
     ) AS e
+    WHERE ${notSuppressed}
     GROUP BY ${RESOLVED_PERSON_ALIAS}
   )`,
     aliasFor,
