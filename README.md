@@ -657,6 +657,89 @@ segment's snapshot only updates when you explicitly run it. Those are
 planned; none of them exist today.
 
 
+## Privacy: deletion and export
+
+`DELETE /v1/persons/:id` erases a person's data — the same subject
+`GET /v1/persons/:id` describes: the id is resolved through the same alias and
+device-id lookup, so deleting a device id or a since-merged id reaches the
+right person. Server-key only, like every endpoint below it that reads or
+mutates a person's data.
+
+```sh
+curl -i -X DELETE http://localhost:3000/v1/persons/user-42 \
+  -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY"
+```
+
+```json
+{
+  "request_id": 118,
+  "person_id": "user-42",
+  "suppressed_at": "2026-08-07T09:30:00.000Z"
+}
+```
+
+`person_id` is the **canonical** id, which can differ from the one you sent —
+deleting an id that was later merged into another still resolves to, and
+erases, the survivor of that merge. `suppressed_at` is the boundary: events at
+or before it stop appearing anywhere, immediately.
+
+Deletion is asynchronous. The moment the API answers `202`, the person's past
+data stops appearing in segment counts, member lists, profile reads and
+exports — that is the suppression list, and it takes effect immediately.
+The rows are then erased for real by a worker inside the server process,
+usually within a minute. Until it finishes, person-level aggregates
+(`first_seen`, `last_seen`, event counts) can still reflect erased events for
+someone whose activity straddles the deletion instant, because those are
+pre-aggregated per month and a month cannot be split. Event-level reads are
+exact throughout. Poll `GET /v1/deletions/:id` for `status: "completed"`.
+
+Suppression is scoped in time, not permanent. Events recorded *after* the
+deletion request are visible normally: if the same user keeps using your
+application, they reappear as a person with a history that starts at the
+deletion. Erasure is a right to have past data deleted, not a promise never
+to be measured again. Requesting deletion again moves the boundary forward
+and erases whatever accumulated since.
+
+**Not covered:** backups. Lyraflow deletes from the live stores it manages. A
+backup you took before the deletion still contains the person's data, and
+restoring it will restore them — the suppression list itself is in Postgres
+and is backed up with it, so a restored person stays hidden from queries, but
+their rows are back. Rotating or re-taking backups after a deletion is the
+operator's responsibility, and this is stated rather than pretended.
+
+A deletion request with no subject — an id this project has never recorded —
+is `404`:
+
+```json
+{ "error": "person_not_found" }
+```
+
+### Checking on a deletion
+
+`GET /v1/deletions/:id` reports what happened to a request returned by the
+`DELETE` above:
+
+```sh
+curl -s http://localhost:3000/v1/deletions/118 \
+  -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY"
+```
+
+```json
+{ "status": "completed", "requested_at": "2026-08-07T09:30:00.000Z", "completed_at": "2026-08-07T09:30:41.000Z" }
+```
+
+| `status` | Meaning |
+| --- | --- |
+| `pending` | Accepted, not yet picked up by the purge worker |
+| `in_progress` | A worker is erasing this person's rows right now |
+| `completed` | Erasure finished — `completed_at` is set |
+| `failed` | The worker gave up after repeated attempts; `error` carries the last one. This is not an API error — the request was accepted, and this is telling you it did not finish |
+
+`:id` belonging to another project, or to no request at all, is `404` with
+`{ "error": "deletion_not_found" }` — never `403`, which would confirm the id
+exists. A non-numeric `:id` is `400` with `{ "error": "invalid_deletion_id" }`.
+
+
 ## Upgrading
 
 ```sh

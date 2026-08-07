@@ -13,6 +13,8 @@ import { CardinalityTracker } from './ingest/limits.js'
 import { registerIngestRoutes } from './ingest/routes.js'
 import type { EventRow } from './ingest/row.js'
 import { registerMetrics } from './metrics.js'
+import { DeletionStore } from './privacy/deletion-store.js'
+import { registerPrivacyRoutes } from './privacy/routes.js'
 import { SuppressionStore } from './privacy/suppression-store.js'
 import { registerSchemaRoutes } from './schema/routes.js'
 import { registerSegmentRoutes } from './segments/routes.js'
@@ -101,6 +103,7 @@ export function buildApp(input: {
   const bindings = new IdentityBindings(pg)
   const aliases = new PersonAliases(pg)
   const suppression = new SuppressionStore(pg)
+  const deletions = new DeletionStore(pg, suppression)
 
   registerIngestRoutes(app, {
     buffer,
@@ -116,6 +119,20 @@ export function buildApp(input: {
   registerPersonRoutes(app, { projects, readiness, ch, bindings, aliases, suppression })
   registerSegmentRoutes(app, { projects, readiness, ch, pg, database: config.ch.database })
   registerSchemaRoutes(app, { projects, readiness, ch })
+  // maxAttempts: 5 is the literal default `LYRAFLOW_PURGE_MAX_ATTEMPTS` will
+  // resolve to once config carries it — a later task wires the configured
+  // value through; nothing here reads it from config yet.
+  registerPrivacyRoutes(app, {
+    projects,
+    readiness,
+    pg,
+    ch,
+    bindings,
+    aliases,
+    deletions,
+    suppression,
+    maxAttempts: 5,
+  })
 
   return app
 }
