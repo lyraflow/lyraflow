@@ -49,6 +49,27 @@ const SERVER_KEY_A = 'sk_person_routes_a'
 const WRITE_KEY_B = 'wk_person_routes_b'
 const SERVER_KEY_B = 'sk_person_routes_b'
 
+/**
+ * Fixtures are anchored to the current run, not to absolute dates.
+ *
+ * The ingest path clamps a client timestamp older than MAX_CLOCK_SKEW_MS
+ * (24h) to now-24h, so hardcoded dates silently expire: this suite was green
+ * in the morning and began failing the same afternoon as wall-clock crossed
+ * the boundary, with the clamped value substituted for the fixture's own.
+ * Anchoring to `now` keeps every fixture inside the window on every run.
+ *
+ * Six hours back, so the spread of offsets below stays comfortably inside
+ * the 24h window even for a long test run.
+ */
+const BASE_MS = Date.now() - 6 * 60 * 60 * 1000
+
+/** ClickHouse DateTime64(3) literal, for direct inserts (bypasses the clamp). */
+const chAt = (minutes: number) =>
+  new Date(BASE_MS + minutes * 60_000).toISOString().replace('T', ' ').replace('Z', '')
+
+/** ISO-8601, for payloads sent through the HTTP ingest path (subject to the clamp). */
+const isoAt = (minutes: number) => new Date(BASE_MS + minutes * 60_000).toISOString()
+
 let projectA: number
 let projectB: number
 
@@ -207,7 +228,7 @@ describe('GET /v1/persons/:id', () => {
     await insertEvent({
       projectId: projectA,
       anonymousId: 'retro-anon',
-      timestamp: '2026-08-06 09:00:00.000',
+      timestamp: chAt(120),
       eventName: 'retro_pre_identify',
     })
 
@@ -219,7 +240,7 @@ describe('GET /v1/persons/:id', () => {
       message_id: randomUUID(),
       anonymous_id: 'retro-anon',
       user_id: 'retro-user',
-      timestamp: '2026-08-06T09:30:00.000Z',
+      timestamp: isoAt(150),
       traits: {},
     })
     expect(res.statusCode).toBe(202)
@@ -232,8 +253,8 @@ describe('GET /v1/persons/:id', () => {
     // 2, not 1: the pre-identify event this test is actually about, plus the
     // identify() call's own event (see the comment above it).
     expect(body.events).toBe(2)
-    expect(body.first_seen).toBe('2026-08-06T09:00:00.000Z')
-    expect(body.last_seen).toBe('2026-08-06T09:30:00.000Z')
+    expect(body.first_seen).toBe(isoAt(120))
+    expect(body.last_seen).toBe(isoAt(150))
   })
 
   // THE test for zero dictionary lag — the entire reason this endpoint
@@ -257,7 +278,7 @@ describe('GET /v1/persons/:id', () => {
     await insertEvent({
       projectId: projectA,
       anonymousId: 'lag-anon',
-      timestamp: '2026-08-06 10:00:00.000',
+      timestamp: chAt(180),
       eventName: 'lag_pre_identify',
     })
 
@@ -304,13 +325,13 @@ describe('GET /v1/persons/:id', () => {
       message_id: randomUUID(),
       anonymous_id: 'alias-device',
       user_id: 'alias-a',
-      timestamp: '2026-08-06T10:00:00.000Z',
+      timestamp: isoAt(180),
       traits: {},
     })
     await insertEvent({
       projectId: projectA,
       userId: 'alias-a',
-      timestamp: '2026-08-06 10:30:00.000',
+      timestamp: chAt(210),
       eventName: 'alias_pre_merge_event',
     })
 
@@ -331,8 +352,8 @@ describe('GET /v1/persons/:id', () => {
     // user_id='alias-a'), plus the explicit alias_pre_merge_event recorded
     // directly under user_id='alias-a'.
     expect(bodyByOldId.events).toBe(2)
-    expect(bodyByOldId.first_seen).toBe('2026-08-06T10:00:00.000Z')
-    expect(bodyByOldId.last_seen).toBe('2026-08-06T10:30:00.000Z')
+    expect(bodyByOldId.first_seen).toBe(isoAt(180))
+    expect(bodyByOldId.last_seen).toBe(isoAt(210))
 
     // The reproduction from the review report: querying the SURVIVOR's own
     // id must return the identical, complete profile — not a 404, which is
@@ -375,33 +396,33 @@ describe('GET /v1/persons/:id', () => {
     await insertEvent({
       projectId: projectA,
       anonymousId: 'split-device',
-      timestamp: '2026-08-06 07:00:00.000',
+      timestamp: chAt(0),
       eventName: 'split_before_any_bind',
     })
     await identify(WRITE_KEY_A, {
       message_id: randomUUID(),
       anonymous_id: 'split-device',
       user_id: 'split-alice',
-      timestamp: '2026-08-06T08:00:00.000Z',
+      timestamp: isoAt(60),
       traits: {},
     })
     await insertEvent({
       projectId: projectA,
       anonymousId: 'split-device',
-      timestamp: '2026-08-06 09:00:00.000',
+      timestamp: chAt(120),
       eventName: 'split_alice_era',
     })
     await identify(WRITE_KEY_A, {
       message_id: randomUUID(),
       anonymous_id: 'split-device',
       user_id: 'split-bob',
-      timestamp: '2026-08-06T10:00:00.000Z',
+      timestamp: isoAt(180),
       traits: {},
     })
     await insertEvent({
       projectId: projectA,
       anonymousId: 'split-device',
-      timestamp: '2026-08-06 11:00:00.000',
+      timestamp: chAt(240),
       eventName: 'split_bob_era',
     })
 
@@ -410,11 +431,11 @@ describe('GET /v1/persons/:id', () => {
     const aliceBody = alice.json()
     expect(aliceBody.ids.sort()).toEqual(['split-alice', 'split-device'])
     // 5, not the 3 the time-split resolution would give her: she also gets
-    // bob's identify (10:00) and bob's era event (11:00).
+    // bob's identify (offset 180) and bob's era event (offset 240).
     expect(aliceBody.events).toBe(5)
-    expect(aliceBody.first_seen).toBe('2026-08-06T07:00:00.000Z')
-    // 11:00 — three hours after she stopped owning the device.
-    expect(aliceBody.last_seen).toBe('2026-08-06T11:00:00.000Z')
+    expect(aliceBody.first_seen).toBe(isoAt(0))
+    // offset 240 — three hours after she stopped owning the device (offset 60).
+    expect(aliceBody.last_seen).toBe(isoAt(240))
 
     const bob = await getPerson('split-bob', { 'x-lyraflow-server-key': SERVER_KEY_A })
     expect(bob.statusCode).toBe(200)
@@ -423,9 +444,9 @@ describe('GET /v1/persons/:id', () => {
     // 5, not 2: the mirror image — he gets everything from before he ever
     // touched the device, including alice's own identify.
     expect(bobBody.events).toBe(5)
-    // 07:00 — three hours before he was bound to it.
-    expect(bobBody.first_seen).toBe('2026-08-06T07:00:00.000Z')
-    expect(bobBody.last_seen).toBe('2026-08-06T11:00:00.000Z')
+    // offset 0 — three hours before he was bound to it (offset 180).
+    expect(bobBody.first_seen).toBe(isoAt(0))
+    expect(bobBody.last_seen).toBe(isoAt(240))
 
     // The divergence stated as an assertion rather than only as prose: the
     // two profiles are identical on every event-derived field, even though
@@ -471,14 +492,14 @@ describe('GET /v1/persons/:id', () => {
     await insertEvent({
       projectId: projectA,
       anonymousId: 'lookup-device',
-      timestamp: '2026-08-06 16:00:00.000',
+      timestamp: chAt(540),
       eventName: 'device_lookup_pre',
     })
     const res = await identify(WRITE_KEY_A, {
       message_id: randomUUID(),
       anonymous_id: 'lookup-device',
       user_id: 'lookup-owner',
-      timestamp: '2026-08-06T16:30:00.000Z',
+      timestamp: isoAt(570),
       traits: {},
     })
     expect(res.statusCode).toBe(202)
@@ -489,8 +510,8 @@ describe('GET /v1/persons/:id', () => {
     expect(body.person_id).toBe('lookup-owner')
     expect(body.ids.sort()).toEqual(['lookup-device', 'lookup-owner'])
     expect(body.events).toBe(2)
-    expect(body.first_seen).toBe('2026-08-06T16:00:00.000Z')
-    expect(body.last_seen).toBe('2026-08-06T16:30:00.000Z')
+    expect(body.first_seen).toBe(isoAt(540))
+    expect(body.last_seen).toBe(isoAt(570))
   })
 
   // The documented ambiguity: a device bound to more than one person over
@@ -505,14 +526,14 @@ describe('GET /v1/persons/:id', () => {
       message_id: randomUUID(),
       anonymous_id: 'ambiguous-device',
       user_id: 'ambiguous-first',
-      timestamp: '2026-08-06T17:00:00.000Z',
+      timestamp: isoAt(600),
       traits: {},
     })
     await identify(WRITE_KEY_A, {
       message_id: randomUUID(),
       anonymous_id: 'ambiguous-device',
       user_id: 'ambiguous-second',
-      timestamp: '2026-08-06T18:00:00.000Z',
+      timestamp: isoAt(660),
       traits: {},
     })
 
@@ -552,7 +573,7 @@ describe('GET /v1/persons/:id', () => {
     await insertEvent({
       projectId: projectA,
       userId: 'server-key-ok',
-      timestamp: '2026-08-06 12:00:00.000',
+      timestamp: chAt(300),
       eventName: 'server_key_ok_event',
     })
     const res = await getPerson('server-key-ok', { 'x-lyraflow-server-key': SERVER_KEY_A })
@@ -583,7 +604,7 @@ describe('GET /v1/persons/:id', () => {
     await insertEvent({
       projectId: projectA,
       userId: 'shared-user',
-      timestamp: '2026-08-06 13:00:00.000',
+      timestamp: chAt(360),
       eventName: 'scope_a_event',
     })
     await insertEvent({
@@ -603,8 +624,8 @@ describe('GET /v1/persons/:id', () => {
     expect(resA.statusCode).toBe(200)
     const bodyA = resA.json()
     expect(bodyA.events).toBe(1)
-    expect(bodyA.first_seen).toBe('2026-08-06T13:00:00.000Z')
-    expect(bodyA.last_seen).toBe('2026-08-06T13:00:00.000Z')
+    expect(bodyA.first_seen).toBe(isoAt(360))
+    expect(bodyA.last_seen).toBe(isoAt(360))
 
     const resB = await getPerson('shared-user', { 'x-lyraflow-server-key': SERVER_KEY_B })
     expect(resB.statusCode).toBe(200)
@@ -651,14 +672,14 @@ describe('GET /v1/persons/:id', () => {
       message_id: randomUUID(),
       anonymous_id: 'tenant-a-device',
       user_id: 'shared-canonical',
-      timestamp: '2026-08-06T14:00:00.000Z',
+      timestamp: isoAt(420),
       traits: {},
     })
     await identify(WRITE_KEY_B, {
       message_id: randomUUID(),
       anonymous_id: 'tenant-b-device',
       user_id: 'shared-canonical',
-      timestamp: '2026-08-06T14:00:00.000Z',
+      timestamp: isoAt(420),
       traits: {},
     })
     const mergedA = await aliasReq(SERVER_KEY_A, {
