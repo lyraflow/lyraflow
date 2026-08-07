@@ -1,0 +1,223 @@
+import { chDateTime, coalesceContiguous, deriveTiling } from '@lyraflow/core'
+import type { PersonAliases } from './aliases.js'
+import type { IdentityBindings } from './bindings.js'
+
+/**
+ * A person's windows are devices multiplied by rebinds, which is unbounded in
+ * principle. Past this many clauses the request is refused rather than
+ * widened: widening a range to fit is how the union behaviour comes back.
+ */
+export const MAX_PERSON_RANGE_CLAUSES = 200
+
+export interface PersonWindow {
+  device: string
+  from: number
+  to: number
+}
+
+/**
+ * "Which events belong to this person": the canonical group, its devices,
+ * the per-device time windows those devices actually belonged to the group,
+ * and the deduped id set a caller sees on the wire.
+ */
+export interface PersonScope {
+  canonical: string
+  /** The canonical plus every id merged into it. */
+  group: string[]
+  /** Every device bound to any member of `group`. */
+  devices: string[]
+  /** `group` ∪ `devices`, deduped and sorted — the wire `ids`. */
+  ids: string[]
+  windows: PersonWindow[]
+}
+
+/**
+ * Steps 1-3 of the resolution below, extracted because step 4 (the device
+ * lookup) has to run all three again against the person it discovers.
+ */
+interface ResolvedGroup {
+  canonical: string
+  /** The canonical plus every id merged into it. */
+  group: string[]
+  /** Every device bound to any member of `group`. */
+  devices: string[]
+}
+
+/**
+ * Resolves "which events belong to this person" — alias resolution, the
+ * device-id fallback, and the per-device windows — the one derivation every
+ * caller that needs a person's full history goes through (the person read,
+ * the export, the purge worker, the deletion route's existence check).
+ *
+ * Does not itself enforce MAX_PERSON_RANGE_CLAUSES; each caller checks
+ * `windows.length` against it, because what a caller does on the cap being
+ * exceeded (400 the request, skip the person, etc.) differs per caller.
+ */
+export async function resolvePersonScope(
+  deps: { bindings: IdentityBindings; aliases: PersonAliases },
+  projectId: number,
+  id: string,
+): Promise<PersonScope> {
+  const { bindings, aliases } = deps
+
+  async function resolveGroup(projectId: number, id: string): Promise<ResolvedGroup> {
+    const canonical = await aliases.canonicalFor(projectId, id)
+    const mergedFrom = await aliases.mergedFrom(projectId, canonical)
+    const group = [canonical, ...mergedFrom]
+    return { canonical, group, devices: await bindings.devicesForAny(projectId, group) }
+  }
+
+  // Step 1: the canonical person for the requested id (PersonAliases).
+  // Step 2: every id ever merged INTO that canonical (PersonAliases again)
+  // — not just the canonical itself. Step 3: every device bound to *any*
+  // id in that whole group (IdentityBindings), in one round trip.
+  //
+  // Step 2 is not optional. `/v1/alias` only ever writes to person_aliases;
+  // it never repoints identity_bindings.person_id. So a device bound to an
+  // id that later gets merged away stays bound to that old id in Postgres
+  // forever — querying IdentityBindings for the canonical alone would never
+  // find it, and neither would an event recorded with that old id as its
+  // raw user_id. Skipping step 2 previously meant a person's own profile
+  // could be *missing* history a segment query (which resolves through
+  // both dictionary stages unconditionally — see resolve.ts) would still
+  // count — the read path meant to be more authoritative than the lagging
+  // dictionary returning a strictly less complete answer than it. Every id
+  // in `group` below is treated equally: the canonical has no special
+  // status once resolved, it is simply one more member whose own devices
+  // must be included.
+  const resolved = await resolveGroup(projectId, id)
+
+  // Step 4, and only when steps 1-3 all came back empty-handed: the
+  // requested id may be a DEVICE id rather than a person id. Everything
+  // above is keyed on person_id, so without this a device id resolves to
+  // itself and the route answers a plausible-looking but silently wrong
+  // 200 (`person_id: "visitor-1", ids: ["visitor-1"]`) — worse than a 404,
+  // because nothing in the response says it failed. README documents `:id`
+  // as accepting a device id; this lookup is what makes that true, rather
+  // than retreating in the docs.
+  //
+  // Gated on "no alias of its own, nothing merged into it, and no devices
+  // of its own" — `group.length === 1` covers the first two, since an id
+  // with an alias resolves to a canonical that has at least this id merged
+  // into it. That is exactly the state in which nothing has ever identified
+  // this id as a person. A real person id fails the gate the moment it has
+  // been identified against, including the
+  // identify({anonymous_id:'x', user_id:'x'}) case where the two ids
+  // coincide (that id IS one of its own devices, so `devices` is
+  // non-empty). So the device lookup can never shadow a real person, and
+  // costs one extra query only on a path that would otherwise 404.
+  //
+  // A device bound to several people over time resolves to the most
+  // recently bound — see mostRecentPersonFor for why that answer and not
+  // another.
+  const looksUnknown = resolved.group.length === 1 && resolved.devices.length === 0
+  const owner = looksUnknown ? await bindings.mostRecentPersonFor(projectId, id) : null
+  const { canonical, group, devices } = owner ? await resolveGroup(projectId, owner) : resolved
+  // Deduped and sorted: `group` and `devices` can overlap (e.g.
+  // identify({anonymous_id:'x', user_id:'x'}) binds a device id that is
+  // identical to the person id, which would otherwise put 'x' in `ids`
+  // twice), and neither query above carries an ORDER BY. The response is a
+  // set, not a log; nothing about it should depend on Postgres's incidental
+  // row order.
+  const ids = Array.from(new Set([...group, ...devices])).sort()
+
+  // Every bind event on every device this group ever touched, keyed by
+  // device — scoped by projectId (see bindings.ts's bindEventsForDevices),
+  // which matters here specifically because `devices` is caller-influenced
+  // (it traces back to the group PersonAliases/IdentityBindings resolved
+  // for a caller-supplied id): an unscoped lookup could pull another
+  // project's bind rows for a device id that collides across projects (see
+  // person.test.ts's "does not leak another project's binds" test, which
+  // puts two projects in genuine contention on the SAME device id to catch
+  // exactly that).
+  const bindEvents = await bindings.bindEventsForDevices(projectId, devices)
+
+  // One [from, to) window per device per CONTIGUOUS owner, derived through
+  // the same function 003_identity.sql's view is required to agree with.
+  // Keeping the derivation in one place is what "converge onto one
+  // implementation of the tiling" actually asks for; the two SQL shapes
+  // stay different because the two reads have different jobs.
+  //
+  // coalesceContiguous runs on every device's tiling before it is filtered
+  // to this group. `deriveTiling` deliberately never collapses adjacent
+  // same-person tiles (see its own docstring) — a logged-in browser's every
+  // page load writes a fresh bind row (bindings.ts's GROWTH CHARACTERISTIC
+  // note), each carrying a distinct server-receipt instant, so one device
+  // used by one person for N page loads tiles as N boundary-touching,
+  // same-person tiles rather than one. Left uncollapsed, that is N windows
+  // per device instead of 1, and MAX_PERSON_RANGE_CLAUSES below turns a
+  // routine 201st page view into a permanent 400 for that customer.
+  //
+  // This is NOT the widening MAX_PERSON_RANGE_CLAUSES exists to forbid.
+  // Widening stretches a range across an actual gap or a different owner to
+  // make something fit a budget, changing what the range means. Merging
+  // alice[10,20) with alice[20,30) changes nothing: the boundary between
+  // them is a same-person handoff, so their union IS EXACTLY alice[10,30) —
+  // no approximation, no information lost. coalesceContiguous only ever
+  // merges a true handoff (same personId, touching boundary); a gap can't
+  // occur (deriveTiling's tiling is always gapless) and a different person
+  // in between always breaks the merge, so this can only shrink the window
+  // count, never change which person owns which instant. See
+  // coalesceContiguous's own docstring in @lyraflow/core for the full
+  // argument.
+  const windows: PersonWindow[] = []
+  for (const [device, events] of bindEvents) {
+    for (const binding of coalesceContiguous(deriveTiling(events))) {
+      if (group.includes(binding.personId)) {
+        windows.push({ device, from: binding.from, to: binding.to })
+      }
+    }
+  }
+
+  return { canonical, group, devices, ids, windows }
+}
+
+/**
+ * The events predicate for a scope — the identity half only,
+ * `(user_id IN {…} OR (user_id = '' AND <per-device windows>))`. Does NOT
+ * add the `project_id` filter and does NOT add the suppression boundary:
+ * each caller adds both itself, because each has a different `project_id`
+ * parameter name and a different boundary source.
+ *
+ * Mutates `params` with every bound value it needs and returns the SQL.
+ * `prefix` namespaces the parameter names so two predicates can share one
+ * params object (the purge chunks).
+ *
+ * Stage 1's short-circuit, expressed as SQL: an event carrying a non-empty
+ * user_id belongs to that user, full stop. The device branch is therefore
+ * guarded on user_id = '' — without that guard an event with user_id='bob'
+ * sitting on alice's device is counted for BOTH, which is the narrower
+ * defect this convergence is also meant to fix.
+ *
+ * `w.from`/`w.to` can be ±Infinity — the earliest tile a device ever had
+ * is unbounded below, and its current tile is unbounded above, which is
+ * the common case, not an edge one: a device with exactly one bind ever
+ * is both at once. `new Date(Infinity)` is an Invalid Date and
+ * `chDateTime` would throw formatting it, so an infinite bound omits its
+ * half of the range clause entirely rather than being clamped to some
+ * representable-but-arbitrary date — the same "no clause means no bound"
+ * shape `windowStart` uses for the segment compiler's `ever` window
+ * (@lyraflow/core's behaviour.ts).
+ */
+export function personEventsPredicate(
+  scope: Pick<PersonScope, 'group' | 'windows'>,
+  params: Record<string, unknown>,
+  prefix = '',
+): string {
+  params[`${prefix}group`] = scope.group
+  const clauses = scope.windows.map((w, i) => {
+    params[`${prefix}d${i}`] = w.device
+    const parts = [`anonymous_id = {${prefix}d${i}:String}`]
+    if (Number.isFinite(w.from)) {
+      params[`${prefix}f${i}`] = chDateTime(new Date(w.from))
+      parts.push(`timestamp >= {${prefix}f${i}:DateTime64(3)}`)
+    }
+    if (Number.isFinite(w.to)) {
+      params[`${prefix}t${i}`] = chDateTime(new Date(w.to))
+      parts.push(`timestamp < {${prefix}t${i}:DateTime64(3)}`)
+    }
+    return `(${parts.join(' AND ')})`
+  })
+  const deviceBranch = clauses.length > 0 ? ` OR (user_id = '' AND (${clauses.join(' OR ')}))` : ''
+  return `(user_id IN {${prefix}group:Array(String)}${deviceBranch})`
+}
