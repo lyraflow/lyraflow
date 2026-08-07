@@ -138,12 +138,19 @@ describe('compileSegment', () => {
       cursor,
     })
 
-  it('selects person columns instead of a count in members mode', () => {
+  it('selects the member projection, not merely the base CTE columns', () => {
     const { sql } = members(trait)
     expect(sql).not.toContain('count() AS person_count')
-    expect(sql).toContain('person_id')
-    expect(sql).toContain('first_seen')
-    expect(sql).toContain('last_seen')
+    // Aliased context columns exist ONLY in the member projection. person_id,
+    // first_seen and last_seen all appear in the base CTE regardless of mode
+    // (see 'produces person_id in every CTE that is joined on it'), so
+    // asserting on those alone would pass against a projection replaced by a
+    // literal.
+    expect(sql).toContain('latest_country AS country')
+    expect(sql).toContain('first_source AS utm_source')
+    // And they must be absent in count mode, which is what makes this a
+    // discriminating assertion rather than a coincidence.
+    expect(compile(trait).sql).not.toContain('AS country')
   })
 
   it('orders by last_seen then person_id so the ordering is total', () => {
