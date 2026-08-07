@@ -34,11 +34,14 @@ their own infrastructure; their data stays theirs.
 
 ## Current status
 
-**v0.1 — the ingest foundation.** The HTTP ingest path is real and running: you can
-self-host the stack, create a project, and send it events. There is **no UI and no query
-API yet** — events land in ClickHouse and are read with a ClickHouse client until the
-query layer ships. Identity resolution, deletion/GDPR tooling, and the dashboard are later
-plans.
+**v0.1 — ingest and identity resolution.** The HTTP ingest path is real and running: you
+can self-host the stack, create a project, and send it events. Identity resolution now
+exists too: `/v1/identify` binds an anonymous device to a known person, `/v1/alias` merges
+two known people (server-key only, not reversible), and `GET /v1/persons/:id` reads one
+person's stitched profile back out, zero-lag, straight from Postgres. There is still **no
+UI and no general query API** — no filtering, segments, or journeys — events land in
+ClickHouse and are read with a ClickHouse client until the query layer ships. Deletion/GDPR
+tooling and the dashboard are later plans.
 
 `README.md` documents the endpoints and payload shape; keep it accurate when the API
 changes, because it is the only thing standing between a new self-hoster and a working
@@ -61,7 +64,9 @@ packages/db/      # Postgres + ClickHouse clients, and the migrator. Migrations
                   # shared version sequence.
 packages/server/  # the Fastify ingest service: /v1/track|identify|page|batch,
                   # auth, the batching buffer, cardinality limits, health,
-                  # metrics, graceful drain.
+                  # metrics, graceful drain, plus identity resolution
+                  # (bindings, aliases, the ClickHouse dictionaries,
+                  # /v1/alias, GET /v1/persons/:id).
 packages/cli/     # `lyraflow migrate | create-project | healthcheck`.
 docs/             # public product documentation
 .github/          # CI, issue + PR templates
@@ -70,7 +75,8 @@ docs/             # public product documentation
 Top-level: `Dockerfile` and `docker-compose.yml` for the self-hosted stack, `install.sh`
 for the one-command install, `docker-compose.test.yml` for the test databases, and
 `test/restart-durability.test.ts` — a container-driven test that proves no accepted event
-is lost across a restart.
+is lost across a restart, and that identity bindings made before the restart still resolve
+correctly afterwards.
 
 ## Running the tests
 
