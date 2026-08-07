@@ -43,6 +43,17 @@ export function chDateTime(d: Date): string {
   return d.toISOString().replace('T', ' ').replace('Z', '')
 }
 
+/**
+ * Inverse of chDateTime. Used to recover the event's own (clamped) instant
+ * from an already-built EventRow — e.g. to bind identity at the moment the
+ * event happened rather than the moment it was processed. See
+ * `registerIngestRoutes`'s identify handling for why that distinction
+ * matters for a late-delivered event.
+ */
+export function parseChDateTime(s: string): Date {
+  return new Date(`${s.replace(' ', 'T')}Z`)
+}
+
 function eventName(payload: IngestPayload): string {
   if (payload.type === 'track') return payload.event
   if (payload.type === 'page') return payload.name ?? '$page'

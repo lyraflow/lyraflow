@@ -3,11 +3,13 @@ import type { ClickHouseClient } from '@lyraflow/db'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import type { ProjectCache } from '../auth/project-cache.js'
 import type { Readiness } from '../health.js'
+import type { PersonAliases } from '../identity/aliases.js'
+import type { IdentityBindings } from '../identity/bindings.js'
 import type { IngestBuffer } from './buffer.js'
 import type { IngestCounters } from './counters.js'
 import type { GeoResolver } from './geo.js'
 import { type CardinalityTracker, checkLimits } from './limits.js'
-import { type EventRow, chDateTime, toEventRow } from './row.js'
+import { type EventRow, chDateTime, parseChDateTime, toEventRow } from './row.js'
 
 export interface IngestDeps {
   buffer: IngestBuffer<EventRow>
@@ -17,9 +19,17 @@ export interface IngestDeps {
   geo: GeoResolver
   readiness: Readiness
   ch: ClickHouseClient
+  bindings: IdentityBindings
+  aliases: PersonAliases
 }
 
 const WRITE_KEY_HEADER = 'x-lyraflow-write-key'
+// Deliberately distinct from WRITE_KEY_HEADER: the write key is public (it
+// ships in browser JavaScript) and can only append events. Aliasing mutates
+// identity for the whole project and is not reversible in v0.1 (see
+// PersonAliases's docstring), so it is gated on the secret server key
+// instead — see `authenticateServer` below.
+const SERVER_KEY_HEADER = 'x-lyraflow-server-key'
 
 interface DeadLetterRow {
   project_id: number
@@ -84,7 +94,7 @@ async function writeDeadLetters(
 }
 
 export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): void {
-  const { buffer, projects, counters, cardinality, geo, readiness, ch } = deps
+  const { buffer, projects, counters, cardinality, geo, readiness, ch, bindings, aliases } = deps
 
   const onDeadLetterError = (err: unknown, rows: DeadLetterRow[]) =>
     app.log.error({ err, rows: rows.length }, 'dead-letter write failed')
@@ -102,6 +112,24 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
     const project = await projects.byWriteKey(key)
     if (!project) {
       reply.code(401).send({ error: 'invalid_write_key' })
+      return null
+    }
+    return project
+  }
+
+  async function authenticateServer(req: FastifyRequest, reply: FastifyReply) {
+    if (readiness.draining) {
+      reply.code(503).header('retry-after', '5').send({ error: 'draining' })
+      return null
+    }
+    const key = req.headers[SERVER_KEY_HEADER]
+    if (typeof key !== 'string' || key.length === 0) {
+      reply.code(401).send({ error: 'missing_server_key' })
+      return null
+    }
+    const project = await projects.byServerKey(key)
+    if (!project) {
+      reply.code(401).send({ error: 'invalid_server_key' })
       return null
     }
     return project
@@ -161,6 +189,32 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
       ...Object.keys(row.properties_num),
     ])
     counters.record(projectId, 'accepted')
+
+    // identify carrying both ids ties a device to a person. Only identify
+    // requires user_id, so this branch is unreachable for track/page, and
+    // anonymous_id is the one optional field left to check. Binds at the
+    // event's own (clamped) timestamp — row.timestamp, not `new Date()` —
+    // because a late-delivered identify must bind at the instant it
+    // happened, not the instant it arrived; identity resolution is
+    // time-ranged and depends on this (see IdentityBindings.bind).
+    if (parsed.data.type === 'identify' && parsed.data.anonymous_id) {
+      try {
+        await bindings.bind(
+          projectId,
+          parsed.data.anonymous_id,
+          parsed.data.user_id,
+          parseChDateTime(row.timestamp),
+        )
+      } catch (err) {
+        // The event is already accepted into the buffer. A failing binding
+        // write must not turn a good, already-accepted event into an error
+        // for the customer's site — same rule 1 reasoning as
+        // writeDeadLetters above. It must not be silent either, so this
+        // follows the same onError-through-the-Fastify-logger convention.
+        app.log.error({ err }, 'identity binding write failed')
+      }
+    }
+
     return { outcome: 'accepted' }
   }
 
@@ -253,5 +307,39 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
     // throttled is always present, even at 0: an SDK parsing a stable shape
     // shouldn't need to special-case the field's absence versus its value.
     return reply.code(202).send({ accepted, rejected, throttled: 0 })
+  })
+
+  interface AliasBody {
+    from_user_id?: unknown
+    to_user_id?: unknown
+  }
+
+  // Not an ingest endpoint: aliasing performs the mutation directly rather
+  // than accepting-then-processing an event, so — unlike /v1/track,
+  // /v1/identify, /v1/page and /v1/batch — a malformed request here is a
+  // genuine client error, answered with a real 4xx rather than a
+  // universal 202.
+  app.post('/v1/alias', async (req, reply) => {
+    const project = await authenticateServer(req, reply)
+    if (!project) return
+
+    // req.body is undefined for a bodyless request (unlike the ingest
+    // routes above, which always spread it into an object); guard before
+    // indexing rather than letting that throw and fall through to the
+    // generic /v1/* 503 handler for what is really a 400.
+    const body = (req.body ?? {}) as AliasBody
+    const fromUserId = body.from_user_id
+    const toUserId = body.to_user_id
+    if (
+      typeof fromUserId !== 'string' ||
+      fromUserId.length === 0 ||
+      typeof toUserId !== 'string' ||
+      toUserId.length === 0
+    ) {
+      return reply.code(400).send({ error: 'invalid_body' })
+    }
+
+    const result = await aliases.alias(project.id, fromUserId, toUserId)
+    return reply.code(200).send({ status: result })
   })
 }
