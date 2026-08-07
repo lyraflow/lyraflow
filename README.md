@@ -73,9 +73,12 @@ device to a person, `/v1/alias` merges two known people, and
 `GET /v1/persons/:id` reads one person's stitched profile back out — see
 *Identity resolution* below.
 
-Ingest listens on port 3000. Every `/v1/*` request authenticates with the
-project's **write key** in the `x-lyraflow-write-key` header. That key is public
-by design: it is safe in browser JavaScript, and it can only write.
+Ingest listens on port 3000. Every ingest request — `/v1/track`, `/v1/page`,
+`/v1/identify`, `/v1/batch` — authenticates with the project's **write key**
+in the `x-lyraflow-write-key` header. That key is public by design: it is safe
+in browser JavaScript, and it can only write. `/v1/alias` and
+`GET /v1/persons/:id` are the exception: see *Identity resolution* below for
+why those two use the separate, secret server key instead.
 
 ```sh
 curl -i http://localhost:3000/v1/track \
@@ -153,14 +156,21 @@ describing how far it got; retry the whole batch.
 
 ### Retries
 
-Retry a `503` with the **same** `message_id`. Every query deduplicates by event
-id, so a replayed event is never double-counted.
+Retry a `503` with the **same** `message_id`; it becomes the event's id (see
+*Payload fields* above). A replayed event is never double-counted **as long as
+your query selects `DISTINCT event_id`** (or otherwise aggregates by it) — a
+plain `count(*)` can see it as two rows, and ClickHouse's `FINAL` modifier does
+not rescue that when the retry omitted `timestamp` (see below). There is no
+query API yet, so this is on you: it is the same discipline any ClickHouse
+client of this table needs.
 
 If you also send an explicit `timestamp` and replay it unchanged, the storage
-engine collapses the replayed rows outright, so the retry costs no extra disk.
-Omit `timestamp` and the server stamps each attempt with its own receipt time,
-which leaves the retried copy on disk as a duplicate row — correct in every
-query, just not free. Long-lived retry queues should send `timestamp`.
+engine's own row collapse — deterministic under `FINAL`, eventual otherwise —
+removes the duplicate outright, so the retry costs no extra disk. Omit
+`timestamp` and the server stamps each attempt with its own receipt time;
+because that receipt time is part of the table's sort key, the two rows never
+collapse — deduplicated only by querying `event_id` yourself, correct but not
+free. Long-lived retry queues should send `timestamp`.
 
 ## Identity resolution
 

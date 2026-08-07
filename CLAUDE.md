@@ -38,10 +38,11 @@ their own infrastructure; their data stays theirs.
 can self-host the stack, create a project, and send it events. Identity resolution now
 exists too: `/v1/identify` binds an anonymous device to a known person, `/v1/alias` merges
 two known people (server-key only, not reversible), and `GET /v1/persons/:id` reads one
-person's stitched profile back out, zero-lag, straight from Postgres. There is still **no
-UI and no general query API** — no filtering, segments, or journeys — events land in
-ClickHouse and are read with a ClickHouse client until the query layer ships. Deletion/GDPR
-tooling and the dashboard are later plans.
+person's stitched profile back out — the identity part (which ids belong to the person)
+resolves zero-lag, straight from Postgres, bypassing ClickHouse's identity dictionaries.
+There is still **no UI and no general query API** — no filtering, segments, or journeys —
+events land in ClickHouse and are read with a ClickHouse client until the query layer
+ships. Deletion/GDPR tooling and the dashboard are later plans.
 
 `README.md` documents the endpoints and payload shape; keep it accurate when the API
 changes, because it is the only thing standing between a new self-hoster and a working
