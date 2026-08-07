@@ -23,6 +23,7 @@ const SERVER_KEY = 'sk_segments_routes'
 const OTHER_SERVER_KEY = 'sk_segments_other'
 
 let app: FastifyInstance
+let projectId: number
 let otherProjectId: number
 
 const trait = { kind: 'trait', key: 'plan', operator: '=', value: 'trial' }
@@ -86,11 +87,12 @@ beforeAll(async () => {
   for (const slug of ['segments-routes-test', 'segments-routes-other']) {
     await pg.query('DELETE FROM projects WHERE slug = $1', [slug])
   }
-  await pg.query(
+  const mine = await pg.query<{ id: string }>(
     `INSERT INTO projects (name, slug, write_key, server_key_hash)
-     VALUES ('Segments Routes', 'segments-routes-test', $1, $2)`,
+     VALUES ('Segments Routes', 'segments-routes-test', $1, $2) RETURNING id`,
     [WRITE_KEY, hashServerKey(SERVER_KEY)],
   )
+  projectId = Number(mine.rows[0]?.id)
   const other = await pg.query<{ id: string }>(
     `INSERT INTO projects (name, slug, write_key, server_key_hash)
      VALUES ('Segments Other', 'segments-routes-other', $1, $2) RETURNING id`,
@@ -433,6 +435,59 @@ describe('POST /v1/segments/preview', () => {
     expect(body.window_exhausted).toBe(false)
     expect(body.next_cursor).toBeNull()
   })
+
+  // THE test for the segment cache actually being project-scoped, not merely
+  // looking like it from the code. The existing cross-project test above
+  // ("cannot be pointed at another project") runs both requests under the
+  // SAME server key, so it cannot catch a cache key that dropped its
+  // `${projectId}:` prefix — deleting that prefix from both countKey and
+  // pageKey in routes.ts passes the entire rest of this suite untouched.
+  // This one runs the identical tree under TWO DIFFERENT server keys: project
+  // A has the seeded `trial` cohort, project B (OTHER_SERVER_KEY) has none of
+  // it. A correctly scoped cache answers each from its own population; an
+  // unscoped one lets B's request hit A's cached entry and come back with
+  // A's count and A's member person ids.
+  it('keeps the segment cache scoped per project, not shared across an identical tree', async () => {
+    const a = await preview({ ast_version: 1, filter: trait, include: ['members'] })
+    expect(a.statusCode).toBe(200)
+    expect(a.json().person_count).toBe(MEMBER_PAGE_SIZE)
+    expect(a.json().members).toHaveLength(MEMBER_PAGE_SIZE)
+
+    const b = await preview(
+      { ast_version: 1, filter: trait, include: ['members'] },
+      { 'x-lyraflow-server-key': OTHER_SERVER_KEY },
+    )
+    expect(b.statusCode).toBe(200)
+    // Project B has none of project A's `plan: 'trial'` people. A leaked
+    // cache hit would return A's count (MEMBER_PAGE_SIZE) and A's member
+    // person ids here instead.
+    expect(b.json().person_count).toBe(0)
+    expect(b.json().members).toEqual([])
+  })
+
+  // THE test for the count cache's as_of, closing the gap the member path
+  // already closed. Deliberately spaced by a real, controlled delay rather
+  // than relying on two calls happening to land in the same millisecond: the
+  // broken implementation re-mints `as_of` via `new Date().toISOString()`
+  // on EVERY count-only call regardless of cache hit or miss, so without the
+  // delay this assertion could pass against broken code purely by executing
+  // fast enough. The delay makes the two timestamps provably different under
+  // the broken code and provably identical under the fix, which does not
+  // read the clock again on a hit at all.
+  it('a cache hit returns the identical as_of as the miss that populated it', async () => {
+    const countOnlyFilter = {
+      kind: 'trait',
+      key: 'plan',
+      operator: '=',
+      value: 'trial-asof-cache-test',
+    }
+    const miss = await preview({ ast_version: 1, filter: countOnlyFilter })
+    expect(miss.statusCode).toBe(200)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    const hit = await preview({ ast_version: 1, filter: countOnlyFilter })
+    expect(hit.statusCode).toBe(200)
+    expect(hit.json().as_of).toBe(miss.json().as_of)
+  })
 })
 
 describe('/v1/segments CRUD and run', () => {
@@ -632,5 +687,76 @@ describe('/v1/segments CRUD and run', () => {
       headers: { 'x-lyraflow-server-key': SERVER_KEY },
     })
     expect(after.json().filter).toEqual(trait)
+  })
+
+  // THE test for the finding this closes. `SegmentQuery.safeParse` is used
+  // only to DETECT whether a tree was sent at all — without the fix, a body
+  // that carries `filter`/`ast_version` but fails to parse is
+  // indistinguishable from a rename-only body: `query.success` is false
+  // either way, `store.update` is called with `query: undefined`, its
+  // COALESCEs no-op, and the route answers 200 with the OLD filter silently
+  // unchanged. POST /v1/segments already 400s for the identical malformed
+  // body (see "rejects a malformed tree" on the preview route above, same
+  // payload shape); PATCH must match, not silently discard it.
+  it('rejects a malformed filter on PATCH with 400, not a silent no-op', async () => {
+    const created = await create({
+      name: 'Malformed patch is rejected, not dropped',
+      ast_version: 1,
+      filter: trait,
+    })
+    const id = created.json().id
+
+    const patch = await app.inject({
+      method: 'PATCH',
+      url: `/v1/segments/${id}`,
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: { ast_version: 1, filter: { kind: 'trait' } } as never,
+    })
+    expect(patch.statusCode).toBe(400)
+    expect(patch.json().error).toBeDefined()
+
+    const after = await app.inject({
+      method: 'GET',
+      url: `/v1/segments/${id}`,
+      headers: { 'x-lyraflow-server-key': SERVER_KEY },
+    })
+    expect(after.json().filter).toEqual(trait)
+  })
+
+  // THE test for the finding this closes: list() must not let one unparseable
+  // row take the other, perfectly fine segments in the project down with it.
+  // Without the fix, list() throws StoredTreeError for the whole request and
+  // GET /v1/segments answers 400 — hiding every OTHER segment in the project
+  // along with the bad one.
+  it('lists a project with one unparseable stored row, marking it rather than failing the list', async () => {
+    const good = await create({ name: 'List: still readable', ast_version: 1, filter: trait })
+
+    await pg.query(
+      `INSERT INTO segments (project_id, name, ast_version, filter)
+       VALUES ($1, 'List: unparseable stored row', 99, $2::jsonb)`,
+      [projectId, JSON.stringify(trait)],
+    )
+
+    const list = await app.inject({
+      method: 'GET',
+      url: '/v1/segments',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY },
+    })
+    expect(list.statusCode).toBe(200)
+    const segments = list.json().segments as Array<{
+      id: number
+      name: string
+      filter: unknown
+      stale: boolean
+    }>
+
+    const goodRow = segments.find((s) => s.id === good.json().id)
+    expect(goodRow?.filter).toEqual(trait)
+    expect(goodRow?.stale).toBe(false)
+
+    const badRow = segments.find((s) => s.name === 'List: unparseable stored row')
+    expect(badRow).toBeDefined()
+    expect(badRow?.filter).toBeNull()
+    expect(badRow?.stale).toBe(true)
   })
 })

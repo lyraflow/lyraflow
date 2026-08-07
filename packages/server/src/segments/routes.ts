@@ -18,7 +18,13 @@ import type { Readiness } from '../health.js'
 import { SERVER_KEY_HEADER, makeAuthenticator } from '../ingest/routes.js'
 import { type MemberRow, SegmentCache } from './cache.js'
 import { SegmentTimeoutError, runSegment, runSegmentMembers } from './execute.js'
-import { DuplicateNameError, SegmentStore, type StoredSegment, StoredTreeError } from './store.js'
+import {
+  DuplicateNameError,
+  type ListedSegment,
+  SegmentStore,
+  type StoredSegment,
+  StoredTreeError,
+} from './store.js'
 
 export interface SegmentDeps {
   projects: ProjectCache
@@ -29,13 +35,21 @@ export interface SegmentDeps {
   database: string
 }
 
-/** Maps a stored segment to the wire shape — snake_case, like every other endpoint. */
-function toWire(s: StoredSegment) {
+/**
+ * Maps a stored segment to the wire shape — snake_case, like every other
+ * endpoint. Also accepts `ListedSegment` (see store.ts) — the shape `list()`
+ * returns for a row it could not parse — so a bad row surfaces on the wire as
+ * `filter: null, stale: true` rather than the whole list request 400ing.
+ * `stale` is always present, `false` for every ordinary row, so a client can
+ * check one field regardless of which route it came from.
+ */
+function toWire(s: StoredSegment | ListedSegment) {
   return {
     id: s.id,
     name: s.name,
     ast_version: s.astVersion,
     filter: s.filter,
+    stale: 'stale' in s ? s.stale : false,
     last_count: s.lastCount,
     last_evaluated_at: s.lastEvaluatedAt,
     created_at: s.createdAt,
@@ -45,6 +59,22 @@ function toWire(s: StoredSegment) {
 
 const CreateBody = z.object({ name: z.string().min(1).max(200) })
 const PatchBody = z.object({ name: z.string().min(1).max(200).optional() })
+
+/**
+ * Whether a PATCH body claims to carry a filter tree at all, checked on the
+ * RAW body rather than on `SegmentQuery.safeParse(...).success`. Those two
+ * are not the same question: a body can fail to parse as a `SegmentQuery`
+ * either because it carries no tree fields (a legitimate rename-only PATCH)
+ * or because it carries a MALFORMED tree — and collapsing both to
+ * `query.success === false` is exactly how a malformed tree used to be
+ * treated as "no tree sent" (see the PATCH route below, and the finding this
+ * closes): `store.update` was called with `query: undefined`, its COALESCEs
+ * no-opped, and the route answered 200 with the OLD filter unchanged instead
+ * of rejecting the bad one.
+ */
+function bodyCarriesTreeFields(body: unknown): boolean {
+  return typeof body === 'object' && body !== null && ('ast_version' in body || 'filter' in body)
+}
 
 /**
  * Parses the `:id` path param. A non-numeric or non-positive id is a
@@ -250,9 +280,23 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
     // than a total that shrinks as the cursor advances, which is what
     // `count() OVER ()` would have produced (it counts rows remaining after
     // the cursor predicate, verified against a live server).
+    //
+    // A cache hit adopts the STORED as_of rather than the `asOf` minted above
+    // for this request — mirroring the member path below. `asOf` is minted
+    // before this cache is even consulted, so using it unconditionally would
+    // stamp a cache HIT (a count computed possibly seconds ago) with an
+    // instant no query actually ran at, silently over-claiming freshness on
+    // every hit within the TTL. Only a genuine miss's freshly-computed count
+    // gets the freshly-minted instant, because that is the one case where
+    // they actually describe the same moment.
     const countKey = `${projectId}:count:${hash}`
-    let count = cache.get(countKey)?.count
-    if (count === undefined) {
+    const cachedCount = cache.get(countKey)
+    let count: number
+    let countAsOf: string
+    if (cachedCount) {
+      count = cachedCount.count
+      countAsOf = cachedCount.asOf
+    } else {
       const compiled = compileSegment({
         query,
         projectId,
@@ -261,11 +305,18 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
         select: 'count',
       })
       count = await runSegment({ client: ch, compiled })
-      cache.set(countKey, { count, members: [], asOf })
+      countAsOf = asOf
+      cache.set(countKey, { count, members: [], asOf: countAsOf })
     }
 
     if (!opts.wantMembers) {
-      return { count, members: [] as MemberRow[], asOf, windowExhausted: false, pagesServed: 0 }
+      return {
+        count,
+        members: [] as MemberRow[],
+        asOf: countAsOf,
+        windowExhausted: false,
+        pagesServed: 0,
+      }
     }
 
     // The window ceiling, checked before any member query runs. A caller who
@@ -401,15 +452,12 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
   app.get('/v1/segments', async (req, reply) => {
     const project = await authenticateServer(req, reply)
     if (!project) return
-    try {
-      const segments = await store.list(project.id)
-      return reply.code(200).send({ segments: segments.map(toWire) })
-    } catch (err) {
-      if (err instanceof StoredTreeError) {
-        return reply.code(400).send({ error: err.message, ast_version: err.astVersion })
-      }
-      throw err
-    }
+    // Unlike get/patch/run below, list() never throws StoredTreeError — a
+    // row that fails to parse comes back marked `stale: true` instead (see
+    // SegmentStore#list), so one bad row cannot take the rest of the list
+    // down with it.
+    const segments = await store.list(project.id)
+    return reply.code(200).send({ segments: segments.map(toWire) })
   })
 
   app.post('/v1/segments', async (req, reply) => {
@@ -469,6 +517,18 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
     // does not, which is what keeps the snapshot on a rename (see
     // SegmentStore#update).
     const query = SegmentQuery.safeParse(req.body)
+    // A tree was SENT but did not parse: reject outright, with field paths,
+    // the same way POST /v1/segments would for the identical body. Without
+    // this, `query.success === false` for a malformed tree is
+    // indistinguishable below from "no tree in this body at all" — a
+    // rename-only PATCH — and the malformed tree would be silently dropped
+    // rather than rejected.
+    if (!query.success && bodyCarriesTreeFields(req.body)) {
+      return reply.code(400).send({
+        error: 'invalid filter tree',
+        detail: query.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
+      })
+    }
     // Same cap check as create, and for the same reason — an update can
     // swap in a fresh over-cap tree just as easily as a create can start
     // with one. Skipped entirely for a rename-only body (query.success is
