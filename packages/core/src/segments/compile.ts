@@ -1,7 +1,9 @@
 import { RESOLVED_PERSON_ALIAS, resolvedPersonExpr } from '../identity/resolve.js'
 import type { Behavior, FilterNode, SegmentQuery } from './ast.js'
-import { baseCte } from './base.js'
+import { CONTEXT_FIELDS } from './ast.js'
+import { CONTEXT_COLUMNS, baseCte } from './base.js'
 import { behaviourCte } from './behaviour.js'
+import type { Cursor } from './cursor.js'
 import { Params } from './params.js'
 import { treeExpr } from './predicates.js'
 import { type CostWarning, costWarnings, validateTree } from './validate.js'
@@ -17,6 +19,38 @@ function collectBehaviors(node: FilterNode, out: Behavior[]): void {
   if (node.kind === 'group') for (const c of node.children) collectBehaviors(c, out)
   else if (node.kind === 'not') collectBehaviors(node.child, out)
   else if (node.kind === 'behavior') out.push(node)
+}
+
+/** One page. Bounded because this endpoint is reachable by any key holder. */
+export const MEMBER_PAGE_SIZE = 100
+
+/**
+ * The furthest a caller may paginate. This endpoint is a preview of a
+ * population, not an export of it — the export API is a later plan. Past this
+ * many rows the response says so rather than truncating quietly.
+ */
+export const MEMBER_WINDOW_MAX = 1000
+
+/**
+ * The member projection.
+ *
+ * Context columns are aliased to their FIELD name, taken from CONTEXT_FIELDS,
+ * so the JSON a client receives is keyed the same way the filter tree is. Both
+ * sides of that mapping are compile-time allowlists, so the aliases are safe
+ * identifiers by construction and no request data reaches the SELECT list.
+ *
+ * `latest` scope only. The `first_touch` values are filterable but not
+ * returned: a People screen's default columns are current values, and
+ * returning both doubles a response that is already a hundred rows wide.
+ * Note that for referrer and the UTM trio the two scopes read the same
+ * column, so those return first-touch values — documented in the README.
+ *
+ * Traits are deliberately absent: a per-person map of arbitrary size,
+ * multiplied by a hundred rows, is unbounded by construction.
+ */
+function memberProjection(): string {
+  const context = CONTEXT_FIELDS.map((f) => `${CONTEXT_COLUMNS[f].latest} AS ${f}`)
+  return ['person_id', 'first_seen', 'last_seen', ...context].join(',\n  ')
 }
 
 /**
@@ -40,8 +74,10 @@ export function compileSegment(opts: {
   projectId: number
   database: string
   now: Date
+  select?: 'count' | 'members'
+  cursor?: Cursor
 }): CompiledQuery {
-  const { query, projectId, database, now } = opts
+  const { query, projectId, database, now, select = 'count', cursor } = opts
 
   validateTree(query)
   const warnings = costWarnings(query)
@@ -91,15 +127,35 @@ export function compileSegment(opts: {
     `dictHas('${database}.suppressed_persons', ` +
     `(${params.add(projectId, 'UInt32')}, base.${RESOLVED_PERSON_ALIAS})) = 0`
 
+  // Keyset continuation on the same (last_seen DESC, person_id ASC) ordering
+  // the projection uses. Strictly lexicographic: a row is "after" the cursor
+  // if its last_seen is older, OR its last_seen is identical and its
+  // person_id sorts later. Collapsing this to `last_seen <` alone would skip
+  // every remaining person who shares the boundary row's timestamp.
+  const after =
+    select === 'members' && cursor
+      ? ` AND (last_seen < ${params.add(cursor.lastSeen, 'DateTime64(3)')}` +
+        ` OR (last_seen = ${params.add(cursor.lastSeen, 'DateTime64(3)')}` +
+        ` AND person_id > ${params.add(cursor.personId, 'String')}))`
+      : ''
+
+  const projection =
+    select === 'members' ? `SELECT\n  ${memberProjection()}` : 'SELECT count() AS person_count'
+
+  const tail =
+    select === 'members'
+      ? `\nORDER BY last_seen DESC, person_id ASC\nLIMIT ${MEMBER_PAGE_SIZE}`
+      : ''
+
   return {
     sql: `WITH
   ${ctes}
-SELECT count() AS person_count
+${projection}
 FROM base
 LEFT JOIN traits USING (${RESOLVED_PERSON_ALIAS})
 ${behJoin}
 WHERE ${suppressed}
-  AND (${where})`,
+  AND (${where})${after}${tail}`,
     params: params.values,
     warnings,
   }
