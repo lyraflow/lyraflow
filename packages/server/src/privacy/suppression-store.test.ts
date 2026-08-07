@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
+import { type Pool, createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { SuppressionStore } from './suppression-store.js'
 
@@ -89,7 +89,18 @@ describe('SuppressionStore', () => {
     expect((await store.upsert(pg, projectId, 'repeat-1', first)).getTime()).toBe(second.getTime())
   })
 
-  it('returns null for an empty group without querying', async () => {
-    expect(await store.boundaryFor(projectId, [])).toBeNull()
+  it('short-circuits an empty group instead of querying', async () => {
+    // Postgres itself returns null for `person_id = ANY('{}')`, so a test
+    // that only checks the return value cannot tell a real short-circuit
+    // apart from its absence — this store is pointed at a pool that THROWS
+    // on any `query()` call, so the assertion can only pass if `boundaryFor`
+    // returns before ever reaching the database.
+    const poisonedPool = {
+      query: () => {
+        throw new Error('boundaryFor queried instead of short-circuiting on an empty group')
+      },
+    } as unknown as Pool
+    const storeWithPoisonedPool = new SuppressionStore(poisonedPool)
+    expect(await storeWithPoisonedPool.boundaryFor(projectId, [])).toBeNull()
   })
 })

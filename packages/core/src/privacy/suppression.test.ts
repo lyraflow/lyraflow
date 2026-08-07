@@ -29,12 +29,28 @@ describe('notSuppressedExpr', () => {
       person: 'p',
       instant: 't',
     })
+    // Wiring check only — SUPPRESSION_NEVER is imported from the module
+    // under test, so this alone would pass no matter what value that
+    // constant held. It is not what proves the property below.
     expect(sql).toContain(SUPPRESSION_NEVER)
-    // The default is the far future and NOT the far past: reached on its own,
-    // `t <= far future` is true for every event, so the NOT hides the person.
-    // The far past would reveal every deleted person instead — the exact
-    // failure mode that made Plan 2's identity resolution silently degrade.
-    expect(sql).not.toContain('toDateTime(0)')
+
+    // The property that actually matters: whatever epoch-seconds literal
+    // ends up as the dictGetOrDefault default, it must denote an instant
+    // far in the FUTURE relative to now — reached on its own (dictHas true,
+    // dictGetOrDefault returning the default), `instant <= default` must
+    // stay true for any real event timestamp, so the default cannot sit
+    // behind "now". A far-past default would make a lone dictGetOrDefault
+    // report "not suppressed" for everyone and silently republish every
+    // deleted person — the exact failure mode that made Plan 2's identity
+    // resolution silently degrade, and the regression this test exists to
+    // pin. The literal is parsed out of the GENERATED SQL rather than taken
+    // from SUPPRESSION_NEVER, so an edit that flips the constant toward the
+    // past fails here regardless of what literal replaces it.
+    const match = sql.match(/toDateTime\((\d+)\)/)
+    expect(match).not.toBeNull()
+    const denotedMs = Number(match?.[1]) * 1000
+    const tenYearsFromNowMs = Date.now() + 10 * 365 * 24 * 3600 * 1000
+    expect(denotedMs).toBeGreaterThan(tenYearsFromNowMs)
   })
 
   it('binds the project id rather than interpolating it', () => {
