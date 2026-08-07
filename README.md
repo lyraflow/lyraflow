@@ -583,7 +583,7 @@ cleanly) — and then records `last_count` / `last_evaluated_at` on the segment,
 whichever output mode you asked for:
 
 ```sh
-curl -s http://localhost:3000/v1/segments/17/preview \
+curl -s -X POST http://localhost:3000/v1/segments/17/preview \
   -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY"
 # {"person_count":128,"as_of":"2026-08-07T09:30:00.000Z"}
 ```
