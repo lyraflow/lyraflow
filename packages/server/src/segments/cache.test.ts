@@ -55,6 +55,33 @@ describe('SegmentCache', () => {
     expect(c.rows).toBeLessThanOrEqual(CACHE_MAX_ROWS)
   })
 
+  it('evicts least-recently-used first when the ROW bound is what trips', () => {
+    // 1000 rows per entry means the row bound trips around entry 50, while the
+    // 200-entry cap is never approached — so this exercises row-driven
+    // eviction on its own, one entry at a time rather than via the entry-cap
+    // path.
+    const c = new SegmentCache()
+    const perEntry = 1000
+    const capEntries = CACHE_MAX_ROWS / perEntry // exact: 50 entries fit the row budget
+    const entries = capEntries + 5
+    for (let i = 0; i < entries; i++) c.set(`k${i}`, result(perEntry))
+
+    // Under one-at-a-time LRU eviction, exactly `entries - capEntries` of the
+    // oldest keys are gone and the rest survive untouched — so the oldest
+    // *surviving* key is `k${survivorStart}`. A cache that instead wipes
+    // itself whenever a bound trips would still show k0 gone and the newest
+    // key present (this happens to be the last thing added, in both models);
+    // checking the oldest surviving key is what actually tells eviction-by-
+    // recency apart from eviction-by-clearing-everything.
+    const survivorStart = entries - capEntries
+    expect(c.size).toBeLessThan(CACHE_MAX_ENTRIES) // the entry cap did NOT trip
+    expect(c.rows).toBeLessThanOrEqual(CACHE_MAX_ROWS)
+    expect(c.get('k0')).toBeUndefined() // oldest gone
+    expect(c.get(`k${survivorStart - 1}`)).toBeUndefined() // still within the evicted range
+    expect(c.get(`k${survivorStart}`)).toBeDefined() // oldest surviving key
+    expect(c.get(`k${entries - 1}`)).toBeDefined() // newest kept
+  })
+
   it('refreshes recency on read, so a hot key is not evicted', () => {
     const c = new SegmentCache()
     c.set('hot', result())
