@@ -34,6 +34,28 @@ const pgSource: PgDictionarySource = {
 
 const uuid = (n: number) => `77000000-0000-4000-8000-${String(n).padStart(12, '0')}`
 
+// Module scope, not local to beforeAll, so the tie-break test below can
+// build additional rows with the exact same shape as the seed fixture.
+const ev = (
+  id: string,
+  anon: string,
+  user: string,
+  name: string,
+  ts: string,
+  properties: Record<string, string> = {},
+) => ({
+  project_id: PROJECT,
+  event_id: id,
+  anonymous_id: anon,
+  user_id: user,
+  event_name: name,
+  timestamp: ts,
+  received_at: ts,
+  trusted: 1,
+  properties,
+  properties_num: {},
+})
+
 const count = (filter: FilterNode) =>
   runSegment({
     client: ch,
@@ -69,26 +91,6 @@ beforeAll(async () => {
   // alice: trial, ran import 3x in the last week, never invited
   // bob:   trial, ran import once, DID invite
   // carol: pro,   ran import 3x
-  const ev = (
-    id: string,
-    anon: string,
-    user: string,
-    name: string,
-    ts: string,
-    properties: Record<string, string> = {},
-  ) => ({
-    project_id: PROJECT,
-    event_id: id,
-    anonymous_id: anon,
-    user_id: user,
-    event_name: name,
-    timestamp: ts,
-    received_at: ts,
-    trusted: 1,
-    properties,
-    properties_num: {},
-  })
-
   await ch.insert({
     table: 'events',
     format: 'JSONEachRow',
@@ -295,6 +297,78 @@ describe('runSegment (live ClickHouse)', () => {
     )
     await ch.command({ query: `SYSTEM RELOAD DICTIONARY ${CH_DB}.suppressed_persons` })
     const rows = await listMembers(trialTrait)
-    expect(rows.map((r) => r.person_id)).not.toContain('bob')
+    // Exact expected set, not `not.toContain('bob')` — that assertion passes
+    // equally on an EMPTY result, so it would not notice the whole trial
+    // cohort silently vanishing alongside bob. alice is the only trial
+    // person left once bob is suppressed.
+    expect(rows.map((r) => r.person_id)).toEqual(['alice'])
+
+    // Un-suppress, same reasoning as the count-mode suppression test above:
+    // this file has no per-test isolation, only a per-run one in beforeAll,
+    // so a row left behind here would silently bleed into every test
+    // declared below it.
+    await pg.query(`DELETE FROM suppressed_persons WHERE project_id = $1 AND person_id = 'bob'`, [
+      PROJECT,
+    ])
+    await ch.command({ query: `SYSTEM RELOAD DICTIONARY ${CH_DB}.suppressed_persons` })
+  })
+
+  // THE live-coverage test for the `last_seen = :x AND person_id > :y`
+  // tie-break branch (compile.ts's `after` clause). The three-person seed
+  // fixture was shaped to give alice and carol an incidental last_seen tie
+  // (both last touched at '2026-08-05 00:00:00.000'), but "does not
+  // double-count a retried delivery" above inserts a later-timestamped row
+  // for alice specifically to test dedup, which as a side effect pushes her
+  // last_seen past carol's and destroys that tie before this point in the
+  // file — so relying on it would leave the tie-break branch with no live
+  // coverage. This uses two FRESH people with a deliberately, unambiguously
+  // shared last_seen instead, independent of anything the other tests do to
+  // the seed fixture's timestamps.
+  it('does not skip or repeat either side of a genuine last_seen tie across a cursor boundary', async () => {
+    const TIE_TS = '2026-08-06 00:00:00.000'
+    const dora = uuid(20)
+    const edgar = uuid(21)
+    await ch.insert({
+      table: 'events',
+      format: 'JSONEachRow',
+      values: [
+        ev(dora, 'dev-dora', 'dora', '$identify', TIE_TS, { plan: 'tie-test' }),
+        ev(edgar, 'dev-edgar', 'edgar', '$identify', TIE_TS, { plan: 'tie-test' }),
+      ],
+    })
+
+    try {
+      const tieTrait: FilterNode = { kind: 'trait', key: 'plan', operator: '=', value: 'tie-test' }
+      const [first, second] = await listMembers(tieTrait)
+      if (!first || !second) throw new Error('fixture produced fewer than two tied rows')
+      expect(first.last_seen).toBe(second.last_seen)
+      // The projection's own ORDER BY breaks the tie on person_id ASC, so
+      // dora (lexicographically first) sorts ahead of edgar — pinning which
+      // row is "the boundary" below, not just that some order was produced.
+      expect([first.person_id, second.person_id]).toEqual(['dora', 'edgar'])
+
+      const rest = await listMembers(tieTrait, {
+        lastSeen: first.last_seen,
+        personId: first.person_id,
+        asOf: NOW.toISOString(),
+      })
+      // edgar must appear EXACTLY once past the boundary: `last_seen < :x`
+      // alone (no tie-break) would skip every row sharing the boundary
+      // instant, including edgar; a tie-break that compared the wrong
+      // direction would instead repeat dora.
+      expect(rest.map((r) => r.person_id)).toEqual(['edgar'])
+    } finally {
+      // Unlike the seed fixture's alice/bob/carol (fixed ids the whole file
+      // is built around) and the intentional duplicate row above, dora and
+      // edgar are TWO EXTRA distinct people this test alone introduces. This
+      // file has no per-test isolation and PROJECT (7700) is a fixed id
+      // never cleared at the top of beforeAll — left behind, they would
+      // silently inflate every population-count assertion in this file on
+      // its NEXT run (a real failure mode hit while writing this test: a
+      // clean run afterwards saw 5 people instead of 3).
+      await ch.command({
+        query: `ALTER TABLE events DELETE WHERE project_id = ${PROJECT} AND event_id IN ('${dora}', '${edgar}')`,
+      })
+    }
   })
 })
