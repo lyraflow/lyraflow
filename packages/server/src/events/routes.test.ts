@@ -8,6 +8,7 @@ import { hashServerKey } from '../auth/project-cache.js'
 import { loadConfig } from '../config.js'
 import { Readiness } from '../health.js'
 import { type PgDictionarySource, ensureIdentityDictionaries } from '../identity/dictionaries.js'
+import { MAX_PERSON_RANGE_CLAUSES } from '../identity/scope.js'
 import { EVENTS_MAX_LIMIT } from './routes.js'
 
 const CH_DB = 'lyraflow_test'
@@ -62,6 +63,15 @@ const chAt = (seconds: number) =>
 
 /** ISO-8601, for payloads sent through the HTTP ingest path (subject to the clamp). */
 const isoAt = (seconds: number) => new Date(BASE_MS + seconds * 1000).toISOString()
+
+/**
+ * ClickHouse DateTime64(3) literal anchored to the ACTUAL current instant,
+ * not `BASE_MS` — needed only by the default-`since` test below, which has
+ * to place one fixture row genuinely more than 24h in the past (`chAt`'s
+ * two-hour anchor can never reach that far back).
+ */
+const chAtRealMsAgo = (msAgo: number) =>
+  new Date(Date.now() - msAgo).toISOString().replace('T', ' ').replace('Z', '')
 
 interface EvOpts {
   projectId: number
@@ -523,5 +533,109 @@ describe('GET /v1/events', () => {
     // uuid(50) sits AT t=500, before the t=510 boundary — hidden. uuid(51)
     // sits at t=520, after it — survives.
     expect(ids).toEqual([uuid(51)])
+  })
+
+  // THE test for the default `since` window. Both rows share one event
+  // name, unique to this test, so a leaky default (no bound at all) would
+  // return both; the correct default returns only the recent one. Anchored
+  // to the REAL current instant (`chAtRealMsAgo`), not this file's `BASE_MS`
+  // (only two hours back) — the old row has to be genuinely more than 24h
+  // in the past, inserted directly via `ch.insert` to bypass the ingest
+  // path's own 24h clamp (`clampTimestamp`), which would otherwise silently
+  // rewrite it to exactly `now - 24h` and make this test unable to tell a
+  // working default from a missing one.
+  it('defaults since to the last 24 hours when omitted', async () => {
+    await insertEvents([
+      evRow({
+        projectId: projectA,
+        eventId: uuid(70),
+        userId: 'since-default-user',
+        eventName: 'feed_default_since_event',
+        atSeconds: 0,
+      }),
+    ])
+    // Overwrite the "recent" row's timestamp to 1h ago (genuinely within the
+    // default window) and add one genuinely stale row, both bypassing the
+    // `BASE_MS`-anchored `evRow`/`chAt` helpers.
+    await ch.insert({
+      table: 'events',
+      format: 'JSONEachRow',
+      values: [
+        {
+          project_id: projectA,
+          event_id: uuid(70),
+          anonymous_id: '',
+          user_id: 'since-default-user',
+          event_name: 'feed_default_since_event',
+          timestamp: chAtRealMsAgo(60 * 60 * 1000),
+          received_at: chAtRealMsAgo(60 * 60 * 1000),
+          trusted: 1,
+          properties: {},
+          properties_num: {},
+        },
+        {
+          project_id: projectA,
+          event_id: uuid(71),
+          anonymous_id: '',
+          user_id: 'since-default-user',
+          event_name: 'feed_default_since_event',
+          timestamp: chAtRealMsAgo(25 * 60 * 60 * 1000),
+          received_at: chAtRealMsAgo(25 * 60 * 60 * 1000),
+          trusted: 1,
+          properties: {},
+          properties_num: {},
+        },
+      ],
+    })
+
+    const res = await get('/v1/events?event=feed_default_since_event')
+    expect(res.statusCode).toBe(200)
+    const ids = res.json().events.map((e: { event_id: string }) => e.event_id)
+    expect(ids).toEqual([uuid(70)])
+    expect(ids).not.toContain(uuid(71))
+  })
+
+  // The cap exists because a person's windows are devices multiplied by
+  // rebinds, which has no fixed bound — reachable by anyone holding the
+  // server key. Would catch: `MAX_PERSON_RANGE_CLAUSES` or the 400 it
+  // guards being deleted or bypassed on THIS route specifically — the same
+  // guard already covers GET /v1/persons/:id (person.test.ts) and the
+  // export (export.test.ts), and this route's `person` filter goes through
+  // the exact same `resolvePersonScope` call. A guardrail holding on those
+  // two routes and not on this one is exactly the "fifth read path" failure
+  // shape this module's own docstring warns about, just for a different
+  // guard than suppression.
+  //
+  // Fixture transplanted from person.test.ts's/export.test.ts's identical
+  // test: MAX_PERSON_RANGE_CLAUSES + 5 DISTINCT devices, each bound exactly
+  // once, in a single `INSERT ... SELECT ... FROM unnest()` rather than one
+  // row per query — see that test's own comment for why this shape keeps
+  // the window count exact and independent of tiling internals. Cleaned up
+  // immediately in a `finally` rather than left for `afterAll`, since
+  // nothing else in this file touches 'events-frag-person' or its devices.
+  it('refuses a person filter whose history is too fragmented to bound', async () => {
+    const deviceIds = Array.from(
+      { length: MAX_PERSON_RANGE_CLAUSES + 5 },
+      (_, i) => `events-frag-device-${i}`,
+    )
+    await pg.query(
+      `INSERT INTO identity_bindings (project_id, anonymous_id, person_id, bound_at)
+       SELECT $1, d, 'events-frag-person', $3::timestamptz
+       FROM unnest($2::text[]) AS d`,
+      [projectA, deviceIds, isoAt(2000)],
+    )
+    try {
+      const res = await get('/v1/events?person=events-frag-person')
+      expect(res.statusCode).toBe(400)
+      expect(res.json()).toEqual({
+        error: 'person_history_too_fragmented',
+        detail: `this person spans ${deviceIds.length} device windows, above the limit of ${MAX_PERSON_RANGE_CLAUSES}`,
+      })
+    } finally {
+      await pg.query(
+        `DELETE FROM identity_bindings WHERE project_id = $1 AND person_id = 'events-frag-person'`,
+        [projectA],
+      )
+    }
   })
 })

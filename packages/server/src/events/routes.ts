@@ -108,12 +108,39 @@ interface FeedRow {
  * GET /v1/persons/:id performs, so a device id or a merged-away id finds the
  * right person here exactly as it would there.
  *
- * `LIMIT 1 BY project_id, event_id` in the inner subquery is not optional:
- * `events` is a `ReplacingMergeTree` ordered by
+ * `LIMIT 1 BY project_id, event_id` in the inner subquery is not optional,
+ * and not merely a race against merge timing: `events` is a
+ * `ReplacingMergeTree` ordered by
  * `(project_id, timestamp, anonymous_id, event_id)`, and a retried delivery
- * that omitted `timestamp` arrives with a fresh `received_at`, a different
- * sort key, and is stored as a permanent second row — a background merge
- * eventually collapses it, but a caller cannot wait on merge timing.
+ * that omitted `timestamp` is assigned a FRESH server timestamp on
+ * redelivery — a genuinely different ORDER BY key, not just a different
+ * `received_at` (the engine's *version* column, which decides which
+ * duplicate wins on merge, but is not part of the sort key itself).
+ * ReplacingMergeTree only ever collapses rows that share the identical sort
+ * key; two rows differing in `timestamp` are never touched by any merge, at
+ * any time, so `LIMIT 1 BY` is the only thing that ever deduplicates this
+ * case — permanently, not until a background merge gets around to it. (A
+ * retry that reused the exact same `timestamp` — identical sort key, only
+ * `received_at` differing — is the one shape a merge *does* eventually
+ * collapse on its own; `LIMIT 1 BY` still has to cover the window before
+ * that merge runs. `routes.test.ts`'s dedup fixture exercises that
+ * narrower, temporary case, since it is also the one a naively-built test
+ * can pass for the wrong reason if merges are not paused — see that test's
+ * own comment.)
+ *
+ * KNOWN LIMITATION, not fixed here: `afterClause`'s keyset predicate is
+ * applied *inside* the same inner subquery as the dedup, and that subquery
+ * has no `ORDER BY` of its own — so when the two physical rows of an
+ * omitted-timestamp retry straddle a page boundary (one at `timestamp` t1,
+ * the other at a later t2, with a cursor landing between them), WHICH
+ * physical row `LIMIT 1 BY` keeps on each page is arbitrary rather than
+ * consistently "the newest": in principle the same logical event could
+ * appear on page 1 via its t1 row and again on page 2 via its t2 row.
+ * Fixing this properly means filtering outside the dedup, which needs the
+ * suppression check restructured too and is a larger change than this task
+ * covers. Documented rather than fixed because triggering it needs a retry
+ * that omitted `timestamp` specifically — normal delivery, and everything
+ * `packages/sdk-browser` ever sends, always carries one.
  *
  * TWO PAGING DIRECTIONS, ONE OUTPUT ORDERING. With no cursor, the only way
  * to get the *most recent* N events is to sort `DESC` and take the top N —
@@ -181,10 +208,30 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
     const params = new Params()
     const projectParam = params.add(project.id, 'UInt32')
 
-    let sinceClause = ''
-    if (since) {
-      sinceClause = ` AND timestamp >= ${params.add(chDateTime(new Date(since)), 'DateTime64(3)')}`
-    }
+    // `since` defaults to 24h before now when the caller omits it —
+    // ALWAYS applied, never an unbounded lower edge. `behaviourCte`
+    // (segments/behaviour.ts), whose two-layer shape this route copies,
+    // always carries a `scanBound`; every behavioural node's window is
+    // finite unless it says `ever` explicitly. This route had no
+    // equivalent, and `LIMIT 1 BY` in the inner subquery blocks any early
+    // stop the outer `ORDER BY ... LIMIT n` might otherwise offer —
+    // ClickHouse cannot know the `LIMIT 1 BY` output already comes out
+    // sorted, since the inner subquery carries no `ORDER BY` of its own
+    // (see the `afterClause` comment above for why it can't). Measured
+    // directly against a 500,000-row fixture: this exact query, with
+    // `limit=50` and no `since` at all, read all 500,000 rows and 52 MiB —
+    // linear in project size, not in `limit`, extrapolating to a hard
+    // `503` around 40M events. It fails loudly (`timeout_overflow_mode:
+    // 'throw'`, below) rather than truncating, so it was never a
+    // correctness bug, but it was an unbounded-by-default operational
+    // ceiling nobody had noticed. Defaulting the window bounds every
+    // unmarked call, matches what a real `--follow`-style caller would
+    // send anyway, and an explicit, older `since` is still available for
+    // anyone who genuinely wants more.
+    const DEFAULT_SINCE_MS = 24 * 60 * 60 * 1000
+    const sinceDate = since ? new Date(since) : new Date(Date.now() - DEFAULT_SINCE_MS)
+    const sinceClause = ` AND timestamp >= ${params.add(chDateTime(sinceDate), 'DateTime64(3)')}`
+
     let untilClause = ''
     if (until) {
       untilClause = ` AND timestamp <= ${params.add(chDateTime(new Date(until)), 'DateTime64(3)')}`
