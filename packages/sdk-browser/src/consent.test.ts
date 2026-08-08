@@ -69,6 +69,23 @@ describe('ConsentGate', () => {
     expect(gate.allowed()).toBe(true)
   })
 
+  it('never reads navigator at all when the gate is off', () => {
+    // The above test pins the outcome but not the mechanism: since every nav
+    // read already goes through a try/catch (below), a version that computes
+    // the signal unconditionally and merely discards the result when
+    // `!required` produces the exact same 'granted' outcome without ever
+    // throwing — so a getter that THROWS cannot distinguish "never read" from
+    // "read, then ignored". A call-count spy can: it fails the moment
+    // anyone reads `navigator` unconditionally, which a throw-based
+    // assertion here does not.
+    const doNotTrack = vi.fn(() => '1')
+    const nav = {} as Navigator
+    Object.defineProperty(nav, 'doNotTrack', { get: doNotTrack })
+    const gate = new ConsentGate({ required: false, nav })
+    expect(gate.allowed()).toBe(true)
+    expect(doNotTrack).not.toHaveBeenCalled()
+  })
+
   // Beyond the brief: `navigator` is host-controlled, and `doNotTrack` in
   // particular has never had one shape. Nothing below may throw.
 
@@ -117,7 +134,24 @@ describe('ConsentGate', () => {
     expect(new ConsentGate({ required: true, nav }).state()).toBe('pending')
   })
 
-  it('does not crash when navigator itself is undefined (non-browser context)', () => {
+  it('does not crash when the global navigator is explicitly undefined', () => {
+    // This pins the "declared but undefined" shape only — `vi.stubGlobal`
+    // defines a real `navigator` property set to `undefined`, so a bare
+    // reference to it here never throws a ReferenceError the way it would
+    // for a genuinely undeclared identifier. The `typeof navigator ===
+    // 'undefined'` guard this exercises is the same code path an actually
+    // undeclared global would hit — the ternary's two branches are identical
+    // for "declared as undefined" and "never declared" — but the specific
+    // failure mode a bare `navigator` reference would produce for an
+    // undeclared identifier is NOT reproduced by this test. Neither of this
+    // repo's two test environments can reproduce it either: happy-dom
+    // declares `navigator`, and so does plain Node 22 by itself (it ships
+    // its own global `Navigator`, see `node -e "console.log(navigator)"`) —
+    // so there is no environment available here in which `navigator` is
+    // genuinely undeclared. The
+    // guard is kept as correct defensive code for embeds where it would be
+    // (workers, older runtimes), on the strength of code inspection, not of
+    // this test.
     vi.stubGlobal('navigator', undefined)
     try {
       expect(() => new ConsentGate({ required: true })).not.toThrow()
