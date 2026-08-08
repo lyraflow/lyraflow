@@ -23,8 +23,17 @@ export interface PersonWindow {
  * and the deduped id set a caller sees on the wire.
  */
 export interface PersonScope {
+  /**
+   * CAVEAT under `resolvePersonScope`'s `restrictTo`: this is the canonical
+   * the id graph resolves to RIGHT NOW, which is not necessarily a member of
+   * the restricted `group` — if the erased person was merged into someone
+   * else after their deletion was accepted, this names that someone else.
+   * Only the purge passes `restrictTo`, and it reads `group`, `devices` and
+   * `ids`, never this. Do not start reading it on a restricted scope without
+   * deciding what it should mean first.
+   */
   canonical: string
-  /** The canonical plus every id merged into it. */
+  /** The canonical plus every id merged into it, intersected with `restrictTo` if given. */
   group: string[]
   /** Every device bound to any member of `group`. */
   devices: string[]
@@ -54,18 +63,49 @@ interface ResolvedGroup {
  * Does not itself enforce MAX_PERSON_RANGE_CLAUSES; each caller checks
  * `windows.length` against it, because what a caller does on the cap being
  * exceeded (400 the request, skip the person, etc.) differs per caller.
+ *
+ * `restrictTo`, when given, is a CEILING on the group: the resolved group is
+ * intersected against it, and everything downstream — devices, windows, `ids`
+ * — is derived from the restricted group. Only the purge worker passes it,
+ * and the property it buys is "may narrow, never widen".
+ *
+ * Why a ceiling on the GROUP specifically, applied before the device lookup,
+ * rather than a filter over the finished scope: the purge re-resolves fresh
+ * ON PURPOSE, because a device bound to the same person between the `202` and
+ * the purge legitimately belongs to them and must be erased. What must be
+ * impossible is a DIFFERENT person's ids entering the group — which is exactly
+ * what `/v1/alias` does if it lands in that window, since
+ * `PersonAliases.alias` repoints the whole from-group at the to-canonical and
+ * both merge directions end up putting the live person in `group`. Restricting
+ * the group first and deriving devices from the restricted group keeps the
+ * legitimate case (new device, same person) and removes the dangerous one
+ * (any device of a person who was never part of this request). Filtering
+ * `devices` directly against `restrictTo` instead would do the opposite: it
+ * would drop the very devices fresh resolution exists to find, while leaving
+ * the widened `group` — and therefore the event predicate itself — intact.
+ * See 009_deletion_request_ids.sql for the full history.
  */
 export async function resolvePersonScope(
   deps: { bindings: IdentityBindings; aliases: PersonAliases },
   projectId: number,
   id: string,
+  restrictTo?: string[],
 ): Promise<PersonScope> {
   const { bindings, aliases } = deps
+
+  // Built once, outside resolveGroup: step 4 below can call that function a
+  // second time, and the ceiling is the same both times.
+  const ceiling = restrictTo ? new Set(restrictTo) : null
 
   async function resolveGroup(projectId: number, id: string): Promise<ResolvedGroup> {
     const canonical = await aliases.canonicalFor(projectId, id)
     const mergedFrom = await aliases.mergedFrom(projectId, canonical)
-    const group = [canonical, ...mergedFrom]
+    const resolved = [canonical, ...mergedFrom]
+    // Intersected HERE — before the device lookup on the next line, which is
+    // the whole point: `devices` must be "every device of the restricted
+    // group", not "the restricted subset of every device the widened group
+    // has". See this function's docstring.
+    const group = ceiling ? resolved.filter((p) => ceiling.has(p)) : resolved
     return { canonical, group, devices: await bindings.devicesForAny(projectId, group) }
   }
 

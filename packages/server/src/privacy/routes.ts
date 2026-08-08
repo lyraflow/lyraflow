@@ -81,6 +81,7 @@ export function registerPrivacyRoutes(app: FastifyInstance, deps: PrivacyDeps): 
     bindings,
     aliases,
     deletions,
+    suppression,
     segmentCache,
     maxAttempts,
     leaseMs,
@@ -155,7 +156,49 @@ export function registerPrivacyRoutes(app: FastifyInstance, deps: PrivacyDeps): 
       }
     }
     if (!exists) {
-      return reply.code(404).send({ error: 'person_not_found' })
+      // No events — but that is not the same question as "nothing left to
+      // erase". The purge deletes events FIRST and identity LAST (purge.ts,
+      // and the order is load-bearing), so a purge that failed part-way
+      // through leaves a person with zero events and their `person_traits`
+      // and `identity_bindings` still in place. Once `attempts` reaches the
+      // cap, `claim()` stops handing the request out (deletion-store.ts) and
+      // this route is the operator's only way back in — answering `404` here
+      // reads as "already gone" and strands a half-erased subject with no API
+      // route to finish the job.
+      //
+      // So: an incomplete request for this canonical means the erasure was
+      // accepted and never finished. Reset it and answer `202` with the
+      // ORIGINAL request's id, rather than filing a second request for the
+      // same person — the caller can keep polling the id they already have,
+      // and the recorded `person_ids` ceiling stays exactly as it was at
+      // request time (deliberately NOT re-widened to the current scope; see
+      // 009_deletion_request_ids.sql).
+      //
+      // Resolution still works in this state precisely BECAUSE identity goes
+      // last: `scope.canonical` is derived from `person_aliases`, which the
+      // purge only touches in its final step. The one state this does not
+      // reach is a purge whose every step succeeded but whose `complete()`
+      // call then failed, re-requested under a MERGED-AWAY id: identity is
+      // gone by then, so that id resolves to itself rather than to the
+      // canonical and finds no request. Everything is genuinely erased in
+      // that state, so `404` is the honest answer; re-requesting under the
+      // canonical id still reopens it.
+      const reopened = await deletions.reopen(project.id, scope.canonical)
+      if (!reopened) {
+        return reply.code(404).send({ error: 'person_not_found' })
+      }
+      // The boundary this person already carries, not a new one: their
+      // suppression rows were written when the request was first accepted and
+      // are never deleted (005_suppression.sql), so there is nothing to
+      // advance and re-running the fan-out would only rewrite the same rows.
+      // `requestedAt` is an unreachable fallback kept for total-ness rather
+      // than sending `null` on a field the caller parses as a date.
+      const boundary = await suppression.boundaryFor(project.id, [reopened.personId])
+      return reply.code(202).send({
+        request_id: reopened.id,
+        person_id: reopened.personId,
+        suppressed_at: (boundary ?? reopened.requestedAt).toISOString(),
+      })
     }
 
     // The CANONICAL person, never the requested id, is what `deletion_requests`
@@ -254,8 +297,35 @@ export function registerPrivacyRoutes(app: FastifyInstance, deps: PrivacyDeps): 
       })
     }
 
-    // Claimed, not completed, under the attempt cap, and the lease has not
-    // yet aged out: a worker genuinely has this request in hand right now.
+    // An attempt has failed and the request is not dead yet: report it as
+    // waiting for its next attempt, WITH the error, ahead of the lease check
+    // below.
+    //
+    // This branch has to come first because `fail()` deliberately leaves
+    // `claimed_at` set (that is what makes the retry wait out the lease
+    // instead of hammering a broken dependency), and the lease check reads
+    // "claimed within the lease" as "a worker has this in hand right now".
+    // Without this branch, a request failing every attempt reports
+    // `in_progress` almost continuously for ~50 minutes on the shipped
+    // defaults, never once reports `pending`, and never surfaces
+    // `last_error` until the request is already dead — during exactly the
+    // interval an operator is polling to find out what is wrong.
+    //
+    // `pending` and not `failed`: the request has attempts left and WILL be
+    // retried, which is the whole difference between the two states. The
+    // `failed` branch above stays the terminal one.
+    if (found.lastError !== null) {
+      return reply.code(200).send({
+        status: 'pending',
+        requested_at: found.requestedAt.toISOString(),
+        completed_at: null,
+        error: found.lastError,
+      })
+    }
+
+    // Claimed, not completed, under the attempt cap, no error recorded, and
+    // the lease has not yet aged out: a worker genuinely has this request in
+    // hand right now.
     // `leaseMs` is the SAME value DeletionStore.claim() uses to decide
     // whether a claim is still live (see DeletionStore.claim) — without it,
     // "claimed" alone cannot tell a request truly in flight apart from one

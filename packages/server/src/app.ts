@@ -118,8 +118,8 @@ export function buildApp(input: {
   const segmentCache = new SegmentCache()
   const purge = new PurgeWorker({
     deletions,
-    resolve: (projectId, personId) =>
-      resolvePersonScope({ bindings, aliases }, projectId, personId),
+    resolve: (projectId, personId, restrictTo) =>
+      resolvePersonScope({ bindings, aliases }, projectId, personId, restrictTo),
     purge: (projectId, scope) => purgePerson({ ch, pg, projectId, scope }),
     intervalMs: config.purgeIntervalMs,
     leaseMs: config.purgeLeaseMs,

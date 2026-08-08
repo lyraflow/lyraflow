@@ -3,7 +3,17 @@ import type { DeletionRequest, DeletionStore } from './deletion-store.js'
 
 export interface PurgeWorkerOptions {
   deletions: DeletionStore
-  resolve: (projectId: number, personId: string) => Promise<PersonScope>
+  /**
+   * `restrictTo` is the id set recorded when the request was accepted; it
+   * becomes `resolvePersonScope`'s ceiling on the resolved group. See
+   * `runOnce` for why it is `undefined` rather than `[]` when the request
+   * carries no set.
+   */
+  resolve: (
+    projectId: number,
+    personId: string,
+    restrictTo: string[] | undefined,
+  ) => Promise<PersonScope>
   purge: (projectId: number, scope: PersonScope) => Promise<void>
   intervalMs: number
   leaseMs: number
@@ -73,7 +83,24 @@ export class PurgeWorker {
         maxAttempts: this.opts.maxAttempts,
       })
       if (!claimed) return 'idle'
-      const scope = await this.opts.resolve(claimed.projectId, claimed.personId)
+      // Still re-resolved FRESH from Postgres, deliberately — a device bound
+      // to this person between the `202` and now legitimately belongs to them
+      // and has to be erased. What the recorded id set adds is a ceiling: the
+      // resolved group is intersected against it, so an `/v1/alias` landing
+      // in that same window cannot pull an uninvolved person's ids, devices
+      // and windows into the purge. The purge may narrow, never widen.
+      //
+      // `undefined`, not `[]`, when the request carries no set: an empty
+      // array is what rows written before 009_deletion_request_ids.sql carry,
+      // and it means "unrestricted" — passing it through as a ceiling would
+      // intersect the group down to nothing and complete a purge that erased
+      // nothing at all. That migration's own comment is where the decision is
+      // argued in full.
+      const scope = await this.opts.resolve(
+        claimed.projectId,
+        claimed.personId,
+        claimed.personIds.length > 0 ? claimed.personIds : undefined,
+      )
       await this.opts.purge(claimed.projectId, scope)
       await this.opts.deletions.complete(claimed.id)
       return 'purged'

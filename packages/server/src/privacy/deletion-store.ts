@@ -5,6 +5,18 @@ export interface DeletionRequest {
   id: number
   projectId: number
   personId: string
+  /**
+   * Every id this request covers, frozen at request time — the canonical,
+   * every id merged into it, and every device (`PersonScope.ids`). The purge
+   * intersects its freshly-resolved group against this, so an `/v1/alias`
+   * landing between the `202` and the purge can never pull a different
+   * person into the erasure. See 009_deletion_request_ids.sql.
+   *
+   * EMPTY MEANS UNRESTRICTED, for rows written before that migration only —
+   * again, see the migration, which argues why that direction and not the
+   * other.
+   */
+  personIds: string[]
   requestedAt: Date
   claimedAt: Date | null
   completedAt: Date | null
@@ -16,6 +28,7 @@ interface Row {
   id: string
   project_id: string
   person_id: string
+  person_ids: string[]
   requested_at: Date
   claimed_at: Date | null
   completed_at: Date | null
@@ -28,6 +41,12 @@ function toRequest(row: Row): DeletionRequest {
     id: Number(row.id),
     projectId: Number(row.project_id),
     personId: row.person_id,
+    // Defensive `?? []`: node-postgres maps a Postgres `text[]` to a JS array
+    // and the column is NOT NULL, so this cannot be null today — but every
+    // consumer treats this as an array without checking, and the cost of the
+    // guard is nothing next to the cost of the purge reading `undefined` as
+    // "no restriction".
+    personIds: row.person_ids ?? [],
     requestedAt: row.requested_at,
     claimedAt: row.claimed_at,
     completedAt: row.completed_at,
@@ -120,9 +139,15 @@ export class DeletionStore {
       // Always present: `personId` is a member of `ids` (checked above), and
       // `upsertMany` returns exactly one row per id it was given.
       const suppressedAt = suppressedAtById.get(personId) as Date
+      // `person_ids` is the SAME set the suppression fan-out above just
+      // wrote a row for, recorded on the request so the purge worker can
+      // intersect its fresh resolution against it and never widen. Written
+      // in this same transaction for the same reason the two writes above
+      // share one: a request row whose id set did not commit with it would
+      // be a request the purge treats as unrestricted.
       const r = await client.query<{ id: string }>(
-        'INSERT INTO deletion_requests (project_id, person_id) VALUES ($1, $2) RETURNING id',
-        [projectId, personId],
+        'INSERT INTO deletion_requests (project_id, person_id, person_ids) VALUES ($1, $2, $3) RETURNING id',
+        [projectId, personId, ids],
       )
       await client.query('COMMIT')
       return { id: Number(r.rows[0]?.id), suppressedAt }
@@ -161,13 +186,72 @@ export class DeletionStore {
    */
   async get(projectId: number, id: number): Promise<DeletionRequest | null> {
     const r = await this.pool.query<Row>(
-      `SELECT id, project_id, person_id, requested_at, claimed_at, completed_at, attempts, last_error
+      `SELECT id, project_id, person_id, person_ids, requested_at, claimed_at, completed_at, attempts, last_error
          FROM deletion_requests
         WHERE project_id = $1 AND id = $2`,
       [projectId, id],
     )
     const row = r.rows[0]
     return row ? toRequest(row) : null
+  }
+
+  /**
+   * Makes an incomplete request for `personId` claimable again, returning it,
+   * or null if there is no incomplete request for that person.
+   *
+   * This is the way back into a HALF-PURGED person. The purge deletes events
+   * FIRST and identity LAST (deliberately — see purge.ts), while the DELETE
+   * route's existence check is `count(DISTINCT event_id) > 0`, and `claim()`
+   * stops handing out a request past `maxAttempts`. Compose the three and a
+   * purge that fails after its first step burns its attempts with the events
+   * already gone: `person_traits` and `identity_bindings` are still sitting
+   * there holding the subject's email and identity graph, and every retry
+   * path answers `404 person_not_found` — which reads as "already gone".
+   * Without this method the only route back is direct SQL.
+   *
+   * `attempts = 0` and `claimed_at = NULL` together are what make the row
+   * claimable on the very next worker tick: zeroing attempts alone would
+   * still leave it waiting out the remainder of a stale lease.
+   *
+   * `last_error` is deliberately LEFT in place. It is the only record of why
+   * the previous attempt failed, the status endpoint surfaces it (see
+   * routes.ts), and `complete()` clears it on success anyway — wiping it here
+   * would destroy the operator's diagnosis at the exact moment they act on
+   * it.
+   *
+   * Scoped to `project_id` unlike `claim()`: this one IS reachable from a
+   * route, with a caller-supplied person id, so it follows this file's
+   * ordinary project-scoping rule rather than `claim()`'s documented
+   * exception.
+   *
+   * `ORDER BY requested_at` with `LIMIT 1`: there is normally at most one
+   * incomplete request per person, because this method is what a repeat
+   * DELETE reaches instead of filing a second one. The ordering makes the
+   * pick deterministic anyway rather than leaving it to Postgres's row order.
+   *
+   * A plain `FOR UPDATE` (not `SKIP LOCKED`, unlike `claim()`): if a worker
+   * holds this row's lock right now, the right behaviour is to WAIT for it
+   * and then reopen, not to skip past and report "nothing to reopen" — the
+   * lock is held only for the duration of `claim()`'s own statement. Reopening
+   * a request a worker is concurrently purging is harmless: every purge step
+   * is a delete predicated on the person, so a second overlapping pass finds
+   * nothing left to do (see `claim()`'s docstring on idempotence).
+   */
+  async reopen(projectId: number, personId: string): Promise<DeletionRequest | null> {
+    const r = await this.pool.query<Row>(
+      `UPDATE deletion_requests
+          SET attempts = 0, claimed_at = NULL
+        WHERE id = (
+          SELECT id FROM deletion_requests
+           WHERE project_id = $1 AND person_id = $2 AND completed_at IS NULL
+           ORDER BY requested_at
+           LIMIT 1
+           FOR UPDATE
+        )
+        RETURNING *`,
+      [projectId, personId],
+    )
+    return r.rows[0] ? toRequest(r.rows[0]) : null
   }
 
   /**

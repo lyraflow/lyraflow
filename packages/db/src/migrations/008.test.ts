@@ -59,11 +59,18 @@ describe('deletion_requests table', () => {
     expect(byName.get('attempts')?.column_default).toMatch(/0/)
     expect(byName.get('last_error')?.is_nullable).toBe('YES')
 
+    // The WHOLE table as it stands after every migration that touches it, not
+    // only the columns 008 itself declares — that is the point of an
+    // exhaustive list, and narrowing it to 008's own columns would let a
+    // later migration add a column here unnoticed. `person_ids` comes from
+    // 009_deletion_request_ids.sql; its own contract (the array type, and the
+    // `'{}'` default that means "unrestricted") is pinned in 009.test.ts.
     expect([...byName.keys()].sort()).toEqual(
       [
         'id',
         'project_id',
         'person_id',
+        'person_ids',
         'requested_at',
         'claimed_at',
         'completed_at',
