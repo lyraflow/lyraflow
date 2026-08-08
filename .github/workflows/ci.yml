@@ -21,6 +21,14 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm typecheck
+      # `pnpm typecheck` (tsc -b) emits every package's TypeScript output, which
+      # used to be enough for the suite. It is not any more: the browser SDK's
+      # shipped artefact is an esbuild IIFE produced by its own build script,
+      # and tsc never runs that. Without this step `bundle-size.test.ts`,
+      # `snippet.test.ts` and the SDK route tests all fail on a missing
+      # dist/lyraflow.js — which is exactly what they are written to say, and
+      # exactly what this branch's first CI run said.
+      - run: pnpm build
       - run: docker compose -f docker-compose.test.yml up -d --wait
       - run: pnpm test
 

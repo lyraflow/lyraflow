@@ -1,6 +1,7 @@
+import { MAX_PROPERTIES_PER_EVENT } from '@lyraflow/core'
 import type { IngestPayload } from '@lyraflow/core'
 
-export const MAX_PROPERTIES_PER_EVENT = 250
+export { MAX_PROPERTIES_PER_EVENT }
 export const MAX_EVENT_NAMES_PER_PROJECT = 1000
 export const MAX_PROPERTY_KEYS_PER_EVENT_NAME = 500
 

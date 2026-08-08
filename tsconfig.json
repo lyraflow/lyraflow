@@ -4,6 +4,7 @@
     { "path": "packages/core" },
     { "path": "packages/db" },
     { "path": "packages/server" },
-    { "path": "packages/cli" }
+    { "path": "packages/cli" },
+    { "path": "packages/sdk-browser" }
   ]
 }

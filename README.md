@@ -116,6 +116,17 @@ not contain `bot`, `crawler`, `curl/`, `python-requests`, and similar tokens
 `/health` (liveness), `/ready` (readiness), and `/metrics` (Prometheus text
 format) are also served, and are not authenticated.
 
+Sent directly from browser JavaScript (as opposed to a server-side SDK),
+`/v1/track`, `/v1/page`, `/v1/identify` and `/v1/batch` are CORS-preflighted
+requests. By default Lyraflow answers that preflight for any origin — set
+`LYRAFLOW_ALLOWED_ORIGINS` (comma-separated) on the server to restrict it.
+This is not a security boundary: the write key already ships in page source,
+and any non-browser client ignores CORS entirely. What it buys is
+tamper-evidence — stopping someone from pasting your write key on their own
+site and quietly polluting your data — not access control. Leave it unset
+and any origin is allowed, which is why a fresh install's tracking snippet
+works on first paste with no configuration.
+
 ### Payload fields
 
 | Field | Required | Notes |
@@ -128,12 +139,20 @@ format) are also served, and are not authenticated.
 | `properties` | no | Flat object. `track` and `page` only. |
 | `traits` | no | Flat object. `identify` only. |
 | `timestamp` | no | ISO-8601. Defaults to server time at receipt; see *Retries*. |
-| `context` | no | `url`, `path`, `referrer`, `user_agent`, and the five `utm_*` fields. |
+| `context` | no | `url`, `path` and `referrer`, up to 2048 characters each; `user_agent`, up to 1024; and the five `utm_*` fields, up to 128 each. |
 
 Property and trait values may be strings, numbers, booleans, or null. Numbers
 are stored in a numeric column and everything else as text, so `3` and `"3"` are
 not interchangeable. Nested objects and arrays are not supported. An event may
 carry up to 250 properties.
+
+**A context field over its limit costs the whole event**, not just that field:
+the event fails validation, is dead-lettered, and the response still says
+`202` — with `rejected` counting it. This is easier to hit than it looks; an
+OAuth callback URL carrying a `redirect_uri` clears 2048 characters without
+trying. The browser SDK truncates `url`, `path`, `referrer` and `user_agent`
+to these limits before sending, and warns on the console when it does. If you
+are calling the HTTP API directly, truncate them yourself.
 
 Client clocks are frequently wrong, so an explicit `timestamp` is clamped to
 within 24 hours of server time.
@@ -181,6 +200,148 @@ different instant, lands as another permanent row, and is also misdated to the
 clamp boundary rather than when it happened. Nothing reports this. If your
 retry queue can outlive a day, aggregate by `event_id` and treat the engine
 collapse as an optimisation you do not have.
+
+## Sending events from a browser
+
+For a website or web app, `@lyraflow/sdk-browser` is a small script that calls
+`/v1/track`, `/v1/page`, `/v1/identify` and `/v1/batch` for you, and handles
+retries, an on-page queue, and (optionally) a consent gate. It is **not**
+published to npm and there is no CDN: the server serves its own bundle, so a
+self-hosted install never depends on infrastructure outside it.
+
+Paste this before `</head>`:
+
+```html
+<script>
+  !function(){var l=window.lyraflow=window.lyraflow||{};l.q=l.q||[];
+  ["init","track","page","identify","consent","reset","flush"].forEach(function(m){
+    l[m]=l[m]||function(){l.q.push([m].concat([].slice.call(arguments)))}});
+  }();
+</script>
+<script async src="https://analytics.example.com/lyraflow.js"></script>
+<script>
+  lyraflow.init({ host: 'https://analytics.example.com', writeKey: 'wk_live_…' })
+</script>
+```
+
+The first block is a stub: it queues any call made before the async script
+finishes loading, so a `track()` fired the instant the page renders is never
+lost to a race with the network. **`init` is queued the same way as every
+other method** — the third block usually runs long before the async script
+has loaded, which is exactly why `init` has to be in the stub's method list.
+The moment the real script loads it replaces the stub on `window.lyraflow`
+and takes the queue with it, running the queued `init` first whatever order
+the calls were made in. On a repeat visit the cached script can run *before*
+the third block; the queue is then held until that `init` arrives, and drained
+by it. Either way nothing queued is lost. Replace both
+occurrences of `https://analytics.example.com` with your own Lyraflow host,
+and `writeKey` with the `wk_…` key from *Running Lyraflow* above — the same
+one your server-side calls already use.
+
+The bundle is served by the app itself at two paths, unauthenticated (a
+`<script>` tag has no way to send a header):
+
+| Path | Cache policy |
+| --- | --- |
+| `GET /lyraflow.js` | `max-age=300` — an upgrade reaches already-cached browsers within five minutes |
+| `GET /lyraflow-<version>.js` (e.g. `/lyraflow-0.1.0.js`) | `max-age=31536000, immutable` — this exact version, forever |
+
+Both paths are served gzipped to any client that accepts it, by the app
+itself — putting a compressing proxy in front is a valid thing to do, but it
+is not something you have to do to avoid shipping three times the bytes.
+
+Use the bare `/lyraflow.js` path, as in the snippet above, unless you have a
+specific reason to pin a version. If the sibling package was never built into
+your image, both paths answer `503` rather than taking the rest of the server
+down.
+
+**The write key is public by design** — it is meant to sit in page source,
+same as in any curl example above. It can only write events. The **server
+key must never appear here or anywhere in browser-shipped code**: it merges
+identities, reads and deletes person data, and runs segment queries — see
+*Identity resolution*, *Segments*, and *Privacy* below for everything it
+gates.
+
+### Methods
+
+`init()` must be called once, before anything else. Every other method is
+silently dropped (and logs a console warning) if called first.
+
+```js
+lyraflow.init({
+  host: 'https://analytics.example.com',
+  writeKey: 'wk_live_…',
+  cookieDomain: '.example.com', // optional; auto-detected if omitted, see below
+  requireConsent: false,        // optional; default false, see Consent below
+  autoPageView: false,          // optional; default false — fire one page() at init
+  debug: false,                 // optional; default false — verbose console.debug logging
+})
+```
+
+```js
+lyraflow.track('signup', { plan: 'trial', seats: 3 })
+```
+
+```js
+lyraflow.page()            // name defaults server-side to "$page"
+lyraflow.page('Pricing')   // an explicit name
+```
+
+```js
+lyraflow.identify('user-42', { plan: 'trial' })
+```
+
+```js
+lyraflow.consent(true)   // or false — see Consent below
+```
+
+```js
+lyraflow.reset()   // e.g. on logout: flushes, then rotates to a fresh anonymous id
+```
+
+```js
+await lyraflow.flush()   // e.g. before a manual redirect the browser's own unload handling won't catch
+```
+
+Events are queued in `localStorage` and sent in batches to `/v1/batch` (see
+*Sending your first event* above for that endpoint's own semantics), on a
+timer and again on page unload using `fetch`'s `keepalive` option, so a
+tab closed mid-batch still delivers what was already queued.
+
+### Consent
+
+Off by default (`requireConsent: false`): the SDK starts sending immediately,
+the same as any other analytics snippet. Set `requireConsent: true` and it
+starts in a **pending** state instead — nothing touches a cookie,
+`localStorage`, or the network until `lyraflow.consent(true)` is called. (One
+exception: if the browser already signals Do Not Track or Global Privacy
+Control, `requireConsent: true` starts the gate **refused** outright, without
+waiting for a call. With `requireConsent` left off, neither signal is read at
+all — that compliance decision is left entirely to you.) Anything tracked
+while pending is held in memory (not persisted) and released once consent is
+granted; `lyraflow.consent(false)` discards it and stops the SDK from sending
+anything further.
+
+**A refusal cannot be remembered by the SDK.** Persisting "this visitor said
+no" would itself mean writing a cookie or `localStorage` entry — exactly what
+a refusal declines. Your application owns that choice: store it however you
+already store consent decisions, and pass the outcome back in on the next
+load (`requireConsent: false` once you know they said yes, or call
+`lyraflow.consent(false)` again before anything else runs if they said no).
+
+### `LYRAFLOW_ALLOWED_ORIGINS`
+
+The CORS preflight restriction described in *Sending your first event* above
+applies here too, since this is exactly what triggers it: the same
+`LYRAFLOW_ALLOWED_ORIGINS` env var, and the same limit. It stops someone from
+quietly reusing your write key on a different origin without you noticing —
+it is **not** a security boundary, because the write key already ships in
+page source and any non-browser sender ignores CORS entirely.
+
+### Single-page apps
+
+The SDK does not patch `history.pushState` or listen for route changes — call
+`lyraflow.page()` yourself after each client-side navigation completes.
 
 ## Identity resolution
 

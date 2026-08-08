@@ -114,8 +114,15 @@ immediately, but the constant only changes when something emits. The failure rea
 "expected 5 to be 6", which looks like a broken test rather than a build that has not been
 re-run.
 
-`pnpm typecheck` (`tsc -b`) also emits and satisfies both, which is why the order in CI is
-lint, typecheck, then test.
+`pnpm typecheck` (`tsc -b`) also emits, which used to make it sufficient on its own. **It is
+not any more.** The browser SDK's shipped artefact is an esbuild bundle produced by that
+package's own build script, and `tsc` never runs it — so `bundle-size.test.ts`,
+`snippet.test.ts` and the SDK route tests all fail on a missing `dist/lyraflow.js` unless
+`pnpm build` has run. CI therefore runs lint, typecheck, **build**, then test.
+
+The lesson generalises: a package whose output is not produced by `tsc` cannot rely on
+`typecheck` to stand in for a build, and the failure surfaces only where that output is
+read.
 
 Most tests talk to those real containers rather than mocking the databases. The durability
 test is deliberately excluded from `pnpm test` — it builds an image and starts the full

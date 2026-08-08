@@ -1,3 +1,4 @@
+import cors from '@fastify/cors'
 import { BatchPayload, IngestPayload, isBot, parseUserAgent } from '@lyraflow/core'
 import type { ClickHouseClient } from '@lyraflow/db'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
@@ -21,6 +22,14 @@ export interface IngestDeps {
   ch: ClickHouseClient
   bindings: IdentityBindings
   aliases: PersonAliases
+  /**
+   * Origins permitted to call the write-key routes from a browser. Empty (or
+   * omitted, for callers that construct IngestDeps directly rather than
+   * through Config) means any origin — see config.ts's allowedOrigins for
+   * why that is the right default. NOT a security boundary; see the same
+   * docstring.
+   */
+  allowedOrigins?: string[]
 }
 
 export const WRITE_KEY_HEADER = 'x-lyraflow-write-key'
@@ -140,7 +149,18 @@ async function writeDeadLetters(
 }
 
 export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): void {
-  const { buffer, projects, counters, cardinality, geo, readiness, ch, bindings, aliases } = deps
+  const {
+    buffer,
+    projects,
+    counters,
+    cardinality,
+    geo,
+    readiness,
+    ch,
+    bindings,
+    aliases,
+    allowedOrigins = [],
+  } = deps
 
   const onDeadLetterError = (err: unknown, rows: DeadLetterRow[]) =>
     app.log.error({ err, rows: rows.length }, 'dead-letter write failed')
@@ -263,11 +283,89 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
     }
   }
 
-  app.post('/v1/track', single('track'))
-  app.post('/v1/identify', single('identify'))
-  app.post('/v1/page', single('page'))
+  // Each write-key route gets its OWN encapsulated plugin, registered with
+  // its own exact `prefix`, rather than one shared plugin covering all four.
+  //
+  // That single-shared-plugin shape looks right and is NOT: @fastify/cors is
+  // wrapped in fastify-plugin, and fastify-plugin's whole purpose is to
+  // *skip* creating a new encapsulation context — the plugin's decorators
+  // and hooks attach directly to whatever instance registered it. Fastify
+  // hooks (onRequest etc.) do stay properly scoped to that instance's own
+  // routes this way, confirmed by probing it directly. But @fastify/cors
+  // also unconditionally registers a wildcard `OPTIONS *` route to answer
+  // preflight (see its index.js), and Fastify's HTTP router (find-my-way) is
+  // ONE shared router for the whole app — a method+path match, not an
+  // encapsulation-scoped one. A bare `OPTIONS *` therefore becomes the
+  // fallback for *any* path in the entire app that has no OPTIONS route of
+  // its own, e.g. GET /v1/segments or POST /v1/alias — exactly the
+  // server-key routes this task exists to keep CORS off of. Registering the
+  // plugin once under a single parent context does not avoid this; it was
+  // tried and it leaks (see cors.test.ts's "does NOT enable CORS on the
+  // server-key routes" — that failure is what surfaced this).
+  //
+  // Registering with a `prefix` makes Fastify prepend that prefix to every
+  // route the plugin declares, including @fastify/cors's own wildcard — so
+  // each instance's wildcard becomes e.g. `OPTIONS /v1/track*` rather than
+  // a bare `OPTIONS *`, and can no longer answer for /v1/segments or
+  // /v1/alias. The trade-off: it also answers for any *other* path sharing
+  // that prefix (e.g. a hypothetical /v1/trackXYZ) — harmless today since no
+  // such route exists, but worth knowing if one ever gets added.
+  function registerIngestRoute(
+    path: string,
+    handler: (req: FastifyRequest, reply: FastifyReply) => Promise<unknown>,
+  ): void {
+    app.register(
+      async (instance) => {
+        await instance.register(cors, {
+          // Empty allowedOrigins means any origin — see config.ts's
+          // allowedOrigins docstring for why that is the right default and
+          // why this is a product limit, not a security boundary.
+          origin: allowedOrigins.length === 0 ? true : allowedOrigins,
+          methods: ['POST'],
+          // Explicit, not the default reflect-the-request-headers behaviour:
+          // the SDK's actual request carries content-type and the write-key
+          // header, and this list is what makes a dropped entry here break
+          // the preflight rather than silently keep working via reflection.
+          allowedHeaders: ['content-type', WRITE_KEY_HEADER],
+          // retry-after is NOT one of the CORS-safelisted response headers a
+          // browser exposes to script by default — without this, a browser's
+          // `res.headers.get('retry-after')` on a real 503 is always `null`,
+          // even though the header is on the wire. transport.ts reads exactly
+          // that header to time its retry; without exposing it, the SDK falls
+          // back to its own backoff instead of the server's advice, retrying
+          // an already-saturated ingest far sooner than told (or, the other
+          // direction, capped at the exponential ceiling when the server
+          // asked for longer). This is the one line where the two halves —
+          // this plugin and transport.ts's `res.headers.get('retry-after')`
+          // — actually meet, and nothing else in the suite can see it: the
+          // SDK's own retry-after tests use a fake fetchImpl whose
+          // headers.get always works, browser CORS restrictions and all.
+          exposedHeaders: ['retry-after'],
+          // The spec default preflight cache (with no max-age sent) is 5
+          // seconds in most browsers, and the SDK flushes every
+          // FLUSH_INTERVAL_MS (transport.ts) — 5,000ms by default. Without
+          // this, a steadily-tracking page pays a fresh OPTIONS before
+          // essentially every POST, doubling request volume against the
+          // busiest endpoint in the product for the life of every session.
+          // 600s is comfortably longer than any realistic flush interval;
+          // the allowlist itself only changes on a server restart, which
+          // invalidates any browser's cached preflight along with it (a new
+          // process, new listener).
+          maxAge: 600,
+        })
+        // '' registers at exactly `path` (the plugin's prefix) rather than
+        // `path + '/'` — see Fastify's own docs on prefixing.
+        instance.post('', handler)
+      },
+      { prefix: path },
+    )
+  }
 
-  app.post('/v1/batch', async (req, reply) => {
+  registerIngestRoute('/v1/track', single('track'))
+  registerIngestRoute('/v1/identify', single('identify'))
+  registerIngestRoute('/v1/page', single('page'))
+
+  registerIngestRoute('/v1/batch', async (req, reply) => {
     const project = await authenticate(req, reply)
     if (!project) return
 

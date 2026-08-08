@@ -1,4 +1,18 @@
 export const MAX_ID_LENGTH = 128
+/** Shared with the browser SDK, which warns before sending rather than after. */
+export const MAX_PROPERTIES_PER_EVENT = 250
+
+/**
+ * Context string caps, enforced by `Context` in `payloads.js`.
+ *
+ * Named constants rather than literals inside the schema because the browser
+ * SDK has to hold the same numbers — it cannot import Zod, so it re-declares
+ * them and `validate.test.ts` pins its copies against these. A URL over the
+ * cap does not merely lose the URL: the whole event fails validation and is
+ * dead-lettered, which is why the SDK truncates to these before sending.
+ */
+export const MAX_URL_LENGTH = 2048
+export const MAX_USER_AGENT_LENGTH = 1024
 
 export type PropertyValue = string | number | boolean | null
 

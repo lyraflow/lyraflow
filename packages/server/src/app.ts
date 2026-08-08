@@ -21,6 +21,7 @@ import { registerPrivacyRoutes } from './privacy/routes.js'
 import { SuppressionStore } from './privacy/suppression-store.js'
 import { PurgeWorker } from './privacy/worker.js'
 import { registerSchemaRoutes } from './schema/routes.js'
+import { registerSdkRoutes } from './sdk/routes.js'
 import { SegmentCache } from './segments/cache.js'
 import { registerSegmentRoutes } from './segments/routes.js'
 
@@ -138,6 +139,9 @@ export function buildApp(input: {
     segmentCache,
   } satisfies AppDeps)
   registerHealth(app, readiness)
+  // Unauthenticated and dependency-free, like health — registered up front
+  // for the same reason.
+  registerSdkRoutes(app)
   // Sourced from IngestCounters, not an onResponse hook counting HTTP
   // responses: /v1/batch answers with a single response for up to 500
   // events, so a response-derived count would undercount by up to 500x and
@@ -159,6 +163,7 @@ export function buildApp(input: {
     ch,
     bindings,
     aliases,
+    allowedOrigins: config.allowedOrigins,
   })
   registerPersonRoutes(app, { projects, readiness, ch, bindings, aliases, suppression })
   registerSegmentRoutes(app, {

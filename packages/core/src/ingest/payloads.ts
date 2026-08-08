@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { MAX_ID_LENGTH } from './properties.js'
+import { MAX_ID_LENGTH, MAX_URL_LENGTH, MAX_USER_AGENT_LENGTH } from './properties.js'
 
 const id = z.string().min(1).max(MAX_ID_LENGTH)
 const propertyValue = z.union([z.string(), z.number(), z.boolean(), z.null()])
@@ -7,10 +7,10 @@ const propertyBag = z.record(propertyValue)
 
 const Context = z
   .object({
-    url: z.string().max(2048).optional(),
-    path: z.string().max(2048).optional(),
-    referrer: z.string().max(2048).optional(),
-    user_agent: z.string().max(1024).optional(),
+    url: z.string().max(MAX_URL_LENGTH).optional(),
+    path: z.string().max(MAX_URL_LENGTH).optional(),
+    referrer: z.string().max(MAX_URL_LENGTH).optional(),
+    user_agent: z.string().max(MAX_USER_AGENT_LENGTH).optional(),
     utm_source: z.string().max(MAX_ID_LENGTH).optional(),
     utm_medium: z.string().max(MAX_ID_LENGTH).optional(),
     utm_campaign: z.string().max(MAX_ID_LENGTH).optional(),
