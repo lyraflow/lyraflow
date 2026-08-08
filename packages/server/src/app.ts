@@ -14,6 +14,7 @@ import { registerIngestRoutes } from './ingest/routes.js'
 import type { EventRow } from './ingest/row.js'
 import { registerMetrics } from './metrics.js'
 import { DeletionStore } from './privacy/deletion-store.js'
+import { registerExportRoute } from './privacy/export.js'
 import { registerPrivacyRoutes } from './privacy/routes.js'
 import { SuppressionStore } from './privacy/suppression-store.js'
 import { registerSchemaRoutes } from './schema/routes.js'
@@ -123,7 +124,12 @@ export function buildApp(input: {
   // `LYRAFLOW_PURGE_MAX_ATTEMPTS` and `LYRAFLOW_PURGE_LEASE_MS` will resolve
   // to once config carries them — a later task wires the configured values
   // through; nothing here reads either from config yet.
-  registerPrivacyRoutes(app, {
+  //
+  // One shared object, not one built per registration: registerExportRoute
+  // takes the exact same PrivacyDeps registerPrivacyRoutes does (export.ts's
+  // own docstring), and constructing a second literal here is exactly the
+  // "define a second deps object" that invites the two to drift apart.
+  const privacyDeps = {
     projects,
     readiness,
     pg,
@@ -134,7 +140,9 @@ export function buildApp(input: {
     suppression,
     maxAttempts: 5,
     leaseMs: 600_000,
-  })
+  }
+  registerPrivacyRoutes(app, privacyDeps)
+  registerExportRoute(app, privacyDeps)
 
   return app
 }

@@ -746,6 +746,61 @@ curl -s http://localhost:3000/v1/deletions/118 \
 `{ "error": "deletion_not_found" }` — never `403`, which would confirm the id
 exists. A non-numeric `:id` is `400` with `{ "error": "invalid_deletion_id" }`.
 
+### Exporting a person
+
+`GET /v1/persons/:id/export` answers a subject-access request: everything
+Lyraflow has recorded about one person, as streamed NDJSON — one JSON object
+per line, not a single JSON document. Server-key only, like every endpoint in
+this section.
+
+```sh
+curl -s http://localhost:3000/v1/persons/user-42/export \
+  -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY"
+```
+
+```json
+{"type":"person","person_id":"user-42","ids":["user-42","visitor-1"],"traits":{"plan":"pro"},"first_seen":"2026-08-01T12:00:00.000Z","last_seen":"2026-08-06T09:30:00.000Z"}
+{"type":"event","event_id":"…","timestamp":"2026-08-01T12:00:00.000Z","event_name":"page","properties":{…},…}
+{"type":"event","event_id":"…","timestamp":"2026-08-06T09:30:00.000Z","event_name":"import_started","properties":{…},…}
+{"type":"end","events":2}
+```
+
+Three line shapes. The first line is always `type: "person"` — the same
+identity `GET /v1/persons/:id` returns, plus `traits`. Then one `type:
+"event"` line per event, oldest first, carrying every field recorded for it.
+The last line is always `type: "end"`, and `events` is the number of `event`
+lines that actually preceded it.
+
+**The export is a stream, and it terminates itself.** The response status and
+headers are sent before the first line, which means a failure part-way
+through cannot be reported as an HTTP error — the connection would already
+be committed to `200`. Instead, on a mid-stream failure the response simply
+ends without ever writing the final `end` line. **A response without a
+final `{"type":"end","events":N}` line is incomplete and must be discarded.**
+Always check for that line, and check that its `events` count matches the
+number of `event` lines you actually received — a truncated response that
+happens to look complete is exactly the failure a subject-access export
+cannot afford to miss.
+
+The export honours deletion the same way the person read does: a person who
+has been deleted exports only the events recorded after the deletion
+boundary, and a person with nothing left after that boundary is `404`, the
+same `{ "error": "person_not_found" }` as an id nothing has ever recorded.
+Traits are omitted entirely once a boundary exists — a trait carries no
+event time (it is the *latest* value known for that key, not a timestamped
+fact), so it cannot be split at the deletion instant the way an event can;
+returning it would be a way to read back exactly what the deletion asked to
+remove.
+
+The same device-window cap `GET /v1/persons/:id` enforces applies here too:
+past 200 device windows the export answers `400`
+`person_history_too_fragmented`, identically to the person read. Unlike
+`DELETE /v1/persons/:id`, which chunks and must never refuse to erase the
+most fragmented people, refusing to *render* an export for them is an
+acceptable answer — nothing about their data goes unerased because of it.
+
+`401` for a missing or invalid server key.
+
 
 ## Upgrading
 
