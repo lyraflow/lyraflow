@@ -41,20 +41,19 @@ export class SuppressionStore {
   }
 
   /**
-   * Writes or advances a person's boundary, returning the value now stored.
-   *
-   * Takes a `PoolClient` as well as a `Pool` so the deletion route can run it
-   * inside the same transaction as the deletion_requests insert — the two
-   * rows land together or not at all.
-   *
-   * GREATEST, so a repeat deletion moves the boundary FORWARD and an
-   * out-of-order write cannot rewind it. A plain `DO UPDATE SET suppressed_at
-   * = EXCLUDED.suppressed_at` would let a retried or delayed request un-hide
-   * data the newer one had already hidden.
+   * Writes or advances a single person's boundary, returning the value now
+   * stored. A thin, single-id convenience wrapper around `upsertMany` — see
+   * that method for the actual SQL, the GREATEST direction, and the
+   * transaction-sharing `Pool | PoolClient` parameter, all of which apply
+   * here unchanged. Kept as its own method because most callers (every test
+   * in this file bar the `upsertMany`-specific ones, and any future caller
+   * suppressing exactly one id) read more plainly against a single id than
+   * against a one-element array.
    *
    * The row is never deleted, including after the purge finishes — see
    * 005_suppression.sql for why (restoring an older backup of the event store
-   * must not resurrect a deleted person).
+   * must not resurrect a deleted person) and `upsertMany`'s own docstring for
+   * the one case where that guarantee does not reach far enough.
    */
   async upsert(
     client: Pool | PoolClient,
@@ -62,17 +61,10 @@ export class SuppressionStore {
     personId: string,
     at: Date,
   ): Promise<Date> {
-    const r = await client.query<{ suppressed_at: Date }>(
-      `INSERT INTO suppressed_persons (project_id, person_id, suppressed_at)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (project_id, person_id)
-       DO UPDATE SET suppressed_at = GREATEST(suppressed_persons.suppressed_at, EXCLUDED.suppressed_at)
-       RETURNING suppressed_at`,
-      [projectId, personId, at],
-    )
-    // The RETURNING row always exists: ON CONFLICT DO UPDATE returns the
-    // updated row, unlike DO NOTHING, which returns none.
-    return r.rows[0]?.suppressed_at as Date
+    const result = await this.upsertMany(client, projectId, [personId], at)
+    // Always present: a non-empty `personIds` array always returns exactly
+    // one row per (deduplicated) id it was given — see `upsertMany`.
+    return result.get(personId) as Date
   }
 
   /**
@@ -90,23 +82,46 @@ export class SuppressionStore {
    * keyed only on the canonical therefore misses it. Writing a row for every
    * id the deletion request actually covers — canonical, every id merged
    * into it, and every device — means each of those self-fallback
-   * resolutions still lands on a row that is there, with no dictionary hop
-   * required. See `deletion-store.ts`'s `request` for the caller that
-   * assembles that set.
+   * resolutions lands on a row that is there, with no dictionary hop
+   * required, FOR AS LONG AS THE FALLBACK ACTUALLY FIRES. See
+   * `deletion-store.ts`'s `request` for the caller that assembles that set.
    *
-   * Same GREATEST-not-overwrite behaviour as `upsert`, applied per id
-   * independently: an id that already carried a LATER boundary from an
-   * earlier, unrelated deletion (e.g. a device since reused and suppressed
-   * again under a different person) keeps its own later value rather than
-   * being rewound by this write.
+   * That qualifier is load-bearing, not decorative: it does NOT cover a
+   * device rebound to a different person after the purge, with a backup
+   * restored afterwards. `identity_bindings_dict_src` (003_identity.sql)
+   * gives a device's first REMAINING bind row a retroactive `valid_from` of
+   * epoch — by design, the same rule that lets a genuinely pre-bind
+   * anonymous session attribute correctly. Once the purge has deleted the
+   * erased person's binding, a later bind to someone else becomes that first
+   * row, and a restored anonymous event on that device resolves to the NEW
+   * person, not to the bare device id — so nothing ever consults the device
+   * id's suppression row again, even though it is still sitting right there.
+   * The erased person's anonymous history comes back, attributed to whoever
+   * holds the device now. This is not a regression this method introduces —
+   * the canonical-only implementation it replaces had exactly the same hole,
+   * for exactly the same events, it just couldn't be blamed on THIS
+   * mechanism specifically. Closing it needs either the suppression check to
+   * consult the raw `anonymous_id` directly, or the purge to persist the
+   * erased device's boundary somewhere the resolver reaches ahead of the
+   * identity dictionary — both are design changes, out of scope here. It
+   * needs all three of: the purge to have completed, that device later bound
+   * to a DIFFERENT person, and a backup predating the deletion restored
+   * afterwards. Identified events are unaffected regardless — they carry
+   * their own `user_id` and stay suppressed through their own row.
+   *
+   * Same GREATEST-not-overwrite behaviour as `upsert` (in fact `upsert` now
+   * calls this), applied per id independently: an id that already carried a
+   * LATER boundary from an earlier, unrelated deletion (e.g. a device since
+   * reused and suppressed again under a different person) keeps its own
+   * later value rather than being rewound by this write.
    *
    * Returns the stored boundary for every id, keyed by id, so a caller that
    * needs one particular id's value (the canonical's, for the API response)
    * can read it out of the map without a second round trip.
    *
-   * Takes a `Pool` as well as a `PoolClient` for the same reason `upsert`
-   * does: `DeletionStore.request` runs this inside the transaction that also
-   * writes the `deletion_requests` row.
+   * Takes a `Pool` as well as a `PoolClient` so `DeletionStore.request` can
+   * run this inside the transaction that also writes the `deletion_requests`
+   * row.
    *
    * `personIds` is deduplicated before it reaches SQL: a PostgreSQL
    * `INSERT ... ON CONFLICT DO UPDATE` errors ("ON CONFLICT DO UPDATE
@@ -115,6 +130,19 @@ export class SuppressionStore {
    * already deduplicated by its own contract, but this method has its own
    * caller-facing contract to keep regardless of what any particular caller
    * guarantees.
+   *
+   * Unlike `resolvePersonScope`'s `windows` (capped by
+   * `MAX_PERSON_RANGE_CLAUSES` and chunked by every caller that walks them),
+   * `personIds` here is NOT capped, and every row it writes is permanent —
+   * suppressed_persons rows are never deleted (see above). A customer that
+   * rotates `anonymous_id` per session turns one deletion into one row per
+   * session that person ever had, forever; and because
+   * `suppressed_persons_dict_src`'s dictionary is `COMPLEX_KEY_HASHED` with
+   * an `invalidate_query` keyed on `count(*)`/`max(suppressed_at)`
+   * (005_suppression.sql, dictionaries.ts), any write that changes either —
+   * which this one always does — reloads the WHOLE table, not just the new
+   * rows. Both are accepted consequences of this design, not defects; this
+   * comment is the only place either is written down.
    */
   async upsertMany(
     client: Pool | PoolClient,

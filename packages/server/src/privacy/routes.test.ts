@@ -290,6 +290,17 @@ describe('DELETE /v1/persons/:id', () => {
       [projectA, toId],
     )
     expect(sup.rowCount).toBe(1)
+    // Before Task 8b this was `0` — the discriminator PROVING suppression
+    // resolved to the canonical alone. After it, `1` only shows a row exists
+    // for `fromId`; it does not by itself prove suppression resolves
+    // correctly once the purge has run (fromId's own row survives the purge
+    // untouched — purge.ts never deletes suppressed_persons — so this
+    // assertion would read `1` even against a broken fan-out that wrote the
+    // wrong boundary, or a fan-out that forgot to dedupe and wrote it twice
+    // silently truncated to one row by the primary key). The end-to-end
+    // proof that this row is what keeps `fromId`'s history hidden after a
+    // restore lives in purge-restore.test.ts. What THIS assertion still
+    // pins: the fan-out did not silently skip `fromId`.
     const supFrom = await pg.query(
       'SELECT person_id FROM suppressed_persons WHERE project_id = $1 AND person_id = $2',
       [projectA, fromId],

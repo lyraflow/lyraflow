@@ -712,6 +712,18 @@ and is backed up with it, so a restored person stays hidden from queries, but
 their rows are back. Rotating or re-taking backups after a deletion is the
 operator's responsibility, and this is stated rather than pretended.
 
+One exception to "stays hidden": a device the erased person used, later
+bound to a genuinely DIFFERENT person, then a backup from before the
+deletion restored after that. The erased person's anonymous activity on that
+device is attributed by device id when nothing else claims it; once someone
+else's identity has since taken over that device, a restored anonymous event
+resolves to the NEW person instead, and nothing hides it — it appears as
+theirs, inflating their history. This needs all three of the purge having
+completed, that device rebound to someone else, and a backup predating the
+original deletion restored afterwards; a person's own identified events
+(anything carrying its own user id) are unaffected regardless. Narrow, and
+stated rather than silently left for an operator to discover.
+
 A deletion request with no subject — an id this project has never recorded —
 is `404`:
 

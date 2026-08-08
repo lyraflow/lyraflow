@@ -179,12 +179,19 @@ describe('DeletionStore', () => {
       const spiedPool = { connect: async () => client } as unknown as Pool
       const storeWithInjectedFailure = new DeletionStore(spiedPool, suppression)
 
+      // A THREE-element id set, not one — `upsertMany` writes the whole
+      // fan-out in a single statement specifically so there is no
+      // "partially written" state for a mid-fan-out crash to leave behind
+      // (see deletion-store.ts's own docstring), and a one-element set can't
+      // tell that apart from the pre-8b single-row write it replaced. All
+      // three must roll back together, not just the canonical.
+      const ids = ['orphan-1', 'orphan-2', 'orphan-3']
       await expect(
-        storeWithInjectedFailure.request(projectId, 'orphan-1', ['orphan-1'], new Date()),
+        storeWithInjectedFailure.request(projectId, 'orphan-1', ids, new Date()),
       ).rejects.toThrow('deliberate failure injected for this test')
       const sup = await pg.query(
-        'SELECT 1 FROM suppressed_persons WHERE project_id=$1 AND person_id=$2',
-        [projectId, 'orphan-1'],
+        'SELECT 1 FROM suppressed_persons WHERE project_id=$1 AND person_id = ANY($2)',
+        [projectId, ids],
       )
       expect(sup.rowCount).toBe(0)
     } finally {
