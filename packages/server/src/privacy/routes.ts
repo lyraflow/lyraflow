@@ -4,7 +4,12 @@ import type { ProjectCache } from '../auth/project-cache.js'
 import type { Readiness } from '../health.js'
 import type { PersonAliases } from '../identity/aliases.js'
 import type { IdentityBindings } from '../identity/bindings.js'
-import { personEventSummary, resolvePersonScope } from '../identity/scope.js'
+import {
+  MAX_PERSON_RANGE_CLAUSES,
+  chunkWindows,
+  personEventSummary,
+  resolvePersonScope,
+} from '../identity/scope.js'
 import { SERVER_KEY_HEADER, makeAuthenticator } from '../ingest/routes.js'
 import type { DeletionStore } from './deletion-store.js'
 import type { SuppressionStore } from './suppression-store.js'
@@ -44,7 +49,13 @@ interface DeletionParams {
  */
 function parseDeletionId(raw: string): number | null {
   const id = Number(raw)
-  return Number.isInteger(id) && id > 0 ? id : null
+  // Bounded above by MAX_SAFE_INTEGER, not just "is an integer": a value
+  // like 1e20 passes Number.isInteger (it is exactly representable as a
+  // float) but is far outside Postgres's bigint range, and reaches
+  // DeletionStore#get as a query parameter that Postgres itself rejects —
+  // the exact "deterministic client error surfaces as a 503" outcome this
+  // function exists to prevent for every other malformed shape.
+  return Number.isInteger(id) && id > 0 && id <= Number.MAX_SAFE_INTEGER ? id : null
 }
 
 /**
@@ -91,9 +102,41 @@ export function registerPrivacyRoutes(app: FastifyInstance, deps: PrivacyDeps): 
     // to guarantee. It also keeps a repeat request idempotent: an operator
     // re-requesting deletion after a purge exhausted its attempts, for a
     // person with no activity since their first request, must still get a
-    // `202` and an advanced boundary, not a `404`.
-    const summary = await personEventSummary(ch, project.id, scope)
-    if (summary.events === 0) {
+    // `202` and an advanced boundary, not a `404`. DO NOT "fix" this by
+    // passing a boundary through for symmetry with GET — that is exactly
+    // the change that breaks the operator-recovery path above, silently:
+    // every test in this file still passes with a boundary applied, because
+    // none of them re-request a deletion for a person with no NEW activity
+    // since their first one. See routes.test.ts's
+    // "still 202s a repeat deletion..." test, which exists specifically to
+    // catch that regression.
+    //
+    // Chunked, not one unbounded call: GET caps at MAX_PERSON_RANGE_CLAUSES
+    // and answers 400 past it, which is a fine answer for a profile view
+    // and an unacceptable one for an erasure request — refusing to erase
+    // the most fragmented people is itself the compliance failure. Each
+    // chunk is independently bounded regardless of how fragmented the
+    // person's device history is, and this stops at the first chunk that
+    // matches ANY event: existence is a yes/no question, so paying for
+    // every remaining chunk once the answer is already "yes" is wasted
+    // work. chunkWindows always yields at least one chunk (even for zero
+    // windows), which is what lets a person whose events all carry their
+    // own user_id — no device window ever needed — be found by the very
+    // first chunk's group-only predicate.
+    let exists = false
+    for (const [i, windows] of chunkWindows(scope.windows, MAX_PERSON_RANGE_CLAUSES).entries()) {
+      const summary = await personEventSummary(
+        ch,
+        project.id,
+        { group: scope.group, windows },
+        { prefix: `c${i}_` },
+      )
+      if (summary.events > 0) {
+        exists = true
+        break
+      }
+    }
+    if (!exists) {
       return reply.code(404).send({ error: 'person_not_found' })
     }
 

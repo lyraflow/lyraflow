@@ -6,6 +6,7 @@ import { IdentityBindings } from './bindings.js'
 import {
   MAX_PERSON_RANGE_CLAUSES,
   type PersonScope,
+  chunkWindows,
   personEventsPredicate,
   resolvePersonScope,
 } from './scope.js'
@@ -88,6 +89,42 @@ describe('personEventsPredicate', () => {
       b_f0: '1970-01-01 00:00:00.000',
       b_t0: '1970-01-01 00:00:02.000',
     })
+  })
+})
+
+describe('chunkWindows', () => {
+  // The load-bearing edge case: a person with zero windows (every event
+  // carries their own user_id, no device match ever needed) must still get
+  // ONE chunk to run the group-only predicate against — an empty chunk
+  // list would make every caller's loop a no-op, silently skipping such a
+  // person entirely (a false 404 for the deletion route, a purge that
+  // deletes nothing for the worker).
+  it('yields exactly one chunk, containing no windows, for an empty input', () => {
+    expect(chunkWindows([], 200)).toEqual([[]])
+  })
+
+  it('yields one chunk when the input is under the chunk size', () => {
+    const windows = [1, 2, 3]
+    expect(chunkWindows(windows, 200)).toEqual([[1, 2, 3]])
+  })
+
+  it('splits exactly at the boundary, with no trailing empty chunk', () => {
+    const windows = [1, 2, 3, 4]
+    expect(chunkWindows(windows, 2)).toEqual([
+      [1, 2],
+      [3, 4],
+    ])
+  })
+
+  it('carries the remainder in its own final, partial chunk', () => {
+    const windows = [1, 2, 3, 4, 5]
+    expect(chunkWindows(windows, 2)).toEqual([[1, 2], [3, 4], [5]])
+  })
+
+  it('does not mutate the input array', () => {
+    const windows = [1, 2, 3]
+    chunkWindows(windows, 2)
+    expect(windows).toEqual([1, 2, 3])
   })
 })
 

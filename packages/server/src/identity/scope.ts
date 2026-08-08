@@ -223,6 +223,39 @@ export function personEventsPredicate(
   return `(user_id IN {${prefix}group:Array(String)}${deviceBranch})`
 }
 
+/**
+ * Splits `windows` into groups of at most `size`, for callers that must
+ * bound the size of a single `personEventsPredicate` statement regardless
+ * of how fragmented a person's device history is — a person's windows are
+ * devices × rebinds, unbounded in principle, and `personEventsPredicate`
+ * emits roughly 110 bytes and three bound parameters PER window. Past a
+ * couple of thousand windows an unchunked statement can exceed
+ * ClickHouse's default `max_query_size` and throw outright.
+ *
+ * Shared by the deletion route's existence check (routes.ts) and the purge
+ * worker's event delete (purge.ts) — both need "process this person's
+ * whole window set without ever refusing", just for different operations,
+ * so the chunking itself lives here once rather than twice.
+ *
+ * ALWAYS yields at least one chunk, even for `windows.length === 0`
+ * (`[[]]`, not `[]`). `personEventsPredicate`'s `user_id IN group` branch
+ * is independent of windows entirely — a person whose every event carries
+ * their own `user_id` directly (no device-window match ever needed, e.g.
+ * server-side-only tracking) has zero windows by construction. Returning
+ * no chunks at all for that person would skip the loop in every caller
+ * entirely: the deletion route would never check for their events (a
+ * false `person_not_found`), and the purge worker would never delete them
+ * (a purge that silently purges nothing).
+ */
+export function chunkWindows<T>(windows: T[], size: number): T[][] {
+  if (windows.length === 0) return [[]]
+  const chunks: T[][] = []
+  for (let i = 0; i < windows.length; i += size) {
+    chunks.push(windows.slice(i, i + size))
+  }
+  return chunks
+}
+
 interface PersonEventsRow {
   first_seen: string
   last_seen: string
@@ -269,20 +302,30 @@ export interface PersonEventSummary {
  * request idempotent: an operator re-requesting after a purge exhausted its
  * attempts, for a person with no activity since their first request, must
  * not be told the person no longer exists.
+ *
+ * `opts.prefix`, like `personEventsPredicate`'s own `prefix`, namespaces
+ * every bound parameter this builds — `projectId` and `after` included —
+ * not only the ones `personEventsPredicate` itself adds. Each call to this
+ * function is its own independent request with its own fresh `params`
+ * object, so nothing here can actually collide across calls; a caller that
+ * chunks a single person's windows across several calls (the deletion
+ * route's existence check) still passes a distinct prefix per chunk, so
+ * that never becomes true by accident later.
  */
 export async function personEventSummary(
   ch: ClickHouseClient,
   projectId: number,
   scope: Pick<PersonScope, 'group' | 'windows'>,
-  opts: { after?: Date } = {},
+  opts: { after?: Date; prefix?: string } = {},
 ): Promise<PersonEventSummary> {
-  const params: Record<string, unknown> = { projectId }
-  const identity = personEventsPredicate(scope, params)
+  const prefix = opts.prefix ?? ''
+  const params: Record<string, unknown> = { [`${prefix}projectId`]: projectId }
+  const identity = personEventsPredicate(scope, params, prefix)
 
   let afterClause = ''
   if (opts.after) {
-    params.after = chDateTime(opts.after)
-    afterClause = ' AND timestamp > {after:DateTime64(3)}'
+    params[`${prefix}after`] = chDateTime(opts.after)
+    afterClause = ` AND timestamp > {${prefix}after:DateTime64(3)}`
   }
 
   const rs = await ch.query({
@@ -292,7 +335,7 @@ export async function personEventSummary(
         max(timestamp) AS last_seen,
         count(DISTINCT event_id) AS events
       FROM events
-      WHERE project_id = {projectId:UInt32}
+      WHERE project_id = {${prefix}projectId:UInt32}
         AND ${identity}${afterClause}
     `,
     query_params: params,

@@ -74,7 +74,26 @@ async function makeProject(slug: string, name: string, writeKey: string, serverK
   return Number(r.rows[0]?.id)
 }
 
+/**
+ * Cleans both stores for this file's two projects, looking the ids up by
+ * slug first rather than trusting `projectA`/`projectB` — those module
+ * variables are unset (or stale, from a previous run in the same process)
+ * the first time this runs at the TOP of `beforeAll`. A run that dies
+ * mid-suite leaves ClickHouse `events` rows behind with the OLD project
+ * id, which nothing cleans up on its own: Postgres project ids are a
+ * fresh `serial` every run, so `afterAll`'s cleanup can never reach a
+ * previous run's abandoned rows by id, only its own. Looking the id up by
+ * slug, right before deleting it, is what makes this idempotent across
+ * runs instead of leaking one project's worth of events per crash.
+ */
 async function cleanup(): Promise<void> {
+  const existing = await pg.query<{ id: string }>('SELECT id FROM projects WHERE slug = ANY($1)', [
+    [SLUG_A, SLUG_B],
+  ])
+  const ids = existing.rows.map((r) => Number(r.id))
+  if (ids.length > 0) {
+    await ch.command({ query: `ALTER TABLE events DELETE WHERE project_id IN (${ids.join(',')})` })
+  }
   await pg.query('DELETE FROM projects WHERE slug = ANY($1)', [[SLUG_A, SLUG_B]])
 }
 
@@ -89,8 +108,9 @@ beforeAll(async () => {
   // identical reasoning: a run that died mid-suite would otherwise leave rows
   // from a previous attempt for this run to collide with. Project deletion
   // cascades to identity_bindings, person_aliases, suppressed_persons and
-  // deletion_requests (every FK above is ON DELETE CASCADE), so this alone
-  // is enough on the Postgres side.
+  // deletion_requests on the Postgres side (every FK above is ON DELETE
+  // CASCADE); `cleanup()` itself handles the ClickHouse `events` rows, which
+  // have no such cascade.
   await cleanup()
 
   projectA = await makeProject(SLUG_A, 'Privacy Routes A', WRITE_KEY_A, SERVER_KEY_A)
@@ -118,9 +138,6 @@ afterAll(async () => {
   await app.deps.buffer.flush()
   await app.close()
   await cleanup()
-  await ch.command({
-    query: `ALTER TABLE events DELETE WHERE project_id IN (${projectA}, ${projectB})`,
-  })
   await pg.end()
   await ch.close()
 })
@@ -337,24 +354,72 @@ describe('DELETE /v1/persons/:id', () => {
     const spy = vi
       .spyOn(ch, 'command')
       .mockRejectedValueOnce(new Error('deliberate reload failure injected for this test'))
+    let requestId: number
     try {
       const res = await deleteAs(userId, SERVER_KEY_A)
       expect(res.statusCode).toBe(202)
       expect(res.json().person_id).toBe(userId)
+      requestId = res.json().request_id
     } finally {
       spy.mockRestore()
     }
 
-    // The rows genuinely landed despite the reload failure.
+    // BOTH rows genuinely landed despite the reload failure — the claim is
+    // that the deletion itself succeeded, not just the suppression half of
+    // it, so both are checked rather than only one standing in for both.
     const sup = await pg.query(
       'SELECT 1 FROM suppressed_persons WHERE project_id = $1 AND person_id = $2',
       [projectA, userId],
     )
     expect(sup.rowCount).toBe(1)
+    const req = await pg.query(
+      'SELECT 1 FROM deletion_requests WHERE project_id = $1 AND person_id = $2 AND id = $3',
+      [projectA, userId, requestId],
+    )
+    expect(req.rowCount).toBe(1)
+  })
+
+  it('still 202s a repeat deletion for a suppressed-but-not-yet-purged person with no new activity', async () => {
+    // THE property the boundary omission exists for. Until the purge worker
+    // actually deletes a person's rows, their events are still sitting in
+    // ClickHouse — a repeat DELETE, with no activity since the first one,
+    // must still find them and answer 202, moving the boundary forward
+    // again. This is also the operator-recovery path: a purge that
+    // exhausted its attempts and gave up leaves exactly this state, and an
+    // operator re-requesting deletion must not be told the person no
+    // longer exists.
+    const userId = `repeat-no-new-activity-${randomUUID()}`
+    await identifyWithDevice(WRITE_KEY_A, userId)
+
+    const first = await deleteAs(userId, SERVER_KEY_A)
+    expect(first.statusCode).toBe(202)
+
+    // No new activity for this person between the two requests — the
+    // events ARE now suppressed (their timestamp is at or before the
+    // boundary `first` just wrote), but nothing has purged them.
+    const second = await deleteAs(userId, SERVER_KEY_A)
+    expect(second.statusCode).toBe(202)
+    expect(second.json().request_id).not.toBe(first.json().request_id)
+    expect(new Date(second.json().suppressed_at).getTime()).toBeGreaterThanOrEqual(
+      new Date(first.json().suppressed_at).getTime(),
+    )
   })
 })
 
 describe('GET /v1/deletions/:id', () => {
+  it('rejects the write key', async () => {
+    // Both routes share one `authenticateServer` today (see
+    // registerPrivacyRoutes), so DELETE's own version of this test would
+    // pass even if this route's wiring broke independently of it — a
+    // future split of the two into separate authenticators is exactly what
+    // this test exists to catch. Same shape as DELETE's own test: the write
+    // key's value sent under the SERVER-key header, so the rejection is
+    // specifically "this key is not a server key".
+    const res = await status(1, WRITE_KEY_A)
+    expect(res.statusCode).toBe(401)
+    expect(res.json().error).toBe('invalid_server_key')
+  })
+
   it('reports pending, then completed', async () => {
     const userId = `status-lifecycle-${randomUUID()}`
     await identifyWithDevice(WRITE_KEY_A, userId)

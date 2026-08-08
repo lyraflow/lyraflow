@@ -698,7 +698,12 @@ deletion request are visible normally: if the same user keeps using your
 application, they reappear as a person with a history that starts at the
 deletion. Erasure is a right to have past data deleted, not a promise never
 to be measured again. Requesting deletion again moves the boundary forward
-and erases whatever accumulated since.
+and erases whatever accumulated since — including while a previous request
+is still waiting on the purge worker, which is exactly the case an operator
+re-requesting after a failed attempt needs to work. Once the purge has
+actually finished, though, a repeat request for a person with no activity
+since then finds nothing left to suppress, and answers `404` like any other
+id nothing has recorded.
 
 **Not covered:** backups. Lyraflow deletes from the live stores it manages. A
 backup you took before the deletion still contains the person's data, and
@@ -713,6 +718,8 @@ is `404`:
 ```json
 { "error": "person_not_found" }
 ```
+
+`401` for a missing or invalid server key.
 
 ### Checking on a deletion
 
