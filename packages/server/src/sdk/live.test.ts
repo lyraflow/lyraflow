@@ -402,4 +402,52 @@ describe('the SDK against the real app and ClickHouse', () => {
     const [row] = await rs.json<{ c: string }>()
     expect(Number(row?.c)).toBe(1)
   })
+
+  it('stores an event from a page whose URL is longer than the server accepts', async () => {
+    // The composition the per-task reviews could not see: the SDK sent
+    // `location.href` unbounded, the server's Zod caps `url` at 2048, and a
+    // violation rejects the WHOLE event. An OAuth callback with a long
+    // `redirect_uri` therefore answered 202, stored nothing, wrote one dead
+    // letter, and said nothing on the console. Both halves are real here —
+    // the real SDK builds the context, the real app validates it.
+    resetBrowserState()
+    const long = `https://shop.example.test/callback?redirect_uri=${'x'.repeat(2100)}`
+    ;(window as unknown as { happyDOM: { setURL: (u: string) => void } }).happyDOM.setURL(long)
+    expect(location.href.length).toBeGreaterThan(2048)
+
+    const sink: Captured[] = []
+    lyraflow.init({
+      host: 'http://sdk-live.test',
+      writeKey: WRITE_KEY,
+      autoPageView: false,
+      fetchImpl: makeFetchImpl(app, { sink }),
+    })
+    lyraflow.track('oauth_return', { plan: 'pro' })
+    await lyraflow.flush()
+    await app.deps.buffer.flush()
+
+    // The server counted it as accepted, not rejected — the number the
+    // transport now reads back and warns about.
+    const captured = sink[sink.length - 1]
+    expect(captured?.response.json()).toMatchObject({ accepted: 1, rejected: 0 })
+
+    const sent = JSON.parse(captured?.body ?? '{}').batch as Array<{
+      message_id: string
+      context: Record<string, string>
+    }>
+    const tracked = sent[0]
+    expect(tracked?.context.url).toHaveLength(2048)
+
+    const rs = await ch.query({
+      query: `SELECT url, properties['plan'] AS plan FROM events
+              WHERE project_id = {p:UInt32} AND event_id = {id:String}`,
+      query_params: { p: projectId, id: tracked?.message_id },
+      format: 'JSONEachRow',
+    })
+    const [row] = await rs.json<{ url: string; plan: string }>()
+    // The row exists at all, which is the point — and it carries the
+    // properties that used to be destroyed along with it.
+    expect(row?.url).toBe(tracked?.context.url)
+    expect(row?.plan).toBe('pro')
+  })
 })
