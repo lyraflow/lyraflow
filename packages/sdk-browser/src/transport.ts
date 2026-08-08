@@ -1,0 +1,219 @@
+import type { EventQueue } from './queue.js'
+
+export const BATCH_SIZE = 20
+export const FLUSH_INTERVAL_MS = 5_000
+const BACKOFF_BASE_MS = 1_000
+const BACKOFF_MAX_MS = 30_000
+/**
+ * A ceiling on a server-advised `retry-after`. The real ingest only ever
+ * sends `5` — both its draining and batch-overload paths
+ * (packages/server/src/ingest/routes.ts) hardcode `retry-after: 5`. This
+ * exists so a malformed or hostile header (a stray extra digit, something
+ * between the SDK and the ingest rewriting it) cannot switch retrying off
+ * for days by being merely a very large, otherwise-well-formed number — the
+ * one shape `Number.isFinite` alone would wave straight through. It never
+ * bites a well-behaved server.
+ */
+const MAX_HONOURED_RETRY_AFTER_MS = 5 * 60_000
+
+export type SendOutcome = 'sent' | 'retry' | 'dropped' | 'stopped'
+
+export class Transport {
+  #opts: {
+    host: string
+    writeKey: string
+    queue: EventQueue
+    warn: (message: string) => void
+    fetchImpl: typeof fetch
+  }
+  #timer: ReturnType<typeof setInterval> | null = null
+  #onHide: (() => void) | null = null
+  #onVisibility: (() => void) | null = null
+  #stopped = false
+  #failures = 0
+  #nextAttemptAt = 0
+
+  constructor(opts: {
+    host: string
+    writeKey: string
+    queue: EventQueue
+    warn: (message: string) => void
+    fetchImpl?: typeof fetch
+  }) {
+    this.#opts = { ...opts, fetchImpl: opts.fetchImpl ?? globalThis.fetch.bind(globalThis) }
+  }
+
+  isStopped(): boolean {
+    return this.#stopped
+  }
+
+  /**
+   * Idempotent: a second call while already running is a no-op. Without
+   * that guard, a caller that invokes `start()` defensively (e.g. on every
+   * SPA route change) would accumulate a fresh `setInterval` and a fresh
+   * pair of `pagehide`/`visibilitychange` listeners on every call, none of
+   * which `stop()` could ever fully undo.
+   */
+  start(): void {
+    if (this.#timer) return
+    this.#timer = setInterval(() => void this.flush(), FLUSH_INTERVAL_MS)
+    this.#onHide = () => void this.flush()
+    this.#onVisibility = () => {
+      if (document.visibilityState === 'hidden') void this.flush()
+    }
+    addEventListener('pagehide', this.#onHide)
+    addEventListener('visibilitychange', this.#onVisibility)
+  }
+
+  /**
+   * Undoes exactly what `start()` added, including the two listeners. Only
+   * clearing the timer here (leaving the listeners attached) would mean a
+   * page that calls `stop()` keeps firing `flush()` from `pagehide` and
+   * `visibilitychange` forever, and a later `start()` would layer a second
+   * pair of listeners on top of the still-live first pair.
+   */
+  stop(): void {
+    if (this.#timer) clearInterval(this.#timer)
+    this.#timer = null
+    if (this.#onHide) removeEventListener('pagehide', this.#onHide)
+    if (this.#onVisibility) removeEventListener('visibilitychange', this.#onVisibility)
+    this.#onHide = null
+    this.#onVisibility = null
+  }
+
+  /**
+   * NEVER REJECTS. Called fire-and-forget from a timer and from pagehide, so
+   * a rejection here becomes an unhandled rejection inside the customer's
+   * page. Every await is inside try/catch — not `.catch()`, which cannot
+   * absorb a synchronous throw from `fetchImpl`.
+   */
+  async flush(): Promise<SendOutcome> {
+    if (this.#stopped) return 'stopped'
+    if (Date.now() < this.#nextAttemptAt) return 'retry'
+
+    const batch = this.#opts.queue.peek(BATCH_SIZE)
+    if (batch.length === 0) return 'sent'
+
+    // Serialise BEFORE the try that handles network failure, so an
+    // unserialisable event is discarded rather than retried. Left inside
+    // that try, a throwing getter looks identical to a network error, and
+    // the same poison event returns to the head of the queue on every
+    // flush — blocking every healthy event behind it, forever, with
+    // nothing reporting it.
+    let body: string
+    try {
+      body = JSON.stringify({ batch })
+    } catch {
+      // At least one event in this batch can't be converted to JSON.
+      // Isolate exactly which one(s) with a per-event JSON.stringify each,
+      // and drop only those — dropping the WHOLE batch here would silently
+      // destroy every healthy event sitting next to the poison one too,
+      // which is barely better than the wedge this exists to prevent. This
+      // flush ends here with no network attempt for the survivors; the next
+      // flush (timer tick or pagehide) re-peeks the now-clean queue and
+      // sends them normally.
+      const poisoned: string[] = []
+      for (const e of batch) {
+        try {
+          JSON.stringify(e)
+        } catch {
+          poisoned.push(e.message_id)
+        }
+      }
+      // poisoned can legitimately come back empty: the whole-batch
+      // stringify can fail for a reason no single element reproduces alone
+      // (e.g. a getter that only throws on a second read). Fall back to
+      // dropping the whole batch rather than looping with nothing removed.
+      const toDrop = poisoned.length > 0 ? poisoned : batch.map((e) => e.message_id)
+      this.#opts.queue.remove(toDrop)
+      this.#opts.warn(
+        poisoned.length > 0
+          ? `${poisoned.length} event(s) could not be serialised and were dropped; a property getter threw`
+          : 'a batch could not be serialised and was dropped',
+      )
+      return 'dropped'
+    }
+
+    let res: Response
+    try {
+      res = await this.#opts.fetchImpl(`${this.#opts.host}/v1/batch`, {
+        method: 'POST',
+        keepalive: true,
+        headers: {
+          'content-type': 'application/json',
+          'x-lyraflow-write-key': this.#opts.writeKey,
+        },
+        body,
+      })
+    } catch {
+      this.#backoff()
+      return 'retry'
+    }
+
+    // `res` came back through an injected fetchImpl, which a test — or a
+    // browser extension shimming `fetch` in production — can hand back
+    // anything. Reading `.status` off something that isn't Response-shaped
+    // must fail the same way a network error does, not crash the caller.
+    let status: number
+    try {
+      status = res.status
+    } catch {
+      this.#backoff()
+      return 'retry'
+    }
+    if (!Number.isFinite(status)) {
+      this.#backoff()
+      return 'retry'
+    }
+
+    if (status === 202) {
+      this.#opts.queue.remove(batch.map((e) => e.message_id))
+      this.#failures = 0
+      this.#nextAttemptAt = 0
+      return 'sent'
+    }
+    if (status === 401) {
+      // The key is wrong; retrying forever hammers somebody's server for
+      // nothing and will never succeed.
+      this.#stopped = true
+      this.stop()
+      this.#opts.warn('the write key was rejected; no further events will be sent')
+      return 'stopped'
+    }
+    if (status === 400 || status === 413) {
+      this.#opts.queue.remove(batch.map((e) => e.message_id))
+      this.#opts.warn(
+        `the server rejected a batch with ${status}; retrying would not help, so it was dropped`,
+      )
+      return 'dropped'
+    }
+
+    // Read AFTER the status decision above, and guarded independently of
+    // it: a Response whose `.headers.get` throws must still let a
+    // 202/401/400/413 verdict stand on the status alone. Folding this read
+    // into the same try as the status read would turn a perfectly good 401
+    // into a mis-classified 'retry' whenever the headers object is
+    // hostile — exactly the response shape a network intermediary or a
+    // broken fetch polyfill can hand back.
+    let retryAfter: string | null = null
+    try {
+      retryAfter = res.headers.get('retry-after')
+    } catch {
+      retryAfter = null
+    }
+    this.#backoff(retryAfter)
+    return 'retry'
+  }
+
+  #backoff(retryAfter?: string | null): void {
+    this.#failures += 1
+    const advisedSeconds = retryAfter ? Number(retryAfter) : Number.NaN
+    const advisedMs = advisedSeconds * 1000
+    const exponential = Math.min(BACKOFF_BASE_MS * 2 ** (this.#failures - 1), BACKOFF_MAX_MS)
+    const jitter = exponential * 0.2 * Math.random()
+    const delay = Number.isFinite(advisedMs)
+      ? Math.min(Math.max(advisedMs, 0), MAX_HONOURED_RETRY_AFTER_MS)
+      : exponential + jitter
+    this.#nextAttemptAt = Date.now() + delay
+  }
+}
