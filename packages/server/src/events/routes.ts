@@ -208,29 +208,48 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
     const params = new Params()
     const projectParam = params.add(project.id, 'UInt32')
 
-    // `since` defaults to 24h before now when the caller omits it —
-    // ALWAYS applied, never an unbounded lower edge. `behaviourCte`
-    // (segments/behaviour.ts), whose two-layer shape this route copies,
-    // always carries a `scanBound`; every behavioural node's window is
-    // finite unless it says `ever` explicitly. This route had no
-    // equivalent, and `LIMIT 1 BY` in the inner subquery blocks any early
-    // stop the outer `ORDER BY ... LIMIT n` might otherwise offer —
-    // ClickHouse cannot know the `LIMIT 1 BY` output already comes out
-    // sorted, since the inner subquery carries no `ORDER BY` of its own
-    // (see the `afterClause` comment above for why it can't). Measured
-    // directly against a 500,000-row fixture: this exact query, with
+    // `since` defaults to 24h before now when the caller omits it AND
+    // there is no cursor. `behaviourCte` (segments/behaviour.ts), whose
+    // two-layer shape this route copies, always carries a `scanBound`;
+    // every behavioural node's window is finite unless it says `ever`
+    // explicitly. The NO-CURSOR call had no equivalent, and `LIMIT 1 BY`
+    // in the inner subquery blocks any early stop the outer
+    // `ORDER BY ... LIMIT n` might otherwise offer — ClickHouse cannot
+    // know the `LIMIT 1 BY` output already comes out sorted, since the
+    // inner subquery carries no `ORDER BY` of its own (see the
+    // `afterClause` comment above for why it can't). Measured directly
+    // against a 500,000-row fixture: this exact no-cursor query, with
     // `limit=50` and no `since` at all, read all 500,000 rows and 52 MiB —
     // linear in project size, not in `limit`, extrapolating to a hard
     // `503` around 40M events. It fails loudly (`timeout_overflow_mode:
     // 'throw'`, below) rather than truncating, so it was never a
     // correctness bug, but it was an unbounded-by-default operational
-    // ceiling nobody had noticed. Defaulting the window bounds every
-    // unmarked call, matches what a real `--follow`-style caller would
-    // send anyway, and an explicit, older `since` is still available for
-    // anyone who genuinely wants more.
+    // ceiling nobody had noticed.
+    //
+    // A CURSOR MUST NOT GET THIS DEFAULT. `(timestamp, event_id) >
+    // (at, aid)` in `afterClause` below is ITSELF a lower bound on the
+    // scan — a cursor-paged call was never the unbounded case the default
+    // exists to close, only the no-cursor call was. Applying the default
+    // on top of an older cursor position creates TWO lower bounds where
+    // the tighter (more recent) one silently wins: a follower whose
+    // cursor has fallen more than 24h behind would have every event
+    // between the cursor and the window edge silently dropped from that
+    // page — and since `next_cursor` only ever advances, that gap becomes
+    // permanently unreachable, with no error and no gap marker. Proven
+    // directly: an event at -30h (the stale cursor position), a gap event
+    // at -27h, and one at -1h — paging from the -30h cursor with no
+    // `since` returned ONLY the -1h event, silently losing the -27h one.
+    // An explicit `since` alongside a cursor still applies below (a
+    // caller deliberately narrowing is not the default firing); only the
+    // DEFAULT must stay off whenever a cursor is doing the job instead.
     const DEFAULT_SINCE_MS = 24 * 60 * 60 * 1000
-    const sinceDate = since ? new Date(since) : new Date(Date.now() - DEFAULT_SINCE_MS)
-    const sinceClause = ` AND timestamp >= ${params.add(chDateTime(sinceDate), 'DateTime64(3)')}`
+    let sinceClause = ''
+    if (since) {
+      sinceClause = ` AND timestamp >= ${params.add(chDateTime(new Date(since)), 'DateTime64(3)')}`
+    } else if (!cursor) {
+      const defaultSince = new Date(Date.now() - DEFAULT_SINCE_MS)
+      sinceClause = ` AND timestamp >= ${params.add(chDateTime(defaultSince), 'DateTime64(3)')}`
+    }
 
     let untilClause = ''
     if (until) {

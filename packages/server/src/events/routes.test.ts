@@ -9,6 +9,7 @@ import { loadConfig } from '../config.js'
 import { Readiness } from '../health.js'
 import { type PgDictionarySource, ensureIdentityDictionaries } from '../identity/dictionaries.js'
 import { MAX_PERSON_RANGE_CLAUSES } from '../identity/scope.js'
+import { encodeFeedCursor } from './cursor.js'
 import { EVENTS_MAX_LIMIT } from './routes.js'
 
 const CH_DB = 'lyraflow_test'
@@ -593,6 +594,87 @@ describe('GET /v1/events', () => {
     const ids = res.json().events.map((e: { event_id: string }) => e.event_id)
     expect(ids).toEqual([uuid(70)])
     expect(ids).not.toContain(uuid(71))
+  })
+
+  // THE test for the default-`since`/cursor interaction. A cursor is
+  // ITSELF a lower bound (`(timestamp, event_id) > (at, aid)`), so the
+  // default `since` must never also apply once a cursor is present — two
+  // lower bounds where the tighter one silently wins is exactly how a
+  // follower who fell more than 24h behind loses events with no error and
+  // no gap marker, since `next_cursor` only ever advances past whatever a
+  // call actually returned.
+  //
+  // Fixture: a stale cursor position at -30h (older than the 24h default
+  // window), a GAP event at -27h that keyset semantics say comes next, and
+  // a recent event at -1h. Paging from the -30h cursor with no `since`
+  // must return BOTH the gap event and the recent one — dropping the gap
+  // event is the exact silent hole this test exists to catch. All three
+  // timestamps are real-`Date.now()`-anchored (`chAtRealMsAgo`), inserted
+  // directly via `ch.insert` to bypass the ingest path's 24h clamp, for
+  // the same reason the default-`since` test above needs it.
+  it('does not apply the default since window when a cursor is present', async () => {
+    const cursorEventId = uuid(90)
+    const gapEventId = uuid(91)
+    const recentEventId = uuid(92)
+    await ch.insert({
+      table: 'events',
+      format: 'JSONEachRow',
+      values: [
+        {
+          project_id: projectA,
+          event_id: cursorEventId,
+          anonymous_id: '',
+          user_id: 'cursor-gap-user',
+          event_name: 'feed_cursor_gap_event',
+          timestamp: chAtRealMsAgo(30 * 60 * 60 * 1000),
+          received_at: chAtRealMsAgo(30 * 60 * 60 * 1000),
+          trusted: 1,
+          properties: {},
+          properties_num: {},
+        },
+        {
+          project_id: projectA,
+          event_id: gapEventId,
+          anonymous_id: '',
+          user_id: 'cursor-gap-user',
+          event_name: 'feed_cursor_gap_event',
+          timestamp: chAtRealMsAgo(27 * 60 * 60 * 1000),
+          received_at: chAtRealMsAgo(27 * 60 * 60 * 1000),
+          trusted: 1,
+          properties: {},
+          properties_num: {},
+        },
+        {
+          project_id: projectA,
+          event_id: recentEventId,
+          anonymous_id: '',
+          user_id: 'cursor-gap-user',
+          event_name: 'feed_cursor_gap_event',
+          timestamp: chAtRealMsAgo(1 * 60 * 60 * 1000),
+          received_at: chAtRealMsAgo(1 * 60 * 60 * 1000),
+          trusted: 1,
+          properties: {},
+          properties_num: {},
+        },
+      ],
+    })
+
+    // A cursor exactly at the stale (-30h) event's own position — the
+    // shape a real `--follow` client would hold after its previous page
+    // ended there.
+    const staleCursor = encodeFeedCursor({
+      timestamp: chAtRealMsAgo(30 * 60 * 60 * 1000),
+      eventId: cursorEventId,
+    })
+
+    const res = await get(
+      `/v1/events?event=feed_cursor_gap_event&after=${encodeURIComponent(staleCursor)}`,
+    )
+    expect(res.statusCode).toBe(200)
+    const ids = res.json().events.map((e: { event_id: string }) => e.event_id)
+    // Both the gap event and the recent one — not just the recent one, and
+    // not the cursor's own (already-seen) event.
+    expect(ids).toEqual([gapEventId, recentEventId])
   })
 
   // The cap exists because a person's windows are devices multiplied by
