@@ -114,8 +114,13 @@ function isRealCalendarDate(
   minute: number,
   second: number,
 ): boolean {
-  const ms = Date.UTC(year, month - 1, day, hour, minute, second)
-  const d = new Date(ms)
+  const d = new Date(Date.UTC(year, month - 1, day, hour, minute, second))
+  // Date.UTC applies the legacy two-digit-year rule to its NUMERIC year
+  // argument: Date.UTC(50, …) means 1950, not year 50. The regex requires
+  // four digits, so `"0050-01-01"` arrives here as year 50 and would fail
+  // the round-trip below against 1950 — rejecting a well-formed ISO date.
+  // setUTCFullYear has no such rule, so it puts the typed year back.
+  d.setUTCFullYear(year)
   return (
     d.getUTCFullYear() === year &&
     d.getUTCMonth() === month - 1 &&

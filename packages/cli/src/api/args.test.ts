@@ -106,6 +106,21 @@ describe('resolveInstant', () => {
       '2026-07-31T19:30:00.000Z',
     )
   })
+
+  it('accepts a four-digit year below 100, which Date.UTC would read as 19xx', () => {
+    // Date.UTC(50, 0, 1) means 1950, not year 50 -- the legacy two-digit-year
+    // rule applies to the NUMERIC argument, so the round-trip check would
+    // compare 1950 against the typed 50 and reject a well-formed ISO date.
+    // Absurd as a --since, but the round-trip must reject wrong dates, not
+    // merely unlikely ones.
+    const now = new Date('2026-08-08T12:00:00.000Z')
+    expect(resolveInstant('0050-01-01', now).toISOString()).toBe('0050-01-01T00:00:00.000Z')
+    expect(resolveInstant('0099-06-15T12:00:00Z', now).toISOString()).toBe(
+      '0099-06-15T12:00:00.000Z',
+    )
+    // And it still rejects an impossible date in that range.
+    expect(() => resolveInstant('0050-02-30', now)).toThrow(UsageError)
+  })
 })
 
 const SPEC = { strings: ['since', 'event'], booleans: ['follow', 'json'] }
