@@ -20,7 +20,20 @@ function checkBag(bag: Record<string, unknown> | undefined, label: string, out: 
     out.push(`${label}: ${keys.length} keys exceeds the limit of ${MAX_PROPERTIES_PER_EVENT}`)
   }
   for (const key of keys) {
-    const value = bag[key]
+    // bag[key] can be a getter the caller controls (directly, or indirectly
+    // through a library that handed them a property bag with computed
+    // accessors). This function's entire contract is "report problems,
+    // never throw" — a read that's allowed to escape breaks that contract
+    // one property in, and does so silently: the caller sees a generic
+    // "something went wrong" from whatever wraps this call, not a hint
+    // that one property was the cause.
+    let value: unknown
+    try {
+      value = bag[key]
+    } catch {
+      out.push(`${label}.${key} could not be read`)
+      continue
+    }
     const ok =
       value === null ||
       typeof value === 'string' ||
@@ -52,7 +65,18 @@ export function validateEvent(e: QueuedEvent): string[] {
     ['event', e.event],
     ['name', e.name],
   ] as const) {
-    if (value !== undefined && (value.length === 0 || value.length > MAX_ID_LENGTH)) {
+    // QueuedEvent types this as string | undefined, but that's a compile-time
+    // promise only — this SDK ships to JavaScript callers, where nothing
+    // stops a runtime value of 12345 or null reaching here. The server's Zod
+    // schema rejects a non-string id outright; treating it as "absent" (via
+    // `.length` throwing or coercing) would let it sail through this check
+    // as clean when the server would dead-letter it.
+    if (value === undefined) continue
+    if (typeof value !== 'string') {
+      out.push(`${label} must be a string, got ${value === null ? 'null' : typeof value}`)
+      continue
+    }
+    if (value.length === 0 || value.length > MAX_ID_LENGTH) {
       out.push(`${label} must be 1 to ${MAX_ID_LENGTH} characters, got ${value.length}`)
     }
   }

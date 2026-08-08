@@ -48,6 +48,29 @@ describe('validateEvent', () => {
     expect(validateEvent(base({ anonymous_id: 'x'.repeat(129) }))).toHaveLength(1)
   })
 
+  it('flags a non-string id instead of letting it pass as absent', () => {
+    // QueuedEvent types anonymous_id as string | undefined, but this SDK
+    // ships to JavaScript callers, where that's advisory. The cast is
+    // deliberate: it reaches the runtime shape TypeScript would otherwise
+    // block, which is exactly the shape that broke this check.
+    const problems = validateEvent(base({ anonymous_id: 12345 as unknown as string }))
+    expect(problems).toHaveLength(1)
+    expect(problems[0]).toContain('anonymous_id')
+  })
+
+  it('records a problem instead of throwing when a property getter throws', () => {
+    const properties: Record<string, unknown> = {}
+    Object.defineProperty(properties, 'poison', {
+      enumerable: true,
+      get(): never {
+        throw new Error('boom')
+      },
+    })
+    const problems = validateEvent(base({ properties }))
+    expect(problems).toHaveLength(1)
+    expect(problems[0]).toContain('poison')
+  })
+
   it('flags a track event with no name', () => {
     expect(validateEvent(base({ event: undefined }))).toHaveLength(1)
   })
@@ -72,6 +95,11 @@ describe('validateEvent', () => {
       base({ properties: { plan: { tier: 'pro' } } }),
       base({ event: undefined }),
       base({ anonymous_id: 'x'.repeat(129) }),
+      // TypeScript types anonymous_id as string | undefined, but this SDK
+      // ships to JavaScript callers where that's advisory, not enforced —
+      // this is the cast that pins the runtime shape TypeScript itself
+      // would otherwise prevent this fixture list from ever containing.
+      base({ anonymous_id: 12345 as unknown as string }),
       base({ anonymous_id: undefined, user_id: undefined }),
       base({ type: 'identify', event: undefined, user_id: 'user-42', traits: { plan: 'pro' } }),
       base({ type: 'page', event: undefined, name: 'Pricing' }),
