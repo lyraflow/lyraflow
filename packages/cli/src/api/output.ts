@@ -7,6 +7,13 @@
  * agree to keep still — which is exactly why `--json` exists and why the
  * documentation tells an agent to pass it explicitly rather than rely on
  * stdout not being a terminal.
+ *
+ * KNOWN LIMIT of the "record could not be serialised" degraded shape (see
+ * `safeJsonLine`): it writes `{ error, detail }`. A real record that
+ * happens to carry exactly those two keys is indistinguishable on the wire
+ * from a degraded line — this is a convention, not a structural guarantee.
+ * A future command whose records legitimately carry an `error` field should
+ * know that before relying on shape alone to tell the two apart.
  */
 
 import { UsageError } from './args.js'
@@ -77,6 +84,35 @@ function sanitizeForLine(s: string): string {
 }
 
 /**
+ * The one place in this module that converts an arbitrary, untrusted value
+ * into a string on a "best effort, cannot fail" basis — every other guard
+ * here (`toCell`, `describeError`, `safeJsonLine`) reaches for this instead
+ * of calling `String()` directly.
+ *
+ * `String(value)` invokes `value`'s own `toString`/`Symbol.toPrimitive`,
+ * which can itself throw — a value can be deliberately (or accidentally,
+ * via a Proxy or a poisoned prototype) built to defeat exactly this kind of
+ * fallback. This function is where that risk terminates: it tries once,
+ * and if the value fights back, returns a fixed literal that performs NO
+ * further operation on `value` — nothing left for a next attack to defeat.
+ *
+ * This is the guarantee this whole module rests on, made structural rather
+ * than a list of individually-guarded call sites: if a new failure mode of
+ * `String()` turns up, it gets fixed HERE, once. The next person hardening
+ * this module should widen this function's callers, not add another ad hoc
+ * try/catch beside it — that is exactly the pattern that let two crashes
+ * hide in `describeError`'s fallback and `safeJsonLine`'s own catch block
+ * across the module's first two review rounds.
+ */
+function describeUnknown(value: unknown): string {
+  try {
+    return String(value)
+  } catch {
+    return '<unrenderable value>'
+  }
+}
+
+/**
  * Turns any value — including the non-string shapes a `Column.get` or an
  * `emitObject` field is not supposed to produce, but nothing at runtime
  * actually prevents — into a single safe line of display text.
@@ -85,7 +121,11 @@ function sanitizeForLine(s: string): string {
  * `'null'` (distinguishable from "absent"); numbers and booleans stringify
  * plainly; objects and arrays go through `JSON.stringify` (itself already
  * single-line-safe, per `sanitizeForLine`'s docstring) so a nested value is
- * still visible rather than rendered as `[object Object]`.
+ * still visible rather than rendered as `[object Object]`. Anything
+ * `JSON.stringify` cannot handle — or whose stringification throws for any
+ * other reason — falls through to `describeUnknown`, which cannot itself
+ * throw, so this function's own "never crashes" promise holds regardless
+ * of what `value` does.
  */
 function toCell(value: unknown): string {
   if (value === undefined) return ''
@@ -93,9 +133,9 @@ function toCell(value: unknown): string {
   if (typeof value === 'string') return sanitizeForLine(value)
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
   try {
-    return sanitizeForLine(JSON.stringify(value) ?? String(value))
+    return sanitizeForLine(JSON.stringify(value) ?? describeUnknown(value))
   } catch {
-    return String(value)
+    return sanitizeForLine(describeUnknown(value))
   }
 }
 
@@ -121,12 +161,35 @@ function safeJsonLine(value: unknown): string {
   try {
     return JSON.stringify(value) ?? 'null'
   } catch (err) {
-    return JSON.stringify({
-      error: 'this record could not be serialised as JSON',
-      detail: err instanceof Error ? err.message : String(err),
-    })
+    return describeSerialisationFailure(err)
   }
 }
+
+/**
+ * Two layers, on purpose, matching `emitError`'s shape below: the inner one
+ * tries to say something useful about WHY `JSON.stringify` failed (via
+ * `describeUnknown`, which cannot itself throw — so this layer's only
+ * remaining risk is `JSON.stringify` on the wrapper object itself, which
+ * holds nothing but plain strings and cannot fail). The outer `catch` is
+ * the true guarantee: a fixed literal, computed from nothing, for the case
+ * where building even that much has somehow failed. It is reachable only
+ * if a future change reintroduces a dynamic value into the wrapper below —
+ * kept as a second layer anyway, because "structurally cannot throw" beats
+ * "should not throw given the code as currently written".
+ */
+function describeSerialisationFailure(err: unknown): string {
+  try {
+    return JSON.stringify({
+      error: 'this record could not be serialised as JSON',
+      detail: describeUnknown(err),
+    })
+  } catch {
+    return UNSERIALISABLE_LINE
+  }
+}
+
+const UNSERIALISABLE_LINE =
+  '{"error":"this record could not be serialised as JSON","detail":"unknown"}'
 
 /**
  * Calls a caller-supplied `Column.get` defensively. `Column.get`'s type
@@ -218,9 +281,55 @@ export function emitObject(record: unknown, mode: Mode, write: (s: string) => vo
 /**
  * `err` is `unknown` because it may be anything JavaScript lets a caller
  * throw, and this function must render every one of them without crashing
- * — an error handler that itself throws hides the original failure. Three
- * shapes are distinguished:
+ * — an error handler that itself throws hides the original failure.
  *
+ * Computing the line (`renderErrorLine`) and writing it (`write`) are
+ * deliberately two separate steps, not one: `renderErrorLine` is wrapped so
+ * it cannot throw, but `write` is called OUTSIDE that wrapping, on purpose.
+ * A `write` that throws (a closed stdout, a broken pipe) is a real failure
+ * the caller needs to see — swallowing it here would turn a legitimate,
+ * actionable error into total silence, which is a worse bug than the one
+ * this function exists to prevent. See `renderErrorLine`'s docstring for
+ * why *its* half of the job cannot itself throw.
+ */
+export function emitError(err: unknown, mode: Mode, write: (s: string) => void): void {
+  write(renderErrorLine(err, mode))
+}
+
+/**
+ * Round 1 guarded `describeError`'s own fallback (a thrown non-Error's
+ * `String()`). Round 2 found that guard was not enough: `describeError`'s
+ * `instanceof` checks run BEFORE that fallback is ever reached, and
+ * `instanceof` invokes `Symbol.hasInstance`, which walks `err`'s prototype
+ * chain — a Proxy with a `getPrototypeOf` trap that throws makes line
+ * `err instanceof ApiError` throw before any of this function's own guards
+ * exist to catch it.
+ *
+ * Rather than add a third guard for a third way in, this function wraps
+ * ALL of `describeError`'s work — the `instanceof` chain, the message
+ * lookup, the JSON/human formatting, all of it — in ONE outer `try`. The
+ * `catch` emits a FIXED LITERAL: no `String(err)`, no `err.message`, no
+ * `JSON.stringify` of anything derived from `err` — nothing that touches
+ * `err` at all. A constant cannot throw, so this is where the "never
+ * crashes" guarantee becomes structurally true instead of a list of
+ * individually-guarded operations that a next attacker just has to find
+ * the gap between. `describeError`'s own internal guards (via
+ * `describeUnknown`) are what make the COMMON case informative; this outer
+ * catch is what makes the promise actually hold for every case.
+ */
+function renderErrorLine(err: unknown, mode: Mode): string {
+  try {
+    const { error, code } = describeError(err)
+    return mode === 'json' ? `${JSON.stringify({ error, code })}\n` : `Error: ${error} (${code})\n`
+  } catch {
+    return mode === 'json' ? FIXED_JSON_ERROR_LINE : FIXED_HUMAN_ERROR_LINE
+  }
+}
+
+const FIXED_JSON_ERROR_LINE = '{"error":"an error value could not be rendered","code":"error"}\n'
+const FIXED_HUMAN_ERROR_LINE = 'Error: an error value could not be rendered (error)\n'
+
+/**
  * - `ApiError` (client.ts): the request reached the wire; `code` is the
  *   server's own error code (or a synthetic `http_<status>` / `no_response`
  *   fallback — see client.ts). Maps to exit code 1 downstream.
@@ -229,45 +338,16 @@ export function emitObject(record: unknown, mode: Mode, write: (s: string) => vo
  *   Maps to exit code 2 downstream.
  * - anything else — a plain `Error`, a thrown string, a thrown object with
  *   no `status`/`code` at all — gets `code: 'error'` and a best-effort
- *   message, so the JSON line is always well-formed even for a value this
- *   CLI never intended to throw.
+ *   message via `describeUnknown`, so the JSON line is well-formed even for
+ *   a value this CLI never intended to throw.
  *
  * `emitError` itself does not decide the exit code; it only renders. Which
  * `code`/status maps to which exit code is the caller's job (see the
  * module docstring on `UsageError`/`ApiError` in args.ts).
  */
-export function emitError(err: unknown, mode: Mode, write: (s: string) => void): void {
-  const { error, code } = describeError(err)
-
-  if (mode === 'json') {
-    write(`${JSON.stringify({ error, code })}\n`)
-    return
-  }
-
-  write(`Error: ${error} (${code})\n`)
-}
-
 function describeError(err: unknown): { error: string; code: string } {
   if (err instanceof ApiError) return { error: err.message, code: err.code }
   if (err instanceof UsageError) return { error: err.message, code: 'usage_error' }
   if (err instanceof Error) return { error: err.message, code: 'error' }
-  return { error: safeDescribe(err), code: 'error' }
-}
-
-/**
- * `String(value)` invokes `value`'s own `toString`/`Symbol.toPrimitive`
- * unguarded — for anything that isn't a plain, well-behaved value, that can
- * itself throw (a thrown object with a `toString()` that throws, or a
- * `Symbol.toPrimitive` that does). `emitError`'s entire job is to render
- * every value it is handed without crashing; an error handler that itself
- * throws hides the original failure behind a confusing new one from the
- * reporting path. The fallback here is honest rather than inventive: it
- * says the value could not be described, not a guess at what it might be.
- */
-function safeDescribe(value: unknown): string {
-  try {
-    return String(value)
-  } catch {
-    return 'an error value that could not be described (its own stringification threw)'
-  }
+  return { error: describeUnknown(err), code: 'error' }
 }

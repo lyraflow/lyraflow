@@ -195,6 +195,71 @@ describe('emitRecords', () => {
     expect(failed.error).toBe('this record could not be serialised as JSON')
     expect(typeof failed.detail).toBe('string')
   })
+
+  it('degrades a record whose toJSON throws a poisoned non-Error to one honest line, without crashing', () => {
+    // Round 1's fix wrapped JSON.stringify itself but left the recovery's
+    // own stringification unguarded: `err instanceof Error ? err.message :
+    // String(err)` calls String(err) bare when the thrown value is not an
+    // Error — and a toJSON can throw anything, not just an Error. If that
+    // thrown value's own toString() also throws, the "recovery" crashes.
+    const evil = {
+      toJSON() {
+        throw {
+          toString() {
+            throw new Error('nested poison boom')
+          },
+        }
+      },
+    }
+    const out: string[] = []
+    expect(() =>
+      emitRecords([{ a: 1 }, { a: 2, b: evil }, { a: 3 }], 'json', COLUMNS, (s) => out.push(s)),
+    ).not.toThrow()
+    const lines = out.join('').split('\n').filter(Boolean)
+    expect(lines).toHaveLength(3)
+    for (const line of lines) expect(() => JSON.parse(line)).not.toThrow()
+    const failed = JSON.parse(lines[1] as string)
+    expect(failed.error).toBe('this record could not be serialised as JSON')
+    expect(typeof failed.detail).toBe('string')
+  })
+
+  it('degrades a poisoned Error subclass (throwing toJSON, throwing toString) to one honest line', () => {
+    // Invented beyond the reviewer's named case: the thrown value here IS
+    // an Error subclass (so a naive `err instanceof Error ? err.message :
+    // …` guard would look safe) but its own toString() is itself poisoned,
+    // and `.message` is never read on this path (describeUnknown always
+    // uses String(), not `.message`) — confirms the fix doesn't depend on
+    // the thrown value's shape at all.
+    class PoisonedError extends Error {
+      override toString(): string {
+        throw new Error('poisoned Error toString')
+      }
+    }
+    const evil = {
+      toJSON() {
+        throw new PoisonedError('evil toJSON')
+      },
+    }
+    const out: string[] = []
+    expect(() => emitRecords([evil], 'json', COLUMNS, (s) => out.push(s))).not.toThrow()
+    const lines = out.join('').split('\n').filter(Boolean)
+    expect(lines).toHaveLength(1)
+    const failed = JSON.parse(lines[0] as string)
+    expect(failed.error).toBe('this record could not be serialised as JSON')
+    expect(typeof failed.detail).toBe('string')
+  })
+
+  it('a write callback that throws still propagates through emitRecords', () => {
+    // The same "what did the fix break" check as emitError's: safeJsonLine
+    // computes the line before write() is called, and write() itself is
+    // never wrapped — a throwing write must still reach the caller.
+    const boom = new Error('write boom')
+    expect(() =>
+      emitRecords([{ a: 1 }], 'json', COLUMNS, () => {
+        throw boom
+      }),
+    ).toThrow(boom)
+  })
 })
 
 describe('emitObject', () => {
@@ -219,6 +284,25 @@ describe('emitObject', () => {
     expect(out.join('')).toBe('just a string\n42\n')
   })
 
+  it('does not crash rendering a human-mode field whose stringification is fully poisoned', () => {
+    // toCell (also used by emitRecords' table rendering, via safeGet) has
+    // the identical shape of bug the reviewer found in safeJsonLine: its
+    // own catch block used to call bare String(value). A field whose
+    // JSON.stringify throws AND whose String() also throws used to defeat
+    // both layers of the old implementation at once.
+    const evil = {
+      toJSON() {
+        throw new Error('toJSON boom')
+      },
+      toString() {
+        throw new Error('toString boom too')
+      },
+    }
+    const out: string[] = []
+    expect(() => emitObject({ a: evil }, 'human', (s) => out.push(s))).not.toThrow()
+    expect(out.join('')).toContain('a: <unrenderable value>')
+  })
+
   it('a record containing a BigInt degrades to one honest, parseable line instead of crashing', () => {
     const out: string[] = []
     emitObject({ version: '0.1.0', huge: 9_007_199_254_740_993n }, 'json', (s) => out.push(s))
@@ -226,6 +310,15 @@ describe('emitObject', () => {
     const parsed = JSON.parse(out.join(''))
     expect(parsed.error).toBe('this record could not be serialised as JSON')
     expect(typeof parsed.detail).toBe('string')
+  })
+
+  it('a write callback that throws still propagates through emitObject', () => {
+    const boom = new Error('write boom')
+    expect(() =>
+      emitObject({ a: 1 }, 'json', () => {
+        throw boom
+      }),
+    ).toThrow(boom)
   })
 })
 
@@ -310,6 +403,69 @@ describe('emitError', () => {
     const text = out.join('')
     expect(text.split('\n').filter(Boolean)).toHaveLength(1)
     expect(text).toBe('Error: the server key was rejected (invalid_server_key)\n')
+  })
+
+  it('does not crash on a value whose own prototype chain cannot be walked (a poisoned Proxy)', () => {
+    // describeError's `instanceof` checks run before any of its own
+    // fallback guards — `instanceof` invokes Symbol.hasInstance, which
+    // walks the value's prototype chain via getPrototypeOf. A Proxy whose
+    // getPrototypeOf trap throws makes `err instanceof ApiError` itself
+    // throw, on the very first line of describeError, before safeDescribe
+    // (round 1's guard) is ever reached.
+    const evil = new Proxy(
+      {},
+      {
+        getPrototypeOf() {
+          throw new Error('getPrototypeOf trap boom')
+        },
+      },
+    )
+    const out: string[] = []
+    expect(() => emitError(evil, 'json', (s) => out.push(s))).not.toThrow()
+    const parsed = JSON.parse(out.join(''))
+    expect(parsed.code).toBe('error')
+    expect(typeof parsed.error).toBe('string')
+  })
+
+  it('does not crash on a Proxy whose every trap throws', () => {
+    // Invented beyond the reviewer's named case: a Proxy poisoned across
+    // has/get/ownKeys/getOwnPropertyDescriptor too, not just
+    // getPrototypeOf, to confirm the outer catch is a genuine backstop
+    // rather than one that happens to cover exactly the traps tested so far.
+    const boom = () => {
+      throw new Error('trap boom')
+    }
+    const evil = new Proxy(
+      {},
+      {
+        getPrototypeOf: boom,
+        has: boom,
+        get: boom,
+        ownKeys: boom,
+        getOwnPropertyDescriptor: boom,
+      },
+    )
+    const out: string[] = []
+    expect(() => emitError(evil, 'json', (s) => out.push(s))).not.toThrow()
+    expect(() => emitError(evil, 'human', (s) => out.push(s))).not.toThrow()
+    const lines = out.join('').split('\n').filter(Boolean)
+    expect(lines).toHaveLength(2)
+    const parsed = JSON.parse(lines[0] as string)
+    expect(parsed.code).toBe('error')
+  })
+
+  it('a write callback that throws still propagates — the outer guard must not swallow it', () => {
+    // The specific way an outermost catch can be wrong: if it wrapped the
+    // write() call too, a real, actionable failure (a closed stdout, a
+    // broken pipe) would vanish into the same bland fallback as a poisoned
+    // input. emitError computes the line first and calls write() outside
+    // any try, so a throwing write must still reach the caller unchanged.
+    const boom = new Error('write boom')
+    expect(() =>
+      emitError(new Error('irrelevant'), 'json', () => {
+        throw boom
+      }),
+    ).toThrow(boom)
   })
 })
 
