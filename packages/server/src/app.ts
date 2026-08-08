@@ -21,6 +21,7 @@ import { registerPrivacyRoutes } from './privacy/routes.js'
 import { SuppressionStore } from './privacy/suppression-store.js'
 import { PurgeWorker } from './privacy/worker.js'
 import { registerSchemaRoutes } from './schema/routes.js'
+import { SegmentCache } from './segments/cache.js'
 import { registerSegmentRoutes } from './segments/routes.js'
 
 export interface AppDeps {
@@ -101,6 +102,12 @@ export function buildApp(input: {
   const aliases = new PersonAliases(pg)
   const suppression = new SuppressionStore(pg)
   const deletions = new DeletionStore(pg, suppression)
+  // Shared with the privacy routes for the same reason: DELETE
+  // /v1/persons/:id must invalidate the SAME cache a preview request can hit
+  // within its 30s TTL, or a suppressed person's row can be served back out
+  // of a cache that has never heard the deletion happened (see
+  // segments/cache.ts's clearProject and privacy/routes.ts's own call to it).
+  const segmentCache = new SegmentCache()
   const purge = new PurgeWorker({
     deletions,
     resolve: (projectId, personId) =>
@@ -137,7 +144,14 @@ export function buildApp(input: {
     aliases,
   })
   registerPersonRoutes(app, { projects, readiness, ch, bindings, aliases, suppression })
-  registerSegmentRoutes(app, { projects, readiness, ch, pg, database: config.ch.database })
+  registerSegmentRoutes(app, {
+    projects,
+    readiness,
+    ch,
+    pg,
+    database: config.ch.database,
+    cache: segmentCache,
+  })
   registerSchemaRoutes(app, { projects, readiness, ch })
   // One shared object, not one built per registration: registerExportRoute
   // takes the exact same PrivacyDeps registerPrivacyRoutes does (export.ts's
@@ -156,6 +170,7 @@ export function buildApp(input: {
     aliases,
     deletions,
     suppression,
+    segmentCache,
     maxAttempts: config.purgeMaxAttempts,
     leaseMs: config.purgeLeaseMs,
   }

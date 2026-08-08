@@ -685,13 +685,24 @@ or before it stop appearing anywhere, immediately.
 
 Deletion is asynchronous. The moment the API answers `202`, the person's past
 data stops appearing in segment counts, member lists, profile reads and
-exports — that is the suppression list, and it takes effect immediately.
-The rows are then erased for real by a worker inside the server process,
-usually within a minute. Until it finishes, person-level aggregates
-(`first_seen`, `last_seen`, event counts) can still reflect erased events for
-someone whose activity straddles the deletion instant, because those are
-pre-aggregated per month and a month cannot be split. Event-level reads are
-exact throughout. Poll `GET /v1/deletions/:id` for `status: "completed"`.
+exports — that is the suppression list, and it takes effect immediately,
+including for a `/v1/segments/preview` result already sitting in the
+in-process cache (see *Segments* above): a `DELETE` clears that
+project's cached entries as part of the same request. The rows are then
+erased for real by a worker inside the server process, usually within a
+minute. Until it finishes, person-level aggregates (`first_seen`, `last_seen`,
+event counts) can still reflect erased events for someone whose activity
+straddles the deletion instant, because those are pre-aggregated per month
+and a month cannot be split. Event-level reads are exact throughout. Poll
+`GET /v1/deletions/:id` for `status: "completed"`.
+
+**A saved segment's `last_count` does not know a deletion happened.** It is a
+snapshot from whenever the segment was last run (`POST /v1/segments/:id/preview`
+or its own creation), not a live figure — a deletion changes what an ad hoc
+`/v1/segments/preview` reports on the very next call, but it does not touch
+`last_count` on any saved segment, which stays exactly as stale as it already
+was until something explicitly re-runs that segment. This is true regardless
+of caching; it is simply what "snapshot, not a live count" already meant.
 
 Suppression is scoped in time, not permanent. Events recorded *after* the
 deletion request are visible normally: if the same user keeps using your

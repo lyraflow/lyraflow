@@ -11,6 +11,7 @@ import {
   resolvePersonScope,
 } from '../identity/scope.js'
 import { SERVER_KEY_HEADER, makeAuthenticator } from '../ingest/routes.js'
+import type { SegmentCache } from '../segments/cache.js'
 import type { DeletionStore } from './deletion-store.js'
 import type { SuppressionStore } from './suppression-store.js'
 
@@ -24,6 +25,13 @@ export interface PrivacyDeps {
   deletions: DeletionStore
   /** Task 7's export route shares this deps object and needs the boundary. */
   suppression: SuppressionStore
+  /**
+   * The SAME cache instance `registerSegmentRoutes` reads previews from
+   * (app.ts shares one). DELETE clears this project's entries the moment a
+   * deletion is accepted — see the call below — so a preview cached within
+   * the last 30s cannot hand a suppressed person's row back out.
+   */
+  segmentCache: SegmentCache
   /** For the status endpoint's "failed" verdict; same value the worker uses. */
   maxAttempts: number
   /** For the status endpoint's "in_progress" vs "pending" verdict; same value the worker uses. */
@@ -66,7 +74,17 @@ function parseDeletionId(raw: string): number | null {
  * reachable with it would be a public erase button.
  */
 export function registerPrivacyRoutes(app: FastifyInstance, deps: PrivacyDeps): void {
-  const { projects, readiness, ch, bindings, aliases, deletions, maxAttempts, leaseMs } = deps
+  const {
+    projects,
+    readiness,
+    ch,
+    bindings,
+    aliases,
+    deletions,
+    segmentCache,
+    maxAttempts,
+    leaseMs,
+  } = deps
 
   const authenticateServer = makeAuthenticator(
     readiness,
@@ -173,6 +191,26 @@ export function registerPrivacyRoutes(app: FastifyInstance, deps: PrivacyDeps): 
       app.log.error(
         { err, projectId: project.id, requestId: id },
         'suppression dictionary reload failed',
+      )
+    }
+
+    // Same reasoning, same "must not fail an already-committed deletion"
+    // shape, as the dictionary reload just above — but a DIFFERENT failure
+    // mode if skipped: the dictionary is only ever stale for a few seconds
+    // regardless, while `SegmentCache` entries live for its full 30s TTL
+    // (segments/cache.ts), so a preview request landing in that window would
+    // otherwise keep serving this person's row — their first_seen/last_seen
+    // and context fields, not just a stale count — straight through the
+    // `202` this response is about to send. `clearProject` is synchronous
+    // and cannot itself throw today, but this is wrapped anyway: a future
+    // change to that method must not be able to turn a successful deletion
+    // into a failed request by accident.
+    try {
+      segmentCache.clearProject(project.id)
+    } catch (err) {
+      app.log.error(
+        { err, projectId: project.id, requestId: id },
+        'segment cache invalidation failed',
       )
     }
 

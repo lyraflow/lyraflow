@@ -94,4 +94,30 @@ export class SegmentCache {
       this.#drop(oldest.value)
     }
   }
+
+  /**
+   * Drops every entry for one project, regardless of TTL. Called after a
+   * deletion request is accepted (privacy/routes.ts), so a preview served
+   * from cache can never hand back a person's row within the 30-second TTL
+   * after the API has already promised — via the `202` — that their data
+   * stops appearing immediately. Without this, `get()`'s own TTL is the only
+   * thing standing between a `DELETE` and a stale hit, and 30 seconds of
+   * "stopped appearing" that in fact still shows the erased person's own
+   * `first_seen`/`last_seen`/context row is not a stale number, it is their
+   * personal data served back out after the API said it would not be.
+   *
+   * Project-scoped by key prefix, not a full clear: every key this cache
+   * ever stores is `${projectId}:...` (both `countKey` and `pageKey` in
+   * routes.ts), so a prefix match is exactly "every entry this project could
+   * have written" with no separate per-entry project id to maintain. Keys
+   * are snapshotted into an array before dropping any of them — deleting the
+   * CURRENT key mid-iteration over a live `Map` iterator is documented-safe,
+   * but taking a copy first removes any doubt without relying on that.
+   */
+  clearProject(projectId: number): void {
+    const prefix = `${projectId}:`
+    for (const key of [...this.#entries.keys()]) {
+      if (key.startsWith(prefix)) this.#drop(key)
+    }
+  }
 }

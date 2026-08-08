@@ -1,14 +1,18 @@
 // The first test that walks a whole person through the real app: ingest,
-// identify, more ingest, a person read, a segment count, DELETE, the
-// immediate post-DELETE view, an actual purge (driven by calling
-// `runOnce()` directly — never by waiting on the worker's own timer, which
-// would make this a test nobody runs), the raw stores afterward, and the
-// status endpoint. The second test proves the whole point of time-scoped
-// suppression: a person who returns after being erased is counted again,
-// from the deletion forward, not blocked forever by their old identity.
+// identify, more ingest, a person read, a segment count AND member page (both
+// through the real POST /v1/segments/preview route — see previewSegment's own
+// docstring for why the cache this goes through must be invalidated by
+// DELETE for this to be safe), DELETE, the immediate post-DELETE view, an
+// actual purge (driven by calling `runOnce()` directly — never by waiting on
+// the worker's own timer, which would make this a test nobody runs), the raw
+// stores afterward (with before/after snapshots where "the purge did not
+// touch this" is the actual claim), and the status endpoint. The second test
+// proves the whole point of time-scoped suppression: a person who returns
+// after being erased is counted again, from the deletion forward, not
+// blocked forever by their old identity.
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
-import { type FilterNode, compileSegment } from '@lyraflow/core'
+import type { FilterNode } from '@lyraflow/core'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -17,7 +21,6 @@ import { hashServerKey } from '../auth/project-cache.js'
 import { loadConfig } from '../config.js'
 import { Readiness } from '../health.js'
 import { type PgDictionarySource, ensureIdentityDictionaries } from '../identity/dictionaries.js'
-import { runSegment } from '../segments/execute.js'
 
 const CH_DB = 'lyraflow_test'
 const CH = {
@@ -188,7 +191,7 @@ function deletionStatus(id: number) {
 
 /**
  * "Did this person perform `event` at all, ever" — the filter shape the
- * segment count below is built from.
+ * segment checks below are built from.
  */
 function performedFilter(event: string): FilterNode {
   return {
@@ -202,27 +205,34 @@ function performedFilter(event: string): FilterNode {
 }
 
 /**
- * Counts people matching `filter`, through `compileSegment`/`runSegment` —
- * the exact production code POST /v1/segments/preview itself calls — rather
- * than through the HTTP route. Deliberately NOT the HTTP route: that route
- * sits behind `SegmentCache`'s 30-SECOND TTL, keyed on the filter tree's own
- * hash alone (segments/cache.ts) — with no dependency on suppression state,
- * so the identical filter tree used to prove "the person is counted" before
- * DELETE would still be a cache HIT immediately after it, silently
- * reporting the pre-deletion count instead of proving anything about
- * deletion at all. Calling the compiler directly is what this file's other
- * genuinely-live-database sibling, purge-restore.test.ts, already does for
- * the identical reason (see its own `visiblePersonIds`).
+ * Goes through the REAL `POST /v1/segments/preview` route, deliberately —
+ * this is the one HTTP surface a caller actually has, and it is the one that
+ * sits behind `SegmentCache`'s 30-second TTL (segments/cache.ts). That cache
+ * is keyed only on the filter tree's own structural hash, with no dependency
+ * on suppression state, which is exactly what made it possible to ask this
+ * same route the identical question before and immediately after `DELETE`
+ * and silently get back the pre-deletion answer — count AND the erased
+ * person's own row, member fields included — instead of a fresh one. That
+ * is now fixed at the source: `DELETE /v1/persons/:id` calls
+ * `segmentCache.clearProject()` on the SAME cache instance this route reads
+ * from (privacy/routes.ts, app.ts) before it answers `202`. Calling through
+ * the route, not around it (an earlier version of this file called
+ * `compileSegment`/`runSegment` directly to sidestep the cache instead of
+ * fixing it — see Task 10's fix-round report for why that was wrong), is
+ * what actually proves the fix rather than merely working around the bug it
+ * exists to catch.
  */
-async function segmentCount(filter: FilterNode): Promise<number> {
-  const compiled = compileSegment({
-    query: { ast_version: 1, filter } as never,
-    projectId,
-    database: CH_DB,
-    now: new Date(),
-    select: 'count',
+function previewSegment(filter: FilterNode) {
+  return app.inject({
+    method: 'POST',
+    url: '/v1/segments/preview',
+    headers: {
+      'x-lyraflow-server-key': SERVER_KEY,
+      'user-agent': UA,
+      'content-type': 'application/json',
+    },
+    payload: { ast_version: 1, filter, include: ['members'] },
   })
-  return runSegment({ client: ch, compiled })
 }
 
 describe('privacy: a person, end to end from ingest to erasure', () => {
@@ -232,7 +242,11 @@ describe('privacy: a person, end to end from ingest to erasure', () => {
   let requestId: number
 
   it('deletes a person end to end', async () => {
-    // 1. Ingest: anonymous events, an identify(), more events.
+    // 1. Ingest: anonymous events, an identify() carrying a trait, more
+    // events. The trait is load-bearing for step 7 below: without it,
+    // `person_traits` has zero rows for this person BEFORE the deletion too,
+    // and "zero rows after the purge" would pass whether or not the purge
+    // actually touches that table.
     const anon1 = await track({
       message_id: randomUUID(),
       anonymous_id: anonId,
@@ -256,6 +270,7 @@ describe('privacy: a person, end to end from ingest to erasure', () => {
       user_id: userId,
       type: 'identify',
       timestamp: isoAt(10),
+      traits: { plan: 'pro' },
     })
     expect(idRes.statusCode).toBe(202)
 
@@ -275,8 +290,33 @@ describe('privacy: a person, end to end from ingest to erasure', () => {
     expect(read.json().events).toBe(4)
     expect((read.json().ids as string[]).sort()).toEqual([anonId, userId].sort())
 
-    // 3. Segment preview → the person is counted.
-    expect(await segmentCount(performedFilter(markerEvent))).toBe(1)
+    // The trait actually landed — the precondition step 7's "purged, not
+    // never-written" assertion depends on.
+    const traitsBefore = await ch.query({
+      query: `SELECT count() AS c FROM person_traits
+               WHERE project_id = {pid:UInt32} AND (user_id = {uid:String} OR anonymous_id = {aid:String})`,
+      query_params: { pid: projectId, uid: userId, aid: anonId },
+      format: 'JSONEachRow',
+    })
+    const [traitsBeforeRow] = await traitsBefore.json<{ c: string }>()
+    expect(Number(traitsBeforeRow?.c ?? 0)).toBeGreaterThan(0)
+
+    // 3. Segment preview → the person is counted, through the real HTTP
+    // route, members page included — the row is the part that matters for
+    // step 5 below.
+    const before = await previewSegment(performedFilter(markerEvent))
+    expect(before.statusCode).toBe(200)
+    expect(before.json().person_count).toBe(1)
+    const beforeMembers = before.json().members as Array<Record<string, unknown>>
+    expect(beforeMembers).toHaveLength(1)
+    expect(beforeMembers[0]?.person_id).toBe(userId)
+    // The UA fixture parses to these exact values (core's parseUserAgent) —
+    // asserting them, not just "a row exists", is what step 5 below needs to
+    // meaningfully compare against: a cache bug returning a STALE row would
+    // carry these same values, since they never change for this person.
+    expect(beforeMembers[0]?.os).toBe('macos')
+    expect(beforeMembers[0]?.browser).toBe('chrome')
+    expect(beforeMembers[0]?.device_type).toBe('desktop')
 
     // 4. DELETE /v1/persons/:id → 202.
     const del = await deletePerson(userId)
@@ -284,9 +324,23 @@ describe('privacy: a person, end to end from ingest to erasure', () => {
     expect(del.json().person_id).toBe(userId)
     requestId = del.json().request_id as number
 
-    // 5. IMMEDIATELY: person read 404s, export 404s, segment count drops.
-    // No sleep, no reload beyond the one DELETE's own handler already
-    // performed (SYSTEM RELOAD DICTIONARY suppressed_persons).
+    // Snapshot suppression BEFORE the purge runs. Paired with the identical
+    // query after runOnce() in step 7 below, this is what actually proves
+    // the purge does not touch suppressed_persons — a single post-purge
+    // assertion alone is consistent with either "never touched" or
+    // "deleted and then, coincidentally, something else recreated it".
+    const suppressedBefore = await pg.query<{ person_id: string }>(
+      'SELECT person_id FROM suppressed_persons WHERE project_id = $1 AND person_id = ANY($2)',
+      [projectId, [userId, anonId]],
+    )
+    expect(suppressedBefore.rows.map((r) => r.person_id).sort()).toEqual([anonId, userId].sort())
+
+    // 5. IMMEDIATELY: person read 404s, export 404s, segment count AND
+    // member page both drop — through the SAME HTTP route and the SAME
+    // filter tree as step 3, which is exactly the shape a stale
+    // `SegmentCache` hit would otherwise defeat. No sleep, no reload beyond
+    // the one DELETE's own handler already performs (the dictionary reload
+    // and the cache invalidation, both in privacy/routes.ts).
     const readAfterDelete = await getPerson(userId)
     expect(readAfterDelete.statusCode).toBe(404)
     expect(readAfterDelete.json().error).toBe('person_not_found')
@@ -295,7 +349,10 @@ describe('privacy: a person, end to end from ingest to erasure', () => {
     expect(exportAfterDelete.statusCode).toBe(404)
     expect(exportAfterDelete.json().error).toBe('person_not_found')
 
-    expect(await segmentCount(performedFilter(markerEvent))).toBe(0)
+    const after = await previewSegment(performedFilter(markerEvent))
+    expect(after.statusCode).toBe(200)
+    expect(after.json().person_count).toBe(0)
+    expect(after.json().members).toEqual([])
 
     // 6. app.deps.purge.runOnce() — driven directly, never via the worker's
     // own timer (a test that sleeps for an interval is a test nobody runs).
@@ -303,8 +360,11 @@ describe('privacy: a person, end to end from ingest to erasure', () => {
     expect(outcome).toBe('purged')
 
     // 7. Raw ClickHouse: zero rows in events, device_index and
-    // person_traits. Raw Postgres: no identity_bindings; the
-    // suppressed_persons rows REMAIN (never deleted — see 005_suppression.sql).
+    // person_traits (see the `traitsBefore` check above for why this is
+    // meaningful and not vacuous). Raw Postgres: no identity_bindings; the
+    // suppressed_persons rows REMAIN — compared against the `suppressedBefore`
+    // snapshot, not merely asserted to exist in isolation (see
+    // 005_suppression.sql).
     const identityFilter =
       'project_id = {pid:UInt32} AND (user_id = {uid:String} OR anonymous_id = {aid:String})'
     const params = { pid: projectId, uid: userId, aid: anonId }
@@ -324,11 +384,13 @@ describe('privacy: a person, end to end from ingest to erasure', () => {
     )
     expect(bindings.rowCount).toBe(0)
 
-    const suppressed = await pg.query<{ person_id: string }>(
+    const suppressedAfter = await pg.query<{ person_id: string }>(
       'SELECT person_id FROM suppressed_persons WHERE project_id = $1 AND person_id = ANY($2)',
       [projectId, [userId, anonId]],
     )
-    expect(suppressed.rows.map((r) => r.person_id).sort()).toEqual([anonId, userId].sort())
+    expect(suppressedAfter.rows.map((r) => r.person_id).sort()).toEqual(
+      suppressedBefore.rows.map((r) => r.person_id).sort(),
+    )
 
     // 8. GET /v1/deletions/:id → status 'completed'.
     const status = await deletionStatus(requestId)
@@ -340,6 +402,16 @@ describe('privacy: a person, end to end from ingest to erasure', () => {
   // The whole argument for time-scoping: a person who returns after being
   // erased must be counted again, from the deletion forward — not treated
   // as permanently gone just because they once asked to be forgotten.
+  //
+  // COUPLED to the test above, deliberately: it reuses that test's `userId`
+  // (whose identity_bindings/person_aliases the purge above deleted) and its
+  // `markerEvent` (to prove the OLD history stays gone). This is safe only
+  // because vitest runs one file's `it`s in declaration order by default —
+  // there is no `test.concurrent` anywhere in this file — so `it.only` on
+  // just this test, or reordering the two, would break it. Not made
+  // independent on purpose: re-running the whole delete/purge sequence here
+  // would just be the first test's own steps 1-6 copied, and would not
+  // exercise anything this one is actually about.
   it('a deleted person who returns is counted again, from the deletion forward', async () => {
     const newMarker = `e2e-marker-returned-${randomUUID()}`
 
@@ -365,10 +437,18 @@ describe('privacy: a person, end to end from ingest to erasure', () => {
     expect(read.json().events).toBe(1)
     expect(read.json().ids).toEqual([userId])
 
-    // The segment count includes them again for the NEW activity...
-    expect(await segmentCount(performedFilter(newMarker))).toBe(1)
+    // The segment count (and member page) include them again for the NEW
+    // activity, through the real route...
+    const newPreview = await previewSegment(performedFilter(newMarker))
+    expect(newPreview.statusCode).toBe(200)
+    expect(newPreview.json().person_count).toBe(1)
+    expect(
+      (newPreview.json().members as Array<Record<string, unknown>>).map((m) => m.person_id),
+    ).toEqual([userId])
     // ...but the OLD marker event stays gone forever — time-scoping allows
     // new history, it does not un-delete the old.
-    expect(await segmentCount(performedFilter(markerEvent))).toBe(0)
+    const oldPreview = await previewSegment(performedFilter(markerEvent))
+    expect(oldPreview.statusCode).toBe(200)
+    expect(oldPreview.json().person_count).toBe(0)
   })
 })

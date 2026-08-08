@@ -98,4 +98,42 @@ describe('SegmentCache', () => {
     c.set('huge', result(CACHE_MAX_ROWS + 1))
     expect(c.rows).toBeLessThanOrEqual(CACHE_MAX_ROWS)
   })
+
+  describe('clearProject', () => {
+    it('drops every entry for the given project, regardless of TTL', () => {
+      const c = new SegmentCache()
+      c.set('1:count:abc', result(2))
+      c.set('1:members::abc', result(2))
+      c.clearProject(1)
+      expect(c.get('1:count:abc')).toBeUndefined()
+      expect(c.get('1:members::abc')).toBeUndefined()
+    })
+
+    it("does not touch another project's entries", () => {
+      const c = new SegmentCache()
+      c.set('1:count:abc', result(2))
+      c.set('2:count:abc', result(3))
+      c.clearProject(1)
+      expect(c.get('1:count:abc')).toBeUndefined()
+      expect(c.get('2:count:abc')?.count).toBe(3)
+    })
+
+    it('is a no-op when the project has nothing cached', () => {
+      const c = new SegmentCache()
+      c.set('2:count:abc', result(3))
+      expect(() => c.clearProject(1)).not.toThrow()
+      expect(c.get('2:count:abc')?.count).toBe(3)
+    })
+
+    it('correctly accounts the row budget after clearing', () => {
+      // clearProject drops entries through the same #drop() path set()/get()
+      // use, not a separate deletion — this pins that the shared #rows
+      // accounting stays correct rather than double-counting or leaking rows
+      // that a later evict() would then trip on for the wrong reason.
+      const c = new SegmentCache()
+      c.set('1:count:abc', result(1000))
+      c.clearProject(1)
+      expect(c.rows).toBe(0)
+    })
+  })
 })

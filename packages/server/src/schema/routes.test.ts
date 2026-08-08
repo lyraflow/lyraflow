@@ -61,6 +61,37 @@ async function schemaHasEvent(projectId: number, eventName: string): Promise<boo
   return Number(row?.c ?? 0) > 0
 }
 
+/**
+ * Cleans BOTH ClickHouse tables this file writes — `events` and
+ * `event_schema` — for its own two projects, looked up by slug rather than
+ * trusting `projectA`/`projectB` (unset, or stale from a previous run in the
+ * same process, the first time this runs at the top of `beforeAll`).
+ * Run at the TOP of `beforeAll`, not only in `afterAll`, per the branch's
+ * live-database rule: `makeProject` gives each run a FRESH Postgres id, so a
+ * crashed prior run's own `events`/`event_schema` rows sitting under its OLD
+ * id are otherwise invisible forever — right up until Postgres's `bigserial`
+ * eventually reissues that exact number to some LATER, unrelated project,
+ * at which point its stale rows reappear as that new project's own data.
+ * That is precisely the leak this file's own "does not leak another
+ * project's event taxonomy" test exists to catch, and precisely what caused
+ * privacy/end-to-end.test.ts to see a one-off, unreproducible failure here
+ * (Task 10's report) before this fix: `event_schema` had no cleanup at all,
+ * only `events` did, in the OLD `afterAll`-only version of this cleanup.
+ */
+async function cleanup(): Promise<void> {
+  const existing = await pg.query<{ id: string }>('SELECT id FROM projects WHERE slug = ANY($1)', [
+    [SLUG_A, SLUG_B],
+  ])
+  const ids = existing.rows.map((r) => Number(r.id))
+  if (ids.length > 0) {
+    await ch.command({ query: `ALTER TABLE events DELETE WHERE project_id IN (${ids.join(',')})` })
+    await ch.command({
+      query: `ALTER TABLE event_schema DELETE WHERE project_id IN (${ids.join(',')})`,
+    })
+  }
+  await pg.query('DELETE FROM projects WHERE slug = ANY($1)', [[SLUG_A, SLUG_B]])
+}
+
 beforeAll(async () => {
   await migrate({
     pg,
@@ -68,6 +99,7 @@ beforeAll(async () => {
     migrations: loadMigrations(join(import.meta.dirname, '../../../db/migrations')),
     appSchemaVersion: 999,
   })
+  await cleanup()
 
   projectA = await makeProject(SLUG_A, 'SchemaRoutesA', WRITE_KEY_A, SERVER_KEY_A)
   projectB = await makeProject(SLUG_B, 'SchemaRoutesB', WRITE_KEY_B, SERVER_KEY_B)
@@ -173,12 +205,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await app.deps.buffer.flush()
   await app.close()
-  await pg.query('DELETE FROM projects WHERE slug = ANY($1)', [[SLUG_A, SLUG_B]])
-  // ClickHouse has no per-file DROP/CASCADE the way Postgres does — see the
-  // identical comment and reasoning in person.test.ts's afterAll.
-  await ch.command({
-    query: `ALTER TABLE events DELETE WHERE project_id IN (${projectA}, ${projectB})`,
-  })
+  await cleanup()
   await pg.end()
   await ch.close()
 })
