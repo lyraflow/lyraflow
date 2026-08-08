@@ -131,21 +131,52 @@ function activateSending(): void {
   state.transport.start()
 }
 
+/**
+ * Retries `activateSending()` from the send path whenever the gate allows
+ * sending but no transport exists yet — the one way that combination can
+ * arise is `activateSending()` throwing (inside `consent(true)`, if
+ * `loadIdentity` fails) before it ever got as far as building a
+ * `Transport`. Without this, that single failed attempt is terminal: the
+ * gate is already `'granted'`, `activateSending()` is only ever called from
+ * `init()` and `consent()`, and neither runs again — so nothing sends for
+ * the rest of the page's life, and events already durably queued (see the
+ * ordering in `consent()`) simply sit in storage until the next load.
+ *
+ * A cheap no-op on the (overwhelmingly common) path where activation
+ * already succeeded, since `state.transport` is set by then.
+ */
+function ensureActivated(): void {
+  if (!state) return
+  if (state.gate.allowed() && !state.transport) activateSending()
+}
+
 function enqueueOrHold(e: QueuedEvent): void {
   if (!state) return
-  for (const problem of validateEvent(e)) warn(problem)
   const gateState = state.gate.state()
+  if (gateState === 'refused') {
+    // Checked before validating, not after: an event that is about to be
+    // dropped unconditionally shouldn't produce validation noise on the
+    // way out. identify()'s own "requires a user_id" rule is guaranteed to
+    // fire here (a refused gate never sets identity.userId), which without
+    // this check meant every identify() call during a refusal logged a
+    // warning about a problem nobody could act on.
+    debugLog(`dropped ${e.type} event ${e.message_id}: consent was refused`)
+    return
+  }
+  for (const problem of validateEvent(e)) warn(problem)
   if (gateState === 'granted') {
+    // Retries activation if a previous attempt (inside consent(true))
+    // threw before a transport ever got built — otherwise a transient
+    // loadIdentity failure on grant would strand every event in storage
+    // for the rest of the page's life, with nothing left to ever flush
+    // them.
+    ensureActivated()
     state.queue?.add(e)
     debugLog(`enqueued ${e.type} event ${e.message_id}`)
-  } else if (gateState === 'pending') {
+  } else {
+    // 'pending'
     state.gate.hold(e)
     debugLog(`held ${e.type} event ${e.message_id} pending consent`)
-  } else {
-    // 'refused': a refusal stops collection, not merely sending — holding
-    // it here would just be collecting under a different name, ready to
-    // ship the moment a later `consent(true)` arrives.
-    debugLog(`dropped ${e.type} event ${e.message_id}: consent was refused`)
   }
 }
 
@@ -285,8 +316,13 @@ export function consent(granted: boolean): void {
     if (!granted) {
       // An explicit refusal must stop any further sending immediately, not
       // merely defer it — leaving the transport running would keep
-      // draining whatever was already queued from a prior grant.
+      // draining whatever was already queued from a prior grant. It must
+      // also discard a user id captured while the gate was still pending —
+      // a refusal stops collection, so persisting an identifier gathered
+      // during the window the visitor then declined is exactly what it
+      // exists to prevent.
       state.transport?.stop()
+      state.pendingUserId = undefined
       return
     }
     // Get the released events into a durable queue BEFORE doing anything
@@ -319,6 +355,12 @@ export function reset(): void {
       return
     }
     void flush()
+    // A user id captured by identify() while the gate was still pending
+    // must not survive a reset — otherwise a logout is silently undone the
+    // moment a later consent(true) persists it, since activateSending()
+    // only ever clears this on a SUCCESSFUL grant, which reset() itself is
+    // not.
+    state.pendingUserId = undefined
     state.identity = state.gate.allowed()
       ? resetIdentity({ cookieDomain: resolveCookieDomain() })
       : { anonymousId: newUuid() }
@@ -340,7 +382,18 @@ export async function flush(): Promise<void> {
     warnNotInitialized('flush')
     return
   }
-  if (!state.gate.allowed() || !state.transport) return
+  if (!state.gate.allowed()) return
+  try {
+    // Retries activation (see ensureActivated's own doc) — the send path
+    // is exactly where a stalled first attempt needs to get another
+    // chance, and an explicit flush() is the one call a host is certain to
+    // make eventually even if nothing else retries it first.
+    ensureActivated()
+  } catch (err) {
+    warn(`swallowed an internal error: ${String(err)}`)
+    return
+  }
+  if (!state.transport) return
   debugLog('flush attempt')
   try {
     const outcome = await state.transport.flush()

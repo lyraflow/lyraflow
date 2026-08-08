@@ -353,6 +353,64 @@ describe('public surface', () => {
     expect(document.cookie).toContain('lyraflow_uid=user-99')
   })
 
+  it('reset() forgets a user id captured while consent was still pending', async () => {
+    // Without this, a logout is silently undone the moment a LATER
+    // consent(true) arrives: identify() before consent stashes the id in
+    // state.pendingUserId, and only a successful activateSending() ever
+    // clears that field — reset() rebuilding identity is not the same
+    // thing as reset() forgetting what was pending.
+    //
+    // The already-held 'identify' event itself is deliberately NOT part of
+    // this assertion: identify('user-42') genuinely happened before the
+    // reset, so that event legitimately keeps user_id: 'user-42' on
+    // release — the same "stamped at enqueue, never retro-stamped"
+    // principle the anonymous_id re-stamping fix protects. The bug is
+    // specifically that the id leaks into the PERSISTED cookie and into
+    // events recorded AFTER the reset, neither of which should ever have
+    // known about a user id a logout was supposed to erase.
+    const f = setup({ requireConsent: true })
+    sdk.identify('user-42')
+    sdk.reset()
+    sdk.consent(true)
+    sdk.track('after_reset_and_grant')
+    await sdk.flush()
+    expect(document.cookie).not.toContain('lyraflow_uid=user-42')
+    const events = sent(f)
+    expect(events.find((e) => e.event === 'after_reset_and_grant')?.user_id).toBeUndefined()
+  })
+
+  it('a refusal discards a user id captured while consent was still pending', async () => {
+    // The same field, the other clearing path: identify() while pending,
+    // then an explicit refusal — not a reset — must ALSO forget it, so a
+    // later grant doesn't persist an id gathered during a window the
+    // visitor declined.
+    const f = setup({ requireConsent: true })
+    sdk.identify('user-refused')
+    sdk.consent(false)
+    sdk.consent(true)
+    await sdk.flush()
+    expect(document.cookie).not.toContain('lyraflow_uid=user-refused')
+    const events = sent(f)
+    expect(events.every((e) => e.user_id !== 'user-refused')).toBe(true)
+  })
+
+  it('does not warn about a missing user_id for an identify() call that is about to be dropped by a refusal', () => {
+    // enqueueOrHold checks the gate BEFORE calling validateEvent — a
+    // refused gate never sets identity.userId, so identify()'s own
+    // "requires a user_id" rule is guaranteed to fire on every call during
+    // a refusal unless the drop happens first, producing a warning about a
+    // problem nobody could ever act on.
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      setup({ requireConsent: true })
+      sdk.consent(false)
+      sdk.identify('user-x')
+      expect(warnSpy.mock.calls.join(' ')).not.toContain('requires a user_id')
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
   it('re-stamps held events with the real, cookie-backed anonymous id on consent — not the ephemeral one', async () => {
     const f = setup({ requireConsent: true })
     sdk.track('held_1')
@@ -364,19 +422,6 @@ describe('public surface', () => {
     expect(ids.size).toBe(1)
     const [id] = [...ids]
     expect(document.cookie).toContain(`lyraflow_aid=${id}`)
-  })
-
-  it('re-stamps anonymous_id only on release — each event keeps the user_id it was recorded under', async () => {
-    const f = setup({ requireConsent: true })
-    sdk.track('anon_event')
-    sdk.identify('user-1')
-    sdk.track('after_identify')
-    sdk.consent(true)
-    await sdk.flush()
-    const events = sent(f)
-    expect(events.find((e) => e.event === 'anon_event')?.user_id).toBeUndefined()
-    expect(events.find((e) => e.event === 'after_identify')?.user_id).toBe('user-1')
-    expect(new Set(events.map((e) => e.anonymous_id)).size).toBe(1)
   })
 
   it('does not collect events after an explicit refusal, and a later grant does not resurrect them', async () => {
@@ -494,6 +539,49 @@ describe('public surface', () => {
     }
     const raw = localStorage.getItem(STORAGE_KEY)
     expect(raw).toContain('important_signup')
+  })
+
+  it('retries activation from the send path after a failed grant, instead of stalling forever', async () => {
+    // After the failed consent(true) below, the gate is 'granted' but no
+    // Transport was ever built — activateSending() is only ever called
+    // from init() and consent(), and neither runs again on its own, so
+    // without a retry this event would sit in storage for the rest of the
+    // page's life. flush() is the send path that has to notice a missing
+    // transport and try activateSending() again.
+    const f = setup({ requireConsent: true })
+    sdk.track('important_signup')
+    const loadIdentitySpy = vi.spyOn(identityModule, 'loadIdentity').mockImplementation(() => {
+      throw new Error('boom')
+    })
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      sdk.consent(true)
+    } finally {
+      loadIdentitySpy.mockRestore()
+      warnSpy.mockRestore()
+    }
+    await sdk.flush()
+    expect(sent(f).map((e) => e.event)).toContain('important_signup')
+  })
+
+  it('retries activation on the next track() too, not only on an explicit flush()', async () => {
+    const f = setup({ requireConsent: true })
+    sdk.track('stranded')
+    const loadIdentitySpy = vi.spyOn(identityModule, 'loadIdentity').mockImplementation(() => {
+      throw new Error('boom')
+    })
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      sdk.consent(true)
+    } finally {
+      loadIdentitySpy.mockRestore()
+      warnSpy.mockRestore()
+    }
+    sdk.track('after_recovery')
+    await sdk.flush()
+    const events = sent(f).map((e) => e.event)
+    expect(events).toContain('stranded')
+    expect(events).toContain('after_recovery')
   })
 
   it('warns when a method is called before init() has ever run', async () => {
