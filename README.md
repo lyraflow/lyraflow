@@ -206,7 +206,7 @@ Paste this before `</head>`:
 ```html
 <script>
   !function(){var l=window.lyraflow=window.lyraflow||{};l.q=l.q||[];
-  ["track","page","identify","consent","reset","flush"].forEach(function(m){
+  ["init","track","page","identify","consent","reset","flush"].forEach(function(m){
     l[m]=l[m]||function(){l.q.push([m].concat([].slice.call(arguments)))}});
   }();
 </script>
@@ -218,8 +218,12 @@ Paste this before `</head>`:
 
 The first block is a stub: it queues any call made before the async script
 finishes loading, so a `track()` fired the instant the page renders is never
-lost to a race with the network. Once the real script runs, it drains that
-queue and replaces the stub with itself on `window.lyraflow`. Replace both
+lost to a race with the network. **`init` is queued the same way as every
+other method** — the third block runs long before the async script has
+loaded, which is exactly why `init` has to be in the stub's method list. The
+moment the real script loads it replaces the stub on `window.lyraflow` and
+replays the queue, running the queued `init` first whatever order the calls
+were made in. Replace both
 occurrences of `https://analytics.example.com` with your own Lyraflow host,
 and `writeKey` with the `wk_…` key from *Running Lyraflow* above — the same
 one your server-side calls already use.

@@ -180,6 +180,10 @@ function enqueueOrHold(e: QueuedEvent): void {
   }
 }
 
+interface SnippetStub {
+  q?: unknown[]
+}
+
 /**
  * Calls queued by the snippet stub (`window.lyraflow.q`) before this script
  * finished loading — the script tag is async, so the call most likely to
@@ -187,14 +191,40 @@ function enqueueOrHold(e: QueuedEvent): void {
  * hypothetical second `init()` never replays it.
  */
 function drainSnippetQueue(): void {
-  const stub = (globalThis as unknown as { lyraflow?: { q?: unknown[] } }).lyraflow
+  const stub = (globalThis as unknown as { lyraflow?: SnippetStub }).lyraflow
   const queued = stub?.q
   if (!Array.isArray(queued)) return
   if (stub) stub.q = []
+  replay(queued)
+}
+
+/**
+ * `init` is replayed FIRST and on its own pass, before anything else in the
+ * array. Every other method needs the state only `init()` builds, and the
+ * documented snippet queues `init` through the stub like any other call —
+ * so replaying strictly in array order would drop every call a page made
+ * before its own `init` line (a `track()` fired from an earlier inline
+ * block, a `consent()` restored from a banner script) and would leave the
+ * SDK uninitialised for the whole first pass besides.
+ *
+ * Re-entry is not a hazard: every caller clears the queue it hands over
+ * before calling this, so the `drainSnippetQueue()` inside `init()` finds
+ * nothing left to replay.
+ */
+function replay(queued: unknown[]): void {
+  for (const call of queued) {
+    if (Array.isArray(call) && call[0] === 'init') {
+      init(call[1] as InitOptions)
+      break
+    }
+  }
   for (const call of queued) {
     if (!Array.isArray(call) || call.length === 0) continue
     const [method, ...args] = call as [unknown, ...unknown[]]
     switch (method) {
+      // Already replayed above, ahead of everything else.
+      case 'init':
+        break
       case 'track':
         track(args[0] as string, args[1] as Record<string, unknown> | undefined)
         break
@@ -252,9 +282,6 @@ export function init(options: InitOptions): void {
     }
     if (gate.allowed()) activateSending()
     drainSnippetQueue()
-    if (typeof window !== 'undefined') {
-      ;(window as unknown as { lyraflow?: unknown }).lyraflow = api
-    }
     if (options.autoPageView) page()
   })
 }
@@ -404,5 +431,32 @@ export async function flush(): Promise<void> {
 }
 
 const api = { init, track, page, identify, consent, reset, flush }
+
+/**
+ * Takes over `window.lyraflow` from the snippet stub AT LOAD, and replays
+ * whatever the stub queued — both before `init()` has been called, because
+ * the snippet calls `init` THROUGH the stub.
+ *
+ * Doing this inside `init()` instead cannot work, and shipped that way once:
+ * the stub only forwards the methods it was written to forward, so until
+ * something replaces it, `window.lyraflow.init` is whatever the stub made
+ * it — and if the stub queues the call, nothing is ever going to run it.
+ * The bundle's `globalName` (`window.lyraflowBundle`) is not an answer
+ * either: it appears in no snippet anyone is documented to paste, and a
+ * strict-mode top-level `var` is not reliably a global property outside a
+ * real browser anyway.
+ *
+ * A no-op off the browser (the server imports `VERSION` from this module in
+ * a Node process).
+ */
+function installGlobal(): void {
+  if (typeof window === 'undefined') return
+  const w = window as unknown as { lyraflow?: unknown }
+  const queued = (w.lyraflow as SnippetStub | undefined)?.q
+  w.lyraflow = api
+  if (Array.isArray(queued)) replay(queued)
+}
+
+installGlobal()
 
 export default api
