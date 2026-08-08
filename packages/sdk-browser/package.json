@@ -6,7 +6,7 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "engines": { "node": ">=22 <23" },
-  "scripts": { "build": "tsc -b && node scripts/bundle.mjs" },
+  "scripts": { "build": "node scripts/clean.mjs && tsc -b && node scripts/bundle.mjs" },
   "dependencies": { "@lyraflow/core": "workspace:*" },
   "devDependencies": { "esbuild": "^0.24.0", "happy-dom": "^15.11.0" }
 }
