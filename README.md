@@ -683,6 +683,15 @@ deleting an id that was later merged into another still resolves to, and
 erases, the survivor of that merge. `suppressed_at` is the boundary: events at
 or before it stop appearing anywhere, immediately.
 
+The boundary belongs to the **person**, not to the single id you named, and a
+person is every id merged into them. So the boundary that applies to a read
+can move as identities merge: if two people who were each deleted at different
+times are later merged with `/v1/alias`, the surviving person carries the
+**later** of the two boundaries, and events after the earlier deletion but at
+or before the later one become hidden too. That direction is guaranteed — a
+merge can only ever move a boundary later, never earlier. Nothing a merge does
+can bring back an event that a deletion has already hidden.
+
 Deletion is asynchronous. The moment the API answers `202`, the person's past
 data stops appearing in segment counts, member lists, profile reads and
 exports — that is the suppression list, and it takes effect immediately,
@@ -724,9 +733,12 @@ request is accepted, and activity recorded in that gap does not survive — it
 is erased with the rest. Requesting deletion again moves the boundary
 forward and erases whatever accumulated since, including while a previous
 request is still waiting on the purge worker, which is exactly the case an
-operator re-requesting after a failed attempt needs to work. Once the purge
-has actually finished, a repeat request for a person with no activity since
-then finds nothing left to suppress, and answers `404` like any other id
+operator re-requesting after a failed attempt needs to work. If a previous
+request failed part way through — its events already erased, its identity rows
+not — the repeat `DELETE` reopens **that** request and returns its original
+`request_id`, instead of reporting the now-eventless person as `404`. Once the
+purge has actually *finished*, a repeat request for a person with no activity
+since then finds nothing left to erase, and answers `404` like any other id
 nothing has recorded.
 
 **Not covered:** backups. Lyraflow deletes from the live stores it manages. A
@@ -748,12 +760,25 @@ original deletion restored afterwards; a person's own identified events
 (anything carrying its own user id) are unaffected regardless. Narrow, and
 stated rather than silently left for an operator to discover.
 
-A deletion request with no subject — an id this project has never recorded —
-is `404`:
+A deletion request with no subject is `404`:
 
 ```json
 { "error": "person_not_found" }
 ```
+
+**Read that `404` carefully — it does not mean "this id was never seen."** It
+means no events could be resolved *for a person* from the id you sent. Erasure,
+export and the profile read all cover people the **identity graph** knows
+about, and an id only enters that graph through `/v1/identify` (or `/v1/alias`).
+A purely anonymous visitor — an `anonymous_id` that has sent events but has
+never been identified — cannot be resolved from that `anonymous_id` alone, and
+answers `404` here even though their events are sitting in the store. If you
+have been handed a raw cookie or device id by a data-subject request and get a
+`404`, that is the case to rule out first: it is not evidence the id was never
+recorded. Resolve it to a user id (anything you have ever called `/v1/identify`
+with for that device) and request erasure for that instead. Widening resolution
+to cover never-identified visitors is a change we intend to make; today it is a
+documented limit rather than a silent one.
 
 `401` for a missing or invalid server key.
 
@@ -773,10 +798,18 @@ curl -s http://localhost:3000/v1/deletions/118 \
 
 | `status` | Meaning |
 | --- | --- |
-| `pending` | Accepted, not yet picked up by the purge worker |
+| `pending` | Waiting for the purge worker. If an attempt has already failed, `error` carries why and the request is waiting to be retried |
 | `in_progress` | A worker is erasing this person's rows right now |
 | `completed` | Erasure finished — `completed_at` is set |
 | `failed` | The worker gave up after repeated attempts; `error` carries the last one. This is not an API error — the request was accepted, and this is telling you it did not finish |
+
+**`failed` does not mean nothing happened.** The purge erases in a fixed order
+— events first, identity last — so a request that failed part way through has
+usually already deleted some of the person's data. Treat `failed` as "partly
+erased, stopped", never as "no change". The recovery is to send the same
+`DELETE /v1/persons/:id` again: it picks the unfinished request back up and
+returns `202` with **the same `request_id`**, rather than `404`-ing a person
+whose events are already gone. Keep polling that id.
 
 `:id` belonging to another project, or to no request at all, is `404` with
 `{ "error": "deletion_not_found" }` — never `403`, which would confirm the id
@@ -824,7 +857,10 @@ cannot afford to miss.
 The export honours deletion the same way the person read does: a person who
 has been deleted exports only the events recorded after the deletion
 boundary, and a person with nothing left after that boundary is `404`, the
-same `{ "error": "person_not_found" }` as an id nothing has ever recorded.
+same `{ "error": "person_not_found" }` an unresolvable id gets. As with
+`DELETE`, that `404` also covers a visitor who has never been through
+`/v1/identify` — see *Deleting a person* above, where the same limit is
+described in full. An `anonymous_id` alone is not enough to export a subject.
 Traits are omitted entirely once a boundary exists — a trait carries no
 event time (it is the *latest* value known for that key, not a timestamped
 fact), so it cannot be split at the deletion instant the way an event can;

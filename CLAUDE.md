@@ -61,10 +61,6 @@ between a new self-hoster and a working install. It has drifted twice; both time
 shipped endpoint went undocumented because the task that added it had no documentation
 step.
 
-`README.md` documents the endpoints and payload shape; keep it accurate when the API
-changes, because it is the only thing standing between a new self-hoster and a working
-install.
-
 ## Stack and layout
 
 A pnpm workspace of TypeScript packages, Node 22, ESM throughout. TypeScript is `strict`
