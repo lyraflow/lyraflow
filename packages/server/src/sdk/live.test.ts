@@ -39,15 +39,28 @@ const WRITE_KEY = 'wk_sdk_live_e2e'
 const ORIGIN = 'https://app.sdk-live-e2e.test'
 
 /**
- * A real browser attaches this to every `fetch()` itself — page script can
- * neither set nor suppress it. The server's bot filter (`isBot()`,
- * `packages/core/src/enrich/bots.ts`) treats a MISSING `user-agent` header
- * as a bot (`if (!ua) return true`), and keys off the real HTTP header, not
- * the `context.user_agent` field the SDK's payload carries. `app.inject`
- * has no browser networking layer to supply this automatically, so the
- * fetchImpl adapter below does it, mirroring what a real browser does
- * outside the SDK's control — see the task report for why this is a
- * harness concern, not a change to the SDK's own request.
+ * Kept even though it turns out not to be load-bearing for THIS harness:
+ * `light-my-request` (what `app.inject` runs on) defaults to
+ * `user-agent: lightMyRequest` whenever a caller supplies none, which
+ * matches no token in `BOT_TOKENS` — deleting this header entirely was
+ * tried, and all four tests in this file still passed. It stays anyway,
+ * for two reasons that have nothing to do with that: it makes the
+ * device_type/os/browser columns the server derives from a real UA
+ * realistic instead of "unknown" for everything this file inserts, and
+ * these tests should not depend on a test library's default happening to
+ * dodge every bot token rather than on something this file controls.
+ *
+ * The genuinely load-bearing finding here is about the SERVER, not this
+ * harness: `isBot(undefined)` (`packages/core/src/enrich/bots.ts`) returns
+ * true, and `BOT_TOKENS` matches `curl/`, `python-requests`, `urllib`,
+ * `okhttp`, `axios/`, `java/` and `node-fetch` — UA strings a real,
+ * non-browser SDK sends by default unless it deliberately overrides them.
+ * `accept()` in `ingest/routes.ts` classifies that as bot traffic, drops
+ * the event silently, still answers 202, and writes no dead letter (the
+ * bot branch returns before one would be written). Both of this plan's
+ * planned server-side SDKs would be silently swallowed on their first
+ * request with no way to diagnose it. Recorded, not fixed, here — see the
+ * task report.
  */
 const BROWSER_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/131.0 Safari/537.36'
@@ -64,12 +77,18 @@ interface Captured {
 /**
  * The only seam between the real SDK and the real app: adapts `app.inject`
  * to the `fetchImpl` shape `Transport` (packages/sdk-browser/src/transport.ts)
- * calls — it reads only `res.status` and `res.headers.get(...)`, so that is
- * all this returns. `origin` is supplied only when a test asks for it, to
- * simulate a cross-origin `fetch()`; the SDK itself never sets that header
- * (browsers forbid it). `sink`, when given, records the exact request body
- * and the raw injected response for a test to inspect afterwards — the
- * SDK's public surface has no way to hand either back itself.
+ * expects. Returns a REAL `Response` (not a hand-rolled lookalike) — a
+ * plain object cast `as unknown as Response` would erase the type checker's
+ * ability to catch a future `Transport` reading `.ok`, `.json()` or
+ * `.text()` and getting `undefined` in silence, and it would throw away the
+ * batch response body, which is exactly the evidence this file's replay
+ * test needs to prove the SDK's own delivery — not just the test's
+ * hand-written replay POST — actually reached the server. `origin` is
+ * supplied only when a test asks for it, to simulate a cross-origin
+ * `fetch()`; the SDK itself never sets that header (browsers forbid it).
+ * `sink`, when given, records the exact request body and the raw injected
+ * response (which still has light-my-request's own `.json()`) for a test
+ * to inspect afterwards — the SDK's public surface hands back neither.
  */
 function makeFetchImpl(
   target: FastifyInstance,
@@ -92,12 +111,10 @@ function makeFetchImpl(
       payload: body,
     })
     if (opts.sink && body !== undefined) opts.sink.push({ body, response })
-    return {
+    return new Response(response.body, {
       status: response.statusCode,
-      headers: {
-        get: (name: string) => (response.headers[name.toLowerCase()] as string) ?? null,
-      },
-    } as unknown as Response
+      headers: response.headers as Record<string, string>,
+    })
   }) as unknown as typeof fetch
 }
 
@@ -146,7 +163,12 @@ beforeAll(async () => {
     LYRAFLOW_CLICKHOUSE_USER: CH.username,
     LYRAFLOW_CLICKHOUSE_PASSWORD: CH.password,
     LYRAFLOW_CLICKHOUSE_DB: CH.database,
-    LYRAFLOW_FLUSH_ROWS: '1',
+    // Left at its default (not forced to 1 row, unlike most other live
+    // ingest tests): every assertion here already goes through an explicit
+    // `app.deps.buffer.flush()`, which awaits in-flight batches regardless
+    // of the row threshold, so forcing per-row auto-flush bought nothing —
+    // and it meant this file, alone among the live tests, never exercised
+    // the multi-row insert path production actually uses.
     LYRAFLOW_ALLOWED_ORIGINS: ORIGIN,
   } as NodeJS.ProcessEnv)
 
@@ -289,17 +311,27 @@ describe('the SDK against the real app and ClickHouse', () => {
     await lyraflow.flush()
     await app.deps.buffer.flush()
 
-    // The exact body the SDK produced — same message_id, same timestamp.
-    const body = sink[sink.length - 1]?.body
-    expect(body).toBeTruthy()
+    // The exact body the SDK produced — same message_id, same timestamp —
+    // AND proof the SDK's OWN delivery actually reached and was accepted by
+    // the server. Without the second half, this test cannot tell "two
+    // deliveries, deduplicated" from "one delivery, from the hand-written
+    // POST below" — which is the entire property under test, and the one
+    // the SDK's absent cross-tab lock relies on. /v1/batch's response body
+    // is `{ accepted, rejected, throttled }` (ingest/routes.ts); asserting
+    // it here is deterministic and needs no new machinery.
+    const sdkSend = sink[sink.length - 1]
+    expect(sdkSend?.body).toBeTruthy()
+    const body = sdkSend?.body
     if (!body) throw new Error('unreachable')
+    expect(sdkSend?.response.json()).toEqual({ accepted: 1, rejected: 0, throttled: 0 })
 
     // A retry or a two-tab race sends this unchanged, a second time. The
     // design relies on this being safe: the SDK has no cross-tab lock, no
     // leader election and no in-flight dedupe, precisely because a query
     // that aggregates by event_id makes a duplicate delivery cost disk, not
-    // correctness.
-    await app.inject({
+    // correctness. Asserted accepted too, for the same reason as the SDK's
+    // own send above — this delivery must be real, not merely attempted.
+    const replay = await app.inject({
       method: 'POST',
       url: '/v1/batch',
       headers: {
@@ -309,6 +341,7 @@ describe('the SDK against the real app and ClickHouse', () => {
       },
       payload: body,
     })
+    expect(replay.json()).toEqual({ accepted: 1, rejected: 0, throttled: 0 })
     await app.deps.buffer.flush()
 
     const rs = await ch.query({
