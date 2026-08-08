@@ -14,6 +14,9 @@ export interface ShutdownOptions {
   readiness: Readiness
   buffer: IngestBuffer<EventRow>
   counters: IngestCounters
+  // The narrowest type that says what shutdown needs — not `PurgeWorker`
+  // itself — so a test can pass a stub without a database.
+  purge: { stop(): void }
   drainDeadlineMs: number
   onExit?: (code: number) => void
 }
@@ -24,7 +27,7 @@ export interface ShutdownOptions {
  * is buffered, which would make the upgrade story dishonest.
  */
 export function installShutdownHandlers(opts: ShutdownOptions): () => Promise<void> {
-  const { app, readiness, buffer, counters, drainDeadlineMs } = opts
+  const { app, readiness, buffer, counters, purge, drainDeadlineMs } = opts
   const exit = opts.onExit ?? ((code: number) => process.exit(code))
   let running: Promise<void> | null = null
 
@@ -33,6 +36,14 @@ export function installShutdownHandlers(opts: ShutdownOptions): () => Promise<vo
     running = (async () => {
       app.log.info('shutdown: draining')
       readiness.markDraining()
+
+      // No new purges once draining starts. A mutation already in flight is
+      // left to ClickHouse — it completes server-side regardless — and the
+      // lease brings the request back on the next boot if completed_at never
+      // landed. Deliberately not awaited: the drain deadline belongs to the
+      // ingest buffer, whose rows are only in this process's memory and are
+      // lost if it is missed. A purge is durable in Postgres and is not.
+      purge.stop()
 
       const result = await buffer.drain(drainDeadlineMs)
       if (result.dropped > 0) {

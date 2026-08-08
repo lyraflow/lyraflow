@@ -16,6 +16,9 @@ describe('loadConfig', () => {
     expect(c.flushIntervalMs).toBe(1000)
     expect(c.flushRows).toBe(1000)
     expect(c.drainDeadlineMs).toBe(25_000)
+    expect(c.purgeIntervalMs).toBe(15_000)
+    expect(c.purgeLeaseMs).toBe(600_000)
+    expect(c.purgeMaxAttempts).toBe(5)
   })
 
   it('throws a named error listing every missing variable at once', () => {
@@ -28,5 +31,26 @@ describe('loadConfig', () => {
     expect(() =>
       loadConfig({ ...required, LYRAFLOW_DRAIN_DEADLINE_MS: '60000' } as NodeJS.ProcessEnv),
     ).toThrow(/stop_grace_period/i)
+  })
+
+  it('overrides the purge worker settings from the environment', () => {
+    const c = loadConfig({
+      ...required,
+      LYRAFLOW_PURGE_INTERVAL_MS: '5000',
+      LYRAFLOW_PURGE_LEASE_MS: '120000',
+      LYRAFLOW_PURGE_MAX_ATTEMPTS: '3',
+    } as NodeJS.ProcessEnv)
+    expect(c.purgeIntervalMs).toBe(5000)
+    expect(c.purgeLeaseMs).toBe(120_000)
+    expect(c.purgeMaxAttempts).toBe(3)
+  })
+
+  it("throws through num's own message for a non-numeric purgeMaxAttempts", () => {
+    expect(() =>
+      loadConfig({
+        ...required,
+        LYRAFLOW_PURGE_MAX_ATTEMPTS: 'not-a-number',
+      } as NodeJS.ProcessEnv),
+    ).toThrow(/LYRAFLOW_PURGE_MAX_ATTEMPTS must be a number, got "not-a-number"/)
   })
 })

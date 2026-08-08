@@ -8,6 +8,9 @@ export interface Config {
   flushRows: number
   bufferMaxRows: number
   drainDeadlineMs: number
+  purgeIntervalMs: number
+  purgeLeaseMs: number
+  purgeMaxAttempts: number
 }
 
 /**
@@ -59,5 +62,18 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     flushRows: num(env, 'LYRAFLOW_FLUSH_ROWS', 1000),
     bufferMaxRows: num(env, 'LYRAFLOW_BUFFER_MAX_ROWS', 100_000),
     drainDeadlineMs,
+    // How often the purge worker looks for a claimable request. Frequent is
+    // cheap: the claim is one indexed statement that returns nothing when
+    // there is no work.
+    purgeIntervalMs: num(env, 'LYRAFLOW_PURGE_INTERVAL_MS', 15_000),
+    // How long a claim is held before another worker may take the request
+    // over. Must comfortably exceed the longest plausible purge — a
+    // ClickHouse mutation over a large partition takes minutes — or two
+    // workers would run the same purge concurrently. Concurrent runs are
+    // safe (every step is a predicated delete) but wasteful.
+    purgeLeaseMs: num(env, 'LYRAFLOW_PURGE_LEASE_MS', 600_000),
+    // A poisoned request stops being claimed past this, with last_error
+    // saying why, rather than spinning forever.
+    purgeMaxAttempts: num(env, 'LYRAFLOW_PURGE_MAX_ATTEMPTS', 5),
   }
 }

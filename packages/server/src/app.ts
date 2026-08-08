@@ -6,6 +6,7 @@ import { type Readiness, registerHealth } from './health.js'
 import { PersonAliases } from './identity/aliases.js'
 import { IdentityBindings } from './identity/bindings.js'
 import { registerPersonRoutes } from './identity/person.js'
+import { resolvePersonScope } from './identity/scope.js'
 import { IngestBuffer } from './ingest/buffer.js'
 import { IngestCounters } from './ingest/counters.js'
 import { NullGeoResolver } from './ingest/geo.js'
@@ -15,8 +16,10 @@ import type { EventRow } from './ingest/row.js'
 import { registerMetrics } from './metrics.js'
 import { DeletionStore } from './privacy/deletion-store.js'
 import { registerExportRoute } from './privacy/export.js'
+import { purgePerson } from './privacy/purge.js'
 import { registerPrivacyRoutes } from './privacy/routes.js'
 import { SuppressionStore } from './privacy/suppression-store.js'
+import { PurgeWorker } from './privacy/worker.js'
 import { registerSchemaRoutes } from './schema/routes.js'
 import { registerSegmentRoutes } from './segments/routes.js'
 
@@ -27,6 +30,7 @@ export interface AppDeps {
   readiness: Readiness
   buffer: IngestBuffer<EventRow>
   counters: IngestCounters
+  purge: PurgeWorker
 }
 
 export function buildApp(input: {
@@ -83,7 +87,32 @@ export function buildApp(input: {
     app.log.error({ err, failed }, 'ingest counters flush failed'),
   )
 
-  app.decorate('deps', { config, pg, ch, readiness, buffer, counters } satisfies AppDeps)
+  // Shared across every registration below, not one instance per
+  // registration: registerPersonRoutes's reads must see the same
+  // authoritative state (and the same ProjectCache) the write path just
+  // wrote through, and constructing a second ProjectCache would also double
+  // the Postgres load an identical key lookup produces. Same reasoning is
+  // why there is exactly one SuppressionStore/DeletionStore/PurgeWorker: the
+  // worker's reads and the routes' writes have to see each other's effects
+  // immediately, and a second ProjectCache-shaped duplicate would double the
+  // Postgres load an identical lookup produces.
+  const projects = new ProjectCache(pg, 60_000)
+  const bindings = new IdentityBindings(pg)
+  const aliases = new PersonAliases(pg)
+  const suppression = new SuppressionStore(pg)
+  const deletions = new DeletionStore(pg, suppression)
+  const purge = new PurgeWorker({
+    deletions,
+    resolve: (projectId, personId) =>
+      resolvePersonScope({ bindings, aliases }, projectId, personId),
+    purge: (projectId, scope) => purgePerson({ ch, pg, projectId, scope }),
+    intervalMs: config.purgeIntervalMs,
+    leaseMs: config.purgeLeaseMs,
+    maxAttempts: config.purgeMaxAttempts,
+    onError: (err, ctx) => app.log.error({ err, ...ctx }, 'purge failed'),
+  })
+
+  app.decorate('deps', { config, pg, ch, readiness, buffer, counters, purge } satisfies AppDeps)
   registerHealth(app, readiness)
   // Sourced from IngestCounters, not an onResponse hook counting HTTP
   // responses: /v1/batch answers with a single response for up to 500
@@ -95,16 +124,6 @@ export function buildApp(input: {
     bufferDepth: () => buffer.depth,
     totals: () => counters.totals(),
   })
-  // Shared across both route registrations below, not one instance per
-  // registration: registerPersonRoutes's reads must see the same
-  // authoritative state (and the same ProjectCache) the write path just
-  // wrote through, and constructing a second ProjectCache would also double
-  // the Postgres load an identical key lookup produces.
-  const projects = new ProjectCache(pg, 60_000)
-  const bindings = new IdentityBindings(pg)
-  const aliases = new PersonAliases(pg)
-  const suppression = new SuppressionStore(pg)
-  const deletions = new DeletionStore(pg, suppression)
 
   registerIngestRoutes(app, {
     buffer,
@@ -120,15 +139,14 @@ export function buildApp(input: {
   registerPersonRoutes(app, { projects, readiness, ch, bindings, aliases, suppression })
   registerSegmentRoutes(app, { projects, readiness, ch, pg, database: config.ch.database })
   registerSchemaRoutes(app, { projects, readiness, ch })
-  // maxAttempts: 5 and leaseMs: 600_000 are the literal defaults
-  // `LYRAFLOW_PURGE_MAX_ATTEMPTS` and `LYRAFLOW_PURGE_LEASE_MS` will resolve
-  // to once config carries them — a later task wires the configured values
-  // through; nothing here reads either from config yet.
-  //
   // One shared object, not one built per registration: registerExportRoute
   // takes the exact same PrivacyDeps registerPrivacyRoutes does (export.ts's
   // own docstring), and constructing a second literal here is exactly the
   // "define a second deps object" that invites the two to drift apart.
+  // maxAttempts/leaseMs are the SAME configured values the PurgeWorker above
+  // was built with — the status endpoint (routes.ts) uses them to decide
+  // "failed" vs "in_progress", and a value that drifted from the worker's
+  // own would make that endpoint lie about state the worker itself defines.
   const privacyDeps = {
     projects,
     readiness,
@@ -138,12 +156,18 @@ export function buildApp(input: {
     aliases,
     deletions,
     suppression,
-    maxAttempts: 5,
-    leaseMs: 600_000,
+    maxAttempts: config.purgeMaxAttempts,
+    leaseMs: config.purgeLeaseMs,
   }
   registerPrivacyRoutes(app, privacyDeps)
   registerExportRoute(app, privacyDeps)
 
+  // Deliberately NOT started here: every route test in this codebase calls
+  // buildApp, and a live timer claiming real deletion requests during
+  // unrelated tests is exactly the cross-file interference the
+  // shared-database rule exists to prevent (see purge/worker.test.ts and
+  // this file's own callers). index.ts starts it, once boot has actually
+  // succeeded.
   return app
 }
 
