@@ -116,6 +116,17 @@ not contain `bot`, `crawler`, `curl/`, `python-requests`, and similar tokens
 `/health` (liveness), `/ready` (readiness), and `/metrics` (Prometheus text
 format) are also served, and are not authenticated.
 
+Sent directly from browser JavaScript (as opposed to a server-side SDK),
+`/v1/track`, `/v1/page`, `/v1/identify` and `/v1/batch` are CORS-preflighted
+requests. By default Lyraflow answers that preflight for any origin — set
+`LYRAFLOW_ALLOWED_ORIGINS` (comma-separated) on the server to restrict it.
+This is not a security boundary: the write key already ships in page source,
+and any non-browser client ignores CORS entirely. What it buys is
+tamper-evidence — stopping someone from pasting your write key on their own
+site and quietly polluting your data — not access control. Leave it unset
+and any origin is allowed, which is why a fresh install's tracking snippet
+works on first paste with no configuration.
+
 ### Payload fields
 
 | Field | Required | Notes |

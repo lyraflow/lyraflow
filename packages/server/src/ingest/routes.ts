@@ -327,6 +327,31 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
           // header, and this list is what makes a dropped entry here break
           // the preflight rather than silently keep working via reflection.
           allowedHeaders: ['content-type', WRITE_KEY_HEADER],
+          // retry-after is NOT one of the CORS-safelisted response headers a
+          // browser exposes to script by default — without this, a browser's
+          // `res.headers.get('retry-after')` on a real 503 is always `null`,
+          // even though the header is on the wire. transport.ts reads exactly
+          // that header to time its retry; without exposing it, the SDK falls
+          // back to its own backoff instead of the server's advice, retrying
+          // an already-saturated ingest far sooner than told (or, the other
+          // direction, capped at the exponential ceiling when the server
+          // asked for longer). This is the one line where the two halves —
+          // this plugin and transport.ts's `res.headers.get('retry-after')`
+          // — actually meet, and nothing else in the suite can see it: the
+          // SDK's own retry-after tests use a fake fetchImpl whose
+          // headers.get always works, browser CORS restrictions and all.
+          exposedHeaders: ['retry-after'],
+          // The spec default preflight cache (with no max-age sent) is 5
+          // seconds in most browsers, and the SDK flushes every
+          // FLUSH_INTERVAL_MS (transport.ts) — 5,000ms by default. Without
+          // this, a steadily-tracking page pays a fresh OPTIONS before
+          // essentially every POST, doubling request volume against the
+          // busiest endpoint in the product for the life of every session.
+          // 600s is comfortably longer than any realistic flush interval;
+          // the allowlist itself only changes on a server restart, which
+          // invalidates any browser's cached preflight along with it (a new
+          // process, new listener).
+          maxAge: 600,
         })
         // '' registers at exactly `path` (the plugin's prefix) rather than
         // `path + '/'` — see Fastify's own docs on prefixing.
