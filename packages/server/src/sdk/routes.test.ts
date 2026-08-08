@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module'
 import { gunzipSync } from 'node:zlib'
 import { VERSION } from '@lyraflow/sdk-browser'
 import Fastify from 'fastify'
@@ -61,6 +62,20 @@ describe('SDK routes', () => {
   it('404s an unknown version rather than serving the current one', async () => {
     const res = await app().inject({ method: 'GET', url: '/lyraflow-9.9.9.js' })
     expect(res.statusCode).toBe(404)
+  })
+
+  it('serves the immutable path under the SDK package version an install ships', async () => {
+    // The path is cached for a year with `immutable`, and it is built from a
+    // hand-written constant in the SDK's source. This resolves the version
+    // the same way the route resolves the bundle — through the installed
+    // package, not through an import — so the URL browsers pin is tied to
+    // the manifest that a release actually bumps.
+    const require = createRequire(import.meta.url)
+    const manifest = require('@lyraflow/sdk-browser/package.json') as { version: string }
+    expect(VERSION).toBe(manifest.version)
+
+    const res = await app().inject({ method: 'GET', url: `/lyraflow-${manifest.version}.js` })
+    expect(res.statusCode).toBe(200)
   })
 
   it('serves the bundle gzipped to a browser, on both paths', async () => {

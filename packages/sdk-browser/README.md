@@ -6,6 +6,20 @@ package and serves the bundle itself at `/lyraflow.js` and
 the top-level [`README.md`](../../README.md) for the snippet, the public API,
 and the consent model. This file is for people working on the SDK itself.
 
+## Releasing: the version is load-bearing
+
+`VERSION` in `src/index.ts` and `version` in `package.json` must move
+together — `version.test.ts` fails the build if they drift — and **both must
+be bumped whenever the bundle changes**, in the same change.
+
+The server serves `/lyraflow-<VERSION>.js` with `max-age=31536000,
+immutable`. A browser that pinned that path and cached it does not ask again
+for a year, and does not revalidate either. Ship a fix without moving the
+version and every one of those browsers keeps running the old bundle out of
+its own cache, with nothing on the server able to reach it. The assertion
+ties the constant to the manifest; it cannot tell you that the bundle changed
+and the manifest did not, so that part is yours.
+
 ## Manual pre-release checklist
 
 The automated suite runs against a DOM shim (`happy-dom`), not a real
