@@ -221,6 +221,7 @@ export class Transport {
       this.#opts.queue.remove(batch.map((e) => e.message_id))
       this.#failures = 0
       this.#nextAttemptAt = 0
+      await this.#reportRejected(res)
       return 'sent'
     }
     if (status === 401) {
@@ -254,6 +255,35 @@ export class Transport {
     }
     this.#backoff(retryAfter)
     return 'retry'
+  }
+
+  /**
+   * `/v1/batch` answers `202` with `{accepted, rejected, throttled}` even when
+   * it stored nothing — the ingest never fails a batch over one bad event.
+   * This body is the SDK's ONLY feedback channel, and it was being thrown
+   * away: a batch that came back `{accepted: 0, rejected: 1}` was treated as
+   * fully delivered and every event in it removed, in silence.
+   *
+   * Reported AFTER the removal, never instead of it: `rejected` means the
+   * server will not take those events on a retry either, so keeping them
+   * would only wedge the queue. The developer gets told; the queue drains.
+   *
+   * Everything here is best-effort. A response with no JSON body, a `json()`
+   * that throws, a shimmed `fetch` handing back a plain object — none of that
+   * may turn a successful send into a failure.
+   */
+  async #reportRejected(res: Response): Promise<void> {
+    try {
+      const body = (await res.json()) as { rejected?: unknown } | null
+      const rejected = body?.rejected
+      if (typeof rejected === 'number' && rejected > 0) {
+        this.#opts.warn(
+          `the server rejected ${rejected} event(s) in a batch it accepted; retrying would not help, so they were dropped`,
+        )
+      }
+    } catch {
+      // No body, not JSON, or already consumed. Nothing to report.
+    }
   }
 
   #backoff(retryAfter?: string | null): void {

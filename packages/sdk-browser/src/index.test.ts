@@ -1,9 +1,11 @@
 /** @vitest-environment happy-dom */
+import { IngestPayload } from '@lyraflow/core'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import * as identityModule from './identity.js'
 import * as sdk from './index.js'
 import { STORAGE_KEY } from './queue.js'
 import { Transport } from './transport.js'
+import { MAX_URL_LENGTH } from './validate.js'
 
 const ok = async () => new Response('{}', { status: 202 })
 
@@ -127,6 +129,36 @@ describe('public surface', () => {
     expect(warn.mock.calls.join(' ')).toContain('nested')
     expect(sent(f)).toHaveLength(1)
     warn.mockRestore()
+  })
+
+  it('truncates a long page URL rather than losing the whole event to it', async () => {
+    // The URL gets long the way a real one does — an OAuth callback with a
+    // long `redirect_uri` — not by a stub reaching into the event. Over the
+    // server's 2048 cap, `url` does not merely get dropped: the event fails
+    // validation in full, answers 202, and lands in the dead-letter table.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const f = setup()
+    history.replaceState({}, '', `/callback?redirect_uri=${'x'.repeat(2100)}`)
+    expect(location.href.length).toBeGreaterThan(MAX_URL_LENGTH)
+    let warnings = ''
+    try {
+      sdk.track('oauth_return')
+      await sdk.flush()
+      // Read before mockRestore(), which clears the recorded calls.
+      warnings = warn.mock.calls.join(' ')
+    } finally {
+      history.replaceState({}, '', '/')
+      warn.mockRestore()
+    }
+
+    // The event still ships — and it ships with a URL the server will accept,
+    // instead of being rejected in full behind a 202.
+    const [event] = sent(f)
+    expect(event?.event).toBe('oauth_return')
+    expect(event?.context.url).toHaveLength(MAX_URL_LENGTH)
+    expect(IngestPayload.safeParse(event).success).toBe(true)
+    // And the developer is told, because nothing else will tell them.
+    expect(warnings).toContain('context.url')
   })
 
   it('sends nothing before consent when the gate is on', async () => {

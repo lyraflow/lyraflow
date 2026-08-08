@@ -1,13 +1,22 @@
 import {
   MAX_ID_LENGTH as CORE_MAX_ID_LENGTH,
   MAX_PROPERTIES_PER_EVENT as CORE_MAX_PROPERTIES_PER_EVENT,
+  MAX_URL_LENGTH as CORE_MAX_URL_LENGTH,
+  MAX_USER_AGENT_LENGTH as CORE_MAX_USER_AGENT_LENGTH,
   IngestPayload,
 } from '@lyraflow/core'
 // Test files run in Node and are never bundled, so importing core here is free
 // — unlike runtime code, where a value import fails the bundle.
 import { describe, expect, it } from 'vitest'
 import type { QueuedEvent } from './payload.js'
-import { MAX_ID_LENGTH, MAX_PROPERTIES_PER_EVENT, validateEvent } from './validate.js'
+import {
+  MAX_ID_LENGTH,
+  MAX_PROPERTIES_PER_EVENT,
+  MAX_URL_LENGTH,
+  MAX_USER_AGENT_LENGTH,
+  clampContext,
+  validateEvent,
+} from './validate.js'
 
 const base = (over: Partial<QueuedEvent> = {}): QueuedEvent => ({
   type: 'track',
@@ -82,8 +91,34 @@ describe('validateEvent', () => {
     // rather than producing an SDK that warns about the wrong number.
     expect(MAX_ID_LENGTH).toBe(CORE_MAX_ID_LENGTH)
     expect(MAX_PROPERTIES_PER_EVENT).toBe(CORE_MAX_PROPERTIES_PER_EVENT)
+    expect(MAX_URL_LENGTH).toBe(CORE_MAX_URL_LENGTH)
+    expect(MAX_USER_AGENT_LENGTH).toBe(CORE_MAX_USER_AGENT_LENGTH)
   })
 
+  it('flags an over-long url, path, referrer and user_agent', () => {
+    // The server caps all four and rejects the whole event over any of them.
+    // Nothing in the SDK knew these limits existed.
+    const problems = validateEvent(
+      base({
+        context: {
+          url: 'u'.repeat(MAX_URL_LENGTH + 1),
+          path: 'p'.repeat(MAX_URL_LENGTH + 1),
+          referrer: 'r'.repeat(MAX_URL_LENGTH + 1),
+          user_agent: 'a'.repeat(MAX_USER_AGENT_LENGTH + 1),
+        },
+      }),
+    )
+    expect(problems).toHaveLength(4)
+    expect(problems.join(' ')).toContain('context.url')
+  })
+
+  it('leaves a context at exactly the limit alone', () => {
+    const e = base({
+      context: { url: 'u'.repeat(MAX_URL_LENGTH), user_agent: 'a'.repeat(MAX_USER_AGENT_LENGTH) },
+    })
+    expect(clampContext(e)).toEqual([])
+    expect(validateEvent(e)).toEqual([])
+  })
   it('agrees with the server schema on a set of fixtures', () => {
     // The drift guard. The SDK cannot ship Zod (13KB gzipped against a 5KB
     // budget), so its checks are hand-written — and a hand-written copy of
@@ -103,6 +138,11 @@ describe('validateEvent', () => {
       base({ anonymous_id: undefined, user_id: undefined }),
       base({ type: 'identify', event: undefined, user_id: 'user-42', traits: { plan: 'pro' } }),
       base({ type: 'page', event: undefined, name: 'Pricing' }),
+      // The shape the whole-branch review found: a context field over the
+      // server's cap. Every fixture above was about the event body, so the
+      // guard had nothing to say about context and the SDK's checks and the
+      // server's schema disagreed here in silence.
+      base({ context: { url: `https://shop.example.com/callback?to=${'y'.repeat(2100)}` } }),
     ]
     for (const fixture of fixtures) {
       const sdkOk = validateEvent(fixture).length === 0
@@ -112,5 +152,37 @@ describe('validateEvent', () => {
         'SDK and server disagree about this fixture',
       ).toEqual({ fixture: JSON.stringify(fixture).slice(0, 120), sdkOk: serverOk })
     }
+  })
+})
+
+describe('clampContext', () => {
+  it('truncates an over-long url instead of letting the server discard the event', () => {
+    // An OAuth callback carrying a long `redirect_uri`, the shape the review
+    // reproduced this with. Sent whole, the server answers 202, stores
+    // nothing, and writes one dead letter; the event, its properties and its
+    // identity are all gone for one long query string.
+    const url = `https://shop.example.com/callback?redirect_uri=${'x'.repeat(2100)}`
+    expect(url.length).toBeGreaterThan(MAX_URL_LENGTH)
+    const e = base({ context: { url, path: '/callback' } })
+
+    const messages = clampContext(e)
+
+    expect(e.context.url).toHaveLength(MAX_URL_LENGTH)
+    expect(e.context.url).toBe(url.slice(0, MAX_URL_LENGTH))
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toContain('truncated')
+    // And the truncated event is now something the server will actually store.
+    expect(IngestPayload.safeParse(e).success).toBe(true)
+  })
+
+  it('says nothing about a context that is already within the limits', () => {
+    expect(clampContext(base({ context: { url: 'https://shop.example.com/' } }))).toEqual([])
+  })
+
+  it('does not throw on a missing or malformed context', () => {
+    expect(clampContext(base({ context: undefined as unknown as Record<string, string> }))).toEqual(
+      [],
+    )
+    expect(clampContext(base({ context: 'nope' as unknown as Record<string, string> }))).toEqual([])
   })
 })

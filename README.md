@@ -139,12 +139,20 @@ works on first paste with no configuration.
 | `properties` | no | Flat object. `track` and `page` only. |
 | `traits` | no | Flat object. `identify` only. |
 | `timestamp` | no | ISO-8601. Defaults to server time at receipt; see *Retries*. |
-| `context` | no | `url`, `path`, `referrer`, `user_agent`, and the five `utm_*` fields. |
+| `context` | no | `url`, `path` and `referrer`, up to 2048 characters each; `user_agent`, up to 1024; and the five `utm_*` fields, up to 128 each. |
 
 Property and trait values may be strings, numbers, booleans, or null. Numbers
 are stored in a numeric column and everything else as text, so `3` and `"3"` are
 not interchangeable. Nested objects and arrays are not supported. An event may
 carry up to 250 properties.
+
+**A context field over its limit costs the whole event**, not just that field:
+the event fails validation, is dead-lettered, and the response still says
+`202` — with `rejected` counting it. This is easier to hit than it looks; an
+OAuth callback URL carrying a `redirect_uri` clears 2048 characters without
+trying. The browser SDK truncates `url`, `path`, `referrer` and `user_agent`
+to these limits before sending, and warns on the console when it does. If you
+are calling the HTTP API directly, truncate them yourself.
 
 Client clocks are frequently wrong, so an explicit `timestamp` is clamped to
 within 24 hours of server time.

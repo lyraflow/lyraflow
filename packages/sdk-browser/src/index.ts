@@ -5,7 +5,7 @@ import { buildEvent } from './payload.js'
 import type { QueuedEvent } from './payload.js'
 import { EventQueue } from './queue.js'
 import { Transport } from './transport.js'
-import { validateEvent } from './validate.js'
+import { clampContext, validateEvent } from './validate.js'
 
 export const VERSION = '0.1.0'
 
@@ -163,6 +163,9 @@ function enqueueOrHold(e: QueuedEvent): void {
     debugLog(`dropped ${e.type} event ${e.message_id}: consent was refused`)
     return
   }
+  // Before validating, and before the event is ever queued: this SHORTENS a
+  // context field the server would otherwise reject the whole event over.
+  for (const problem of clampContext(e)) warn(problem)
   for (const problem of validateEvent(e)) warn(problem)
   if (gateState === 'granted') {
     // Retries activation if a previous attempt (inside consent(true))
@@ -441,10 +444,8 @@ const api = { init, track, page, identify, consent, reset, flush }
  * the stub only forwards the methods it was written to forward, so until
  * something replaces it, `window.lyraflow.init` is whatever the stub made
  * it — and if the stub queues the call, nothing is ever going to run it.
- * The bundle's `globalName` (`window.lyraflowBundle`) is not an answer
- * either: it appears in no snippet anyone is documented to paste, and a
- * strict-mode top-level `var` is not reliably a global property outside a
- * real browser anyway.
+ * This is now the bundle's ONLY global; `scripts/bundle.mjs` no longer sets
+ * an esbuild `globalName`, which named a handle no documentation mentioned.
  *
  * A no-op off the browser (the server imports `VERSION` from this module in
  * a Node process).

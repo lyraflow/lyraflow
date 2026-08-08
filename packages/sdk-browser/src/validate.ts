@@ -12,6 +12,58 @@ import type { QueuedEvent } from './payload.js'
  */
 export const MAX_ID_LENGTH = 128
 export const MAX_PROPERTIES_PER_EVENT = 250
+export const MAX_URL_LENGTH = 2048
+export const MAX_USER_AGENT_LENGTH = 1024
+
+/**
+ * The four context fields the server caps, and the cap it applies to each.
+ * Nothing in the SDK bounded these, and the server rejects the WHOLE event
+ * when one is exceeded — a 2,141-character OAuth callback URL, which is an
+ * ordinary thing for a page to have, cost the entire event and every
+ * property on it. The remaining context fields (the five `utm_*`) are capped
+ * at `MAX_ID_LENGTH`, and are not truncated here: a mangled campaign name
+ * silently attributed to the wrong campaign is worse than a warning.
+ */
+const CONTEXT_LIMITS: [string, number][] = [
+  ['url', MAX_URL_LENGTH],
+  ['path', MAX_URL_LENGTH],
+  ['referrer', MAX_URL_LENGTH],
+  ['user_agent', MAX_USER_AGENT_LENGTH],
+]
+
+/**
+ * The one implementation of the context caps, in both modes.
+ *
+ * `truncate` decides whether an over-long field is SHORTENED in place or
+ * merely reported. Truncating is the lesser loss and it is not close: a
+ * shortened `url` costs the query string of one event, while sending it whole
+ * costs the event, its properties and the identity attached to it — silently,
+ * behind a `202`.
+ */
+function contextProblems(e: QueuedEvent, truncate: boolean): string[] {
+  const out: string[] = []
+  const ctx = e.context as Record<string, unknown> | undefined
+  if (!ctx || typeof ctx !== 'object') return out
+  for (const [field, limit] of CONTEXT_LIMITS) {
+    const value = ctx[field]
+    if (typeof value === 'string' && value.length > limit) {
+      if (truncate) ctx[field] = value.slice(0, limit)
+      out.push(
+        `context.${field} was ${value.length} characters, ${truncate ? 'truncated' : 'over'} the ${limit} limit`,
+      )
+    }
+  }
+  return out
+}
+
+/**
+ * Truncates over-long context strings IN PLACE and returns one message per
+ * field it touched. The only mutating export in this file, and deliberately
+ * separate from `validateEvent` because of it.
+ */
+export function clampContext(e: QueuedEvent): string[] {
+  return contextProblems(e, true)
+}
 
 function checkBag(bag: Record<string, unknown> | undefined, label: string, out: string[]): void {
   if (!bag) return
@@ -82,6 +134,11 @@ export function validateEvent(e: QueuedEvent): string[] {
   }
   if (e.type === 'track' && !e.event) out.push('track requires an event name')
   if (e.type === 'identify' && !e.user_id) out.push('identify requires a user_id')
+
+  // Reports only; it never mutates. In practice this fires for a context
+  // this SDK did not build — everything going out through enqueueOrHold has
+  // been through `clampContext` already, which leaves nothing over a cap.
+  for (const problem of contextProblems(e, false)) out.push(problem)
 
   checkBag(e.properties, 'properties', out)
   checkBag(e.traits, 'traits', out)

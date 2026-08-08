@@ -19,6 +19,12 @@ const nowIso = () => new Date().toISOString()
 const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString()
 const hoursAhead = (h: number) => new Date(Date.now() + h * 3_600_000).toISOString()
 
+/** The message ids actually persisted under the shared storage key. */
+const stored = (): string[] => {
+  const raw = localStorage.getItem(STORAGE_KEY)
+  return raw === null ? [] : (JSON.parse(raw) as QueuedEvent[]).map((e) => e.message_id)
+}
+
 describe('EventQueue', () => {
   beforeEach(() => localStorage.clear())
 
@@ -267,6 +273,70 @@ describe('EventQueue', () => {
     expect(q.size()).toBe(0)
     q.remove([''])
     expect(q.size()).toBe(0)
+  })
+
+  it("does not destroy another tab's queued events on add", () => {
+    // Two tabs are two read-modify-write loops over one storage key. Before
+    // this merge, tab B's first `add` wrote back only what tab B knew about
+    // and tab A's two events were gone from storage — silently, and only
+    // from the copy that was supposed to survive an unload.
+    // BOTH tabs are open before either tracks anything — the constructor's
+    // one read is what hid this: a queue built after the other tab had
+    // already written picks its events up and looks correct.
+    const tabA = new EventQueue()
+    const tabB = new EventQueue()
+
+    tabA.add(at(nowIso(), 'A1'))
+    tabA.add(at(nowIso(), 'A2'))
+    tabB.add(at(nowIso(), 'B1'))
+
+    expect(stored()).toEqual(['A1', 'A2', 'B1'])
+  })
+
+  it("does not destroy another tab's queued events when a flush removes its own", () => {
+    // The more destructive half: `remove` wrote back a SHORTER array, so a
+    // successful delivery in tab A erased everything tab B had queued since
+    // tab A last read storage. During an outage this is the whole point of
+    // the persisted queue, deleted by an unrelated tab succeeding.
+    const tabA = new EventQueue()
+    const tabB = new EventQueue()
+    tabA.add(at(nowIso(), 'A1'))
+    tabA.add(at(nowIso(), 'A2'))
+    tabB.add(at(nowIso(), 'B1'))
+
+    // Tab A delivers its own two and removes them, knowing nothing of B1.
+    tabA.remove(['A1', 'A2'])
+
+    expect(stored()).toEqual(['B1'])
+    // And a reload still finds B1 — which is the entire reason it was stored.
+    expect(new EventQueue().peek(10).map((e) => e.message_id)).toEqual(['B1'])
+  })
+
+  it('keeps the age, size and shape bounds on the merged set', () => {
+    // Merging must not become a way around the bounds: another tab's storage
+    // is exactly as untrusted as any other storage, and it is now read on
+    // every mutation rather than only in the constructor.
+    const q = new EventQueue()
+    q.add(at(nowIso(), 'mine'))
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify([
+        at(hoursAgo(24), 'too-old'),
+        at(hoursAhead(5 * 24), 'too-new'),
+        null,
+        { message_id: 'no-timestamp' },
+        at(nowIso(), 'theirs'),
+      ]),
+    )
+    q.add(at(nowIso(), 'next'))
+    expect(q.peek(10).map((e) => e.message_id)).toEqual(['theirs', 'mine', 'next'])
+  })
+
+  it("does not read another tab's storage when persistence is off", () => {
+    const q = new EventQueue({ persist: false })
+    localStorage.setItem(STORAGE_KEY, JSON.stringify([at(nowIso(), 'theirs')]))
+    q.add(at(nowIso(), 'mine'))
+    expect(q.peek(10).map((e) => e.message_id)).toEqual(['mine'])
   })
 
   it('counts an unparseable timestamp added at runtime as corrupt, not as expired', () => {

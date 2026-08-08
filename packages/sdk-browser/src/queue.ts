@@ -137,7 +137,42 @@ export class EventQueue {
     if (this.#persist) writeStore(this.#events)
   }
 
+  /**
+   * Folds whatever another tab has written into this tab's view, BEFORE every
+   * write. Without it, two open tabs are two read-modify-write loops over one
+   * storage key and each write silently discards the other tab's events:
+   *
+   *   tab A tracks 2  -> ['A1','A2']
+   *   tab B tracks 1  -> ['B1']        A1 and A2 are gone
+   *   A's flush 202   -> []            B1 is gone
+   *
+   * In-tab delivery never noticed, because this tab's own array is intact in
+   * memory — the loss falls entirely on the thing persistence exists for,
+   * events surviving an unload. During an outage tab A accumulates for
+   * hours and one `track()` in tab B erases the lot.
+   *
+   * Merging by `message_id` converts that loss into at worst a duplicate
+   * delivery (an event another tab already sent, still present in a stale
+   * stored array, comes back here). That trade is already settled: the design
+   * reasoned about two tabs producing duplicates and the ingest dedupes them
+   * by `event_id`. It only ever considered the duplicate, never the loss.
+   *
+   * Stored events come first, so the merged array stays roughly
+   * chronological; the caller re-applies the age, size and shape bounds to
+   * the result (`readStore` filters shape, `#prune` does the rest).
+   */
+  #mergeStored(): void {
+    if (!this.#persist) return
+    const merged = readStore()
+    const seen = new Set(merged.map((e) => e.message_id))
+    for (const e of this.#events) {
+      if (!seen.has(e.message_id)) merged.push(e)
+    }
+    this.#events = merged
+  }
+
   add(e: QueuedEvent): void {
+    this.#mergeStored()
     this.#events.push(e)
     this.#prune()
     this.#flushStore()
@@ -150,8 +185,14 @@ export class EventQueue {
   }
 
   remove(messageIds: string[]): void {
+    // Merged here too, not only in `add`: a flush that removed this tab's
+    // delivered events by writing back only what this tab knew about was the
+    // more destructive half of the two-tab race — it wrote a SHORTER array,
+    // wiping every event another tab had queued since this one last read.
+    this.#mergeStored()
     const sent = new Set(messageIds)
     this.#events = this.#events.filter((e) => !sent.has(e.message_id))
+    this.#prune()
     this.#flushStore()
   }
 

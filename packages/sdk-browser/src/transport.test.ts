@@ -71,6 +71,53 @@ describe('Transport', () => {
     expect(queue.size()).toBe(0)
   })
 
+  it('warns when a 202 says it rejected part of the batch', async () => {
+    // `/v1/batch` answers 202 whatever happens to the individual events and
+    // reports the split in its BODY. The transport used to remove the whole
+    // batch on the status alone and never read that body — so the one signal
+    // the server does send about malformed events was discarded on arrival,
+    // and a page could deliver nothing at all, forever, in silence.
+    const body = JSON.stringify({ accepted: 1, rejected: 1, throttled: 0 })
+    const { queue, transport, warn } = make(
+      vi.fn(async () => new Response(body, { status: 202 })) as unknown as typeof fetch,
+    )
+    queue.add(event('m1'))
+    queue.add(event('m2'))
+    expect(await transport.flush()).toBe('sent')
+    expect(warn.mock.calls.join(' ')).toContain('rejected 1')
+    // Still removed: `rejected` means a retry would be rejected too, and
+    // holding them would wedge every healthy event behind them.
+    expect(queue.size()).toBe(0)
+  })
+
+  it('says nothing when a 202 rejected nothing', async () => {
+    const body = JSON.stringify({ accepted: 1, rejected: 0, throttled: 0 })
+    const { queue, transport, warn } = make(
+      vi.fn(async () => new Response(body, { status: 202 })) as unknown as typeof fetch,
+    )
+    queue.add(event('m1'))
+    await transport.flush()
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('treats a 202 with an unreadable body as a plain success', async () => {
+    // A response with no body, a `json()` that throws, or a shimmed fetch
+    // handing back a bare object must not turn a delivered batch into a
+    // failure — this read is a feedback channel, not part of the contract.
+    const hostile = {
+      status: 202,
+      headers: { get: () => null },
+      json: () => {
+        throw new Error('boom')
+      },
+    }
+    const { queue, transport, warn } = make(vi.fn(async () => hostile) as unknown as typeof fetch)
+    queue.add(event('m1'))
+    expect(await transport.flush()).toBe('sent')
+    expect(queue.size()).toBe(0)
+    expect(warn).not.toHaveBeenCalled()
+  })
+
   it('keeps events on 503 and reports retry', async () => {
     const { queue, transport } = make(
       vi.fn(async () => reply(503, { 'retry-after': '5' })) as unknown as typeof fetch,
