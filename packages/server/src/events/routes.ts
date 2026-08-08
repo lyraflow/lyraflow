@@ -67,6 +67,32 @@ const STATS_INTERVAL_MS: Record<keyof typeof STATS_INTERVALS, number> = {
   '1d': 24 * 60 * 60_000,
 }
 
+/**
+ * The default `since` window when the caller omits it, scaled to
+ * `interval` — a fixed 24h default (this route's original behaviour)
+ * collides with `STATS_MAX_BUCKETS` at fine resolutions: 24h at `1m`
+ * resolution is 1440 buckets against a cap of 1000, so `?interval=1m` with
+ * no other parameters — the obvious first thing to try, and exactly what
+ * "is my instrumentation working right now" means — was an unconditional
+ * 400. Each entry keeps a bare request comfortably under the cap AND
+ * matches the window that resolution is actually useful for: a minute of
+ * granularity is for watching the last hour, a day of granularity is for
+ * a month of trend. `1h`'s entry is unchanged from the original fixed
+ * default (24h, 24 buckets), so the documented default at the default
+ * interval is exactly what it always was.
+ *
+ * Applies ONLY when `since` is omitted; an explicit `since` (with or
+ * without an explicit `until`) always goes through `STATS_MAX_BUCKETS`
+ * unchanged, no matter how wide it is. Exported so Task 7's CLI docs state
+ * the real per-interval default rather than a single 24h figure that only
+ * ever applied to one of the three intervals.
+ */
+export const STATS_DEFAULT_WINDOW_MS: Record<keyof typeof STATS_INTERVALS, number> = {
+  '1m': 60 * 60_000,
+  '1h': 24 * 60 * 60_000,
+  '1d': 30 * 24 * 60 * 60_000,
+}
+
 export interface EventsDeps {
   projects: ProjectCache
   readiness: Readiness
@@ -467,14 +493,25 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
    * resolved) before any query runs, the same reasoning `validateTree`
    * (segments/validate.ts) uses for an over-cap filter tree.
    *
-   * `since` defaults to 24h before now when omitted, for the identical
-   * reason the feed's default does — an unbounded scan is unbounded
-   * whether or not the route happens to aggregate the result afterwards.
-   * Unlike the feed, this route has no cursor to conflict with that
-   * default, so it always applies when `since` is missing.
+   * `since` defaults to a window scaled to `interval` when omitted
+   * (`STATS_DEFAULT_WINDOW_MS`) — for the identical underlying reason the
+   * feed's fixed 24h default exists (an unbounded scan is unbounded
+   * whether or not the route happens to aggregate the result afterwards),
+   * but a single fixed 24h figure collides with `STATS_MAX_BUCKETS` at
+   * fine resolutions; see that constant's own docstring. Unlike the feed,
+   * this route has no cursor to conflict with the default, so it always
+   * applies when `since` is missing.
    *
    * Server-key only, the same authenticator as the feed: this aggregates
    * project-wide event data, not a per-caller public surface.
+   *
+   * BUCKET ATTRIBUTION INHERITS THE FEED'S ARBITRARY-ROW LIMITATION. The
+   * feed's own KNOWN LIMITATION above documents that `LIMIT 1 BY` has no
+   * tie-break, so for an omitted-timestamp retry which physical row
+   * survives is arbitrary. Here that surfaces as bucket attribution: the
+   * one logical event lands in whichever of its retried physical rows'
+   * buckets `LIMIT 1 BY` happens to keep, not deterministically the
+   * earliest or the latest.
    */
   app.get('/v1/events/stats', async (req, reply) => {
     const project = await authenticateServer(req, reply)
@@ -485,8 +522,9 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
     const { since, until, interval, group_by } = q.data
     const groupBy = group_by === 'event_name'
 
-    const DEFAULT_SINCE_MS = 24 * 60 * 60 * 1000
-    const sinceDate = since ? new Date(since) : new Date(Date.now() - DEFAULT_SINCE_MS)
+    const sinceDate = since
+      ? new Date(since)
+      : new Date(Date.now() - STATS_DEFAULT_WINDOW_MS[interval])
     const untilDate = until ? new Date(until) : new Date()
 
     // Cheap arithmetic before any query — see this route's own docstring.
@@ -507,11 +545,17 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
     const params = new Params()
     const projectParam = params.add(project.id, 'UInt32')
 
+    // `untilClause` is emitted unconditionally from the already-resolved
+    // `untilDate` (explicit, or `now` by default) — NOT only when `until`
+    // was explicitly passed. `untilDate` is what the bucket-count guard
+    // above already assumed as the window's upper edge; making the SQL
+    // upper bound conditional on `until` being explicit would let the two
+    // disagree. `clampTimestamp` (@lyraflow/core, MAX_CLOCK_SKEW_MS = 24h)
+    // admits ingested events up to 24h in the future, so an explicit
+    // narrow `since` with no `until` could otherwise scan events the
+    // guard never counted, past the ceiling it was meant to enforce.
     const sinceClause = ` AND timestamp >= ${params.add(chDateTime(sinceDate), 'DateTime64(3)')}`
-    let untilClause = ''
-    if (until) {
-      untilClause = ` AND timestamp <= ${params.add(chDateTime(untilDate), 'DateTime64(3)')}`
-    }
+    const untilClause = ` AND timestamp <= ${params.add(chDateTime(untilDate), 'DateTime64(3)')}`
 
     // The identical suppression derivation the feed uses above:
     // `notSuppressedExpr` against each event's own timestamp, inside the
@@ -525,6 +569,18 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
       instant: 'e.timestamp',
     })
 
+    // `LIMIT 1 BY project_id, event_id` below is the real dedup — the same
+    // guarantee the feed's own docstring establishes above, and pinned
+    // independently here by routes.test.ts's bucket-straddling retry test
+    // (a retry whose two physical rows land in DIFFERENT buckets, which no
+    // per-bucket GROUP BY aggregate can collapse across groups). The outer
+    // `count(DISTINCT event_id)` is defence in depth, not a second
+    // mechanism doing real work: `LIMIT 1 BY` already guarantees at most
+    // one row per `event_id` reaches this SELECT, so no ingest-producible
+    // input can make `count(DISTINCT event_id)` differ from a plain
+    // `count()` here. Kept as DISTINCT anyway — it costs nothing, and
+    // stays correct if the inner subquery's dedup shape ever changes —
+    // but no test can, or should try to, prove it necessary on its own.
     const sql = `
       SELECT toStartOfInterval(timestamp, ${STATS_INTERVALS[interval]}) AS bucket,
              ${groupBy ? 'event_name,' : ''}

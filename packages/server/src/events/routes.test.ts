@@ -868,8 +868,19 @@ describe('GET /v1/events/stats', () => {
   // GET /v1/events above for why merges are stopped and the two duplicate
   // rows are two SEPARATE ch.insert() calls rather than one — a single
   // insert carrying both would already be pre-merged into one physical row
-  // before reaching disk, making count(DISTINCT event_id) indistinguishable
-  // from plain count() and proving nothing about this route's own query.
+  // before reaching disk.
+  //
+  // This fixture alone does NOT independently pin `LIMIT 1 BY`, and does
+  // NOT make `count(DISTINCT event_id)` distinguishable from plain
+  // `count()` either: both duplicate rows share one `timestamp` and land
+  // in the SAME bucket, so removing just `LIMIT 1 BY` (DISTINCT still
+  // collapses them) or just DISTINCT (LIMIT 1 BY already removed the
+  // duplicate upstream) still passes this test — only removing BOTH at
+  // once fails it. The test below ("counts a retried delivery once even
+  // when its retry lands in a different bucket") is the one that pins
+  // `LIMIT 1 BY` on its own, with a fixture DISTINCT structurally cannot
+  // rescue: two physical rows in DIFFERENT buckets, which no per-bucket
+  // GROUP BY aggregate can collapse across groups.
   it('counts distinct event ids, so a retried delivery is one event', async () => {
     const intervalMs = 60_000
     const bucket1 = bucketStart(Date.now() - 46 * 60_000, intervalMs)
@@ -916,6 +927,185 @@ describe('GET /v1/events/stats', () => {
     } finally {
       await ch.command({ query: `SYSTEM START MERGES ${CH_DB}.events` })
     }
+  })
+
+  // THE test that independently pins `LIMIT 1 BY project_id, event_id` in
+  // the stats query, as opposed to the outer `count(DISTINCT event_id)`.
+  // The module's own docstring (routes.ts) identifies the PERMANENT
+  // duplicate shape as a retry that omitted `timestamp`: it is assigned a
+  // fresh server timestamp on redelivery, so its two physical rows can
+  // straddle a bucket boundary entirely — one lands in bucket1, the retry
+  // in bucket2. `count(DISTINCT event_id)` is evaluated PER GROUP (per
+  // bucket): if both physical rows survived `LIMIT 1 BY` to reach the
+  // outer query, the one logical event would be counted once IN EACH
+  // bucket, since DISTINCT cannot collapse duplicates across separate
+  // GROUP BY groups — only `LIMIT 1 BY`, which runs before grouping, can.
+  //
+  // Asserted as the SUM across buckets, not a specific per-bucket shape:
+  // `LIMIT 1 BY` has no tie-break (see the route's own docstring), so
+  // which of the two physical rows survives — and therefore which single
+  // bucket the surviving row lands in — is arbitrary. The total is the
+  // one invariant that must hold regardless of which row wins.
+  it('counts a retried delivery once even when its retry lands in a different bucket', async () => {
+    const intervalMs = 60_000
+    const bucket1 = bucketStart(Date.now() - 65 * 60_000, intervalMs)
+    const bucket2 = bucket1 + intervalMs
+    const eventId = uuid(150)
+
+    await ch.command({ query: `SYSTEM STOP MERGES ${CH_DB}.events` })
+    try {
+      await ch.insert({
+        table: 'events',
+        format: 'JSONEachRow',
+        values: [
+          evRowAtMs({
+            projectId: projectA,
+            eventId,
+            userId: 'stats-boundary-retry-user',
+            eventName: 'stats_boundary_retry_event',
+            atMs: bucket1 + 5_000,
+            receivedAtMs: bucket1 + 5_000,
+          }),
+        ],
+      })
+      await ch.insert({
+        table: 'events',
+        format: 'JSONEachRow',
+        values: [
+          evRowAtMs({
+            projectId: projectA,
+            eventId,
+            userId: 'stats-boundary-retry-user',
+            eventName: 'stats_boundary_retry_event',
+            atMs: bucket2 + 5_000,
+            receivedAtMs: bucket2 + 15_000,
+          }),
+        ],
+      })
+
+      const since = new Date(bucket1 - 1_000).toISOString()
+      const until = new Date(bucket2 + intervalMs - 1_000).toISOString()
+      const res = await statsGet(
+        `?interval=1m&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`,
+      )
+      expect(res.statusCode).toBe(200)
+      const total = res
+        .json()
+        .buckets.reduce((sum: number, b: { events: number }) => sum + b.events, 0)
+      expect(total).toBe(1)
+    } finally {
+      await ch.command({ query: `SYSTEM START MERGES ${CH_DB}.events` })
+    }
+  })
+
+  // THE test that independently pins the `project_id` tenancy filter in
+  // the stats inner select. Every other stats fixture in this file lives
+  // under project A alone, so a deleted `project_id = {p0}` clause would
+  // change nothing any of them could observe. This inserts a project-B row
+  // inside a project-A stats window and confirms it is absent: sharper
+  // than the feed's equivalent cross-project test (routes.test.ts, "never
+  // returns another project's events for a colliding id") because the
+  // suppression clause binds project A's OWN dictionary key — a leaked
+  // project-B row would be both counted and unsuppressed, not merely
+  // counted.
+  it("never counts another project's events", async () => {
+    const intervalMs = 60_000
+    const bucket1 = bucketStart(Date.now() - 68 * 60_000, intervalMs)
+
+    await ch.insert({
+      table: 'events',
+      format: 'JSONEachRow',
+      values: [
+        evRowAtMs({
+          projectId: projectA,
+          eventId: uuid(160),
+          userId: 'stats-tenant-a',
+          eventName: 'stats_tenant_event',
+          atMs: bucket1 + 5_000,
+        }),
+        evRowAtMs({
+          projectId: projectB,
+          eventId: uuid(161),
+          userId: 'stats-tenant-b',
+          eventName: 'stats_tenant_event',
+          atMs: bucket1 + 6_000,
+        }),
+      ],
+    })
+
+    const since = new Date(bucket1 - 1_000).toISOString()
+    const until = new Date(bucket1 + intervalMs - 1_000).toISOString()
+    const res = await statsGet(
+      `?interval=1m&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`,
+      SERVER_KEY_A,
+    )
+    expect(res.statusCode).toBe(200)
+    expect(res.json().buckets).toEqual([{ bucket: new Date(bucket1).toISOString(), events: 1 }])
+  })
+
+  it('aligns buckets correctly at 1h resolution', async () => {
+    const intervalMs = 60 * 60_000
+    const bucket1 = bucketStart(Date.now() - 6 * 60 * 60_000, intervalMs)
+
+    await ch.insert({
+      table: 'events',
+      format: 'JSONEachRow',
+      values: [
+        evRowAtMs({
+          projectId: projectA,
+          eventId: uuid(170),
+          userId: 'stats-1h-user',
+          eventName: 'stats_1h_event',
+          atMs: bucket1 + 5_000,
+        }),
+      ],
+    })
+
+    const since = new Date(bucket1 - 1_000).toISOString()
+    const until = new Date(bucket1 + intervalMs - 1_000).toISOString()
+    const res = await statsGet(
+      `?interval=1h&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`,
+    )
+    expect(res.statusCode).toBe(200)
+    expect(res.json().buckets).toEqual([{ bucket: new Date(bucket1).toISOString(), events: 1 }])
+  })
+
+  it('aligns buckets correctly at 1d resolution', async () => {
+    const intervalMs = 24 * 60 * 60_000
+    const bucket1 = bucketStart(Date.now() - 5 * 24 * 60 * 60_000, intervalMs)
+
+    await ch.insert({
+      table: 'events',
+      format: 'JSONEachRow',
+      values: [
+        evRowAtMs({
+          projectId: projectA,
+          eventId: uuid(171),
+          userId: 'stats-1d-user',
+          eventName: 'stats_1d_event',
+          atMs: bucket1 + 5_000,
+        }),
+      ],
+    })
+
+    const since = new Date(bucket1 - 1_000).toISOString()
+    const until = new Date(bucket1 + intervalMs - 1_000).toISOString()
+    const res = await statsGet(
+      `?interval=1d&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`,
+    )
+    expect(res.statusCode).toBe(200)
+    expect(res.json().buckets).toEqual([{ bucket: new Date(bucket1).toISOString(), events: 1 }])
+  })
+
+  // Important 3's fix: the default `since` window is scaled to `interval`
+  // (STATS_DEFAULT_WINDOW_MS) specifically so this bare call — no `since`,
+  // no `until` — never collides with STATS_MAX_BUCKETS. Before that fix,
+  // `1m`'s default window was the fixed 24h default (1440 buckets against
+  // a cap of 1000): the single most obvious invocation of this endpoint
+  // was an unconditional 400.
+  it('returns 200 for a bare ?interval=1m with no since/until', async () => {
+    const res = await statsGet('?interval=1m')
+    expect(res.statusCode).toBe(200)
   })
 
   // Stats cannot join the four-path matrix — it returns counts, not
