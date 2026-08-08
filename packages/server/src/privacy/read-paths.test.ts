@@ -10,16 +10,25 @@ import { Readiness } from '../health.js'
 import { type PgDictionarySource, ensureIdentityDictionaries } from '../identity/dictionaries.js'
 
 /**
- * One suppression rule, four read paths that each derive it independently
- * (see compile.ts, behaviour.ts, person.ts, export.ts — each carries its own
- * copy of "hide at or before the boundary, show after it"). Plan 4's final
- * review found a guardrail that held on one route and not its neighbour, a
- * defect no per-task review could see because each diff was correct against
- * its own brief. This file is the guard against that shape recurring: one
- * fixture, one assertion body, run against all four routes through their
- * real HTTP surface (never compileSegment/runSegment directly — an earlier
- * task routed around the segment route specifically to dodge its 30s result
- * cache, and exercising that cache for real is the point of this file).
+ * One suppression rule, five read paths that must agree on it — but only two
+ * independent DERIVATIONS of the boundary, not five. `notSuppressedExpr`
+ * (@lyraflow/core/privacy/suppression.ts) checks each event's own timestamp
+ * against the ClickHouse suppression dictionary, and is shared verbatim by
+ * segment count (compile.ts), segment members (behaviour.ts), and the events
+ * feed (events/routes.ts). `SuppressionStore.boundaryFor`
+ * (privacy/suppression-store.ts) checks Postgres directly, at zero
+ * replication lag, and is used independently by the person read (person.ts)
+ * and the export (export.ts). Plan 4's final review found a guardrail that
+ * held on one route and not its neighbour, a defect no per-task review could
+ * see because each diff was correct against its own brief. This file is the
+ * guard against that shape recurring — and with three of five routes sharing
+ * one derivation and two sharing the other, its real job is proving those
+ * two derivations still agree with each other, not just that each is
+ * internally consistent: one fixture, one assertion body, run against all
+ * five routes through their real HTTP surface (never compileSegment/
+ * runSegment directly — an earlier task routed around the segment route
+ * specifically to dodge its 30s result cache, and exercising that cache for
+ * real is the point of this file).
  */
 
 const CH_DB = 'lyraflow_test'
@@ -133,7 +142,7 @@ const T_SUB_GAP = SUBSECOND_BOUNDARY_MS - 300 // rp_event — inside the truncat
 // coincidentally land on the correct side by construction.
 const CUTOFF_MS = hoursAgo(4)
 
-// The exact set of instants any of the four paths may legitimately reveal.
+// The exact set of instants any of the five paths may legitimately reveal.
 // Real timestamps, not counts — a path returning the right NUMBER of events
 // from the wrong side of the boundary fails this exact-set comparison the
 // same way a path returning the wrong timestamps outright would. Deliberately
@@ -510,6 +519,18 @@ const eventsFeedFor = async (): Promise<Snapshot> => {
   const personIds = new Set<string>()
   const eventTimestamps = new Set<number>()
   for (const e of body.events) {
+    // Loud, not silent: this fixture's own beforeAll only ever inserts
+    // events carrying a real user_id (no anonymous_id/device involved — see
+    // that comment), so every row this project can legitimately return
+    // should have one too. If that ever stops being true — an anonymous or
+    // merged fixture person added to ALL_IDS — this row's personIds would
+    // silently start reporting raw device/anonymous ids instead of the
+    // resolved person id the other four paths report (this function's own
+    // docstring above), and a suppressed person's leaked history could hide
+    // behind a device id the "hides a person" assertion never checks for.
+    // Failing here, immediately, turns that into an error that names its
+    // own cause instead of a matrix row that quietly asserts nothing.
+    expect(e.user_id).not.toBe('')
     const id = e.user_id || e.anonymous_id
     if (id) personIds.add(id)
     eventTimestamps.add(new Date(e.timestamp).getTime())
@@ -578,7 +599,7 @@ describe.each([
   // later of their two) compared as AFTER the truncated boundary on the
   // ClickHouse side — visible via segment count/members — while the exact
   // Postgres-side boundary correctly kept it hidden on person read/export.
-  // All four must agree the person is gone.
+  // All five must agree the person is gone.
   it('hides a person whose only recent event sits in a truncated boundary sub-second gap', async () => {
     const snap = await run()
     expect(snap.personIds.has(SUBSECOND)).toBe(false)
