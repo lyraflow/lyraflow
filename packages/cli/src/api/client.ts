@@ -9,6 +9,17 @@
 
 const SERVER_KEY_HEADER = 'x-lyraflow-server-key'
 
+/**
+ * The real export route (packages/server/src/privacy/export.ts) writes bare
+ * `\n` — this only matters if something between it and the caller rewrites
+ * line endings to CRLF (a proxy, a Windows pipe). Left unstripped, the `\r`
+ * becomes part of the line's content and `JSON.parse` on it fails at the far
+ * end with no indication the line itself was otherwise fine.
+ */
+function stripTrailingCR(line: string): string {
+  return line.endsWith('\r') ? line.slice(0, -1) : line
+}
+
 export interface ClientConfig {
   host: string
   serverKey: string
@@ -67,12 +78,12 @@ export class Client {
 
   async get<T>(path: string, query?: Record<string, string | number | undefined>): Promise<T> {
     const res = await this.#request('GET', path, query)
-    return (await res.json()) as T
+    return this.#readJson<T>(res)
   }
 
   async delete<T>(path: string): Promise<T> {
     const res = await this.#request('DELETE', path)
-    return (await res.json()) as T
+    return this.#readJson<T>(res)
   }
 
   /**
@@ -105,13 +116,13 @@ export class Client {
       buffer += decoder.decode(chunk as Uint8Array, { stream: true })
       let newlineAt = buffer.indexOf('\n')
       while (newlineAt !== -1) {
-        yield buffer.slice(0, newlineAt)
+        yield stripTrailingCR(buffer.slice(0, newlineAt))
         buffer = buffer.slice(newlineAt + 1)
         newlineAt = buffer.indexOf('\n')
       }
     }
     buffer += decoder.decode()
-    if (buffer.length > 0) yield buffer
+    if (buffer.length > 0) yield stripTrailingCR(buffer)
   }
 
   async #request(
@@ -125,6 +136,19 @@ export class Client {
     try {
       res = await this.#fetchImpl(url, {
         method,
+        // NOT the default 'follow'. Fetch's cross-origin redirect handling
+        // strips Authorization/Cookie/Proxy-Authorization — nothing else,
+        // by spec — so `x-lyraflow-server-key` sails straight through to
+        // wherever a redirect points, including a different host entirely.
+        // This client talks to exactly one configured host; a redirect
+        // from it is never part of the normal contract (confirmed: no
+        // route under packages/server/src ever sends one), so the only
+        // safe move is to refuse to follow at all and fail loudly. A
+        // compromised reverse proxy, DNS rebinding, or a MITM answering
+        // with a redirect is precisely the scenario this defends — see
+        // the redirect probe in client.test.ts, which proves against two
+        // real local servers that the target never receives the header.
+        redirect: 'manual',
         headers: { [SERVER_KEY_HEADER]: this.#serverKey },
       })
     } catch {
@@ -138,8 +162,42 @@ export class Client {
       throw new ApiError(0, 'no_response', `could not reach ${this.#host}`)
     }
 
+    // `res.type === 'opaqueredirect'` covers a fetch implementation that
+    // follows the spec's browser-facing shape (status 0, opaque body) for a
+    // manual redirect instead of Node's own (a real 3xx status, readable
+    // headers) — checked against Node 22 directly, which does the latter,
+    // but nothing guarantees every fetchImpl this client is ever handed
+    // agrees. Either shape must be refused the same way. The message never
+    // includes `Location`: it is attacker-controlled text chosen by
+    // whatever answered the request, and printing it is the same mistake
+    // as printing the key.
+    if (res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)) {
+      throw new ApiError(
+        res.status,
+        'unexpected_redirect',
+        `the host answered with a redirect (status ${res.status}); this client will not follow it`,
+      )
+    }
+
     if (!res.ok) throw await this.#toApiError(res)
     return res
+  }
+
+  /**
+   * Guards `res.json()` for every 2xx path. Not reachable against the real
+   * server today — every 2xx route sends a JSON body — but every OTHER
+   * failure path in this client surfaces as `ApiError`, and later tasks
+   * catch `ApiError` specifically to map exit codes. A bare `SyntaxError`
+   * from a non-JSON or empty body would be the one path that breaks that
+   * contract. The body itself is never included in the message: it is
+   * untrusted response text, same reasoning as not echoing `Location`.
+   */
+  async #readJson<T>(res: Response): Promise<T> {
+    try {
+      return (await res.json()) as T
+    } catch {
+      throw new ApiError(res.status, 'invalid_response_body', 'the server returned a non-JSON body')
+    }
   }
 
   #buildUrl(path: string, query?: Record<string, string | number | undefined>): string {

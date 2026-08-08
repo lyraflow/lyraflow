@@ -1,3 +1,5 @@
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { describe, expect, it, vi } from 'vitest'
 import { ApiError, Client } from './client.js'
 
@@ -266,5 +268,104 @@ describe('Client', () => {
     const client = make(fetchImpl)
     const err = (await client.get('/v1/events').catch((e) => e)) as ApiError
     expect(String(err.stack)).not.toContain(SERVER_KEY)
+  })
+
+  // --- Redirects: a live exfiltration path, not a printed-string one ------
+  // Fetch's cross-origin redirect handling strips only Authorization,
+  // Cookie and Proxy-Authorization — an arbitrary header like the server
+  // key is NOT stripped by spec, and `fetch`'s default `redirect: 'follow'`
+  // would hand it to whatever `Location` names. A faked `fetchImpl` cannot
+  // prove this either way: the forwarding happens inside the real `fetch`
+  // implementation, between the two real requests, which a fake never
+  // makes. This spins up two real local HTTP servers — one that redirects
+  // to the other — and uses the client's real, uninjected `fetchImpl`.
+
+  it('does not forward the server key to a redirect target, and fails loudly instead', async () => {
+    let targetReceivedKey: string | undefined
+    let targetWasHit = false
+    const target = createServer((req, res) => {
+      targetWasHit = true
+      targetReceivedKey = req.headers['x-lyraflow-server-key'] as string | undefined
+      res.end(JSON.stringify({ events: [] }))
+    })
+    const origin = createServer((req, res) => {
+      const targetPort = (target.address() as AddressInfo).port
+      res.writeHead(302, { Location: `http://127.0.0.1:${targetPort}/elsewhere` })
+      res.end()
+    })
+
+    await new Promise<void>((resolve) => target.listen(0, '127.0.0.1', resolve))
+    await new Promise<void>((resolve) => origin.listen(0, '127.0.0.1', resolve))
+    try {
+      const originPort = (origin.address() as AddressInfo).port
+      const client = new Client({
+        host: `http://127.0.0.1:${originPort}`,
+        serverKey: SERVER_KEY,
+        // Deliberately no fetchImpl override: the real global fetch is
+        // exactly the thing under test here.
+      })
+
+      const err = (await client.get('/v1/events').catch((e) => e)) as ApiError
+      expect(err).toBeInstanceOf(ApiError)
+      expect(err.status).toBe(302)
+      expect(err.message.toLowerCase()).toContain('redirect')
+      expect(err.message).not.toContain(SERVER_KEY)
+      // Not just "the client raised an ApiError" — the target must never
+      // have been reached at all, and if it was, it must not have seen the
+      // key.
+      expect(targetWasHit).toBe(false)
+      expect(targetReceivedKey).toBeUndefined()
+    } finally {
+      await new Promise((resolve) => target.close(resolve))
+      await new Promise((resolve) => origin.close(resolve))
+    }
+  })
+
+  // --- Minor: non-JSON 2xx bodies must still surface as ApiError ---------
+
+  it('wraps a non-JSON 2xx body in ApiError instead of a raw SyntaxError', async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response('not json', { status: 200 }),
+    ) as unknown as typeof fetch
+    const client = make(fetchImpl)
+    const err = (await client.get('/v1/events').catch((e) => e)) as ApiError
+    expect(err).toBeInstanceOf(ApiError)
+    expect(err.status).toBe(200)
+    expect(err.message).not.toContain('not json')
+    expect(err.message.toLowerCase()).toContain('non-json')
+  })
+
+  it('wraps an empty 2xx body in ApiError instead of a raw SyntaxError', async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response('', { status: 200 }),
+    ) as unknown as typeof fetch
+    const client = make(fetchImpl)
+    const err = (await client.delete('/v1/persons/p1').catch((e) => e)) as ApiError
+    expect(err).toBeInstanceOf(ApiError)
+    expect(err.status).toBe(200)
+  })
+
+  // --- Minor: getLines strips a trailing \r from CRLF-terminated lines ---
+
+  it('strips a trailing \\r so a CRLF stream still yields parseable lines', async () => {
+    const { stream, push, close } = controllableBody()
+    const fetchImpl = vi.fn(
+      async () => new Response(stream, { status: 200 }),
+    ) as unknown as typeof fetch
+    const client = make(fetchImpl)
+
+    const seen: string[] = []
+    const consumer = (async () => {
+      for await (const line of client.getLines('/v1/persons/p1/export')) seen.push(line)
+    })()
+
+    push('{"type":"person"}\r\n{"type":"end","events":0}\r\n')
+    close()
+    await consumer
+
+    expect(seen).toEqual(['{"type":"person"}', '{"type":"end","events":0}'])
+    for (const line of seen) {
+      expect(() => JSON.parse(line)).not.toThrow()
+    }
   })
 })
