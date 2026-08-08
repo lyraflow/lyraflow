@@ -92,10 +92,15 @@ export class PurgeWorker {
       //
       // `undefined`, not `[]`, when the request carries no set: an empty
       // array is what rows written before 009_deletion_request_ids.sql carry,
-      // and it means "unrestricted" — passing it through as a ceiling would
-      // intersect the group down to nothing and complete a purge that erased
-      // nothing at all. That migration's own comment is where the decision is
-      // argued in full.
+      // and it means "unrestricted". That migration's own comment is where
+      // the decision is argued in full.
+      //
+      // BELT-AND-BRACES, not the guarantee. `resolvePersonScope` treats an
+      // empty ceiling as no ceiling itself (see its `restrictTo?.length`), so
+      // deleting this ternary does not reopen the hole. It stays because the
+      // intent reads better at the call site than it does as an absence, and
+      // because "unrestricted" is a claim this caller is making, not one it
+      // is inheriting.
       const scope = await this.opts.resolve(
         claimed.projectId,
         claimed.personId,

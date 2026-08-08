@@ -95,7 +95,18 @@ export async function resolvePersonScope(
 
   // Built once, outside resolveGroup: step 4 below can call that function a
   // second time, and the ceiling is the same both times.
-  const ceiling = restrictTo ? new Set(restrictTo) : null
+  //
+  // `?.length`, NOT a bare truthiness check on `restrictTo`. An EMPTY array is
+  // truthy in JavaScript, so `restrictTo ? new Set(restrictTo) : null` builds
+  // an empty ceiling that intersects every group down to nothing — a purge
+  // that erases NOTHING and reports success, which is the false-compliance
+  // failure 009_deletion_request_ids.sql exists to rule out. An empty
+  // restriction means "no restriction" everywhere else in this feature (the
+  // migration argues why), and it has to mean the same thing HERE, at the
+  // point the ceiling is built, rather than resting on every caller
+  // remembering to pass `undefined` instead of `[]`. The worker does normalise
+  // it too, deliberately — but that is belt-and-braces, not the guarantee.
+  const ceiling = restrictTo?.length ? new Set(restrictTo) : null
 
   async function resolveGroup(projectId: number, id: string): Promise<ResolvedGroup> {
     const canonical = await aliases.canonicalFor(projectId, id)

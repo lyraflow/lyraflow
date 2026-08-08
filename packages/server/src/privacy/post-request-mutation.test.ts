@@ -338,6 +338,45 @@ describe('finding 1: an /v1/alias between the 202 and the purge cannot widen the
     expect(row.rows[0]?.person_ids.slice().sort()).toEqual([anonId, userId].sort())
   })
 
+  it('purges in FULL when person_ids is empty (a request written before 009)', async () => {
+    // The upgrade case, and the one place where getting the direction wrong
+    // produces a FALSE COMPLIANCE REPORT rather than a leak: a request queued
+    // before 009_deletion_request_ids.sql shipped carries `person_ids = '{}'`
+    // from the column default. Empty means UNRESTRICTED — the migration
+    // argues why at length — because the alternative is intersecting the
+    // group down to nothing, erasing NOTHING, and marking the request
+    // `completed`. A deletion reported as done and never performed is worse
+    // than the hole the ceiling closes.
+    //
+    // The trap this pins is that an empty array is TRUTHY in JavaScript, so
+    // `restrictTo ? new Set(restrictTo) : null` silently builds an empty
+    // ceiling. Nothing else in the suite would notice: every other test here
+    // supplies a non-empty set, so the whole privacy suite stays green while
+    // an upgrade quietly stops erasing anything.
+    const userId = `postmut-legacy-${randomUUID()}`
+    const anonId = `anon-${userId}`
+    await makePerson(userId, anonId, 5)
+
+    const del = await deletePerson(userId)
+    expect(del.statusCode).toBe(202)
+    const requestId = del.json().request_id as number
+
+    // Rewrite the row into exactly the shape it would have had before the
+    // migration. Done through SQL rather than by faking a scope, because the
+    // claim is about what the WORKER does with a row Postgres hands it.
+    await pg.query("UPDATE deletion_requests SET person_ids = '{}' WHERE id = $1", [requestId])
+    const legacy = await deletions.get(projectId, requestId)
+    expect(legacy?.personIds).toEqual([])
+
+    await purgeUntilComplete(requestId)
+
+    // Everything gone, exactly as an unrestricted purge would leave it —
+    // including the anonymous event, which is only reachable through the
+    // device windows and so is the first thing an empty ceiling would strand.
+    expect(await storeSnapshot(userId, anonId)).toEqual({ events: 0, deviceIndex: 0, traits: 0 })
+    expect(await bindingCount(userId)).toBe(0)
+  })
+
   it('leaves a live person untouched when the DELETED person is merged INTO them', async () => {
     // alice is deleted, then merged into bob. `canonicalFor(alice)` now
     // returns BOB, so an unrestricted re-resolution hands the purge bob's

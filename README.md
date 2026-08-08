@@ -688,9 +688,20 @@ person is every id merged into them. So the boundary that applies to a read
 can move as identities merge: if two people who were each deleted at different
 times are later merged with `/v1/alias`, the surviving person carries the
 **later** of the two boundaries, and events after the earlier deletion but at
-or before the later one become hidden too. That direction is guaranteed — a
-merge can only ever move a boundary later, never earlier. Nothing a merge does
-can bring back an event that a deletion has already hidden.
+or before the later one become hidden too.
+
+That direction holds for the profile read and the export, which resolve the
+whole merged group and take the strictest boundary in it. **It does not hold
+for segment counts and member lists.** Those resolve a person through the
+identity dictionaries and read whichever person the merge produced — so merging
+a recently-deleted person *into* one deleted earlier can make some of the first
+person's erased events countable in a segment again, until the purge worker
+removes the rows for real. This only ever concerns subjects who have already
+been deleted, it is bounded by the purge (usually under a minute), and no
+never-deleted person is affected. If you need the guarantee to be absolute
+rather than eventual, wait for `GET /v1/deletions/:id` to report `completed`
+before treating a deletion as final — which is the right thing to do anyway,
+since only the purge actually removes data.
 
 Deletion is asynchronous. The moment the API answers `202`, the person's past
 data stops appearing in segment counts, member lists, profile reads and
