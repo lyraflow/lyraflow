@@ -34,6 +34,11 @@ describe('validateEvent', () => {
     expect(validateEvent(base({ properties: { tags: ['a', 'b'] } }))).toHaveLength(1)
   })
 
+  it('allows exactly 250 properties, the documented limit', () => {
+    const properties = Object.fromEntries(Array.from({ length: 250 }, (_, i) => [`k${i}`, i]))
+    expect(validateEvent(base({ properties }))).toEqual([])
+  })
+
   it('flags more than 250 properties', () => {
     const properties = Object.fromEntries(Array.from({ length: 251 }, (_, i) => [`k${i}`, i]))
     expect(validateEvent(base({ properties }))).toHaveLength(1)
@@ -63,6 +68,8 @@ describe('validateEvent', () => {
     const fixtures: QueuedEvent[] = [
       base(),
       base({ properties: { rows: 12, source: 'csv', ok: true, note: null } }),
+      base({ properties: { tags: ['a', 'b'] } }),
+      base({ properties: { plan: { tier: 'pro' } } }),
       base({ event: undefined }),
       base({ anonymous_id: 'x'.repeat(129) }),
       base({ anonymous_id: undefined, user_id: undefined }),
