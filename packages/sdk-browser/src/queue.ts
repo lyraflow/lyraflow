@@ -22,10 +22,16 @@ export const STORAGE_KEY = 'lyraflow_queue'
  *  - a non-null object (a null or primitive element would throw when
  *    `#prune` reads `.timestamp` off it — property access on null/undefined
  *    always throws)
- *  - a string `message_id` (this is the only field `remove()` matches
- *    against; a missing or non-string one is silently unremovable forever —
- *    an object `message_id`, since `Set.has` compares by reference, would
- *    never equal anything a real caller passes to `remove()`)
+ *  - a non-empty string `message_id` (this is the only field `remove()`
+ *    matches against; a missing or non-string one is silently unremovable
+ *    forever — an object `message_id`, since `Set.has` compares by
+ *    reference, would never equal anything a real caller passes to
+ *    `remove()`. An EMPTY string is the same failure one size smaller: real
+ *    ids are never empty, so `''` is still unremovable through the normal
+ *    flow — and it's worse than merely unremovable, because two distinct
+ *    corrupt entries can both land on `message_id: ''`, and a single
+ *    `remove([''])` would then clear both as though they were one event.
+ *    Requiring non-empty keeps either from ever entering the queue.)
  *  - a `timestamp` that actually parses (anything else is indistinguishable
  *    from corruption, and `#prune`'s age math needs a real instant)
  */
@@ -34,6 +40,7 @@ function isQueuedEventShape(e: unknown): e is QueuedEvent {
   const candidate = e as Record<string, unknown>
   return (
     typeof candidate.message_id === 'string' &&
+    candidate.message_id.length > 0 &&
     typeof candidate.timestamp === 'string' &&
     !Number.isNaN(Date.parse(candidate.timestamp))
   )

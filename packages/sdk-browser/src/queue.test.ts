@@ -240,6 +240,35 @@ describe('EventQueue', () => {
     expect(new EventQueue().peek(10)).toHaveLength(0)
   })
 
+  it('ignores a stored event with an empty string message_id', () => {
+    // typeof '' === 'string' passes a check that only tests the type, not
+    // the value — and an empty id is exactly the failure class the
+    // non-empty rule exists to close: real ids are never empty, so nothing
+    // in the normal flow can ever match one to remove it.
+    const good = at(nowIso(), 'ok')
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify([{ ...at(nowIso(), ''), event: 'ghost' }, good]),
+    )
+    expect(new EventQueue().peek(10).map((e) => e.message_id)).toEqual(['ok'])
+  })
+
+  it('does not let two distinct events colliding on an empty message_id survive to be removed as one', () => {
+    // The sharper edge: message_id: '' isn't just unremovable, it's
+    // ambiguous. Two different corrupt entries that both land on '' would
+    // be indistinguishable to remove() — a single remove(['']) would clear
+    // both as though they were the same event. Requiring non-empty keeps
+    // either from ever entering the queue, so there's nothing left for one
+    // remove() call to (mis)match against.
+    const first = { ...at(nowIso(), ''), event: 'first' }
+    const second = { ...at(nowIso(), ''), event: 'second' }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify([first, second]))
+    const q = new EventQueue()
+    expect(q.size()).toBe(0)
+    q.remove([''])
+    expect(q.size()).toBe(0)
+  })
+
   it('counts an unparseable timestamp added at runtime as corrupt, not as expired', () => {
     // readStore's shape filter keeps this out of storage-sourced data, but
     // `add()` takes its argument on trust — `timestamp` is typed `string`,
