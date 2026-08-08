@@ -30,6 +30,7 @@ export class Transport {
   #onHide: (() => void) | null = null
   #onVisibility: (() => void) | null = null
   #stopped = false
+  #inFlight = false
   #failures = 0
   #nextAttemptAt = 0
 
@@ -53,11 +54,23 @@ export class Transport {
    * SPA route change) would accumulate a fresh `setInterval` and a fresh
    * pair of `pagehide`/`visibilitychange` listeners on every call, none of
    * which `stop()` could ever fully undo.
+   *
+   * The two listeners are deliberately NOT symmetric in how they call
+   * flush. `visibilitychange` fires every time a tab is backgrounded —
+   * switching tabs, minimising, a mobile OS suspending the app — which is
+   * common and is not a reliable signal the page is actually going away, so
+   * it runs an ordinary, backoff-respecting flush. `pagehide` is a much
+   * stronger unload signal and may be the last chance this visitor's data
+   * ever gets to leave the browser, so it bypasses an active backoff once
+   * (see the `bypassBackoff` parameter on `#run`). Bypassing backoff on
+   * `visibilitychange` too would let a visitor who merely alt-tabs during a
+   * server-side outage re-hammer the server on every tab switch — exactly
+   * what the backoff exists to prevent.
    */
   start(): void {
     if (this.#timer) return
     this.#timer = setInterval(() => void this.flush(), FLUSH_INTERVAL_MS)
-    this.#onHide = () => void this.flush()
+    this.#onHide = () => void this.#run(true)
     this.#onVisibility = () => {
       if (document.visibilityState === 'hidden') void this.flush()
     }
@@ -82,15 +95,53 @@ export class Transport {
   }
 
   /**
-   * NEVER REJECTS. Called fire-and-forget from a timer and from pagehide, so
-   * a rejection here becomes an unhandled rejection inside the customer's
-   * page. Every await is inside try/catch — not `.catch()`, which cannot
-   * absorb a synchronous throw from `fetchImpl`.
+   * NEVER REJECTS — the whole call, not just the network leg. Called
+   * fire-and-forget from a timer and from pagehide/visibilitychange, so a
+   * rejection anywhere inside is an unhandled rejection inside the
+   * customer's page, and on the unload path it lands exactly where their
+   * own error reporting will attribute it to us.
    */
   async flush(): Promise<SendOutcome> {
-    if (this.#stopped) return 'stopped'
-    if (Date.now() < this.#nextAttemptAt) return 'retry'
+    return this.#run(false)
+  }
 
+  /**
+   * `bypassBackoff` is true only for the `pagehide` listener in `start()` —
+   * see its docstring for why `visibilitychange` does not get the same
+   * treatment. Everything else about a bypassed run is identical: it still
+   * respects `#stopped` and the in-flight guard, and a failed attempt still
+   * recomputes a fresh backoff for whatever comes next.
+   *
+   * The in-flight guard exists because `remove()` only happens after the
+   * response comes back: without it, a second `flush()` arriving while one
+   * is still awaiting `fetchImpl` (a keepalive POST outliving the 5s
+   * interval, or a pagehide flush racing the timer) would `peek()` the same
+   * unremoved events and send them again. The ingest dedupes by
+   * `message_id` → `event_id`, so a duplicate send costs bandwidth rather
+   * than correctness, but there is no reason to pay for it.
+   */
+  async #run(bypassBackoff: boolean): Promise<SendOutcome> {
+    if (this.#stopped) return 'stopped'
+    if (!bypassBackoff && Date.now() < this.#nextAttemptAt) return 'retry'
+    if (this.#inFlight) return 'retry'
+
+    this.#inFlight = true
+    try {
+      return await this.#attempt()
+    } catch {
+      // A catch-all for anything not already handled inside #attempt:
+      // queue.peek, any of the three queue.remove calls, or the
+      // host-supplied `warn` callback throwing. None of those are
+      // hypothetical — `warn` is wired by the caller (Task 8), and
+      // `message_id` is read off events that this very file has already
+      // established can carry throwing getters on other properties.
+      return 'retry'
+    } finally {
+      this.#inFlight = false
+    }
+  }
+
+  async #attempt(): Promise<SendOutcome> {
     const batch = this.#opts.queue.peek(BATCH_SIZE)
     if (batch.length === 0) return 'sent'
 
@@ -211,8 +262,11 @@ export class Transport {
     const advisedMs = advisedSeconds * 1000
     const exponential = Math.min(BACKOFF_BASE_MS * 2 ** (this.#failures - 1), BACKOFF_MAX_MS)
     const jitter = exponential * 0.2 * Math.random()
+    // Floored at BACKOFF_BASE_MS, matching the intent of the ceiling above:
+    // a server advising `retry-after: 0` (or a negative value) must not be
+    // able to switch the client's own throttle off entirely.
     const delay = Number.isFinite(advisedMs)
-      ? Math.min(Math.max(advisedMs, 0), MAX_HONOURED_RETRY_AFTER_MS)
+      ? Math.min(Math.max(advisedMs, BACKOFF_BASE_MS), MAX_HONOURED_RETRY_AFTER_MS)
       : exponential + jitter
     this.#nextAttemptAt = Date.now() + delay
   }

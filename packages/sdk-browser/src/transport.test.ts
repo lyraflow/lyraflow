@@ -168,6 +168,43 @@ describe('Transport', () => {
     await expect(transport.flush()).resolves.toBe('retry')
   })
 
+  it('applies backoff even on a synchronous fetch throw, not just a bare retry', async () => {
+    // The outer catch added in #run (see "never rejects even when
+    // queue.peek throws" etc. below) also absorbs a synchronous fetchImpl
+    // throw, which means the ORIGINAL "never rejects" test above no longer
+    // discriminates the try/catch-around-fetchImpl → .catch() mutation on
+    // its own — that mutation still passes every test above it once the
+    // outer catch exists. What it still gets wrong: replacing the try/catch
+    // with `.catch()` means `.catch()` never attaches (the throw happens
+    // before fetchImpl returns anything to attach it to), so `#backoff()`
+    // never runs, and an immediate next flush hits the network again
+    // instead of being held off. This test pins that.
+    vi.useFakeTimers()
+    try {
+      const fetchImpl = vi.fn(() => {
+        throw new Error('sync boom')
+      }) as unknown as typeof fetch
+      const { queue, transport } = make(fetchImpl)
+      queue.add(event('m1'))
+      expect(await transport.flush()).toBe('retry')
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+
+      // An immediate second flush must be held off by backoff, not hit the
+      // network again.
+      expect(await transport.flush()).toBe('retry')
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+
+      // BACKOFF_BASE_MS (1_000ms) plus up to 20% jitter — advance past the
+      // worst case rather than the bare minimum, so this isn't flaky on the
+      // random jitter draw.
+      vi.advanceTimersByTime(1_300)
+      await transport.flush()
+      expect(fetchImpl).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('sends at most one batch worth at a time', async () => {
     const fetchImpl = vi.fn(async () => reply(202)) as unknown as typeof fetch
     const { queue, transport } = make(fetchImpl)
@@ -288,5 +325,182 @@ describe('Transport', () => {
 
     addSpy.mockRestore()
     removeSpy.mockRestore()
+  })
+
+  // --- The guarantee covers the whole call, not only fetchImpl ----------
+  // Found on review: the original try/catch only wrapped the fetchImpl call
+  // and the two reads off its response. queue.peek, all three queue.remove
+  // call sites, and the host-supplied `warn` callback could each throw
+  // synchronously and reject flush() — an unhandled rejection on the
+  // pagehide path, in the customer's page. `warn` in particular isn't
+  // hypothetical: it's wired by the caller (Task 8), and `message_id` is
+  // read off events this file has already established can carry throwing
+  // getters on other properties.
+
+  it('never rejects even when queue.peek throws', async () => {
+    const rogueQueue = {
+      peek: () => {
+        throw new Error('peek exploded')
+      },
+      remove: () => {},
+    } as unknown as EventQueue
+    const transport = new Transport({
+      host: 'https://a.test',
+      writeKey: 'wk_test',
+      queue: rogueQueue,
+      warn: vi.fn(),
+      fetchImpl: vi.fn(async () => reply(202)) as unknown as typeof fetch,
+    })
+    await expect(transport.flush()).resolves.toBe('retry')
+  })
+
+  it('never rejects even when queue.remove throws', async () => {
+    // Exercises the queue.remove call on the 202 path specifically.
+    const rogueQueue = {
+      peek: () => [event('m1')],
+      remove: () => {
+        throw new Error('storage exploded')
+      },
+    } as unknown as EventQueue
+    const transport = new Transport({
+      host: 'https://a.test',
+      writeKey: 'wk_test',
+      queue: rogueQueue,
+      warn: vi.fn(),
+      fetchImpl: vi.fn(async () => reply(202)) as unknown as typeof fetch,
+    })
+    await expect(transport.flush()).resolves.toBe('retry')
+  })
+
+  it('never rejects even when the host-supplied warn callback throws', async () => {
+    // Exercises the 400 path's warn call, after queue.remove has already
+    // run — a throwing warn must not turn an already-decided drop into a
+    // rejected promise.
+    const throwingWarn = vi.fn(() => {
+      throw new Error('warn blew up')
+    })
+    const { queue, transport } = make(
+      vi.fn(async () => reply(400)) as unknown as typeof fetch,
+      throwingWarn,
+    )
+    queue.add(event('m1'))
+    await expect(transport.flush()).resolves.toBe('retry')
+  })
+
+  // --- In-flight guard ----------------------------------------------------
+  // Found on review: queue.remove only runs after the response comes back,
+  // so a second flush() arriving while one is still awaiting fetchImpl
+  // would peek the same unremoved batch and send it again. Reachable
+  // whenever a keepalive POST outlives the 5s interval, or a pagehide flush
+  // races the timer.
+
+  it('does not send the same batch twice when a flush is still in flight', async () => {
+    const gate: { resolve?: (r: Response) => void } = {}
+    const fetchImpl = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          gate.resolve = resolve
+        }),
+    ) as unknown as typeof fetch
+    const { queue, transport } = make(fetchImpl)
+    queue.add(event('m1'))
+
+    const first = transport.flush()
+    const second = transport.flush() // races the still-pending first
+
+    expect(await second).toBe('retry')
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+
+    gate.resolve?.(reply(202))
+    expect(await first).toBe('sent')
+    expect(queue.size()).toBe(0)
+  })
+
+  // --- Backoff floor -------------------------------------------------------
+  // Found on review: Math.min(Math.max(advisedMs, 0), MAX) lets an advised
+  // retry-after of 0 (or negative) set the next attempt to "now", switching
+  // the client's own throttle off entirely.
+
+  it('floors an advised retry-after so a server cannot disable the client throttle', async () => {
+    vi.useFakeTimers()
+    try {
+      const fetchImpl = vi.fn(async () =>
+        reply(503, { 'retry-after': '0' }),
+      ) as unknown as typeof fetch
+      const { queue, transport } = make(fetchImpl)
+      queue.add(event('m1'))
+      expect(await transport.flush()).toBe('retry')
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+
+      // Without a floor, retry-after: 0 would set the next attempt to
+      // "now", and this immediate second call would hit the network again.
+      expect(await transport.flush()).toBe('retry')
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+
+      // 1_000ms matches BACKOFF_BASE_MS, the floor transport.ts documents.
+      vi.advanceTimersByTime(1_000)
+      await transport.flush()
+      expect(fetchImpl).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // --- pagehide bypasses an active backoff; visibilitychange does not ----
+  // Found on review: after one 503, the backoff short-circuits the very
+  // next flush with no network attempt at all — including an unload flush,
+  // the final delivery chance for a visitor who never returns. pagehide
+  // gets one bypass; visibilitychange (fired on every tab switch, not only
+  // real unloads) does not, or a visitor backgrounding the tab during an
+  // outage would re-hammer the server on every switch.
+  //
+  // Both assertions below happen synchronously, with no waiting: the
+  // backoff check runs before any `await` in #run/#attempt, so if the
+  // dispatched event's handler is going to call fetchImpl, it already has
+  // by the time dispatchEvent returns.
+
+  it('lets a pagehide flush bypass an active backoff, since it may be the final chance to deliver', async () => {
+    const fetchImpl = vi.fn(async () =>
+      reply(503, { 'retry-after': '30' }),
+    ) as unknown as typeof fetch
+    const { queue, transport } = make(fetchImpl)
+    queue.add(event('m1'))
+    transport.start()
+    try {
+      await transport.flush() // fails, enters a 30s backoff
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+
+      // A normal flush() inside the backoff window is still blocked...
+      expect(await transport.flush()).toBe('retry')
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+
+      // ...but pagehide bypasses it and attempts the network once more.
+      dispatchEvent(new Event('pagehide'))
+      expect(fetchImpl).toHaveBeenCalledTimes(2)
+    } finally {
+      transport.stop()
+    }
+  })
+
+  it('does not bypass backoff for a visibilitychange flush, only for pagehide', async () => {
+    const fetchImpl = vi.fn(async () =>
+      reply(503, { 'retry-after': '30' }),
+    ) as unknown as typeof fetch
+    const { queue, transport } = make(fetchImpl)
+    queue.add(event('m1'))
+    transport.start()
+    try {
+      await transport.flush()
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+
+      Object.defineProperty(document, 'visibilityState', {
+        value: 'hidden',
+        configurable: true,
+      })
+      dispatchEvent(new Event('visibilitychange'))
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+    } finally {
+      transport.stop()
+    }
   })
 })
