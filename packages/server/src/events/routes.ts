@@ -28,6 +28,45 @@ import { FeedCursorError, decodeFeedCursor, encodeFeedCursor } from './cursor.js
  */
 export const EVENTS_MAX_LIMIT = 500
 
+/**
+ * Bounded for the same class of reason as `EVENTS_MAX_LIMIT`, but on the
+ * other side of the trade: `/v1/events/stats` sums groups server-side
+ * rather than paging rows, so it has no `LIMIT` to hide an oversized window
+ * behind. A 1-minute interval over a year is roughly half a million
+ * buckets — checked with cheap arithmetic on the requested window BEFORE
+ * any query runs, the same reasoning `validateTree` (segments/validate.ts)
+ * uses for an over-cap filter tree: reject rather than run something that
+ * was always going to be too expensive.
+ */
+export const STATS_MAX_BUCKETS = 1000
+
+/**
+ * The interval reaches SQL only through this compile-time record, never as
+ * the request string. `StatsQuery`'s `z.enum(['1m', '1h', '1d'])` already
+ * rejects anything else at the parse boundary; this record is the SECOND
+ * line of defence, the one that makes the interval structurally
+ * uninjectable rather than merely validated against — a lookup into a
+ * closed, compile-time set of literals can never emit anything but one of
+ * those three fixed strings, regardless of what reaches it.
+ */
+export const STATS_INTERVALS = {
+  '1m': 'INTERVAL 1 MINUTE',
+  '1h': 'INTERVAL 1 HOUR',
+  '1d': 'INTERVAL 1 DAY',
+} as const
+
+/**
+ * Milliseconds per bucket, keyed identically to `STATS_INTERVALS` — used
+ * only for the pre-query `STATS_MAX_BUCKETS` arithmetic below, never for
+ * SQL text. The SQL side always goes through the record above, never
+ * through arithmetic on the request.
+ */
+const STATS_INTERVAL_MS: Record<keyof typeof STATS_INTERVALS, number> = {
+  '1m': 60_000,
+  '1h': 60 * 60_000,
+  '1d': 24 * 60 * 60_000,
+}
+
 export interface EventsDeps {
   projects: ProjectCache
   readiness: Readiness
@@ -45,6 +84,27 @@ const Query = z.object({
   limit: z.coerce.number().int().positive().max(EVENTS_MAX_LIMIT).default(50),
   after: z.string().max(512).optional(),
 })
+
+const StatsQuery = z.object({
+  since: z.string().datetime().optional(),
+  until: z.string().datetime().optional(),
+  interval: z.enum(['1m', '1h', '1d']).default('1h'),
+  group_by: z.literal('event_name').optional(),
+})
+
+/**
+ * One aggregated row as ClickHouse returns it. `event_name` is present only
+ * when `group_by=event_name` was requested — omitted from the SELECT list
+ * otherwise, so it is simply absent from the row rather than null. `events`
+ * is `count(DISTINCT event_id)`, a `UInt64` that JSONEachRow serializes as a
+ * JSON string (the same shape `person_count` takes in
+ * `segments/execute.ts`), converted with `Number(...)` below.
+ */
+interface StatsRow {
+  bucket: string
+  event_name?: string
+  events: string
+}
 
 /** The exact column list this route selects and returns — a compile-time allowlist. */
 interface FeedRow {
@@ -380,6 +440,128 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
         city: r.city,
       })),
       next_cursor,
+    })
+  })
+
+  /**
+   * GET /v1/events/stats — time-bucketed counts, the other half of "is my
+   * instrumentation working": the feed above answers "what happened", this
+   * answers "how much, over time". Built directly on the feed's own nested
+   * shape — an aggregation over the identical deduplicated,
+   * suppression-checked inner select — because a guardrail that holds on
+   * the feed and not on this sibling read path is exactly the "fifth read
+   * path" failure this module's own docstring warns about, just one route
+   * later.
+   *
+   * FLAT ROWS, NOT A NESTED OBJECT PER BUCKET. `{ buckets: [{ bucket,
+   * event_name?, events }] }` is what stays pipeable into `jq`/`sort`
+   * without restructuring first — a caller scripting against this should
+   * not need to flatten a `{ bucket: { event_name: count } }` map before it
+   * can sort or filter.
+   *
+   * BUCKET-COUNT GUARD, NOT A QUERY-TIME LIMIT. This route sums groups
+   * server-side rather than paging rows, so — unlike the feed — it has no
+   * `LIMIT` to hide an oversized window behind: a 1-minute interval over a
+   * year is roughly half a million buckets. `STATS_MAX_BUCKETS` is enforced
+   * with cheap arithmetic on the EFFECTIVE window (defaults already
+   * resolved) before any query runs, the same reasoning `validateTree`
+   * (segments/validate.ts) uses for an over-cap filter tree.
+   *
+   * `since` defaults to 24h before now when omitted, for the identical
+   * reason the feed's default does — an unbounded scan is unbounded
+   * whether or not the route happens to aggregate the result afterwards.
+   * Unlike the feed, this route has no cursor to conflict with that
+   * default, so it always applies when `since` is missing.
+   *
+   * Server-key only, the same authenticator as the feed: this aggregates
+   * project-wide event data, not a per-caller public surface.
+   */
+  app.get('/v1/events/stats', async (req, reply) => {
+    const project = await authenticateServer(req, reply)
+    if (!project) return
+
+    const q = StatsQuery.safeParse(req.query)
+    if (!q.success) return reply.code(400).send({ error: 'invalid_query' })
+    const { since, until, interval, group_by } = q.data
+    const groupBy = group_by === 'event_name'
+
+    const DEFAULT_SINCE_MS = 24 * 60 * 60 * 1000
+    const sinceDate = since ? new Date(since) : new Date(Date.now() - DEFAULT_SINCE_MS)
+    const untilDate = until ? new Date(until) : new Date()
+
+    // Cheap arithmetic before any query — see this route's own docstring.
+    // Computed from the EFFECTIVE window (defaults already resolved
+    // above), since that is what actually determines how many buckets the
+    // query would produce, not just whatever the caller happened to type.
+    const windowMs = untilDate.getTime() - sinceDate.getTime()
+    const bucketCount = Math.ceil(windowMs / STATS_INTERVAL_MS[interval])
+    if (bucketCount > STATS_MAX_BUCKETS) {
+      return reply.code(400).send({
+        error: 'window_too_large',
+        detail: `this window at ${interval} resolution would produce ${bucketCount} buckets, above the limit of ${STATS_MAX_BUCKETS}`,
+      })
+    }
+
+    // `project_id` is bound from the authenticated key, never from the
+    // query string — same rule as the feed above.
+    const params = new Params()
+    const projectParam = params.add(project.id, 'UInt32')
+
+    const sinceClause = ` AND timestamp >= ${params.add(chDateTime(sinceDate), 'DateTime64(3)')}`
+    let untilClause = ''
+    if (until) {
+      untilClause = ` AND timestamp <= ${params.add(chDateTime(untilDate), 'DateTime64(3)')}`
+    }
+
+    // The identical suppression derivation the feed uses above:
+    // `notSuppressedExpr` against each event's own timestamp, inside the
+    // same nested shape — one clause, never a second bespoke one.
+    const resolved = resolvedPersonExpr({ database, alias: 'e' })
+    const notSuppressed = notSuppressedExpr({
+      database,
+      projectId: project.id,
+      params,
+      person: resolved,
+      instant: 'e.timestamp',
+    })
+
+    const sql = `
+      SELECT toStartOfInterval(timestamp, ${STATS_INTERVALS[interval]}) AS bucket,
+             ${groupBy ? 'event_name,' : ''}
+             count(DISTINCT event_id) AS events
+      FROM (
+        SELECT project_id, event_id, timestamp, event_name, anonymous_id, user_id
+        FROM events
+        WHERE project_id = ${projectParam}${sinceClause}${untilClause}
+        LIMIT 1 BY project_id, event_id
+      ) AS e
+      WHERE ${notSuppressed}
+      GROUP BY bucket${groupBy ? ', event_name' : ''}
+      ORDER BY bucket ASC${groupBy ? ', event_name ASC' : ''}
+    `
+
+    const rs = await ch.query({
+      query: sql,
+      query_params: params.values,
+      format: 'JSONEachRow',
+      clickhouse_settings: {
+        max_execution_time: SEGMENT_MAX_EXECUTION_SECONDS,
+        max_memory_usage: String(SEGMENT_MAX_MEMORY_BYTES),
+        // Without this, ClickHouse would rather return a partial set of
+        // buckets than fail — a silently truncated aggregate reads as
+        // "instrumentation is fine, nothing else happened", the same
+        // reasoning the feed's identical setting documents above.
+        timeout_overflow_mode: 'throw',
+      },
+    })
+    const rows = await rs.json<StatsRow>()
+
+    return reply.code(200).send({
+      buckets: rows.map((r) => ({
+        bucket: parseChDateTime(r.bucket).toISOString(),
+        ...(groupBy ? { event_name: r.event_name } : {}),
+        events: Number(r.events),
+      })),
     })
   })
 }

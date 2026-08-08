@@ -10,7 +10,7 @@ import { Readiness } from '../health.js'
 import { type PgDictionarySource, ensureIdentityDictionaries } from '../identity/dictionaries.js'
 import { MAX_PERSON_RANGE_CLAUSES } from '../identity/scope.js'
 import { encodeFeedCursor } from './cursor.js'
-import { EVENTS_MAX_LIMIT } from './routes.js'
+import { EVENTS_MAX_LIMIT, STATS_MAX_BUCKETS } from './routes.js'
 
 const CH_DB = 'lyraflow_test'
 const CH = {
@@ -102,6 +102,52 @@ function evRow(opts: EvOpts) {
 async function insertEvents(rows: ReturnType<typeof evRow>[]): Promise<void> {
   await ch.insert({ table: 'events', format: 'JSONEachRow', values: rows })
 }
+
+/**
+ * Like `evRow`, but anchored to an arbitrary real instant (epoch ms) rather
+ * than this file's `BASE_MS`. The stats tests below pick their OWN
+ * real-clock-anchored bucket boundaries (via `bucketStart`) so the exact
+ * bucket a fixture row lands in can be computed and asserted precisely,
+ * independent of `BASE_MS`'s fixed two-hour offset — and, since
+ * `/v1/events/stats` has no `event` filter to isolate a fixture the way the
+ * feed tests do, each stats test also picks its own few-minutes-wide real
+ * time slot, distinct from every other fixture in this file (BASE_MS's
+ * ~110-120-minutes-ago window, and the default-since/cursor-gap tests'
+ * exact 1h/25h/27h/30h-ago marks), so a `since`/`until` window scoped
+ * tightly around one test's own bucket(s) can never pick up another test's
+ * rows.
+ */
+function evRowAtMs(opts: {
+  projectId: number
+  eventId: string
+  userId?: string
+  eventName: string
+  atMs: number
+  receivedAtMs?: number
+}) {
+  const fmt = (ms: number) => new Date(ms).toISOString().replace('T', ' ').replace('Z', '')
+  return {
+    project_id: opts.projectId,
+    event_id: opts.eventId,
+    anonymous_id: '',
+    user_id: opts.userId ?? '',
+    event_name: opts.eventName,
+    timestamp: fmt(opts.atMs),
+    received_at: fmt(opts.receivedAtMs ?? opts.atMs),
+    trusted: 1,
+    properties: {},
+    properties_num: {},
+  }
+}
+
+/**
+ * Matches ClickHouse's `toStartOfInterval(timestamp, INTERVAL n UNIT)` for
+ * the three single-unit intervals this route supports (`1m`/`1h`/`1d`):
+ * plain UTC epoch-floor division. `events.timestamp` is
+ * `DateTime64(3, 'UTC')` and UTC days carry no DST, so epoch flooring and
+ * UTC calendar flooring land on the identical instant.
+ */
+const bucketStart = (ms: number, intervalMs: number) => Math.floor(ms / intervalMs) * intervalMs
 
 async function makeProject(slug: string, name: string, writeKey: string, serverKey: string) {
   const r = await pg.query<{ id: string }>(
@@ -719,5 +765,225 @@ describe('GET /v1/events', () => {
         [projectA],
       )
     }
+  })
+})
+
+describe('GET /v1/events/stats', () => {
+  const statsGet = (query: string, key = SERVER_KEY_A) => get(`/v1/events/stats${query}`, key)
+
+  it('buckets counts by interval, oldest bucket first', async () => {
+    const intervalMs = 60_000
+    // 40 minutes ago: distinct from BASE_MS's ~110-120-minutes-ago window
+    // and from the other tests' exact 1h/25h/27h/30h/43m/46m/49m marks.
+    const bucket1 = bucketStart(Date.now() - 40 * 60_000, intervalMs)
+    const bucket2 = bucket1 + intervalMs
+
+    await ch.insert({
+      table: 'events',
+      format: 'JSONEachRow',
+      values: [
+        evRowAtMs({
+          projectId: projectA,
+          eventId: uuid(100),
+          userId: 'stats-bucket-user',
+          eventName: 'stats_bucket_event',
+          atMs: bucket1 + 5_000,
+        }),
+        evRowAtMs({
+          projectId: projectA,
+          eventId: uuid(101),
+          userId: 'stats-bucket-user',
+          eventName: 'stats_bucket_event',
+          atMs: bucket1 + 15_000,
+        }),
+        evRowAtMs({
+          projectId: projectA,
+          eventId: uuid(102),
+          userId: 'stats-bucket-user',
+          eventName: 'stats_bucket_event',
+          atMs: bucket2 + 5_000,
+        }),
+      ],
+    })
+
+    const since = new Date(bucket1 - 1_000).toISOString()
+    const until = new Date(bucket2 + intervalMs - 1_000).toISOString()
+    const res = await statsGet(
+      `?interval=1m&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`,
+    )
+    expect(res.statusCode).toBe(200)
+    expect(res.json().buckets).toEqual([
+      { bucket: new Date(bucket1).toISOString(), events: 2 },
+      { bucket: new Date(bucket2).toISOString(), events: 1 },
+    ])
+  })
+
+  it('groups by event name when asked, one row per bucket and name', async () => {
+    // Flat rows, not a nested object per bucket — it is what keeps the
+    // NDJSON pipeable into jq and sort without restructuring.
+    const intervalMs = 60_000
+    const bucket1 = bucketStart(Date.now() - 43 * 60_000, intervalMs)
+
+    await ch.insert({
+      table: 'events',
+      format: 'JSONEachRow',
+      values: [
+        evRowAtMs({
+          projectId: projectA,
+          eventId: uuid(110),
+          userId: 'stats-group-user',
+          eventName: 'stats_group_a',
+          atMs: bucket1 + 5_000,
+        }),
+        evRowAtMs({
+          projectId: projectA,
+          eventId: uuid(111),
+          userId: 'stats-group-user',
+          eventName: 'stats_group_a',
+          atMs: bucket1 + 10_000,
+        }),
+        evRowAtMs({
+          projectId: projectA,
+          eventId: uuid(112),
+          userId: 'stats-group-user',
+          eventName: 'stats_group_b',
+          atMs: bucket1 + 15_000,
+        }),
+      ],
+    })
+
+    const since = new Date(bucket1 - 1_000).toISOString()
+    const until = new Date(bucket1 + intervalMs - 1_000).toISOString()
+    const res = await statsGet(
+      `?interval=1m&group_by=event_name&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`,
+    )
+    expect(res.statusCode).toBe(200)
+    expect(res.json().buckets).toEqual([
+      { bucket: new Date(bucket1).toISOString(), event_name: 'stats_group_a', events: 2 },
+      { bucket: new Date(bucket1).toISOString(), event_name: 'stats_group_b', events: 1 },
+    ])
+  })
+
+  // events is a ReplacingMergeTree; see the identical dedup test on
+  // GET /v1/events above for why merges are stopped and the two duplicate
+  // rows are two SEPARATE ch.insert() calls rather than one — a single
+  // insert carrying both would already be pre-merged into one physical row
+  // before reaching disk, making count(DISTINCT event_id) indistinguishable
+  // from plain count() and proving nothing about this route's own query.
+  it('counts distinct event ids, so a retried delivery is one event', async () => {
+    const intervalMs = 60_000
+    const bucket1 = bucketStart(Date.now() - 46 * 60_000, intervalMs)
+    const atMs = bucket1 + 5_000
+
+    await ch.command({ query: `SYSTEM STOP MERGES ${CH_DB}.events` })
+    try {
+      await ch.insert({
+        table: 'events',
+        format: 'JSONEachRow',
+        values: [
+          evRowAtMs({
+            projectId: projectA,
+            eventId: uuid(120),
+            userId: 'stats-dedup-user',
+            eventName: 'stats_dedup_event',
+            atMs,
+            receivedAtMs: atMs,
+          }),
+        ],
+      })
+      await ch.insert({
+        table: 'events',
+        format: 'JSONEachRow',
+        values: [
+          evRowAtMs({
+            projectId: projectA,
+            eventId: uuid(120),
+            userId: 'stats-dedup-user',
+            eventName: 'stats_dedup_event',
+            atMs,
+            receivedAtMs: atMs + 10_000,
+          }),
+        ],
+      })
+
+      const since = new Date(bucket1 - 1_000).toISOString()
+      const until = new Date(bucket1 + intervalMs - 1_000).toISOString()
+      const res = await statsGet(
+        `?interval=1m&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`,
+      )
+      expect(res.statusCode).toBe(200)
+      expect(res.json().buckets).toEqual([{ bucket: new Date(bucket1).toISOString(), events: 1 }])
+    } finally {
+      await ch.command({ query: `SYSTEM START MERGES ${CH_DB}.events` })
+    }
+  })
+
+  // Stats cannot join the four-path matrix — it returns counts, not
+  // people, so it has no personIds to assert on. This is its equivalent: a
+  // person whose events are all before their boundary contributes nothing
+  // to any bucket. A third, non-suppressed person's event in the same
+  // window is the positive control — it survives, proving the absence of
+  // the erased user's two events is suppression, not an empty result set.
+  it("excludes an erased person's events from the counts", async () => {
+    const intervalMs = 60_000
+    const bucket1 = bucketStart(Date.now() - 49 * 60_000, intervalMs)
+
+    await ch.insert({
+      table: 'events',
+      format: 'JSONEachRow',
+      values: [
+        evRowAtMs({
+          projectId: projectA,
+          eventId: uuid(130),
+          userId: 'stats-erased-user',
+          eventName: 'stats_suppressed_event',
+          atMs: bucket1 + 2_000,
+        }),
+        evRowAtMs({
+          projectId: projectA,
+          eventId: uuid(131),
+          userId: 'stats-erased-user',
+          eventName: 'stats_suppressed_event',
+          atMs: bucket1 + 3_000,
+        }),
+        evRowAtMs({
+          projectId: projectA,
+          eventId: uuid(132),
+          userId: 'stats-control-user',
+          eventName: 'stats_suppressed_event',
+          atMs: bucket1 + 4_000,
+        }),
+      ],
+    })
+    // Strictly after both of the erased user's events — "all events before
+    // their boundary" is the shape this test exists to catch.
+    await suppress(projectA, 'stats-erased-user', new Date(bucket1 + 20_000))
+
+    const since = new Date(bucket1 - 1_000).toISOString()
+    const until = new Date(bucket1 + intervalMs - 1_000).toISOString()
+    const res = await statsGet(
+      `?interval=1m&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`,
+    )
+    expect(res.statusCode).toBe(200)
+    // Only the control user's single event survives.
+    expect(res.json().buckets).toEqual([{ bucket: new Date(bucket1).toISOString(), events: 1 }])
+  })
+
+  it('rejects an interval outside the allowlist', async () => {
+    // The interval becomes a SQL literal and can never come from request
+    // data.
+    const res = await statsGet(`?interval=${encodeURIComponent('1 HOUR); DROP TABLE events--')}`)
+    expect(res.statusCode).toBe(400)
+  })
+
+  it('refuses a window that would exceed STATS_MAX_BUCKETS', async () => {
+    // Reachable from an authenticated route: a 1m interval over a year is
+    // half a million buckets. 1-minute buckets over
+    // (STATS_MAX_BUCKETS + 500) minutes is comfortably past the cap no
+    // matter where `now` falls at the instant this runs.
+    const since = new Date(Date.now() - (STATS_MAX_BUCKETS + 500) * 60_000).toISOString()
+    const res = await statsGet(`?interval=1m&since=${encodeURIComponent(since)}`)
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toBe('window_too_large')
   })
 })
