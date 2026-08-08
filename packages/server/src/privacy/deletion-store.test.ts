@@ -70,13 +70,71 @@ const opts = { leaseMs: 300_000, maxAttempts: 5 }
 
 describe('DeletionStore', () => {
   it('writes the suppression row and the request in one transaction', async () => {
-    const { id, suppressedAt } = await store.request(projectId, 'atomic-1', new Date())
+    const { id, suppressedAt } = await store.request(
+      projectId,
+      'atomic-1',
+      ['atomic-1'],
+      new Date(),
+    )
     expect(id).toBeGreaterThan(0)
     const sup = await pg.query(
       'SELECT suppressed_at FROM suppressed_persons WHERE project_id=$1 AND person_id=$2',
       [projectId, 'atomic-1'],
     )
     expect(sup.rows[0].suppressed_at.getTime()).toBe(suppressedAt.getTime())
+  })
+
+  it('writes one suppression row per id in the given set, all at the same boundary, alongside exactly one deletion_requests row for the canonical', async () => {
+    // The Task 8b fix: a deletion is per PERSON (one deletion_requests row,
+    // naming the canonical) but suppression is per ID (one row each for the
+    // canonical, an id merged into it, and a device) — see DeletionStore's
+    // own docstring for why the read side needs every one of them once the
+    // purge has deleted the dictionaries that would otherwise let a
+    // non-canonical id resolve back to the canonical.
+    const at = new Date(Date.now() - 3_600_000)
+    const { id, suppressedAt } = await store.request(
+      projectId,
+      'fanout-canonical',
+      ['fanout-canonical', 'fanout-merged-away', 'fanout-device'],
+      at,
+    )
+    expect(id).toBeGreaterThan(0)
+    expect(suppressedAt.getTime()).toBe(at.getTime())
+
+    const rows = await pg.query<{ person_id: string; suppressed_at: Date }>(
+      'SELECT person_id, suppressed_at FROM suppressed_persons WHERE project_id = $1 AND person_id = ANY($2) ORDER BY person_id',
+      [projectId, ['fanout-canonical', 'fanout-merged-away', 'fanout-device']],
+    )
+    expect(rows.rows.map((r) => r.person_id)).toEqual([
+      'fanout-canonical',
+      'fanout-device',
+      'fanout-merged-away',
+    ])
+    for (const row of rows.rows) {
+      expect(row.suppressed_at.getTime()).toBe(at.getTime())
+    }
+
+    // Exactly ONE deletion_requests row, naming the canonical — the purge is
+    // per person, not per id, so the fan-out on the suppression side must
+    // not multiply this table too.
+    const requests = await pg.query(
+      'SELECT person_id FROM deletion_requests WHERE project_id = $1 AND id = $2',
+      [projectId, id],
+    )
+    expect(requests.rows).toEqual([{ person_id: 'fanout-canonical' }])
+  })
+
+  it('rejects an id set that does not include the canonical', async () => {
+    // An internal contract, not a caller-facing API error: every production
+    // caller (routes.ts) builds `ids` from `scope.ids`, which always
+    // contains `scope.canonical` by construction (PersonScope.ids is
+    // group ∪ devices, and group always starts with canonical). This guards
+    // against a future caller silently breaking that invariant and writing
+    // a deletion_requests row for a person with no matching suppression row
+    // at all.
+    await expect(
+      store.request(projectId, 'missing-canonical', ['some-other-id'], new Date()),
+    ).rejects.toThrow(/must include personId/)
   })
 
   it('lands NEITHER row when the second write fails', async () => {
@@ -122,7 +180,7 @@ describe('DeletionStore', () => {
       const storeWithInjectedFailure = new DeletionStore(spiedPool, suppression)
 
       await expect(
-        storeWithInjectedFailure.request(projectId, 'orphan-1', new Date()),
+        storeWithInjectedFailure.request(projectId, 'orphan-1', ['orphan-1'], new Date()),
       ).rejects.toThrow('deliberate failure injected for this test')
       const sup = await pg.query(
         'SELECT 1 FROM suppressed_persons WHERE project_id=$1 AND person_id=$2',
@@ -161,7 +219,14 @@ describe('DeletionStore', () => {
       query: vi.fn((text: string, params?: unknown[]) => {
         if (text === 'BEGIN' || text === 'COMMIT') return Promise.resolve({ rows: [] })
         if (text.includes('INSERT INTO suppressed_persons')) {
-          return Promise.resolve({ rows: [{ suppressed_at: params?.[2] }] })
+          // upsertMany's call shape: params = [projectId, ids, at]. Echoes
+          // back one { person_id, suppressed_at } row per id, the same shape
+          // the real `RETURNING person_id, suppressed_at` produces.
+          const ids = params?.[1] as string[]
+          const at = params?.[2]
+          return Promise.resolve({
+            rows: ids.map((personId) => ({ person_id: personId, suppressed_at: at })),
+          })
         }
         if (text.includes('INSERT INTO deletion_requests')) {
           return Promise.reject(new Error('deliberate insert failure'))
@@ -182,7 +247,12 @@ describe('DeletionStore', () => {
     // is what must reach the caller; the rollback failure is dealt with
     // separately, via `release`, below.
     await expect(
-      storeWithFakeConnection.request(projectId, 'rollback-fails-1', new Date()),
+      storeWithFakeConnection.request(
+        projectId,
+        'rollback-fails-1',
+        ['rollback-fails-1'],
+        new Date(),
+      ),
     ).rejects.toThrow('deliberate insert failure')
 
     expect(releaseCalls).toHaveLength(1)
@@ -196,8 +266,8 @@ describe('DeletionStore', () => {
     // fail on a duplicate key and erase nothing new.
     const first = new Date(Date.now() - 5 * 3_600_000)
     const second = new Date(Date.now() - 2 * 3_600_000)
-    const a = await store.request(projectId, 'repeat-1', first)
-    const b = await store.request(projectId, 'repeat-1', second)
+    const a = await store.request(projectId, 'repeat-1', ['repeat-1'], first)
+    const b = await store.request(projectId, 'repeat-1', ['repeat-1'], second)
     expect(b.id).not.toBe(a.id)
     expect(b.suppressedAt.getTime()).toBe(second.getTime())
 
@@ -212,8 +282,8 @@ describe('DeletionStore', () => {
   })
 
   it('claims exactly one request, and never the same one twice, under genuine concurrency', async () => {
-    await store.request(projectId, 'concurrent-1', new Date())
-    await store.request(projectId, 'concurrent-2', new Date())
+    await store.request(projectId, 'concurrent-1', ['concurrent-1'], new Date())
+    await store.request(projectId, 'concurrent-2', ['concurrent-2'], new Date())
 
     // Promise.all over a single pooled connection would serialise these two
     // claims, which would make this test pass even without SKIP LOCKED — see
@@ -272,8 +342,8 @@ describe('DeletionStore', () => {
   })
 
   it('skips a row it cannot lock instead of blocking on it', async () => {
-    const locked = await store.request(projectId, 'locked-row-1', new Date())
-    await store.request(projectId, 'locked-row-2', new Date())
+    const locked = await store.request(projectId, 'locked-row-1', ['locked-row-1'], new Date())
+    await store.request(projectId, 'locked-row-2', ['locked-row-2'], new Date())
 
     // Hold an explicit row lock on the FIRST (oldest, so ORDER BY would pick
     // it first) pending request from a second, independent connection, and
@@ -311,13 +381,13 @@ describe('DeletionStore', () => {
     // whether the lease clause exists at all — the test would pass against a
     // store with no lease logic whatsoever. A live row has to exist before
     // the first claim for this to test anything.
-    await store.request(projectId, 'live-lease-1', new Date())
+    await store.request(projectId, 'live-lease-1', ['live-lease-1'], new Date())
     await store.claim(opts)
     expect(await store.claim(opts)).toBeNull()
   })
 
   it('re-claims a request whose lease expired, and counts the attempt', async () => {
-    await store.request(projectId, 'expired-lease-1', new Date())
+    await store.request(projectId, 'expired-lease-1', ['expired-lease-1'], new Date())
     const first = await store.claim(opts)
     if (!first) throw new Error('expected a claimable request')
     // Expire it by ageing claimed_at rather than by sleeping.
@@ -333,7 +403,7 @@ describe('DeletionStore', () => {
   it('stops claiming a request that has exhausted its attempts', async () => {
     // attempts = maxAttempts → never returned again, and `last_error` explains
     // why. A poisoned request must not spin forever.
-    await store.request(projectId, 'exhausted-1', new Date())
+    await store.request(projectId, 'exhausted-1', ['exhausted-1'], new Date())
     // leaseMs: 0 stands in for a lease that has always already expired, so
     // each claim below is immediately eligible again without sleeping or
     // hand-editing claimed_at — the same trick as the previous test, applied
@@ -358,7 +428,7 @@ describe('DeletionStore', () => {
   })
 
   it('never claims a completed request', async () => {
-    const { id } = await store.request(projectId, 'completed-1', new Date())
+    const { id } = await store.request(projectId, 'completed-1', ['completed-1'], new Date())
     const claimed = await store.claim(opts)
     expect(claimed?.id).toBe(id)
     await store.complete(id)
@@ -369,7 +439,12 @@ describe('DeletionStore', () => {
   })
 
   it('truncates an oversized error before it reaches the row', async () => {
-    const { id } = await store.request(projectId, 'oversized-error-1', new Date())
+    const { id } = await store.request(
+      projectId,
+      'oversized-error-1',
+      ['oversized-error-1'],
+      new Date(),
+    )
     await store.fail(id, 'x'.repeat(5_000))
     const row = await store.get(projectId, id)
     expect(row?.lastError?.length).toBeLessThan(2_100)
@@ -383,7 +458,7 @@ describe('DeletionStore', () => {
     )
     const otherProjectId = Number(b.rows[0]?.id)
     try {
-      const { id } = await store.request(projectId, 'scoped-1', new Date())
+      const { id } = await store.request(projectId, 'scoped-1', ['scoped-1'], new Date())
       expect(await store.get(otherProjectId, id)).toBeNull()
       expect(await store.get(projectId, id)).not.toBeNull()
     } finally {

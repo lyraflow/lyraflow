@@ -73,26 +73,53 @@ export class DeletionStore {
   ) {}
 
   /**
-   * The two rows, together or neither.
+   * The suppression rows and the deletion request row, together or neither.
+   *
+   * `personId` is the CANONICAL person — `deletion_requests` gets exactly
+   * ONE row for it, because the purge is per PERSON, not per id. `ids` is
+   * the whole scope the deletion covers (the canonical, every id merged into
+   * it, and every device — see `identity/scope.ts`'s `PersonScope.ids`) and
+   * gets one `suppressed_persons` row EACH, all carrying the same boundary
+   * instant `at`. `personId` must itself be a member of `ids`; see
+   * `SuppressionStore.upsertMany`'s own docstring for why the write has to
+   * fan out this way at all — the short version is that the purge deletes
+   * the only dictionary path a non-canonical id has back to the canonical,
+   * so a suppression row keyed on the canonical alone stops protecting every
+   * other id in the group the instant the purge finishes.
    *
    * Split across two statements outside a transaction, a crash between them
    * gives either suppression with no scheduled purge (hidden forever, never
    * erased) or a purge with no suppression (visible until the worker
    * arrives). The endpoint has already answered 202 by then, so neither is
-   * recoverable by retry.
+   * recoverable by retry. That is equally true of a crash mid-way through
+   * the suppression fan-out itself — a partial set of rows with no
+   * `deletion_requests` row would be just as unrecoverable — which is why
+   * the fan-out is one INSERT statement (`upsertMany`), not a loop of
+   * separate ones: there is no "partially written" state for Postgres
+   * itself to leave behind, only "committed" or "rolled back" like the rest
+   * of this transaction.
    */
   async request(
     projectId: number,
     personId: string,
+    ids: string[],
     at: Date,
   ): Promise<{ id: number; suppressedAt: Date }> {
+    if (!ids.includes(personId)) {
+      throw new Error(
+        `DeletionStore.request: ids must include personId (the canonical) — got personId=${JSON.stringify(personId)}, ids=${JSON.stringify(ids)}`,
+      )
+    }
     const client = await this.pool.connect()
     // Set only if ROLLBACK itself fails, below, and passed to
     // `client.release()` in `finally` — see that catch block for why.
     let releaseErr: Error | undefined
     try {
       await client.query('BEGIN')
-      const suppressedAt = await this.suppression.upsert(client, projectId, personId, at)
+      const suppressedAtById = await this.suppression.upsertMany(client, projectId, ids, at)
+      // Always present: `personId` is a member of `ids` (checked above), and
+      // `upsertMany` returns exactly one row per id it was given.
+      const suppressedAt = suppressedAtById.get(personId) as Date
       const r = await client.query<{ id: string }>(
         'INSERT INTO deletion_requests (project_id, person_id) VALUES ($1, $2) RETURNING id',
         [projectId, personId],

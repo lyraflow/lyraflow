@@ -89,6 +89,52 @@ describe('SuppressionStore', () => {
     expect((await store.upsert(pg, projectId, 'repeat-1', first)).getTime()).toBe(second.getTime())
   })
 
+  it('upsertMany writes one row per id, all at the same boundary instant', async () => {
+    const at = new Date(Date.now() - 4 * 3_600_000)
+    const result = await store.upsertMany(pg, projectId, ['many-a', 'many-b', 'many-c'], at)
+
+    expect(new Set(result.keys())).toEqual(new Set(['many-a', 'many-b', 'many-c']))
+    for (const value of result.values()) {
+      expect(value.getTime()).toBe(at.getTime())
+    }
+    expect((await store.boundaryFor(projectId, ['many-a']))?.getTime()).toBe(at.getTime())
+    expect((await store.boundaryFor(projectId, ['many-b']))?.getTime()).toBe(at.getTime())
+    expect((await store.boundaryFor(projectId, ['many-c']))?.getTime()).toBe(at.getTime())
+  })
+
+  it('upsertMany applies GREATEST per id independently, not across the whole set', async () => {
+    // 'indep-a' already carries a LATER boundary than this write (e.g. from
+    // an earlier, unrelated deletion of a device since reused) — it must
+    // keep its own later value. 'indep-b' has never been suppressed and
+    // simply gets the new instant. One statement, two different outcomes.
+    const earlier = new Date(Date.now() - 5 * 3_600_000)
+    const later = new Date(Date.now() - 1 * 3_600_000)
+    await store.upsert(pg, projectId, 'indep-a', later)
+
+    const result = await store.upsertMany(pg, projectId, ['indep-a', 'indep-b'], earlier)
+    expect(result.get('indep-a')?.getTime()).toBe(later.getTime())
+    expect(result.get('indep-b')?.getTime()).toBe(earlier.getTime())
+  })
+
+  it('upsertMany dedupes its own input so a repeated id in one call does not conflict with itself', async () => {
+    const at = new Date(Date.now() - 3_600_000)
+    const result = await store.upsertMany(pg, projectId, ['dup-1', 'dup-1', 'dup-1'], at)
+    expect(result.size).toBe(1)
+    expect(result.get('dup-1')?.getTime()).toBe(at.getTime())
+  })
+
+  it('upsertMany short-circuits an empty set instead of querying', async () => {
+    const poisonedPool = {
+      query: () => {
+        throw new Error('upsertMany queried instead of short-circuiting on an empty set')
+      },
+    } as unknown as Pool
+    const storeWithPoisonedPool = new SuppressionStore(poisonedPool)
+    expect(await storeWithPoisonedPool.upsertMany(poisonedPool, projectId, [], new Date())).toEqual(
+      new Map(),
+    )
+  })
+
   it('short-circuits an empty group instead of querying', async () => {
     // Postgres itself returns null for `person_id = ANY('{}')`, so a test
     // that only checks the return value cannot tell a real short-circuit

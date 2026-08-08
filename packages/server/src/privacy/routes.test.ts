@@ -260,10 +260,19 @@ describe('DELETE /v1/persons/:id', () => {
   })
 
   it('files the request against the CANONICAL person, not the requested id', async () => {
-    // alias merged-id → canonical, then DELETE the merged id. Both rows must
-    // name the canonical: suppressing a pre-alias id leaves the survivor
-    // visible, the same defect class as an unresolved stage 2 in
-    // resolvedPersonExpr.
+    // alias merged-id → canonical, then DELETE the merged id. The
+    // deletion_requests row must name the canonical: a purge is per PERSON,
+    // not per id.
+    //
+    // The suppression side is different (Task 8b): it fans out over
+    // scope.ids, so the merged-away id gets its OWN suppressed_persons row
+    // too, not just the canonical's. Suppressing the canonical alone would
+    // stop protecting `fromId` the instant the purge deletes the
+    // person_aliases row that is otherwise the only thing resolving
+    // `fromId`'s own history back to the canonical — see
+    // deletion-store.ts's docstring and suppression-store.ts's
+    // `upsertMany` for the full argument, and purge-restore.test.ts for the
+    // end-to-end proof against a restored backup.
     const fromId = `merge-from-${randomUUID()}`
     const toId = `merge-to-${randomUUID()}`
     await identifyWithDevice(WRITE_KEY_A, fromId)
@@ -285,7 +294,7 @@ describe('DELETE /v1/persons/:id', () => {
       'SELECT person_id FROM suppressed_persons WHERE project_id = $1 AND person_id = $2',
       [projectA, fromId],
     )
-    expect(supFrom.rowCount).toBe(0)
+    expect(supFrom.rowCount).toBe(1)
 
     const req = await pg.query('SELECT person_id FROM deletion_requests WHERE id = $1', [
       res.json().request_id,

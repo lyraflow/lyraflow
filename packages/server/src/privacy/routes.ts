@@ -140,10 +140,23 @@ export function registerPrivacyRoutes(app: FastifyInstance, deps: PrivacyDeps): 
       return reply.code(404).send({ error: 'person_not_found' })
     }
 
-    // The CANONICAL person, never the requested id — suppressing a
-    // pre-alias id would leave the survivor's data visible, the same
-    // defect class as an unresolved second stage in resolvedPersonExpr.
-    const { id, suppressedAt } = await deletions.request(project.id, scope.canonical, new Date())
+    // The CANONICAL person, never the requested id, is what `deletion_requests`
+    // names — suppressing a pre-alias id there would leave the survivor's
+    // data visible, the same defect class as an unresolved second stage in
+    // resolvedPersonExpr. But the SUPPRESSION rows fan out over `scope.ids`
+    // (the canonical, every id merged into it, and every device): the purge
+    // deletes the identity_bindings/person_aliases mappings resolvedPersonExpr
+    // depends on, so once it has run a merged-away id or an anonymous device
+    // event resolves to ITSELF, not the canonical — a suppression row keyed
+    // on the canonical alone would stop protecting them from that point on
+    // (e.g. a restored backup of the event store). See
+    // DeletionStore.request's own docstring for the full argument.
+    const { id, suppressedAt } = await deletions.request(
+      project.id,
+      scope.canonical,
+      scope.ids,
+      new Date(),
+    )
 
     // Forces the segment-facing dictionary to pick up this deletion within
     // this request rather than within its own 1-5s LIFETIME. Wrapped in its
