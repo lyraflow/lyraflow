@@ -1,7 +1,11 @@
 /** @vitest-environment happy-dom */
+// Test files run in Node and are never bundled, so importing core here is
+// free — unlike runtime code, where a value import from core fails the
+// bundle outright.
+import { MAX_CLOCK_SKEW_MS } from '@lyraflow/core'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { QueuedEvent } from './payload.js'
-import { EventQueue, MAX_QUEUE_EVENTS, STORAGE_KEY } from './queue.js'
+import { EventQueue, MAX_EVENT_AGE_MS, MAX_QUEUE_EVENTS, STORAGE_KEY } from './queue.js'
 
 const at = (iso: string, id = iso): QueuedEvent => ({
   type: 'track',
@@ -13,6 +17,7 @@ const at = (iso: string, id = iso): QueuedEvent => ({
 })
 const nowIso = () => new Date().toISOString()
 const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString()
+const hoursAhead = (h: number) => new Date(Date.now() + h * 3_600_000).toISOString()
 
 describe('EventQueue', () => {
   beforeEach(() => localStorage.clear())
@@ -41,6 +46,34 @@ describe('EventQueue', () => {
     // Re-read from storage with the clock effectively advanced past the cap.
     localStorage.setItem(STORAGE_KEY, JSON.stringify([{ ...at(hoursAgo(23.5), 'edge') }]))
     expect(new EventQueue().peek(10)).toHaveLength(0)
+  })
+
+  it('drops events timestamped implausibly far in the future, not only stale ones', () => {
+    // The age cap is symmetric with the ingest's clamp, which clamps a
+    // client timestamp too far AHEAD of server time exactly as readily as
+    // one too far behind it — and the future side is worse to miss: a
+    // future-dated event's timestamp never "ages into" validity on its own
+    // (real time has to catch up days of drift), so an unfiltered one would
+    // sit at the head of the queue for the life of the queue, get clamped
+    // to a different instant on every retry, and land as a permanent extra
+    // row each time. A device clock running days fast, later corrected by
+    // NTP, is the ordinary way here — nothing exotic.
+    localStorage.setItem(STORAGE_KEY, JSON.stringify([at(hoursAhead(5 * 24), 'from-the-future')]))
+    const q = new EventQueue()
+    expect(q.peek(10)).toHaveLength(0)
+    expect(q.expiredCount()).toBe(1)
+  })
+
+  it('pins the margin to exactly one hour under the ingest clock-skew clamp', () => {
+    // The two boundary tests above only pin MAX_EVENT_AGE_MS to a
+    // 36-minute-wide range (22.9h passes, 23.5h fails) — a value like
+    // 23.4h leaves both, and every other test in this file, green. The "one
+    // hour of margin so an event can't cross the clamp line in flight"
+    // rationale otherwise lives only in a comment. This is the house
+    // pattern from validate.test.ts: duplicate the constant (runtime code
+    // can't import core as a value — see MAX_EVENT_AGE_MS's own comment),
+    // and assert the two stay related here, where importing core is free.
+    expect(MAX_CLOCK_SKEW_MS - MAX_EVENT_AGE_MS).toBe(60 * 60 * 1000)
   })
 
   it('bounds the queue, dropping oldest first', () => {
@@ -172,14 +205,52 @@ describe('EventQueue', () => {
   })
 
   it('drops a stored event whose timestamp is not a valid date', () => {
-    // A non-string or unparsable timestamp must not throw; Date.parse
-    // returns NaN for it, which #prune's cutoff comparison treats as
-    // expired rather than as a crash.
+    // A non-string or unparsable timestamp must not throw. readStore's shape
+    // filter rejects it at the door — it never reaches #prune's Date.parse
+    // at all — so this pins the observable behaviour (gone, no crash)
+    // rather than which layer does the dropping.
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify([{ ...at(nowIso(), 'bad'), timestamp: 'not-a-date' }]),
     )
     expect(() => new EventQueue()).not.toThrow()
     expect(new EventQueue().peek(10)).toHaveLength(0)
+  })
+
+  it('ignores a stored event with no message_id instead of returning something unremovable', () => {
+    // peek() guarantees "will not throw", not "is a real event" — a filter
+    // that only checked object-and-non-null let this kind of entry through:
+    // indistinguishable from a real event to a caller, and `remove()` can
+    // never clear it (Set.has needs the exact message_id it was given).
+    // JSON.stringify drops the key outright, but a hand-edited or
+    // partially-written storage value is exactly the adversarial case this
+    // queue has to assume.
+    const { message_id: _drop, ...rest } = at(nowIso(), 'x')
+    localStorage.setItem(STORAGE_KEY, JSON.stringify([rest]))
+    expect(new EventQueue().peek(10)).toHaveLength(0)
+  })
+
+  it('ignores a stored event whose message_id is not a string', () => {
+    // An object message_id would never equal a string a real caller passes
+    // to remove() — same unremovable failure mode as a missing one.
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify([{ ...at(nowIso(), 'x'), message_id: { evil: 1 } }]),
+    )
+    expect(new EventQueue().peek(10)).toHaveLength(0)
+  })
+
+  it('counts an unparseable timestamp added at runtime as corrupt, not as expired', () => {
+    // readStore's shape filter keeps this out of storage-sourced data, but
+    // `add()` takes its argument on trust — `timestamp` is typed `string`,
+    // which "not-a-date" satisfies, so nothing in the type system stops a
+    // caller (or a bug upstream in this SDK) handing it an unparseable one
+    // directly. #prune still has to not crash on it, and the debug counters
+    // need to say which failure it was.
+    const q = new EventQueue()
+    q.add({ ...at(nowIso(), 'bad'), timestamp: 'not-a-date' })
+    expect(q.peek(10)).toHaveLength(0)
+    expect(q.corruptCount()).toBe(1)
+    expect(q.expiredCount()).toBe(0)
   })
 })
