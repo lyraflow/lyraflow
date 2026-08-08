@@ -8,6 +8,17 @@ describe('pageContext', () => {
     expect(ctx.url).toBe(window.location.href)
     expect(ctx.path).toBe(window.location.pathname)
     expect(ctx.user_agent).toBe(navigator.userAgent)
+    // Direct navigation is the common case: document.referrer is empty, and
+    // an empty referrer must not become an empty-string `referrer` key — that
+    // would misreport "no referrer" as "referrer of ''" downstream.
+    expect(ctx.referrer).toBeUndefined()
+
+    const withReferrer = pageContext(
+      location,
+      { referrer: 'https://ref.example/landing' } as Document,
+      navigator,
+    )
+    expect(withReferrer.referrer).toBe('https://ref.example/landing')
   })
 
   it('includes utm parameters only when the URL carries them', () => {
