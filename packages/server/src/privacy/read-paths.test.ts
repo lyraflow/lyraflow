@@ -63,7 +63,18 @@ const ALL_IDS = [STRADDLER, FULLY_ERASED, UNTOUCHED]
 // red mid-afternoon before over exactly this (see person.test.ts's BASE_MS
 // docstring for the incident). NOW is captured once so every offset below,
 // and every assertion against it, agrees for the life of this file's run.
-const NOW = Date.now()
+// Floored to a whole second, not raw Date.now(): the suppressed_persons
+// ClickHouse DICTIONARY declares `suppressed_at DateTime` — second precision,
+// not DateTime64 — so any sub-second component on a suppressed_at value is
+// silently truncated the moment it's loaded from Postgres. An event's own
+// `timestamp` stays DateTime64(3) (millisecond) throughout. Without this
+// floor, a boundary-instant event built from an un-floored `now` could sit
+// up to 999ms AFTER its own (truncated) boundary as ClickHouse sees it —
+// putting the one fixture event this task exists to test on the wrong side
+// of the very comparison it's meant to pin, for a reason with nothing to do
+// with the code under test. Found by running this file's own new assertions
+// against unmutated code and watching them fail.
+const NOW = Math.floor(Date.now() / 1000) * 1000
 const hoursAgo = (h: number) => NOW - h * 3_600_000
 const chStamp = (ms: number) => new Date(ms).toISOString().replace('T', ' ').replace('Z', '')
 const isoStamp = (ms: number) => new Date(ms).toISOString()
@@ -71,17 +82,26 @@ const isoStamp = (ms: number) => new Date(ms).toISOString()
 // straddler: two events before their boundary, one after — the shape the
 // brief names directly ("a person with two erased events and one surviving
 // one"), and the one case that discriminates a per-event filter from a
-// person-level one.
+// person-level one. Plus one event landing EXACTLY on the boundary instant
+// (see T_S_BOUNDARY below) — the case a per-task review found untested: the
+// ClickHouse side treats `timestamp <= suppressed_at` as suppressed, the
+// Postgres side treats `timestamp > suppressed_at` as kept, and the only
+// thing making those two complements is that both were written that way. A
+// fixture with no event AT the boundary cannot catch either side drifting
+// to the wrong side of that inequality by one instant.
 const T_S1 = hoursAgo(6) // $identify — erased
 const T_S2 = hoursAgo(5) // rp_event  — erased
 const T_S3 = hoursAgo(1) // rp_event  — survives
 const BOUNDARY_STRADDLER = new Date(hoursAgo(3))
+const T_S_BOUNDARY = BOUNDARY_STRADDLER.getTime() // rp_event — exactly on the boundary, erased
 
 // fully-erased: both events sit before their own (separate) boundary, so
-// the whole person disappears.
+// the whole person disappears. Also gets its own boundary-instant event, for
+// the same reason straddler does.
 const T_F1 = hoursAgo(10) // $identify — erased
 const T_F2 = hoursAgo(9) // rp_event   — erased
 const BOUNDARY_FULLY_ERASED = new Date(hoursAgo(8))
+const T_F_BOUNDARY = BOUNDARY_FULLY_ERASED.getTime() // rp_event — exactly on the boundary, erased
 
 // untouched: never suppressed at all.
 const T_U1 = hoursAgo(2.5) // $identify
@@ -98,8 +118,16 @@ const CUTOFF_MS = hoursAgo(4)
 // The exact set of instants any of the four paths may legitimately reveal.
 // Real timestamps, not counts — a path returning the right NUMBER of events
 // from the wrong side of the boundary fails this exact-set comparison the
-// same way a path returning the wrong timestamps outright would.
+// same way a path returning the wrong timestamps outright would. Deliberately
+// excludes T_S_BOUNDARY/T_F_BOUNDARY: an event stamped exactly at a person's
+// own boundary is erased, not kept, on both sides of the feature.
 const EXPECTED_SURVIVING = new Set([T_S3, T_U1, T_U2])
+
+// The two instants that must never appear in ANY path's eventTimestamps —
+// checked by their own dedicated test below, separately from the general
+// exact-set comparison above, so a failure here reads unambiguously as "an
+// on-the-boundary event leaked" rather than as one line in a larger diff.
+const BOUNDARY_INSTANTS = new Set([T_S_BOUNDARY, T_F_BOUNDARY])
 
 /**
  * Cleans every table this file writes, at the TOP of beforeAll as well as in
@@ -210,6 +238,7 @@ beforeAll(async () => {
   })
   await insertEvent({ userId: STRADDLER, eventName: 'rp_event', timestampMs: T_S2 })
   await insertEvent({ userId: STRADDLER, eventName: 'rp_event', timestampMs: T_S3 })
+  await insertEvent({ userId: STRADDLER, eventName: 'rp_event', timestampMs: T_S_BOUNDARY })
 
   await insertEvent({
     userId: FULLY_ERASED,
@@ -218,6 +247,7 @@ beforeAll(async () => {
     properties: { rp_probe: FULLY_ERASED },
   })
   await insertEvent({ userId: FULLY_ERASED, eventName: 'rp_event', timestampMs: T_F2 })
+  await insertEvent({ userId: FULLY_ERASED, eventName: 'rp_event', timestampMs: T_F_BOUNDARY })
 
   await insertEvent({
     userId: UNTOUCHED,
@@ -320,8 +350,10 @@ const PROBES: Array<{ owner: string; atMs: number }> = [
   { owner: STRADDLER, atMs: T_S1 },
   { owner: STRADDLER, atMs: T_S2 },
   { owner: STRADDLER, atMs: T_S3 },
+  { owner: STRADDLER, atMs: T_S_BOUNDARY },
   { owner: FULLY_ERASED, atMs: T_F1 },
   { owner: FULLY_ERASED, atMs: T_F2 },
+  { owner: FULLY_ERASED, atMs: T_F_BOUNDARY },
   { owner: UNTOUCHED, atMs: T_U1 },
   { owner: UNTOUCHED, atMs: T_U2 },
 ]
@@ -441,5 +473,20 @@ describe.each([
   it('leaves an undeleted person untouched', async () => {
     const snap = await run()
     expect(snap.personIds.has(UNTOUCHED)).toBe(true)
+  })
+
+  // THE test a fixture with no boundary-instant event cannot make possible.
+  // ClickHouse's notSuppressedExpr treats `instant <= suppressed_at` as
+  // suppressed; Postgres's paths keep on strict `instant > suppressed_at`.
+  // Those are complements only because both were written that way — a
+  // one-instant drift on either side (`<=` -> `<`, or `>` -> `>=`) is exactly
+  // the "guardrail holds on one route and not its neighbour" shape this file
+  // exists to catch, and it is invisible to every other assertion above,
+  // which never places an event exactly on a boundary.
+  it('hides an event landing exactly on the boundary instant', async () => {
+    const snap = await run()
+    for (const ts of BOUNDARY_INSTANTS) {
+      expect(snap.eventTimestamps.has(ts)).toBe(false)
+    }
   })
 })
