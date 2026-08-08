@@ -769,26 +769,47 @@ describe('GET /v1/events', () => {
 })
 
 // FIXTURE-ISOLATION INVARIANT FOR EVERY TEST BELOW THAT ANCHORS ON
-// `Date.now() - N * 60_000` (this route has no `event` filter, so a
-// tightly-scoped `since`/`until` window is the ONLY isolation a stats
-// fixture gets). Every such anchor, plus half its window's width, MUST
-// stay strictly under 60 minutes. The feed's own tests above
-// (`chAtRealMsAgo(60 * 60 * 1000)` at line ~617, `chAtRealMsAgo(1 *
-// 60 * 60 * 1000)` at line ~699) insert real fixtures pinned at exactly
-// "-60 minutes ago AT THE INSTANT THOSE EARLIER TESTS RAN" — by the time
-// this describe block executes, real wall-clock time has moved on, so
-// those fixtures' TRUE age is `60 minutes + however long the file took to
-// reach here`, always AT LEAST 60 minutes and never less. An anchor here
-// held strictly below 60 minutes can therefore never drift into them,
-// however much wall-clock time the suite takes: elapsed time only pushes
-// the 60-minute fixtures further away, never closer. An anchor AT OR ABOVE
-// 60 minutes is gambling against exactly how much time elapsed between
-// that earlier test running and this one — proven for real by inserting
-// one unrelated project-A event into an over-60-minute stats window: the
-// failure read `expected 2 to be 1`, byte-identical to a genuine `LIMIT 1
-// BY` regression, misdiagnosable as a real dedup defect by whoever hits it
-// next. The ladder below is 40/43/46/49/52/55 for exactly this reason —
-// keep extending it in 3-minute steps rather than picking a fresh number.
+// `Date.now() - N * <unit>` (this route has no `event` filter, so a
+// tightly-scoped `since`/`until` window, or a real-time offset chosen
+// under this invariant, is the ONLY isolation a stats fixture gets). The
+// hazard: the feed's own tests above (`chAtRealMsAgo(60 * 60 * 1000)` at
+// line ~617, `chAtRealMsAgo(1 * 60 * 60 * 1000)` at line ~699) insert real
+// fixtures pinned at exactly "-60 minutes ago AT THE INSTANT THOSE EARLIER
+// TESTS RAN" — by the time this describe block executes, real wall-clock
+// time has moved on, so those fixtures' TRUE age is `60 minutes + however
+// long the file took to reach here`, always AT LEAST 60 minutes and never
+// less. Proven for real by inserting one unrelated project-A event into a
+// stats window sitting close to that 60-minute mark: the failure read
+// `expected 2 to be 1`, byte-identical to a genuine `LIMIT 1 BY`
+// regression, misdiagnosable as a real dedup defect by whoever hits it
+// next.
+//
+// Every anchor below (plus half its window's width, for the ones that use
+// a tight `since`/`until` window rather than the unique-event-name/
+// `group_by` technique) must satisfy ONE of two conditions — this is a
+// TWO-SIDED invariant, not just a ceiling:
+//
+//   (a) STAY STRICTLY UNDER 60 MINUTES. Elapsed test-suite time only
+//       pushes the feed's 60-minute fixtures further away, never closer,
+//       so an anchor held here can never drift into them no matter how
+//       long the suite takes. The ladder below is 40/43/46/49/52/55 for
+//       exactly this reason — keep extending it in 3-minute steps rather
+//       than picking a fresh number.
+//
+//   (b) OR SIT FAR ENOUGH BEYOND 60 MINUTES THAT NO PLAUSIBLE SUITE
+//       RUNTIME COULD EVER BRIDGE THE GAP. The `1h`/`1d` alignment tests
+//       below (anchored 6 hours and 5 days ago respectively) qualify
+//       under this clause, not clause (a): their oldest edges sit roughly
+//       407 and 7307 minutes out. They are safe by DISTANCE — no
+//       plausible run of this file bridges 5+ hours, let alone 4+ days,
+//       between one test and the next — not because they honour the
+//       under-60-minutes rule literally, which they do not.
+//
+// An anchor satisfying NEITHER clause — close to, at, or just past 60
+// minutes (roughly 60-120 minutes, where a few minutes of real elapsed
+// suite time could plausibly close the gap) — is exactly the danger zone
+// the retry and cross-project tests originally landed in (65 and 68
+// minutes) before being moved into the clause-(a) ladder.
 describe('GET /v1/events/stats', () => {
   const statsGet = (query: string, key = SERVER_KEY_A) => get(`/v1/events/stats${query}`, key)
 
@@ -1237,6 +1258,66 @@ describe('GET /v1/events/stats', () => {
     const hourRes = await statsGet('?interval=1h&group_by=event_name')
     expect(hourRes.statusCode).toBe(200)
     expect(hasProbe(hourRes.json().buckets)).toBe(false)
+  })
+
+  // The two tests above pin the BOUNDARIES between adjacent intervals'
+  // defaults (1m-vs-1h, 1h-vs-1d), but leave both OUTER edges open: `1d`'s
+  // 7-day default — the value carrying the measured `LIMIT 1 BY` memory
+  // ceiling (~40M events in the scanned window against
+  // `SEGMENT_MAX_MEMORY_BYTES`) — could silently revert to 30 days with
+  // every existing test still green, since nothing asserted an UPPER bound
+  // on how far back `1d` reaches. Symmetrically, `1m`'s 1h default could
+  // narrow to something far smaller (down to nothing) with nothing
+  // asserting a LOWER bound on how far back `1m` reaches either. These two
+  // close both edges, same unique-event-name/`group_by` technique as above.
+  it('the default since window for 1d does not reach past its 7-day ceiling', async () => {
+    const probeEventName = 'stats_default_window_probe_1d_ceiling'
+    await ch.insert({
+      table: 'events',
+      format: 'JSONEachRow',
+      values: [
+        evRowAtMs({
+          projectId: projectA,
+          eventId: uuid(182),
+          userId: 'stats-default-window-probe-user',
+          eventName: probeEventName,
+          // 8 days ago — just past the 7-day default, so a correct
+          // implementation excludes it; a reversion to (e.g.) the old
+          // 30-day default would include it instead.
+          atMs: Date.now() - 8 * 24 * 60 * 60_000,
+        }),
+      ],
+    })
+    const res = await statsGet('?interval=1d&group_by=event_name')
+    expect(res.statusCode).toBe(200)
+    expect(
+      res.json().buckets.some((b: { event_name?: string }) => b.event_name === probeEventName),
+    ).toBe(false)
+  })
+
+  it('the default since window for 1m reaches back at least 30 minutes', async () => {
+    const probeEventName = 'stats_default_window_probe_1m_floor'
+    await ch.insert({
+      table: 'events',
+      format: 'JSONEachRow',
+      values: [
+        evRowAtMs({
+          projectId: projectA,
+          eventId: uuid(183),
+          userId: 'stats-default-window-probe-user',
+          eventName: probeEventName,
+          // 30 minutes ago — comfortably inside the 1h default, so a
+          // correct implementation includes it; a narrowed default (down
+          // to the extreme of a few seconds) would exclude it instead.
+          atMs: Date.now() - 30 * 60_000,
+        }),
+      ],
+    })
+    const res = await statsGet('?interval=1m&group_by=event_name')
+    expect(res.statusCode).toBe(200)
+    expect(
+      res.json().buckets.some((b: { event_name?: string }) => b.event_name === probeEventName),
+    ).toBe(true)
   })
 
   // THE test that independently pins Minor 2's fix: `untilClause` emitted
