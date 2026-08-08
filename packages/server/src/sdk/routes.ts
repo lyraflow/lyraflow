@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
+import { gzipSync } from 'node:zlib'
 import { VERSION } from '@lyraflow/sdk-browser'
-import type { FastifyInstance, FastifyReply } from 'fastify'
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 
 const CONTENT_TYPE = 'application/javascript; charset=utf-8'
 
@@ -59,6 +60,9 @@ function loadBundle(): Buffer | undefined {
  * whatever the current bundle happens to be — this is the only mechanism
  * that guarantees it, since Fastify 404s any path with no matching route.
  *
+ * Both paths serve gzip to any client that accepts it — which is every
+ * browser — from a copy compressed once at registration.
+ *
  * The bundle is read once, here, at registration — it is a few kilobytes
  * and does not change while the process lives. If it is missing (the
  * sibling package was never built), the read fails, a warning is logged,
@@ -66,6 +70,27 @@ function loadBundle(): Buffer | undefined {
  * stopping the server from starting: an optional static asset being absent
  * should not take the rest of the app down with it.
  */
+/**
+ * Whether this client wants gzip. Deliberately narrow: anything other than a
+ * clear `gzip` acceptance gets the plain bundle, because serving an encoding
+ * a client did not ask for is a broken script tag, and a broken script tag on
+ * a customer's site is a worse failure than a few extra kilobytes.
+ *
+ * `gzip;q=0` is an explicit refusal and is honoured as one — it is the one
+ * shape a bare substring test would get exactly backwards.
+ */
+function wantsGzip(req: FastifyRequest): boolean {
+  const header = req.headers['accept-encoding']
+  const value = Array.isArray(header) ? header.join(',') : (header ?? '')
+  for (const part of value.split(',')) {
+    const [coding, ...params] = part.trim().split(';')
+    if (coding?.toLowerCase() !== 'gzip') continue
+    const q = params.find((p) => p.trim().startsWith('q='))
+    return q === undefined || Number(q.trim().slice(2)) > 0
+  }
+  return false
+}
+
 export function registerSdkRoutes(app: FastifyInstance): void {
   const bundle = loadBundle()
 
@@ -75,9 +100,29 @@ export function registerSdkRoutes(app: FastifyInstance): void {
     )
   }
 
-  const serve = (cacheControl: string) => async (_req: unknown, reply: FastifyReply) => {
+  // Compressed once, here, for the same reason the bundle itself is read
+  // once: it is a few kilobytes and cannot change while the process lives.
+  //
+  // The route compresses rather than the README assuming a proxy in front of
+  // it. The whole claim this endpoint exists to support is that a self-hosted
+  // install needs no infrastructure outside itself — an install that ships
+  // 12KB where 5KB would do, on every uncached page load, because the
+  // operator did not know to add nginx, is that claim quietly not holding.
+  // Compressing here is ~15 lines and no dependency; `@fastify/compress`
+  // across every route would be neither, and this is the only static asset
+  // the server has.
+  const gzipped = bundle ? gzipSync(bundle, { level: 9 }) : undefined
+
+  const serve = (cacheControl: string) => async (req: FastifyRequest, reply: FastifyReply) => {
     if (!bundle) return reply.code(503).send()
-    return reply.type(CONTENT_TYPE).header('cache-control', cacheControl).send(bundle)
+    reply.type(CONTENT_TYPE).header('cache-control', cacheControl)
+    // Always announced, whichever branch runs: a cache that stored the
+    // gzipped response must not hand it to a client that cannot read it.
+    reply.header('vary', 'accept-encoding')
+    if (gzipped && wantsGzip(req)) {
+      return reply.header('content-encoding', 'gzip').send(gzipped)
+    }
+    return reply.send(bundle)
   }
 
   app.get('/lyraflow.js', serve(BARE_CACHE_CONTROL))

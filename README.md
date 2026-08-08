@@ -244,6 +244,10 @@ The bundle is served by the app itself at two paths, unauthenticated (a
 | `GET /lyraflow.js` | `max-age=300` — an upgrade reaches already-cached browsers within five minutes |
 | `GET /lyraflow-<version>.js` (e.g. `/lyraflow-0.1.0.js`) | `max-age=31536000, immutable` — this exact version, forever |
 
+Both paths are served gzipped to any client that accepts it, by the app
+itself — putting a compressing proxy in front is a valid thing to do, but it
+is not something you have to do to avoid shipping three times the bytes.
+
 Use the bare `/lyraflow.js` path, as in the snippet above, unless you have a
 specific reason to pin a version. If the sibling package was never built into
 your image, both paths answer `503` rather than taking the rest of the server

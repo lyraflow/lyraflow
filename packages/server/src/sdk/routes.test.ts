@@ -1,3 +1,4 @@
+import { gunzipSync } from 'node:zlib'
 import { VERSION } from '@lyraflow/sdk-browser'
 import Fastify from 'fastify'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -60,6 +61,48 @@ describe('SDK routes', () => {
   it('404s an unknown version rather than serving the current one', async () => {
     const res = await app().inject({ method: 'GET', url: '/lyraflow-9.9.9.js' })
     expect(res.statusCode).toBe(404)
+  })
+
+  it('serves the bundle gzipped to a browser, on both paths', async () => {
+    // The README sells this route as the reason a self-hosted install needs
+    // no infrastructure outside itself. Shipping it uncompressed meant every
+    // uncached page load paid ~12KB for a bundle the branch polices at 5KB
+    // gzipped, unless the operator knew to put a compressing proxy in front —
+    // which is exactly the outside infrastructure the claim rules out.
+    const f = app()
+    for (const url of ['/lyraflow.js', `/lyraflow-${VERSION}.js`]) {
+      const res = await f.inject({
+        method: 'GET',
+        url,
+        headers: { 'accept-encoding': 'gzip, deflate, br' },
+      })
+      expect(res.statusCode).toBe(200)
+      expect(res.headers['content-encoding']).toBe('gzip')
+      // Caches key on this, or a gzip body reaches a client that cannot read
+      // it.
+      expect(res.headers.vary).toContain('accept-encoding')
+
+      const body = gunzipSync(res.rawPayload)
+      expect(body.toString('utf8')).toContain('lyraflow')
+      expect(res.rawPayload.byteLength).toBeLessThan(body.byteLength)
+    }
+  })
+
+  it('serves the bundle uncompressed to a client that did not ask for gzip', async () => {
+    // Including one that refuses it outright with `q=0` — the shape a bare
+    // substring test for "gzip" gets exactly backwards, and an unreadable
+    // script tag is a worse failure than a large one.
+    const f = app()
+    for (const accept of [undefined, 'identity', 'gzip;q=0', 'br']) {
+      const res = await f.inject({
+        method: 'GET',
+        url: '/lyraflow.js',
+        headers: accept === undefined ? {} : { 'accept-encoding': accept },
+      })
+      expect(res.statusCode).toBe(200)
+      expect(res.headers['content-encoding'], `for accept-encoding: ${accept}`).toBeUndefined()
+      expect(res.body).toContain('lyraflow')
+    }
   })
 
   it('answers 503 and warns exactly once at registration when the bundle is missing', async () => {
