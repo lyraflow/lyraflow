@@ -65,6 +65,9 @@ const BASE_MS = Date.now() - 6 * 60 * 60 * 1000
 const chAt = (minutes: number) =>
   new Date(BASE_MS + minutes * 60_000).toISOString().replace('T', ' ').replace('Z', '')
 
+/** ISO-8601, for asserting against a wire response built from a chAt(...) offset. */
+const isoAt = (minutes: number) => new Date(BASE_MS + minutes * 60_000).toISOString()
+
 /** Same conversion, from an arbitrary Date rather than a BASE_MS offset. */
 const chStamp = (d: Date) => d.toISOString().replace('T', ' ').replace('Z', '')
 
@@ -372,6 +375,79 @@ describe('GET /v1/persons/:id/export', () => {
     expect(afterLines[0]?.traits).toEqual({})
   })
 
+  // THE test for the anonymous-trait leak a review of this task caught: a
+  // `user_id = ''` person_traits row is keyed only by anonymous_id, so it
+  // cannot itself say which of a device's owners it belongs to. Correct
+  // behaviour is compile.ts's own rule for the identical ambiguity — the
+  // device's CURRENT owner only, never a past one — which is why this
+  // fixture rebinds ONE device between TWO people and asserts both sides:
+  // the current owner's export contains the anonymous trait, the previous
+  // owner's does not. A version keyed on scope.devices instead of
+  // scope.windows (unbounded by time) would leak it into BOTH.
+  //
+  // Inserted directly against ClickHouse rather than through POST
+  // /v1/identify: IdentifyPayload requires a non-empty `id`, so the ingest
+  // path itself can never produce a `user_id = ''` identify event today —
+  // this is the shape only a future "identify anonymously with traits"
+  // feature (or a direct write) could create, which is exactly why the
+  // review flagged it as untested rather than merely theoretical.
+  it("gives an anonymous trait to a device's current owner only, not a past one", async () => {
+    const device = `exp-trait-device-${randomUUID()}`
+    const prevOwner = `exp-trait-prev-${randomUUID()}`
+    const currentOwner = `exp-trait-current-${randomUUID()}`
+    const firstBindAt = new Date(Date.now() - 3 * 3_600_000)
+    const rebindAt = new Date(Date.now() - 2 * 3_600_000)
+
+    await pg.query(
+      `INSERT INTO identity_bindings (project_id, anonymous_id, person_id, bound_at) VALUES
+         ($1, $2, $3, $4),
+         ($1, $2, $5, $6)`,
+      [projectA, device, prevOwner, firstBindAt, currentOwner, rebindAt],
+    )
+    // Each owner needs an event of their own so their export is a real
+    // profile, not the 404 case above.
+    await insertEvent({
+      projectId: projectA,
+      anonymousId: device,
+      timestamp: chStamp(new Date(firstBindAt.getTime() + 60_000)),
+      eventName: 'exp_trait_prev_event',
+    })
+    await insertEvent({
+      projectId: projectA,
+      anonymousId: device,
+      timestamp: chStamp(new Date(rebindAt.getTime() + 60_000)),
+      eventName: 'exp_trait_current_event',
+    })
+
+    // The anonymous identify() this test is actually about.
+    await ch.insert({
+      table: 'events',
+      format: 'JSONEachRow',
+      values: [
+        {
+          project_id: projectA,
+          event_id: randomUUID(),
+          anonymous_id: device,
+          user_id: '',
+          event_name: '$identify',
+          timestamp: chStamp(new Date(rebindAt.getTime() + 30_000)),
+          received_at: chStamp(new Date(rebindAt.getTime() + 30_000)),
+          trusted: 0,
+          properties: { theme: 'dark' },
+          properties_num: {},
+        },
+      ],
+    })
+
+    const currentRes = await exportAs(currentOwner, SERVER_KEY_A)
+    expect(currentRes.statusCode).toBe(200)
+    expect(parseLines(currentRes.body)[0]?.traits).toEqual({ theme: 'dark' })
+
+    const prevRes = await exportAs(prevOwner, SERVER_KEY_A)
+    expect(prevRes.statusCode).toBe(200)
+    expect(parseLines(prevRes.body)[0]?.traits).toEqual({})
+  })
+
   // events is a ReplacingMergeTree; a retried delivery that omitted
   // `timestamp` is stored as a permanent second row rather than a
   // self-deduplicating one. Same event_id inserted twice with the same
@@ -383,32 +459,59 @@ describe('GET /v1/persons/:id/export', () => {
     expect(identifyRes.statusCode).toBe(202)
 
     const dupEventId = randomUUID()
-    await insertEvent({
-      projectId: projectA,
-      eventId: dupEventId,
-      userId,
-      timestamp: chAt(30),
-      receivedAt: chAt(30),
-      eventName: 'exp_dup_original',
-    })
-    await insertEvent({
-      projectId: projectA,
-      eventId: dupEventId,
-      userId,
-      timestamp: chAt(30),
-      receivedAt: chAt(35),
-      eventName: 'exp_dup_original',
-    })
+    // Merges paused for this window only: `events` is
+    // ReplacingMergeTree(received_at), and a background merge collapses
+    // duplicate physical rows on its own schedule, keeping whichever has
+    // the higher received_at — exactly the same outcome LIMIT 1 BY's own
+    // `received_at DESC` is designed to converge on (see the route's own
+    // comment). Left to chance, a merge landing before this test's query
+    // runs would make the assertions below pass even with LIMIT 1 BY
+    // deleted from the route entirely, silently defeating this test's own
+    // purpose — this happened for real while proving the mutation (see the
+    // report). Stopping merges removes that race rather than hoping to
+    // out-run it; `fileParallelism: false` (root vitest.config.ts) is what
+    // makes it safe to do from a single test file.
+    await ch.command({ query: `SYSTEM STOP MERGES ${CH_DB}.events` })
+    try {
+      await insertEvent({
+        projectId: projectA,
+        eventId: dupEventId,
+        userId,
+        timestamp: chAt(30),
+        receivedAt: chAt(30),
+        eventName: 'exp_dup_original',
+      })
+      await insertEvent({
+        projectId: projectA,
+        eventId: dupEventId,
+        userId,
+        timestamp: chAt(30),
+        receivedAt: chAt(35),
+        eventName: 'exp_dup_original',
+      })
 
-    const res = await exportAs(userId, SERVER_KEY_A)
-    expect(res.statusCode).toBe(200)
-    const lines = parseLines(res.body)
-    const events = lines.filter((l) => l.type === 'event')
-    // 2: the identify() call's own event, plus the retried delivery counted
-    // ONCE despite existing as two physical rows.
-    expect(events).toHaveLength(2)
-    expect(events.filter((e) => e.event_id === dupEventId)).toHaveLength(1)
-    expect(lines.at(-1)).toEqual({ type: 'end', events: 2 })
+      const res = await exportAs(userId, SERVER_KEY_A)
+      expect(res.statusCode).toBe(200)
+      const lines = parseLines(res.body)
+      const events = lines.filter((l) => l.type === 'event')
+      // 2: the identify() call's own event, plus the retried delivery
+      // counted ONCE despite existing as two physical rows.
+      expect(events).toHaveLength(2)
+      const survivors = events.filter((e) => e.event_id === dupEventId)
+      expect(survivors).toHaveLength(1)
+      // WHICH physical row survives is not incidental:
+      // `(timestamp, event_id)` ties on both duplicates here, so
+      // `received_at DESC` is what makes the later-received row (offset
+      // 35, the retry) the deterministic survivor — the same row
+      // `events`' own ReplacingMergeTree(received_at) engine keeps once it
+      // merges the two physical rows, so the answer this endpoint gives
+      // cannot change out from under a caller depending on whether that
+      // merge has run yet.
+      expect(survivors[0]?.received_at).toBe(isoAt(35))
+      expect(lines.at(-1)).toEqual({ type: 'end', events: 2 })
+    } finally {
+      await ch.command({ query: `SYSTEM START MERGES ${CH_DB}.events` })
+    }
   })
 
   it("does not export another project's events for a colliding id", async () => {

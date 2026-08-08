@@ -766,10 +766,13 @@ curl -s http://localhost:3000/v1/persons/user-42/export \
 ```
 
 Three line shapes. The first line is always `type: "person"` — the same
-identity `GET /v1/persons/:id` returns, plus `traits`. Then one `type:
-"event"` line per event, oldest first, carrying every field recorded for it.
-The last line is always `type: "end"`, and `events` is the number of `event`
-lines that actually preceded it.
+identity `GET /v1/persons/:id` returns (`person_id`, `ids`, `first_seen`,
+`last_seen`), plus `traits`, and *without* that read's `events` count: the
+count moved to the terminator below, where it can be checked against what
+was actually received. Then one `type: "event"` line per event, oldest
+first, carrying every field recorded for it. The last line is always `type:
+"end"`, and `events` is the number of `event` lines that actually preceded
+it.
 
 **The export is a stream, and it terminates itself.** The response status and
 headers are sent before the first line, which means a failure part-way
@@ -798,6 +801,17 @@ past 200 device windows the export answers `400`
 `DELETE /v1/persons/:id`, which chunks and must never refuse to erase the
 most fragmented people, refusing to *render* an export for them is an
 acceptable answer — nothing about their data goes unerased because of it.
+
+Every query behind this endpoint runs under a ceiling — 300 seconds and 4
+GiB, the same memory ceiling segment queries use. For almost every person
+this is invisible; for someone with an exceptionally large recorded history,
+hitting either ceiling mid-export is expected behaviour, not a bug, and it
+looks exactly like the mid-stream failure above: the response ends without
+its final `end` line. The discard rule already covers it — a response
+missing `end` is always incomplete, whatever the underlying cause — but if
+you self-host and export is being cut short for one particular person, an
+unusually large history hitting these ceilings is the first thing to check
+before assuming something is broken.
 
 `401` for a missing or invalid server key.
 

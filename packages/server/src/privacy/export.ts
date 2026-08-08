@@ -28,32 +28,48 @@ export const EXPORT_MAX_EXECUTION_SECONDS = 300
 
 /**
  * Folds `person_traits`' argMax states into a plain object for the wire,
- * for exactly the group + devices a resolved `PersonScope` names.
+ * for exactly this group plus the devices it CURRENTLY owns.
  *
  * Traits carry no event time (see 004_person_traits.sql: value_str/
  * value_num/has_num are `argMax(…, timestamp)` states with the timestamp
  * itself discarded, not stored per row) — so unlike the events query below,
- * there is no timestamp predicate to add here. That absence is exactly why
- * the caller only calls this when there is no deletion boundary at all: a
- * trait cannot be split at an instant it does not carry.
+ * there is no per-event timestamp predicate to add here. That absence is
+ * exactly why the caller only calls this when there is no deletion boundary
+ * at all: a trait cannot be split at an instant it does not carry.
  *
- * `scope.devices`, not `scope.windows` — a trait predicate has no window to
- * restrict to; any device this group has EVER owned qualifies, the same
- * unrestricted-by-time reach `compile.ts`'s segment-wide trait CTE gives
- * every person's traits.
+ * An anonymous trait row (`user_id = ''`) is keyed only by `anonymous_id` —
+ * it cannot itself say WHICH owner of that device it belongs to, and a
+ * device can have had several over time. `compile.ts`'s segment-wide trait
+ * CTE resolves this ambiguity by giving an anonymous row to the device's
+ * CURRENT owner and no one else (`resolvedPersonExpr(..., 'tr')` with `now()
+ * AS timestamp` — see that CTE's own comment). This function has to agree
+ * with that exact rule, not merely "any device this group has ever owned":
+ * `scope.windows` already carries this group's own per-device windows, and
+ * `deriveTiling`/`coalesceContiguous` (scope.ts) guarantee at most one open
+ * window per device — the one with no upper bound (`to === Infinity`) is
+ * the device's current tile. Anything else is a PAST window, and handing a
+ * past owner's export another owner's anonymous traits is a leak: an
+ * anonymous `$identify` on a shared device is exactly the "identify
+ * anonymously before login" shape that produces a `user_id = ''` trait row
+ * in the first place, and `devicesForAny`/`scope.devices` has no time bound
+ * at all — using it here (as an earlier version of this function did) would
+ * fan that one row out to every past owner too, not just the current one.
  */
 async function readTraits(
   ch: ClickHouseClient,
   projectId: number,
-  scope: Pick<PersonScope, 'group' | 'devices'>,
+  scope: Pick<PersonScope, 'group' | 'windows'>,
 ): Promise<Record<string, string | number>> {
   const params: Record<string, unknown> = { projectId, group: scope.group }
+  const currentDevices = scope.windows.filter((w) => !Number.isFinite(w.to)).map((w) => w.device)
   // Mirrors personEventsPredicate's own conditional device branch: omitted
-  // entirely for a person with no device ever bound (e.g. server-side-only
-  // identify()), rather than binding an empty Array(String) for no reason.
+  // entirely when this group owns no device's current window (e.g.
+  // server-side-only identify(), or every device it ever touched has since
+  // moved on to someone else), rather than binding an empty Array(String)
+  // for no reason.
   let deviceClause = ''
-  if (scope.devices.length > 0) {
-    params.devices = scope.devices
+  if (currentDevices.length > 0) {
+    params.devices = currentDevices
     deviceClause = ` OR (user_id = '' AND anonymous_id IN {devices:Array(String)})`
   }
 
@@ -71,6 +87,16 @@ async function readTraits(
     `,
     query_params: params,
     format: 'JSONEachRow',
+    // Its OR defeats person_traits' own sort key, making this an
+    // argMaxMerge aggregate over the project's whole partition when no
+    // ceiling is set — reachable by an authenticated caller on repeat, and
+    // there is no server-side default anywhere in this repo. Same ceilings
+    // as the events query below.
+    clickhouse_settings: {
+      max_execution_time: EXPORT_MAX_EXECUTION_SECONDS,
+      max_memory_usage: String(SEGMENT_MAX_MEMORY_BYTES),
+      timeout_overflow_mode: 'throw',
+    },
   })
   const rows = await rs.json<{
     trait_key: string
@@ -198,14 +224,28 @@ export function registerExportRoute(app: FastifyInstance, deps: PrivacyDeps): vo
           // own `count(DISTINCT event_id)`) — `events` is a
           // ReplacingMergeTree, so a retried delivery that omitted
           // `timestamp` is a permanent second row, not a self-deduplicating
-          // one.
+          // one. `(timestamp, event_id)` alone is not a total order across
+          // duplicate deliveries of the SAME event_id at the SAME
+          // timestamp, so a third key is needed to pick a row
+          // deterministically — and `received_at DESC`, not ASC, is the
+          // only choice that stays deterministic over time: `events` is
+          // declared `ReplacingMergeTree(received_at)` (002_events.sql),
+          // meaning `received_at` IS the engine's own version column, and a
+          // background merge collapses duplicates to the row with the
+          // HIGHEST received_at whether this query asks for it or not. An
+          // ASC tiebreak would agree with LIMIT 1 BY only until the first
+          // merge runs, then silently disagree with it — the exact same
+          // export request answering differently before and after a merge
+          // it never controls. DESC always agrees with where the engine is
+          // already headed, so the answer is stable regardless of merge
+          // timing.
           query: `SELECT event_id, timestamp, received_at, event_name, anonymous_id, user_id,
                          properties, properties_num, url, path, referrer,
                          utm_source, utm_medium, utm_campaign, utm_term, utm_content,
                          device_type, os, browser, country, region, city
                   FROM events
                   WHERE ${where}
-                  ORDER BY timestamp ASC, event_id ASC
+                  ORDER BY timestamp ASC, event_id ASC, received_at DESC
                   LIMIT 1 BY project_id, event_id`,
           query_params: params,
           format: 'JSONEachRow',

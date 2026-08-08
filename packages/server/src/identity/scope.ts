@@ -1,5 +1,6 @@
 import { chDateTime, coalesceContiguous, deriveTiling } from '@lyraflow/core'
 import type { ClickHouseClient } from '@lyraflow/db'
+import { SEGMENT_MAX_EXECUTION_SECONDS, SEGMENT_MAX_MEMORY_BYTES } from '../segments/execute.js'
 import type { PersonAliases } from './aliases.js'
 import type { IdentityBindings } from './bindings.js'
 
@@ -340,6 +341,16 @@ export async function personEventSummary(
     `,
     query_params: params,
     format: 'JSONEachRow',
+    // Three callers (GET /v1/persons/:id, the deletion route's existence
+    // check, and the export route), all reachable by an authenticated
+    // caller on repeat, none of them otherwise bounded — segments/execute.ts
+    // ceilings reused rather than a fourth pair of magic numbers, since this
+    // is now the most-shared query in the identity/privacy subsystem.
+    clickhouse_settings: {
+      max_execution_time: SEGMENT_MAX_EXECUTION_SECONDS,
+      max_memory_usage: String(SEGMENT_MAX_MEMORY_BYTES),
+      timeout_overflow_mode: 'throw',
+    },
   })
   const [row] = await rs.json<PersonEventsRow>()
   return {
