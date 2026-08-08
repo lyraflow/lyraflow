@@ -74,23 +74,44 @@ const STATS_INTERVAL_MS: Record<keyof typeof STATS_INTERVALS, number> = {
  * resolution is 1440 buckets against a cap of 1000, so `?interval=1m` with
  * no other parameters — the obvious first thing to try, and exactly what
  * "is my instrumentation working right now" means — was an unconditional
- * 400. Each entry keeps a bare request comfortably under the cap AND
- * matches the window that resolution is actually useful for: a minute of
- * granularity is for watching the last hour, a day of granularity is for
- * a month of trend. `1h`'s entry is unchanged from the original fixed
+ * 400.
+ *
+ * Each entry is 60/24/7 BUCKETS — roughly a screenful at every resolution,
+ * not an independently-chosen span per interval. That also keeps every
+ * bare request comfortably under `STATS_MAX_BUCKETS` regardless of which
+ * interval is picked. `1h`'s entry is unchanged from the original fixed
  * default (24h, 24 buckets), so the documented default at the default
  * interval is exactly what it always was.
  *
+ * `1d`'s entry was originally 30 days (30 buckets, the same screenful
+ * reasoning) but measured too wide against a real query: `LIMIT 1 BY
+ * project_id, event_id` in the inner select holds one hash entry per
+ * DISTINCT `event_id` in the SCANNED window, at roughly 108 bytes/row —
+ * the same figure the feed's own `since`-default comment above measures —
+ * so `SEGMENT_MAX_MEMORY_BYTES` (4 GiB) is exhausted around 40M events
+ * inside the window, independent of `interval` or `STATS_MAX_BUCKETS`
+ * (neither bounds row count, only bucket count). At 30 days that ceiling
+ * is ~1.3M events/day (~15/sec sustained) before a BARE `?interval=1d`
+ * call — no other parameters — starts failing; at 7 days it's ~5.7M
+ * events/day (~66/sec sustained), a substantially higher bar for the
+ * default case to hit. Either way this fails LOUDLY as a `503`
+ * (`timeout_overflow_mode: 'throw'`, below) rather than by truncating, so
+ * it was never a correctness bug — but a narrower default pushes the wall
+ * further out for the one call shape that can't be narrowed by the caller
+ * at all.
+ *
  * Applies ONLY when `since` is omitted; an explicit `since` (with or
  * without an explicit `until`) always goes through `STATS_MAX_BUCKETS`
- * unchanged, no matter how wide it is. Exported so Task 7's CLI docs state
- * the real per-interval default rather than a single 24h figure that only
- * ever applied to one of the three intervals.
+ * unchanged, no matter how wide it is — that guard bounds bucket count,
+ * not row count, so it does not and cannot protect against the ceiling
+ * above either way. Exported so Task 7's CLI docs state the real
+ * per-interval default rather than a single 24h figure that only ever
+ * applied to one of the three intervals.
  */
 export const STATS_DEFAULT_WINDOW_MS: Record<keyof typeof STATS_INTERVALS, number> = {
   '1m': 60 * 60_000,
   '1h': 24 * 60 * 60_000,
-  '1d': 30 * 24 * 60 * 60_000,
+  '1d': 7 * 24 * 60 * 60_000,
 }
 
 export interface EventsDeps {

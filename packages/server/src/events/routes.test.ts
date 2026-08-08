@@ -768,13 +768,36 @@ describe('GET /v1/events', () => {
   })
 })
 
+// FIXTURE-ISOLATION INVARIANT FOR EVERY TEST BELOW THAT ANCHORS ON
+// `Date.now() - N * 60_000` (this route has no `event` filter, so a
+// tightly-scoped `since`/`until` window is the ONLY isolation a stats
+// fixture gets). Every such anchor, plus half its window's width, MUST
+// stay strictly under 60 minutes. The feed's own tests above
+// (`chAtRealMsAgo(60 * 60 * 1000)` at line ~617, `chAtRealMsAgo(1 *
+// 60 * 60 * 1000)` at line ~699) insert real fixtures pinned at exactly
+// "-60 minutes ago AT THE INSTANT THOSE EARLIER TESTS RAN" — by the time
+// this describe block executes, real wall-clock time has moved on, so
+// those fixtures' TRUE age is `60 minutes + however long the file took to
+// reach here`, always AT LEAST 60 minutes and never less. An anchor here
+// held strictly below 60 minutes can therefore never drift into them,
+// however much wall-clock time the suite takes: elapsed time only pushes
+// the 60-minute fixtures further away, never closer. An anchor AT OR ABOVE
+// 60 minutes is gambling against exactly how much time elapsed between
+// that earlier test running and this one — proven for real by inserting
+// one unrelated project-A event into an over-60-minute stats window: the
+// failure read `expected 2 to be 1`, byte-identical to a genuine `LIMIT 1
+// BY` regression, misdiagnosable as a real dedup defect by whoever hits it
+// next. The ladder below is 40/43/46/49/52/55 for exactly this reason —
+// keep extending it in 3-minute steps rather than picking a fresh number.
 describe('GET /v1/events/stats', () => {
   const statsGet = (query: string, key = SERVER_KEY_A) => get(`/v1/events/stats${query}`, key)
 
   it('buckets counts by interval, oldest bucket first', async () => {
     const intervalMs = 60_000
     // 40 minutes ago: distinct from BASE_MS's ~110-120-minutes-ago window
-    // and from the other tests' exact 1h/25h/27h/30h/43m/46m/49m marks.
+    // and from the other tests' exact 1h/25h/27h/30h/43m/46m/49m/52m/55m
+    // marks. See the fixture-isolation invariant comment above this
+    // describe block for why every anchor here stays under 60 minutes.
     const bucket1 = bucketStart(Date.now() - 40 * 60_000, intervalMs)
     const bucket2 = bucket1 + intervalMs
 
@@ -948,7 +971,9 @@ describe('GET /v1/events/stats', () => {
   // one invariant that must hold regardless of which row wins.
   it('counts a retried delivery once even when its retry lands in a different bucket', async () => {
     const intervalMs = 60_000
-    const bucket1 = bucketStart(Date.now() - 65 * 60_000, intervalMs)
+    // 52 minutes ago — extends the 40/43/46/49 ladder, still under the
+    // 60-minute invariant (see the comment above this describe block).
+    const bucket1 = bucketStart(Date.now() - 52 * 60_000, intervalMs)
     const bucket2 = bucket1 + intervalMs
     const eventId = uuid(150)
 
@@ -1010,7 +1035,9 @@ describe('GET /v1/events/stats', () => {
   // counted.
   it("never counts another project's events", async () => {
     const intervalMs = 60_000
-    const bucket1 = bucketStart(Date.now() - 68 * 60_000, intervalMs)
+    // 55 minutes ago — extends the 40/43/46/49/52 ladder, still under the
+    // 60-minute invariant (see the comment above this describe block).
+    const bucket1 = bucketStart(Date.now() - 55 * 60_000, intervalMs)
 
     await ch.insert({
       table: 'events',
@@ -1043,6 +1070,12 @@ describe('GET /v1/events/stats', () => {
     expect(res.json().buckets).toEqual([{ bucket: new Date(bucket1).toISOString(), events: 1 }])
   })
 
+  // A single event 5s into the bucket cannot distinguish a correct 1h
+  // width from a halved (30m) one — every finer aligned interval floors to
+  // the identical boundary, so the test would pass either way. The second
+  // event, 40 minutes into the SAME 1-hour bucket, is what a halved
+  // interval would put in the FOLLOWING bucket instead: this fixture is a
+  // single row with `events: 2` only if the bucket is genuinely 1h wide.
   it('aligns buckets correctly at 1h resolution', async () => {
     const intervalMs = 60 * 60_000
     const bucket1 = bucketStart(Date.now() - 6 * 60 * 60_000, intervalMs)
@@ -1058,6 +1091,13 @@ describe('GET /v1/events/stats', () => {
           eventName: 'stats_1h_event',
           atMs: bucket1 + 5_000,
         }),
+        evRowAtMs({
+          projectId: projectA,
+          eventId: uuid(172),
+          userId: 'stats-1h-user',
+          eventName: 'stats_1h_event',
+          atMs: bucket1 + 40 * 60_000,
+        }),
       ],
     })
 
@@ -1067,9 +1107,12 @@ describe('GET /v1/events/stats', () => {
       `?interval=1h&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`,
     )
     expect(res.statusCode).toBe(200)
-    expect(res.json().buckets).toEqual([{ bucket: new Date(bucket1).toISOString(), events: 1 }])
+    expect(res.json().buckets).toEqual([{ bucket: new Date(bucket1).toISOString(), events: 2 }])
   })
 
+  // Same reasoning as the 1h test above: the second event, 18 hours into
+  // the SAME 1-day bucket, is what a halved (12h) interval would split
+  // into a following bucket instead.
   it('aligns buckets correctly at 1d resolution', async () => {
     const intervalMs = 24 * 60 * 60_000
     const bucket1 = bucketStart(Date.now() - 5 * 24 * 60 * 60_000, intervalMs)
@@ -1085,6 +1128,13 @@ describe('GET /v1/events/stats', () => {
           eventName: 'stats_1d_event',
           atMs: bucket1 + 5_000,
         }),
+        evRowAtMs({
+          projectId: projectA,
+          eventId: uuid(173),
+          userId: 'stats-1d-user',
+          eventName: 'stats_1d_event',
+          atMs: bucket1 + 18 * 60 * 60_000,
+        }),
       ],
     })
 
@@ -1094,7 +1144,7 @@ describe('GET /v1/events/stats', () => {
       `?interval=1d&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`,
     )
     expect(res.statusCode).toBe(200)
-    expect(res.json().buckets).toEqual([{ bucket: new Date(bucket1).toISOString(), events: 1 }])
+    expect(res.json().buckets).toEqual([{ bucket: new Date(bucket1).toISOString(), events: 2 }])
   })
 
   // Important 3's fix: the default `since` window is scaled to `interval`
@@ -1106,6 +1156,125 @@ describe('GET /v1/events/stats', () => {
   it('returns 200 for a bare ?interval=1m with no since/until', async () => {
     const res = await statsGet('?interval=1m')
     expect(res.statusCode).toBe(200)
+  })
+
+  // THE tests that independently pin `STATS_DEFAULT_WINDOW_MS`'s actual
+  // per-interval values, not just that a bare call succeeds (the previous
+  // test above). Without these, collapsing all three entries to the same
+  // tiny value — or reverting to a single flat default — left the suite
+  // fully green.
+  //
+  // Each probe event carries a UNIQUE `event_name` and is queried back with
+  // `group_by=event_name`, checking for that name's PRESENCE in the
+  // response rather than an exact bucket count — this sidesteps every
+  // other stats fixture that might also land inside a 24h/7d default
+  // window (which, unlike the tightly-scoped tests above, these bare
+  // calls make no attempt to exclude) without needing a real-time offset
+  // under the 60-minute fixture-isolation invariant either, since a
+  // uniquely-named row is unambiguous regardless of what else is present.
+  //
+  // `now - 90m` sits OUTSIDE `1m`'s default (1h) but INSIDE `1h`'s (24h) —
+  // note this is NOT `now - 50m` as an earlier version of this review
+  // round suggested: 50 minutes is still inside `1m`'s own 1-hour default
+  // window, so it cannot discriminate the two at all. 90 minutes is the
+  // smallest round number clear of that boundary with a comfortable
+  // margin either side.
+  it("the default since window is scaled to interval: 1h's default reaches further back than 1m's", async () => {
+    const probeEventName = 'stats_default_window_probe_1h_vs_1m'
+    await ch.insert({
+      table: 'events',
+      format: 'JSONEachRow',
+      values: [
+        evRowAtMs({
+          projectId: projectA,
+          eventId: uuid(180),
+          userId: 'stats-default-window-probe-user',
+          eventName: probeEventName,
+          atMs: Date.now() - 90 * 60_000,
+        }),
+      ],
+    })
+    const hasProbe = (buckets: { event_name?: string }[]) =>
+      buckets.some((b) => b.event_name === probeEventName)
+
+    const hourRes = await statsGet('?interval=1h&group_by=event_name')
+    expect(hourRes.statusCode).toBe(200)
+    expect(hasProbe(hourRes.json().buckets)).toBe(true)
+
+    const minuteRes = await statsGet('?interval=1m&group_by=event_name')
+    expect(minuteRes.statusCode).toBe(200)
+    expect(hasProbe(minuteRes.json().buckets)).toBe(false)
+  })
+
+  // Same technique, one window pair further out: `now - 3 days` sits
+  // OUTSIDE `1h`'s default (24h) but INSIDE `1d`'s (7d after Important 1's
+  // fix). No real-time wait is needed to test this — the probe's
+  // `timestamp` is a fabricated ClickHouse column value, not a value tied
+  // to how long the test actually takes to run, so there is no "slow
+  // fixture" tradeoff here to accept or decline.
+  it("the default since window is scaled to interval: 1d's default reaches further back than 1h's", async () => {
+    const probeEventName = 'stats_default_window_probe_1d_vs_1h'
+    await ch.insert({
+      table: 'events',
+      format: 'JSONEachRow',
+      values: [
+        evRowAtMs({
+          projectId: projectA,
+          eventId: uuid(181),
+          userId: 'stats-default-window-probe-user',
+          eventName: probeEventName,
+          atMs: Date.now() - 3 * 24 * 60 * 60_000,
+        }),
+      ],
+    })
+    const hasProbe = (buckets: { event_name?: string }[]) =>
+      buckets.some((b) => b.event_name === probeEventName)
+
+    const dayRes = await statsGet('?interval=1d&group_by=event_name')
+    expect(dayRes.statusCode).toBe(200)
+    expect(hasProbe(dayRes.json().buckets)).toBe(true)
+
+    const hourRes = await statsGet('?interval=1h&group_by=event_name')
+    expect(hourRes.statusCode).toBe(200)
+    expect(hasProbe(hourRes.json().buckets)).toBe(false)
+  })
+
+  // THE test that independently pins Minor 2's fix: `untilClause` emitted
+  // unconditionally from the resolved `untilDate`, not only when the
+  // caller passed `until` explicitly. `clampTimestamp` (@lyraflow/core,
+  // MAX_CLOCK_SKEW_MS = 24h) is an INGEST-time clamp only — a row inserted
+  // directly, as every fixture in this file is, carries whatever
+  // `timestamp` it's given, so a future-dated row is a legal, reachable
+  // shape for this route to see regardless of the ingest path's own rules.
+  // Uses the same unique-`event_name` presence check as the tests above,
+  // so it needs no real-time-offset ladder slot at all: `since` is
+  // explicit here, so `STATS_DEFAULT_WINDOW_MS` never enters into it.
+  it('bounds a since-only query at now, even though a directly-inserted row can be future-dated', async () => {
+    const probeEventName = 'stats_future_dated_probe_event'
+    await ch.insert({
+      table: 'events',
+      format: 'JSONEachRow',
+      values: [
+        evRowAtMs({
+          projectId: projectA,
+          eventId: uuid(190),
+          userId: 'stats-future-probe-user',
+          eventName: probeEventName,
+          // 12h ahead of now — legal under MAX_CLOCK_SKEW_MS (24h), and
+          // this route's own inner select has no clamp of its own.
+          atMs: Date.now() + 12 * 60 * 60_000,
+        }),
+      ],
+    })
+
+    const since = new Date(Date.now() - 5 * 60_000).toISOString()
+    const res = await statsGet(
+      `?interval=1m&since=${encodeURIComponent(since)}&group_by=event_name`,
+    )
+    expect(res.statusCode).toBe(200)
+    expect(
+      res.json().buckets.some((b: { event_name?: string }) => b.event_name === probeEventName),
+    ).toBe(false)
   })
 
   // Stats cannot join the four-path matrix — it returns counts, not
