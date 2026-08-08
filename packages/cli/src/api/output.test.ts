@@ -486,3 +486,41 @@ describe('OUTPUT_SCHEMA_VERSION', () => {
     expect(OUTPUT_SCHEMA_VERSION).toBe(1)
   })
 })
+
+describe('the table path survives a first-party bug', () => {
+  const throwingHeader: Column = {
+    get header(): string {
+      throw new Error('header getter boom')
+    },
+    get: (row: never) => String((row as { a: unknown }).a),
+  }
+
+  it('renders a table whose Column.header getter throws', () => {
+    // A Column is CLI-authored, so a throwing header means a bug in a command
+    // definition -- exactly when the table must still render enough to read
+    // the bug from, rather than taking the process down while reporting it.
+    // col.get already had this protection via safeGet; col.header did not.
+    const out: string[] = []
+    expect(() =>
+      emitRecords([{ a: 1 }], 'human', [throwingHeader], (s) => out.push(s)),
+    ).not.toThrow()
+    expect(out.join('')).toBe('\n1\n')
+  })
+
+  it('renders an object in human mode whose ownKeys trap throws', () => {
+    // json mode is already immune to this via safeJsonLine. A fallback format
+    // that survives less than the format it backs up is the wrong way round.
+    const hostile = new Proxy(
+      {},
+      {
+        ownKeys() {
+          throw new Error('ownKeys trap boom')
+        },
+      },
+    )
+    const out: string[] = []
+    expect(() => emitObject(hostile, 'human', (s) => out.push(s))).not.toThrow()
+    expect(out).toHaveLength(1)
+    expect(out[0]?.endsWith('\n')).toBe(true)
+  })
+})

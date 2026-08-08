@@ -209,6 +209,22 @@ function safeGet(col: Column, row: unknown): string {
 }
 
 /**
+ * `col.header` gets the same protection `col.get` has via `safeGet`, for
+ * the same reason: reading a property is an operation, and an operation
+ * can throw. A `Column` is first-party CLI code rather than server data,
+ * so a throwing header means a bug in a command definition — which is
+ * exactly when the table must still render enough to read the bug from,
+ * rather than taking the process down while reporting it.
+ */
+function safeHeader(col: Column): string {
+  try {
+    return toCell(col.header)
+  } catch {
+    return ''
+  }
+}
+
+/**
  * NDJSON in `json` mode: one `JSON.stringify`d record per line, nothing
  * else — no wrapping array, no header, no summary line, because records
  * are data. An empty list writes nothing at all in EITHER mode: an agent
@@ -240,8 +256,9 @@ export function emitRecords(
   }
 
   const rows = records.map((record) => columns.map((col) => safeGet(col, record)))
-  const widths = columns.map((col, i) =>
-    Math.max(col.header.length, ...rows.map((row) => row[i]?.length ?? 0)),
+  const headers = columns.map(safeHeader)
+  const widths = headers.map((header, i) =>
+    Math.max(header.length, ...rows.map((row) => row[i]?.length ?? 0)),
   )
 
   const renderRow = (cells: string[]): string =>
@@ -249,7 +266,7 @@ export function emitRecords(
       .map((cell, i) => (i === cells.length - 1 ? cell : cell.padEnd(widths[i] as number)))
       .join('  ')
 
-  write(`${renderRow(columns.map((c) => c.header))}\n`)
+  write(`${renderRow(headers)}\n`)
   for (const row of rows) write(`${renderRow(row)}\n`)
 }
 
@@ -268,9 +285,20 @@ export function emitObject(record: unknown, mode: Mode, write: (s: string) => vo
   }
 
   if (record !== null && typeof record === 'object') {
-    const pairs = Object.entries(record as Record<string, unknown>).map(
-      ([key, value]) => `${key}: ${toCell(value)}`,
-    )
+    // Object.entries needs [[OwnPropertyKeys]] and [[GetOwnProperty]], both
+    // of which a Proxy can make throw. json mode is already immune here via
+    // safeJsonLine, and a format that survives less than the one it exists
+    // to be a fallback for is the wrong way round -- the same asymmetry, in
+    // reverse, that made a BigInt crash json while the table shrugged.
+    let pairs: string[]
+    try {
+      pairs = Object.entries(record as Record<string, unknown>).map(
+        ([key, value]) => `${key}: ${toCell(value)}`,
+      )
+    } catch {
+      write(`${describeUnknown(record)}\n`)
+      return
+    }
     write(`${pairs.join('  ')}\n`)
     return
   }
