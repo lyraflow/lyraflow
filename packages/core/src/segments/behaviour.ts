@@ -155,10 +155,13 @@ export function behaviourCte(opts: {
   // would put a privacy rule in one clause per behavioural node, kept in
   // agreement by discipline, which is exactly the shape the spec forbids.
   //
-  // `resolved` is therefore evaluated twice per row (here and in the SELECT).
-  // ClickHouse folds the identical subexpression; the alternative — a third
-  // nesting level to compute it once — costs more in readability than it
-  // saves.
+  // `resolved` is therefore evaluated THREE times per row: once here in the
+  // SELECT, and twice more inside notSuppressedExpr, which substitutes this
+  // same `person` expression into both the `dictHas` guard and the
+  // `dictGetOrDefault` lookup (suppression.ts) — see behaviour.test.ts, which
+  // pins the count at three. ClickHouse folds the identical subexpression;
+  // the alternative — a third nesting level to compute it once — costs more
+  // in readability than it saves.
   const notSuppressed = notSuppressedExpr({
     database,
     projectId,

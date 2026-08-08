@@ -28,6 +28,32 @@ export class SuppressionStore {
    *
    * Both parameters are bound: `personIds` traces back to a caller-supplied
    * URL path segment through alias resolution.
+   *
+   * A COUPLING THAT IS CURRENTLY LOAD-BEARING AND UNSTATED ANYWHERE ELSE:
+   * `suppressed_persons.suppressed_at` is Postgres `timestamptz`, which
+   * carries microsecond precision — but node-postgres parses it into a JS
+   * `Date`, which cannot represent anything finer than a millisecond, and it
+   * TRUNCATES the extra digits rather than rounding them. So the boundary
+   * this method hands back is `floor_ms(T)`, not `T` itself. The
+   * ClickHouse-dictionary path (`suppressed_persons` dictionary,
+   * dictionaries.ts) reads the same column at its full `DateTime64(6)`
+   * precision and compares against it exactly. Callers of this method
+   * (person.ts, export.ts) then bind the truncated `Date` back into
+   * ClickHouse as `DateTime64(3)` via `chDateTime` — so the Postgres-side
+   * boundary used for comparison is `floor_ms(T)` and the ClickHouse-side one
+   * is the exact `T`.
+   *
+   * That mismatch is harmless only because of two independent facts, both of
+   * which must keep holding: `events.timestamp` is itself `DateTime64(3,
+   * 'UTC')` (002_events.sql), so every event instant already IS a whole
+   * millisecond — there is no sub-millisecond instant that could fall
+   * strictly between `floor_ms(T)` and `T` for either path to disagree
+   * about. If the events column ever gains sub-millisecond precision, or if
+   * node-postgres (or a future driver) ever rounded a `timestamptz` instead
+   * of truncating it, the two halves of suppression would disagree by up to
+   * one millisecond again — exactly the class of bug Task 11 and the
+   * `DateTime64(6)` dictionary attribute (dictionaries.ts) exist to close on
+   * the ClickHouse side alone.
    */
   async boundaryFor(projectId: number, personIds: string[]): Promise<Date | null> {
     if (personIds.length === 0) return null

@@ -300,16 +300,27 @@ export async function ensureIdentityDictionaries(
   // Task 11 exists to make impossible, just one layer further down than that
   // task's own fixture could reach until it grew a boundary-instant case.
   //
-  // The attribute is declared `(6)`, not `(3)`, to match what ClickHouse's
-  // PostgreSQL source itself infers for a `timestamptz` column (confirmed
-  // directly: `SELECT ... FROM postgresql(...)` with no explicit structure
-  // reports `DateTime64(6)`) — also measured directly: declaring the
-  // dictionary attribute at a DIFFERENT scale than the source infers (`(3)`
-  // against a `(6)` source) does not cleanly truncate or convert, it
-  // silently reinterprets the underlying integer at the wrong unit and
-  // returns a garbage instant more than a hundred years off. Matching the
-  // source's own inferred scale exactly is what makes this a value it can
-  // load correctly, not merely a value it can declare.
+  // The attribute is declared `(6)`, not `(3)` (to match `events.timestamp`)
+  // or `(9)` ("more precision is safer"). Both of those instincts are
+  // plausible, and both are wrong in a way that is silent and bidirectional:
+  // getting the scale wrong does not fail to load, it loads clean and reads
+  // back a garbage instant. Measured directly against a live server, with a
+  // single `suppressed_persons` row holding `2026-08-08 12:00:00.123456`:
+  //   - `DateTime64(3)` reads back as `2299-12-31` — a far-future boundary,
+  //     which SUPPRESSES EVERY EVENT for that person, forever.
+  //   - `DateTime64(9)` reads back as `1970-01-21` — a far-past boundary,
+  //     which REPUBLISHES EVERY DELETED PERSON, the exact leak this feature
+  //     exists to prevent.
+  //   - `DateTime64(6)` reads back correctly.
+  // All four scales tried ((3), (6), (9), and no explicit structure) load
+  // with dictionary status `LOADED` and an empty `last_exception` — nothing
+  // errors, nothing warns, at either the wrong scales or the right one. `(6)`
+  // is not a tuning choice; it is what ClickHouse's own `postgresql()` source
+  // infers for a `timestamptz` column with no explicit structure given
+  // (confirmed directly: `SELECT ... FROM postgresql(...)` reports
+  // `DateTime64(6)`), and matching that inferred scale exactly is what makes
+  // this a value the dictionary loads correctly rather than merely a value
+  // it accepts declaring.
   try {
     await ch.command({
       query: `CREATE OR REPLACE DICTIONARY suppressed_persons (

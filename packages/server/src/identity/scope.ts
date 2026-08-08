@@ -147,8 +147,10 @@ export async function resolvePersonScope(
   // note), each carrying a distinct server-receipt instant, so one device
   // used by one person for N page loads tiles as N boundary-touching,
   // same-person tiles rather than one. Left uncollapsed, that is N windows
-  // per device instead of 1, and MAX_PERSON_RANGE_CLAUSES below turns a
-  // routine 201st page view into a permanent 400 for that customer.
+  // per device instead of 1, and the MAX_PERSON_RANGE_CLAUSES cap each
+  // caller checks (person.ts, export.ts — see this file's own docstring
+  // above) would turn a routine 201st page view into a permanent 400 for
+  // that customer.
   //
   // This is NOT the widening MAX_PERSON_RANGE_CLAUSES exists to forbid.
   // Widening stretches a range across an actual gap or a different owner to

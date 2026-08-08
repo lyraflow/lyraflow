@@ -4,7 +4,7 @@
 
 Lyraflow helps you understand the full path your customers take — from first touch to conversion, retention, and beyond — on infrastructure you control. Your customer data stays yours.
 
-> ⚠️ **Early days.** Lyraflow currently ships the ingest spine, identity resolution, and a segment query API — you can self-host it, create a project, send it events, stitch anonymous and known activity into one person, and count or list the people matching a filter tree. There is no builder UI yet (segments, journeys, dashboards) and no journey/funnel analysis. Watch the repo to follow along.
+> ⚠️ **Early days.** Lyraflow currently ships the ingest spine, identity resolution, a segment query API, and per-person deletion and export — you can self-host it, create a project, send it events, stitch anonymous and known activity into one person, count or list the people matching a filter tree, and erase or export any one person's data on request. There is no builder UI yet (segments, journeys, dashboards) and no journey/funnel analysis. Watch the repo to follow along.
 
 ## Why Lyraflow?
 
@@ -55,9 +55,9 @@ export LYRAFLOW_WRITE_KEY=wk_...   # the write key printed above
 
 The **server key** (`sk_…`) is secret and shown only once — write it down. It
 is not needed for sending events; it authenticates `/v1/alias` and
-`GET /v1/persons/:id` (see *Identity resolution* below), and later releases
-use it for deletion and export too. The *Identity resolution* examples use it
-the same way:
+`GET /v1/persons/:id` (see *Identity resolution* below), and deletion and
+export too (see *Privacy: deletion and export* below). The *Identity
+resolution* examples use it the same way:
 
 ```sh
 export LYRAFLOW_SERVER_KEY=sk_...  # the server key printed above
@@ -66,12 +66,12 @@ export LYRAFLOW_SERVER_KEY=sk_...  # the server key printed above
 ## Sending your first event
 
 Everything below is the whole of v0.1's public surface. There is still no UI
-and no general query API (filtering, journeys, dashboards) — events land in
-ClickHouse, and you read them with your own ClickHouse client until the query
-layer ships. What v0.1 does add is identity resolution: `/v1/identify` binds a
-device to a person, `/v1/alias` merges two known people, and
-`GET /v1/persons/:id` reads one person's stitched profile back out — see
-*Identity resolution* below.
+and no journey/funnel analysis — v0.1 adds identity resolution
+(`/v1/identify` binds a device to a person, `/v1/alias` merges two known
+people, `GET /v1/persons/:id` reads one person's stitched profile back out —
+see *Identity resolution* below), a segment query API for counting and
+listing people matching a filter tree (see *Segments* below), and per-person
+deletion and export (see *Privacy: deletion and export* below).
 
 Ingest listens on port 3000. Every ingest request — `/v1/track`, `/v1/page`,
 `/v1/identify`, `/v1/batch` — authenticates with the project's **write key**
@@ -704,17 +704,30 @@ or its own creation), not a live figure — a deletion changes what an ad hoc
 was until something explicitly re-runs that segment. This is true regardless
 of caching; it is simply what "snapshot, not a live count" already meant.
 
-Suppression is scoped in time, not permanent. Events recorded *after* the
-deletion request are visible normally: if the same user keeps using your
-application, they reappear as a person with a history that starts at the
-deletion. Erasure is a right to have past data deleted, not a promise never
-to be measured again. Requesting deletion again moves the boundary forward
-and erases whatever accumulated since — including while a previous request
-is still waiting on the purge worker, which is exactly the case an operator
-re-requesting after a failed attempt needs to work. Once the purge has
-actually finished, though, a repeat request for a person with no activity
-since then finds nothing left to suppress, and answers `404` like any other
-id nothing has recorded.
+Suppression is scoped in time, not permanent. Erasure is a right to have past
+data deleted, not a promise never to be measured again — if the same user
+keeps using your application, they eventually reappear as a person with a
+history of their own.
+
+**But that history does not start at the `202`.** Under suppression alone,
+an event recorded between the `202` and the purge finishing genuinely is
+visible — every read path filters by the boundary, and this new event is
+after it. The purge, though, is not boundary-aware: by design, it deletes
+*every* event the person has, with no "at or before `suppressed_at`" clause
+— honouring the boundary here would mean keeping the identity bindings that
+say those events are this person's, and unsuppressed bindings for a deleted
+person are the exact leak the purge's step order exists to prevent. So an
+event landing in that gap is shown by every read path for the minute or so
+the purge takes, and then erased along with everything older. The person's
+surviving history begins after the **purge completes**, not after the
+request is accepted, and activity recorded in that gap does not survive — it
+is erased with the rest. Requesting deletion again moves the boundary
+forward and erases whatever accumulated since, including while a previous
+request is still waiting on the purge worker, which is exactly the case an
+operator re-requesting after a failed attempt needs to work. Once the purge
+has actually finished, a repeat request for a person with no activity since
+then finds nothing left to suppress, and answers `404` like any other id
+nothing has recorded.
 
 **Not covered:** backups. Lyraflow deletes from the live stores it manages. A
 backup you took before the deletion still contains the person's data, and
