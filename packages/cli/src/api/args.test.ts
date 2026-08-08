@@ -54,6 +54,58 @@ describe('resolveInstant', () => {
     const now = new Date('2026-08-08T12:00:00.000Z')
     expect(resolveInstant('2026-08-01', now).toISOString()).toBe('2026-08-01T00:00:00.000Z')
   })
+
+  it("rejects a duration whose offset overflows Date's representable range, with UsageError not a crash", () => {
+    // DURATION_RE has no digit cap: "999999999d" is shape-valid but the
+    // resulting offset falls outside Date's +-8.64e15ms range. `new Date`
+    // on that doesn't throw -- it returns an Invalid Date whose .getTime()
+    // is NaN, and the RangeError would otherwise only surface later, in
+    // whatever caller first calls .toISOString() (every caller).
+    const now = new Date('2026-08-08T12:00:00.000Z')
+    expect(() => resolveInstant('999999999d', now)).toThrow(UsageError)
+  })
+
+  it('accepts a merely absurd but still in-range duration', () => {
+    // The boundary is Date's representable range, not "a big number" --
+    // this pins that a large-but-valid duration is NOT rejected, so the
+    // overflow test above is proven against the real boundary rather than
+    // an arbitrary size cutoff.
+    const now = new Date('2026-08-08T12:00:00.000Z')
+    expect(resolveInstant('36500d', now).toISOString()).toBe('1926-09-02T12:00:00.000Z')
+  })
+
+  it('rejects a calendar date that Date.parse would silently roll over to a different real date', () => {
+    // Date.parse (and Date.UTC) do not reject an out-of-range day/month --
+    // they roll it forward into the next one. A shape match against
+    // ISO_INSTANT_RE alone does not catch this; only round-tripping the
+    // typed digits does.
+    const now = new Date('2026-08-08T12:00:00.000Z')
+    for (const bad of [
+      '2026-02-30', // rolls to 2026-03-02
+      '2026-02-30T00:00:00Z', // same, with a time component
+      '2026-04-31', // April has 30 days; rolls to 2026-05-01
+      '2025-02-29', // 2025 is not a leap year; rolls to 2025-03-01
+    ]) {
+      expect(() => resolveInstant(bad, now)).toThrow(UsageError)
+    }
+  })
+
+  it('still accepts every previously-supported ISO form after the round-trip check', () => {
+    const now = new Date('2026-08-08T12:00:00.000Z')
+    expect(resolveInstant('2026-08-01T00:00:00.000Z', now).toISOString()).toBe(
+      '2026-08-01T00:00:00.000Z',
+    )
+    expect(resolveInstant('2026-08-01', now).toISOString()).toBe('2026-08-01T00:00:00.000Z')
+    // Fractional seconds.
+    expect(resolveInstant('2026-08-01T12:34:56.789Z', now).toISOString()).toBe(
+      '2026-08-01T12:34:56.789Z',
+    )
+    // A non-Z offset, which legitimately shifts the calendar day in UTC --
+    // that's a correct conversion, not a near-miss to reject.
+    expect(resolveInstant('2026-08-01T01:00:00+05:30', now).toISOString()).toBe(
+      '2026-07-31T19:30:00.000Z',
+    )
+  })
 })
 
 const SPEC = { strings: ['since', 'event'], booleans: ['follow', 'json'] }

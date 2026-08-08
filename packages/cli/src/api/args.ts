@@ -47,6 +47,13 @@ function unitMs(unit: string): number {
  * what to do with values this CLI cannot round-trip cleanly; rejecting them
  * is cheaper than guessing, and cheap to loosen later if a real caller
  * needs it.
+ *
+ * Deliberately no cap on digit count. A cap here would only produce a
+ * friendlier message for one specific way to go out of range; the actual
+ * guarantee — that an absurd amount never reaches a caller as anything
+ * other than `UsageError` — is enforced once, downstream in
+ * `resolveInstant`, by validating the resulting `Date` rather than the
+ * input digits. See `assertValidInstant`.
  */
 export function parseDuration(input: string): number {
   const match = DURATION_RE.exec(input)
@@ -60,20 +67,90 @@ export function parseDuration(input: string): number {
 /**
  * Deliberately narrower than `Date.parse`, which is far looser than "ISO
  * 8601" — V8 accepts bare years (`"2026"`), month-only strings and
- * non-ISO forms like `"Aug 1 2026"` as real instants. Left unguarded, a
- * mistyped `--since 15` (meant as "15 minutes") would not fail; it would
- * silently resolve to some date in the past and return a plausible-looking
- * answer to a question nobody asked. Requiring the full shape below closes
- * that gap: everything that reaches `Date.parse` here already looks like an
- * instant, and `Date.parse` is used only to reject impossible calendar
- * values (`"2026-13-45T00:00:00Z"`) that the regex alone cannot catch.
+ * non-ISO forms like `"Aug 1 2026"` as real instants, and SILENTLY ROLLS
+ * OVER a near-miss calendar value into a different real date instead of
+ * rejecting it: `"2026-02-30"` becomes `2026-03-02T00:00:00.000Z`,
+ * `"2025-02-29"` (2025 is not a leap year) becomes `2025-03-01T00:00:00.000Z`.
+ * Left unguarded, either failure mode returns a plausible-looking wrong
+ * answer instead of an error — exactly the thing this module exists to
+ * prevent.
+ *
+ * Two checks close both gaps, and neither is sufficient alone: this regex
+ * requires the ISO shape before `Date.parse` ever runs (closes the
+ * bare-year / non-ISO-string gap), and `isRealCalendarDate` (below)
+ * round-trips the typed digits through `Date.UTC` and rejects anything
+ * that does not come back unchanged (closes the near-miss-rollover gap —
+ * a shape match alone does not catch "the 30th of February").
  *
  * Accepts a bare date (`YYYY-MM-DD`, midnight UTC per the ISO 8601 / `Date`
  * spec) and a full timestamp with optional milliseconds and a required
  * `Z` or `±HH:MM` offset — i.e. exactly what `Date.prototype.toISOString()`
  * produces, which is what an agent-generated `--since` looks like.
  */
-const ISO_INSTANT_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d{1,3})?(Z|[+-]\d{2}:\d{2}))?$/
+const ISO_INSTANT_RE =
+  /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2}))?$/
+
+/**
+ * Confirms `year`-`month`-`day` `hour`:`minute`:`second` is a real point on
+ * the calendar, not just a string that satisfies `ISO_INSTANT_RE`'s digit
+ * shape. `Date.UTC` (like `Date.parse`) does not reject an out-of-range
+ * component — it rolls it forward into the next one, silently turning a
+ * typo into a DIFFERENT real date. Reconstructing the date from the typed
+ * components and checking every one survives the round trip is what
+ * actually catches that.
+ *
+ * Deliberately checks the components as literal digits, ignoring whatever
+ * offset the input carried (`Z` or `±HH:MM`) — an offset legitimately
+ * shifts the final UTC instant onto a different calendar day
+ * (`"2026-08-01T01:00:00+05:30"` is `2026-07-31T19:30:00.000Z`), and that
+ * is correct, not a typo. This function only answers "are these digits a
+ * real calendar date/time", independent of what timezone they're in.
+ */
+function isRealCalendarDate(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  second: number,
+): boolean {
+  const ms = Date.UTC(year, month - 1, day, hour, minute, second)
+  const d = new Date(ms)
+  return (
+    d.getUTCFullYear() === year &&
+    d.getUTCMonth() === month - 1 &&
+    d.getUTCDate() === day &&
+    d.getUTCHours() === hour &&
+    d.getUTCMinutes() === minute &&
+    d.getUTCSeconds() === second
+  )
+}
+
+/**
+ * Both branches of `resolveInstant` funnel their result through here, so
+ * the function's guarantee — return a valid `Date` or throw `UsageError`,
+ * never an Invalid Date — holds by construction rather than per-branch.
+ *
+ * Without this, a shape-valid but absurd duration (`DURATION_RE` has no
+ * cap on digit count — see `parseDuration`'s docstring) such as
+ * `"999999999d"` computes an offset outside `Date`'s representable range
+ * (±8,640,000,000,000,000 ms from the epoch). `new Date(...)` on an
+ * out-of-range value does not throw — it silently returns an Invalid Date
+ * whose `.getTime()` is `NaN` — so the `RangeError` only surfaces later, in
+ * whichever caller first calls `.toISOString()` on it, which in this CLI
+ * is every caller (building a query parameter means exactly that). That
+ * would break the exit-code contract described in the module docstring: a
+ * usage error must exit 2, never crash the process with an unhandled
+ * `RangeError`.
+ */
+function assertValidInstant(date: Date, input: string): Date {
+  if (Number.isNaN(date.getTime())) {
+    throw new UsageError(
+      `"${input}" resolves to an instant outside the range JavaScript's Date can represent`,
+    )
+  }
+  return date
+}
 
 /**
  * `input` as a relative duration (offset before `now`) or an absolute ISO
@@ -84,12 +161,26 @@ const ISO_INSTANT_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d{1,3})?(Z|[+-]
  */
 export function resolveInstant(input: string, now: Date): Date {
   if (DURATION_RE.test(input)) {
-    return new Date(now.getTime() - parseDuration(input))
+    return assertValidInstant(new Date(now.getTime() - parseDuration(input)), input)
   }
-  if (ISO_INSTANT_RE.test(input)) {
-    const ms = Date.parse(input)
-    if (!Number.isNaN(ms)) return new Date(ms)
+
+  const isoMatch = ISO_INSTANT_RE.exec(input)
+  if (isoMatch) {
+    const [, year, month, day, hour, minute, second] = isoMatch
+    const isReal = isRealCalendarDate(
+      Number(year),
+      Number(month),
+      Number(day),
+      Number(hour ?? '0'),
+      Number(minute ?? '0'),
+      Number(second ?? '0'),
+    )
+    if (isReal) {
+      const ms = Date.parse(input)
+      if (!Number.isNaN(ms)) return assertValidInstant(new Date(ms), input)
+    }
   }
+
   throw new UsageError(
     `not a valid instant: "${input}" (expected a duration like "15m", "24h", "7d", or an ISO 8601 instant like "2026-08-01T00:00:00.000Z")`,
   )
@@ -100,6 +191,12 @@ export function resolveInstant(input: string, now: Date): Date {
  * aliases — this CLI's argv is machine-generated as often as typed, and
  * keeping the surface small keeps `parseCommandArgs` a thin wrapper over
  * `node:util`'s `parseArgs` rather than a small argument-parsing framework.
+ *
+ * A flag passed more than once (`--since 15m --since 1h`) keeps only the
+ * last value — `parseArgs`'s own default, and standard CLI convention. If a
+ * later command needs to tell "given twice" apart from "given once", that
+ * is new surface on `ArgSpec` (e.g. a `multiple: true` per-flag option),
+ * not something already here to discover.
  */
 export interface ArgSpec {
   /** Flags that take a string value, e.g. `--since 15m`. */
