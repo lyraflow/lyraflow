@@ -399,6 +399,47 @@ describe('DELETE /v1/persons/:id', () => {
     expect(req.rowCount).toBe(1)
   })
 
+  it('still returns 202 when the cache invalidation fails', async () => {
+    // The sibling of the dictionary-reload test just above, and load-bearing
+    // for the identical reason: `app.deps.segmentCache` is the EXACT
+    // instance the route calls `clearProject` on (see AppDeps's own
+    // docstring for why it is exposed at all) — spying on a separately
+    // constructed SegmentCache would prove nothing about this route. The
+    // deletion is already durable by the time `clearProject` runs; reporting
+    // a failure here would tell the caller to retry something that already
+    // happened, for the sake of a cache that self-heals off its own 30s TTL
+    // regardless.
+    const userId = `cache-invalidation-fails-${randomUUID()}`
+    await identifyWithDevice(WRITE_KEY_A, userId)
+
+    const spy = vi.spyOn(app.deps.segmentCache, 'clearProject').mockImplementationOnce(() => {
+      throw new Error('deliberate cache invalidation failure injected for this test')
+    })
+    let requestId: number
+    try {
+      const res = await deleteAs(userId, SERVER_KEY_A)
+      expect(res.statusCode).toBe(202)
+      expect(res.json().person_id).toBe(userId)
+      requestId = res.json().request_id
+    } finally {
+      spy.mockRestore()
+    }
+
+    // BOTH rows genuinely landed despite the invalidation failure — same
+    // shape as the dictionary-reload test: the claim is that the deletion
+    // itself succeeded, not just one half of it.
+    const sup = await pg.query(
+      'SELECT 1 FROM suppressed_persons WHERE project_id = $1 AND person_id = $2',
+      [projectA, userId],
+    )
+    expect(sup.rowCount).toBe(1)
+    const req = await pg.query(
+      'SELECT 1 FROM deletion_requests WHERE project_id = $1 AND person_id = $2 AND id = $3',
+      [projectA, userId, requestId],
+    )
+    expect(req.rowCount).toBe(1)
+  })
+
   it('still 202s a repeat deletion for a suppressed-but-not-yet-purged person with no new activity', async () => {
     // THE property the boundary omission exists for. Until the purge worker
     // actually deletes a person's rows, their events are still sitting in

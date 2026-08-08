@@ -32,6 +32,14 @@ export interface AppDeps {
   buffer: IngestBuffer<EventRow>
   counters: IngestCounters
   purge: PurgeWorker
+  /**
+   * Exposed for the same reason `buffer`/`counters`/`purge` already are:
+   * tests need to reach the EXACT instance the routes share, not a
+   * lookalike constructed separately — see privacy/routes.test.ts's
+   * "still returns 202 when the cache invalidation fails" for a spy that
+   * depends on this being the real, shared object.
+   */
+  segmentCache: SegmentCache
 }
 
 export function buildApp(input: {
@@ -119,7 +127,16 @@ export function buildApp(input: {
     onError: (err, ctx) => app.log.error({ err, ...ctx }, 'purge failed'),
   })
 
-  app.decorate('deps', { config, pg, ch, readiness, buffer, counters, purge } satisfies AppDeps)
+  app.decorate('deps', {
+    config,
+    pg,
+    ch,
+    readiness,
+    buffer,
+    counters,
+    purge,
+    segmentCache,
+  } satisfies AppDeps)
   registerHealth(app, readiness)
   // Sourced from IngestCounters, not an onResponse hook counting HTTP
   // responses: /v1/batch answers with a single response for up to 500

@@ -305,6 +305,14 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
       count = cachedCount.count
       countAsOf = cachedCount.asOf
     } else {
+      // Captured BEFORE the query below runs, not after — see
+      // SegmentCache.set's own docstring for why the ordering matters: a
+      // DELETE's clearProject() landing while this exact query is still in
+      // flight against ClickHouse must make the `cache.set` below a no-op,
+      // and it can only do that by comparing against the generation this
+      // query started under, not whatever the generation happens to be once
+      // the query finally returns.
+      const countGeneration = cache.generation(projectId)
       const compiled = compileSegment({
         query,
         projectId,
@@ -314,7 +322,7 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
       })
       count = await runSegment({ client: ch, compiled })
       countAsOf = asOf
-      cache.set(countKey, { count, members: [], asOf: countAsOf })
+      cache.set(countKey, { count, members: [], asOf: countAsOf }, projectId, countGeneration)
     }
 
     if (!opts.wantMembers) {
@@ -352,6 +360,9 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
       members = cachedPage.members
       pageAsOf = cachedPage.asOf
     } else {
+      // Same reasoning as countGeneration above: captured before the query
+      // that will produce the value this generation guards.
+      const pageGeneration = cache.generation(projectId)
       const compiledMembers = compileSegment({
         query,
         projectId,
@@ -362,7 +373,7 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
       })
       members = await runSegmentMembers({ client: ch, compiled: compiledMembers })
       pageAsOf = asOf
-      cache.set(pageKey, { count, members, asOf: pageAsOf })
+      cache.set(pageKey, { count, members, asOf: pageAsOf }, projectId, pageGeneration)
     }
 
     const pagesServedNow = pagesServed + 1

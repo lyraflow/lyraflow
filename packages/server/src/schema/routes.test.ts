@@ -65,18 +65,27 @@ async function schemaHasEvent(projectId: number, eventName: string): Promise<boo
  * Cleans BOTH ClickHouse tables this file writes — `events` and
  * `event_schema` — for its own two projects, looked up by slug rather than
  * trusting `projectA`/`projectB` (unset, or stale from a previous run in the
- * same process, the first time this runs at the top of `beforeAll`).
- * Run at the TOP of `beforeAll`, not only in `afterAll`, per the branch's
- * live-database rule: `makeProject` gives each run a FRESH Postgres id, so a
- * crashed prior run's own `events`/`event_schema` rows sitting under its OLD
- * id are otherwise invisible forever — right up until Postgres's `bigserial`
- * eventually reissues that exact number to some LATER, unrelated project,
- * at which point its stale rows reappear as that new project's own data.
- * That is precisely the leak this file's own "does not leak another
- * project's event taxonomy" test exists to catch, and precisely what caused
- * privacy/end-to-end.test.ts to see a one-off, unreproducible failure here
- * (Task 10's report) before this fix: `event_schema` had no cleanup at all,
- * only `events` did, in the OLD `afterAll`-only version of this cleanup.
+ * same process, the first time this runs at the top of `beforeAll`). Run at
+ * the TOP of `beforeAll`, not only in `afterAll`, per the branch's
+ * live-database rule.
+ *
+ * This is correct regardless of WHY a stale row under an old project id
+ * might resurface, but the condition worth naming is: Postgres's own
+ * `bigserial` for `projects.id` is never reset in this suite — no
+ * `TRUNCATE`, `RESTART IDENTITY`, or `setval` appears anywhere in this
+ * codebase — so ordinarily an id is never reissued and a crashed run's
+ * `events`/`event_schema` rows just sit, inert, under an id nothing will
+ * ever reuse. The one way that changes is the Postgres volume being reset
+ * or recreated (a real thing that happens in local development — a fresh
+ * `docker compose down -v`, say) while the ClickHouse volume survives
+ * untouched: Postgres's sequence then restarts from 1 while ClickHouse still
+ * holds `events`/`event_schema` rows tagged with those low ids from a
+ * previous database's history, and a freshly created project can collide
+ * with them. That is the only mechanism that matches the single,
+ * unreproduced failure recorded in Task 10's fix-round report — it was not
+ * confirmed to be the actual cause, only a plausible one consistent with
+ * what was observed; stated here as the condition this cleanup guards
+ * against, not as a proven root cause.
  */
 async function cleanup(): Promise<void> {
   const existing = await pg.query<{ id: string }>('SELECT id FROM projects WHERE slug = ANY($1)', [
