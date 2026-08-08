@@ -2,6 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import * as identityModule from './identity.js'
 import * as sdk from './index.js'
+import { STORAGE_KEY } from './queue.js'
 import { Transport } from './transport.js'
 
 const ok = async () => new Response('{}', { status: 202 })
@@ -230,6 +231,14 @@ describe('public surface', () => {
     // This spies on probeCookieDomain directly and drives two identify()
     // calls (each of which writes a cookie) to pin that the probe itself
     // still only ever runs the once, at init.
+    //
+    // Weaker than the count-based test below: this only sees calls made
+    // through index.ts's own imported binding. identity.ts's internal
+    // domainFor() calls probeCookieDomain through a module-internal
+    // reference this spy cannot intercept, so a regression that re-probes
+    // *inside* identity.ts (rather than in index.ts) would pass this test
+    // and only be caught by counting real `document.cookie` writes — see
+    // the next test, which is the one that actually pins the requirement.
     ;(window as unknown as { happyDOM: { setURL: (u: string) => void } }).happyDOM.setURL(
       'https://sub.example.com/',
     )
@@ -244,11 +253,19 @@ describe('public surface', () => {
     }
   })
 
-  it('probes the cookie domain once, at init, and reuses it across track calls', () => {
+  it('probes the cookie domain once, at init, and reuses it across track and identify calls', () => {
     // A three-label host so the probe walk actually runs candidates instead
     // of short-circuiting immediately (a single-label host like the default
     // "localhost" returns undefined with zero cookie writes, which would
     // make this test pass trivially regardless of caching).
+    //
+    // Includes identify() calls, not just track(): track()/page() never
+    // touch a cookie at all in this implementation, so on their own they
+    // can't exercise resolveCookieDomain()'s cache at all, let alone a
+    // regression inside identity.ts's own domainFor() (see the previous
+    // test's note). Counting real `document.cookie` setter invocations
+    // across calls that DO touch identity is what actually proves the
+    // probe only ever runs once.
     ;(window as unknown as { happyDOM: { setURL: (u: string) => void } }).happyDOM.setURL(
       'https://sub.example.com/',
     )
@@ -256,6 +273,8 @@ describe('public surface', () => {
       const f = setup()
       sdk.track('one')
       sdk.track('two')
+      sdk.identify('user-1')
+      sdk.identify('user-2')
       // Cookies are written synchronously by init/identify/track; the
       // network flush isn't relevant to this count, so it's deliberately
       // not awaited here.
@@ -264,11 +283,228 @@ describe('public surface', () => {
     // init(): the probe accepts the broadest candidate, .example.com, on its
     // first try for this host, so the walk is one write-then-delete (2
     // setter calls) plus loadIdentity's own single write of the
-    // anonymous-id cookie: 3 total. The two track() calls that follow reuse
-    // the already-loaded, in-memory identity and the cached cookie domain,
-    // so they must not add any further cookie writes at all — if the probe
-    // re-ran on every call instead of being cached, this would be well into
-    // double digits.
-    expect(setCount).toBe(3)
+    // anonymous-id cookie: 3 total. The two track() calls add nothing (see
+    // above). Each identify() call writes the user-id cookie once (1 each,
+    // no re-probe): 2 more. Total: 5. If the probe re-ran on every
+    // identity-touching call instead of being cached, this would be well
+    // into double digits.
+    expect(setCount).toBe(5)
+  })
+
+  it('does not transmit a queue persisted by a previous, consented session while the gate is closed', () => {
+    // The ordinary path this guards: consent granted on visit 1, the server
+    // briefly down, an event survives in localStorage; on visit 2 the gate
+    // is 'pending' again (a refusal — and, per this SDK's own design, even
+    // a grant — cannot be remembered across a fresh init). Nothing may drain
+    // that leftover queue until this new session's gate says so.
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify([
+        {
+          type: 'track',
+          message_id: 'seed-1',
+          timestamp: new Date().toISOString(),
+          anonymous_id: 'prev-anon',
+          context: {},
+          event: 'from_a_previous_session',
+        },
+      ]),
+    )
+    vi.useFakeTimers()
+    try {
+      const f = setup({ requireConsent: true })
+      vi.advanceTimersByTime(5_100)
+      expect(f).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stops sending immediately on refusal, even with events already queued', () => {
+    vi.useFakeTimers()
+    try {
+      const f = setup()
+      sdk.track('queued_before_refusal')
+      sdk.consent(false)
+      vi.advanceTimersByTime(5_100)
+      expect(f).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('flush() is a no-op after an explicit refusal', async () => {
+    const f = setup()
+    sdk.track('x')
+    sdk.consent(false)
+    await sdk.flush()
+    expect(f).not.toHaveBeenCalled()
+  })
+
+  it('persists a user id set before consent once consent is granted', async () => {
+    const f = setup({ requireConsent: true })
+    sdk.identify('user-99')
+    sdk.consent(true)
+    await sdk.flush()
+    const identifyEvent = sent(f).find((e) => e.type === 'identify')
+    expect(identifyEvent?.user_id).toBe('user-99')
+    // And actually persisted, not just present on the wire once — the whole
+    // point is that a page reload afterwards must still know this visitor.
+    expect(document.cookie).toContain('lyraflow_uid=user-99')
+  })
+
+  it('re-stamps held events with the real, cookie-backed anonymous id on consent — not the ephemeral one', async () => {
+    const f = setup({ requireConsent: true })
+    sdk.track('held_1')
+    sdk.track('held_2')
+    sdk.consent(true)
+    await sdk.flush()
+    const events = sent(f)
+    const ids = new Set(events.map((e) => e.anonymous_id))
+    expect(ids.size).toBe(1)
+    const [id] = [...ids]
+    expect(document.cookie).toContain(`lyraflow_aid=${id}`)
+  })
+
+  it('re-stamps anonymous_id only on release — each event keeps the user_id it was recorded under', async () => {
+    const f = setup({ requireConsent: true })
+    sdk.track('anon_event')
+    sdk.identify('user-1')
+    sdk.track('after_identify')
+    sdk.consent(true)
+    await sdk.flush()
+    const events = sent(f)
+    expect(events.find((e) => e.event === 'anon_event')?.user_id).toBeUndefined()
+    expect(events.find((e) => e.event === 'after_identify')?.user_id).toBe('user-1')
+    expect(new Set(events.map((e) => e.anonymous_id)).size).toBe(1)
+  })
+
+  it('does not collect events after an explicit refusal, and a later grant does not resurrect them', async () => {
+    const f = setup({ requireConsent: true })
+    sdk.consent(false)
+    sdk.track('after_refusal')
+    sdk.consent(true)
+    await sdk.flush()
+    expect(sent(f).map((e) => e.event)).not.toContain('after_refusal')
+  })
+
+  it('collects nothing while Do Not Track has already refused, even once consent is granted later', async () => {
+    // `doNotTrack` lives on Navigator's prototype in happy-dom, not as an
+    // own property of `navigator` itself — restoring only an own-property
+    // descriptor (a natural first attempt) silently no-ops, permanently
+    // stubbing every later test's `navigator.doNotTrack` at '1' via the own
+    // property this defineProperty call below leaves behind. `delete`
+    // removes that own property outright and lets the prototype's getter
+    // show through again, which is what actually restores it.
+    Object.defineProperty(navigator, 'doNotTrack', { value: '1', configurable: true })
+    try {
+      const f = setup({ requireConsent: true })
+      sdk.track('during_dnt')
+      sdk.consent(true)
+      await sdk.flush()
+      expect(sent(f).map((e) => e.event)).not.toContain('during_dnt')
+    } finally {
+      // Reflect.deleteProperty, not `= undefined`: an own property set to
+      // `undefined` still shadows the prototype getter this is trying to
+      // restore — it has to be actually removed.
+      Reflect.deleteProperty(navigator, 'doNotTrack')
+    }
+  })
+
+  it('does not read localStorage before consent', () => {
+    // happy-dom's Storage implementation cannot be intercepted directly —
+    // vi.spyOn(Storage.prototype, 'getItem') and even a manual prototype
+    // monkey-patch both silently stop working the moment ANY earlier test
+    // in the file has already touched localStorage once (confirmed with a
+    // minimal repro; happy-dom's storage access bypasses the prototype
+    // after first use). JSON.parse is a real global, not a happy-dom host
+    // object, and EventQueue's readStore() is the only code path in this
+    // whole call graph that ever parses the stored queue — so seeding a
+    // parseable queue and watching whether JSON.parse ever sees it is a
+    // reliable proxy for "was the persisted queue actually read."
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify([
+        {
+          type: 'track',
+          message_id: 'seed-2',
+          timestamp: new Date().toISOString(),
+          anonymous_id: 'prev-anon',
+          context: {},
+          event: 'seed',
+        },
+      ]),
+    )
+    const parseSpy = vi.spyOn(JSON, 'parse')
+    try {
+      setup({ requireConsent: true })
+      sdk.track('x')
+      expect(parseSpy).not.toHaveBeenCalled()
+    } finally {
+      parseSpy.mockRestore()
+    }
+  })
+
+  it('a second init() stops the first transport, not merely orphans it', () => {
+    // Deliberately never flushed explicitly: the periodic interval is the
+    // ONLY thing that could ever send 'one', so a first Transport left
+    // running after a second init() is directly observable by advancing
+    // past its 5-second tick.
+    vi.useFakeTimers()
+    try {
+      const f1 = setup()
+      sdk.track('one')
+      setup({ writeKey: 'wk_test_2' })
+      vi.advanceTimersByTime(5_100)
+      expect(f1).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a second init() fully reconfigures the SDK — the new config is what actually sends', async () => {
+    const f1 = setup()
+    sdk.track('one')
+    await sdk.flush()
+    expect(sent(f1)).toHaveLength(1)
+
+    const f2 = setup({ writeKey: 'wk_test_2' })
+    sdk.track('two')
+    await sdk.flush()
+    expect(sent(f2)).toHaveLength(1)
+
+    // The proof this guards: if the first Transport's interval/listeners
+    // were still live, they would still be able to drain the (shared,
+    // persisted) queue through the FIRST fetchImpl mock too.
+    expect(sent(f1)).toHaveLength(1)
+  })
+
+  it('does not lose held events if loadIdentity throws while consent is being granted', () => {
+    setup({ requireConsent: true })
+    sdk.track('important_signup')
+    const loadIdentitySpy = vi.spyOn(identityModule, 'loadIdentity').mockImplementation(() => {
+      throw new Error('boom')
+    })
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      expect(() => sdk.consent(true)).not.toThrow()
+    } finally {
+      loadIdentitySpy.mockRestore()
+      warnSpy.mockRestore()
+    }
+    const raw = localStorage.getItem(STORAGE_KEY)
+    expect(raw).toContain('important_signup')
+  })
+
+  it('warns when a method is called before init() has ever run', async () => {
+    vi.resetModules()
+    const fresh = (await import('./index.js')) as typeof sdk
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      fresh.track('too_early')
+      expect(warnSpy.mock.calls.join(' ')).toContain('before init()')
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 })

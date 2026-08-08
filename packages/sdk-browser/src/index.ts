@@ -20,14 +20,23 @@ export interface InitOptions {
 }
 
 interface State {
+  host: string
+  writeKey: string
+  fetchImpl: typeof fetch | undefined
   cookieDomainOption: string | undefined
   cookieDomainProbed: boolean
   cookieDomain: string | undefined
   debug: boolean
   gate: ConsentGate
-  queue: EventQueue
-  transport: Transport
+  // Undefined until the gate first allows sending. Nothing that reaches a
+  // cookie, localStorage or the network exists before that point — see
+  // activateSending().
+  queue: EventQueue | undefined
+  transport: Transport | undefined
   identity: Identity
+  // Captured by identify() while the gate is still pending, so a signup
+  // behind a not-yet-answered banner isn't lost the moment consent arrives.
+  pendingUserId: string | undefined
 }
 
 let state: State | undefined
@@ -63,6 +72,11 @@ function guard(fn: () => void): void {
   }
 }
 
+/** Every public method's "nothing happened yet" branch goes through this, so it's never silent. */
+function warnNotInitialized(method: string): void {
+  warn(`${method}() was called before init() — this call was dropped, not queued`)
+}
+
 /**
  * Resolved lazily and cached, not eagerly at `init`: the probe itself writes
  * and deletes a throwaway cookie per candidate label, and "nothing touches a
@@ -83,15 +97,55 @@ function resolveCookieDomain(): string | undefined {
   return state.cookieDomain
 }
 
+/**
+ * Creates the queue and transport and starts sending, the FIRST time the
+ * gate allows it — from `init()` if consent is already granted (or not
+ * required), or from `consent(true)` otherwise. Never re-entered once a
+ * queue/transport already exist, so a later call is a cheap no-op.
+ *
+ * Nothing in this module constructs an `EventQueue` — which reads
+ * `localStorage` in its constructor — or a `Transport` — which starts a
+ * timer and unload listeners that read from and remove out of that queue —
+ * before this runs. A closed gate must not gain access to stored
+ * information any more than it may write it, and it must not have anything
+ * capable of transmitting sitting armed in the background either.
+ */
+function activateSending(): void {
+  if (!state) return
+  if (!state.queue) state.queue = new EventQueue()
+  state.identity = loadIdentity({ cookieDomain: resolveCookieDomain() })
+  if (state.pendingUserId !== undefined) {
+    setUserId(state.pendingUserId, { cookieDomain: resolveCookieDomain() })
+    state.identity = { ...state.identity, userId: state.pendingUserId }
+    state.pendingUserId = undefined
+  }
+  if (!state.transport) {
+    state.transport = new Transport({
+      host: state.host,
+      writeKey: state.writeKey,
+      queue: state.queue,
+      warn,
+      fetchImpl: state.fetchImpl,
+    })
+  }
+  state.transport.start()
+}
+
 function enqueueOrHold(e: QueuedEvent): void {
   if (!state) return
   for (const problem of validateEvent(e)) warn(problem)
-  if (state.gate.allowed()) {
-    state.queue.add(e)
+  const gateState = state.gate.state()
+  if (gateState === 'granted') {
+    state.queue?.add(e)
     debugLog(`enqueued ${e.type} event ${e.message_id}`)
-  } else {
+  } else if (gateState === 'pending') {
     state.gate.hold(e)
     debugLog(`held ${e.type} event ${e.message_id} pending consent`)
+  } else {
+    // 'refused': a refusal stops collection, not merely sending — holding
+    // it here would just be collecting under a different name, ready to
+    // ship the moment a later `consent(true)` arrives.
+    debugLog(`dropped ${e.type} event ${e.message_id}: consent was refused`)
   }
 }
 
@@ -136,41 +190,36 @@ function drainSnippetQueue(): void {
 
 export function init(options: InitOptions): void {
   guard(() => {
-    const gate = new ConsentGate({ required: options.requireConsent ?? false })
-    // Loaded, and the cookie domain probed, only when the gate allows it:
-    // both loadIdentity and the probe behind it write a cookie, and a
-    // closed gate must not touch one. A closed gate still needs SOME
-    // identity to stamp held events with, so it gets an ephemeral,
-    // never-persisted one instead.
-    let cookieDomain: string | undefined
-    let cookieDomainProbed = false
-    let identity: Identity
-    if (gate.allowed()) {
-      cookieDomain = options.cookieDomain ?? probeCookieDomain(location.hostname)
-      cookieDomainProbed = true
-      identity = loadIdentity({ cookieDomain })
-    } else {
-      identity = { anonymousId: newUuid() }
+    // A second init() must not leave a first Transport's interval and
+    // pagehide/visibilitychange listeners running alongside a second one,
+    // draining a queue nothing here references any more — that's a
+    // lost-update hazard on the shared storage key, not just a leak.
+    // Transport.start() already guards re-entry into a SINGLE instance;
+    // this guards against two different instances existing at once by
+    // fully retiring the old one before anything below builds a new state.
+    if (state) {
+      warn('init() was called again; the SDK is being reconfigured from scratch')
+      state.transport?.stop()
     }
-    const queue = new EventQueue()
-    const transport = new Transport({
+    const gate = new ConsentGate({ required: options.requireConsent ?? false })
+    state = {
       host: options.host,
       writeKey: options.writeKey,
-      queue,
-      warn,
       fetchImpl: options.fetchImpl,
-    })
-    state = {
       cookieDomainOption: options.cookieDomain,
-      cookieDomainProbed,
-      cookieDomain,
+      cookieDomainProbed: false,
+      cookieDomain: undefined,
       debug: options.debug ?? false,
       gate,
-      queue,
-      transport,
-      identity,
+      queue: undefined,
+      transport: undefined,
+      // A closed gate still needs SOME identity to stamp held events with;
+      // this is ephemeral and never persisted. activateSending() replaces
+      // it with the real, cookie-backed one the moment the gate allows it.
+      identity: { anonymousId: newUuid() },
+      pendingUserId: undefined,
     }
-    transport.start()
+    if (gate.allowed()) activateSending()
     drainSnippetQueue()
     if (typeof window !== 'undefined') {
       ;(window as unknown as { lyraflow?: unknown }).lyraflow = api
@@ -181,7 +230,10 @@ export function init(options: InitOptions): void {
 
 export function track(event: string, properties?: Record<string, unknown>): void {
   guard(() => {
-    if (!state) return
+    if (!state) {
+      warnNotInitialized('track')
+      return
+    }
     const e = buildEvent({ type: 'track', identity: state.identity, event, properties })
     enqueueOrHold(e)
   })
@@ -189,7 +241,10 @@ export function track(event: string, properties?: Record<string, unknown>): void
 
 export function page(name?: string, properties?: Record<string, unknown>): void {
   guard(() => {
-    if (!state) return
+    if (!state) {
+      warnNotInitialized('page')
+      return
+    }
     const e = buildEvent({ type: 'page', identity: state.identity, name, properties })
     enqueueOrHold(e)
   })
@@ -197,12 +252,24 @@ export function page(name?: string, properties?: Record<string, unknown>): void 
 
 export function identify(userId: string, traits?: Record<string, unknown>): void {
   guard(() => {
-    if (!state) return
-    // Persisted only when the gate allows it — see the note in init(). The
-    // in-memory identity is updated either way, so a later track() call in
-    // the same (still-gated) session carries the same user id.
-    if (state.gate.allowed()) setUserId(userId, { cookieDomain: resolveCookieDomain() })
-    state.identity = { ...state.identity, userId }
+    if (!state) {
+      warnNotInitialized('identify')
+      return
+    }
+    const gateState = state.gate.state()
+    if (gateState === 'granted') {
+      setUserId(userId, { cookieDomain: resolveCookieDomain() })
+      state.identity = { ...state.identity, userId }
+    } else if (gateState === 'pending') {
+      // Carried across so consent(true) can persist it — without this, a
+      // signup behind a still-open banner is anonymous forever the moment
+      // consent DOES arrive, because loadIdentity() on grant never learns
+      // about it.
+      state.pendingUserId = userId
+      state.identity = { ...state.identity, userId }
+    }
+    // 'refused': identity is left untouched — a refusal stops collection,
+    // so there is nothing to carry forward for a grant that may never come.
     const e = buildEvent({ type: 'identify', identity: state.identity, traits })
     enqueueOrHold(e)
   })
@@ -210,11 +277,36 @@ export function identify(userId: string, traits?: Record<string, unknown>): void
 
 export function consent(granted: boolean): void {
   guard(() => {
-    if (!state) return
+    if (!state) {
+      warnNotInitialized('consent')
+      return
+    }
     const released = state.gate.decide(granted)
-    if (!granted) return
-    state.identity = loadIdentity({ cookieDomain: resolveCookieDomain() })
+    if (!granted) {
+      // An explicit refusal must stop any further sending immediately, not
+      // merely defer it — leaving the transport running would keep
+      // draining whatever was already queued from a prior grant.
+      state.transport?.stop()
+      return
+    }
+    // Get the released events into a durable queue BEFORE doing anything
+    // that can throw (loadIdentity, inside activateSending) — losing them
+    // to an internal error would be strictly worse than shipping them
+    // under their pre-consent, ephemeral anonymous_id.
+    if (!state.queue) state.queue = new EventQueue()
     for (const e of released) state.queue.add(e)
+    activateSending()
+    // Re-stamp anonymous_id only, now that the real identity is loaded —
+    // held events never had a persisted id, so nothing here is a resend of
+    // anything already on the wire. user_id is left exactly as each event
+    // was recorded under: retro-stamping a user id onto events from before
+    // identify() would violate the same principle reset()'s flush-first
+    // ordering protects.
+    const anonymousId = state.identity.anonymousId
+    for (const e of released) {
+      state.queue.remove([e.message_id])
+      state.queue.add({ ...e, anonymous_id: anonymousId })
+    }
     void flush()
   })
 }
@@ -222,7 +314,10 @@ export function consent(granted: boolean): void {
 /** Flushes before rotating, so events already queued keep the identity they were recorded under. */
 export function reset(): void {
   guard(() => {
-    if (!state) return
+    if (!state) {
+      warnNotInitialized('reset')
+      return
+    }
     void flush()
     state.identity = state.gate.allowed()
       ? resetIdentity({ cookieDomain: resolveCookieDomain() })
@@ -234,9 +329,18 @@ export function reset(): void {
  * Delegates to the transport, which never rejects. The try/catch below is a
  * second layer for the same "nothing throws into the host app" promise the
  * synchronous `guard()` gives every other public method.
+ *
+ * A no-op while the gate is closed: there is no queue or transport before
+ * `activateSending()` has ever run, and even after a later refusal — where
+ * `transport.stop()` has already silenced the timer and unload listeners —
+ * an explicit `flush()` call must not reach around that and send anyway.
  */
 export async function flush(): Promise<void> {
-  if (!state) return
+  if (!state) {
+    warnNotInitialized('flush')
+    return
+  }
+  if (!state.gate.allowed() || !state.transport) return
   debugLog('flush attempt')
   try {
     const outcome = await state.transport.flush()
