@@ -2,6 +2,7 @@ import type { ClickHouseClient, Pool } from '@lyraflow/db'
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify'
 import { ProjectCache } from './auth/project-cache.js'
 import type { Config } from './config.js'
+import { registerEventsRoutes } from './events/routes.js'
 import { type Readiness, registerHealth } from './health.js'
 import { PersonAliases } from './identity/aliases.js'
 import { IdentityBindings } from './identity/bindings.js'
@@ -166,6 +167,20 @@ export function buildApp(input: {
     allowedOrigins: config.allowedOrigins,
   })
   registerPersonRoutes(app, { projects, readiness, ch, bindings, aliases, suppression })
+  // Shares `projects`/`bindings`/`aliases` with the registrations above and
+  // below rather than constructing new instances — same reasoning as the
+  // comment on those three above: two ProjectCache-shaped duplicates would
+  // double the Postgres load an identical lookup produces, and the person
+  // filter's resolution must see the exact same authoritative state the
+  // write path just wrote through.
+  registerEventsRoutes(app, {
+    projects,
+    readiness,
+    ch,
+    bindings,
+    aliases,
+    database: config.ch.database,
+  })
   registerSegmentRoutes(app, {
     projects,
     readiness,
