@@ -31,6 +31,15 @@ describe('resolveMode', () => {
     expect(resolveMode({ json: true }, true)).toBe('json')
     expect(resolveMode({ human: true }, false)).toBe('human')
   })
+
+  it('prefers json when both --json and --human are passed', () => {
+    // Pinned, not incidental: a script that asked for --json and gets a
+    // table back breaks silently, while a human who asked for --human and
+    // gets JSON back still gets something readable. json is the safer
+    // default for an ambiguous request.
+    expect(resolveMode({ json: true, human: true }, true)).toBe('json')
+    expect(resolveMode({ json: true, human: true }, false)).toBe('json')
+  })
 })
 
 describe('emitRecords', () => {
@@ -164,6 +173,28 @@ describe('emitRecords', () => {
     emitRecords([undefined], 'json', COLUMNS, (s) => out.push(s))
     expect(JSON.parse(out.join(''))).toBeNull()
   })
+
+  it('a record containing a BigInt degrades to one honest, parseable line instead of crashing', () => {
+    // JSON.stringify throws TypeError: Do not know how to serialize a
+    // BigInt. Not reachable through Task 4's client today (res.json() never
+    // produces one), but ClickHouse counts can exceed
+    // Number.MAX_SAFE_INTEGER, so a future direct caller is plausible — and
+    // NDJSON's whole value is reading it line by line, so one bad record
+    // must still be exactly one line, never zero and never an exception
+    // that aborts every record after it.
+    const out: string[] = []
+    emitRecords([{ a: 1 }, { a: 2, b: 9_007_199_254_740_993n }, { a: 3 }], 'json', COLUMNS, (s) =>
+      out.push(s),
+    )
+    const lines = out.join('').split('\n').filter(Boolean)
+    expect(lines).toHaveLength(3)
+    for (const line of lines) expect(() => JSON.parse(line)).not.toThrow()
+    expect(JSON.parse(lines[0] as string)).toEqual({ a: 1 })
+    expect(JSON.parse(lines[2] as string)).toEqual({ a: 3 })
+    const failed = JSON.parse(lines[1] as string)
+    expect(failed.error).toBe('this record could not be serialised as JSON')
+    expect(typeof failed.detail).toBe('string')
+  })
 })
 
 describe('emitObject', () => {
@@ -186,6 +217,15 @@ describe('emitObject', () => {
     emitObject('just a string', 'human', (s) => out.push(s))
     emitObject(42, 'json', (s) => out.push(s))
     expect(out.join('')).toBe('just a string\n42\n')
+  })
+
+  it('a record containing a BigInt degrades to one honest, parseable line instead of crashing', () => {
+    const out: string[] = []
+    emitObject({ version: '0.1.0', huge: 9_007_199_254_740_993n }, 'json', (s) => out.push(s))
+    expect(out).toHaveLength(1)
+    const parsed = JSON.parse(out.join(''))
+    expect(parsed.error).toBe('this record could not be serialised as JSON')
+    expect(typeof parsed.detail).toBe('string')
   })
 })
 
@@ -225,6 +265,36 @@ describe('emitError', () => {
   it('renders a thrown plain object with no status/code at all, without crashing', () => {
     const out: string[] = []
     emitError({ oops: true }, 'json', (s) => out.push(s))
+    const parsed = JSON.parse(out.join(''))
+    expect(parsed.code).toBe('error')
+    expect(typeof parsed.error).toBe('string')
+  })
+
+  it('does not crash on a value whose toString() itself throws', () => {
+    // describeError's fallback for a non-Error, non-ApiError, non-UsageError
+    // value calls String(err), which invokes the value's own toString()
+    // unguarded unless this is caught. An error handler that itself throws
+    // hides the original failure — the worst possible place for a crash.
+    const evil = {
+      toString() {
+        throw new Error('toString boom')
+      },
+    }
+    const out: string[] = []
+    expect(() => emitError(evil, 'json', (s) => out.push(s))).not.toThrow()
+    const parsed = JSON.parse(out.join(''))
+    expect(parsed.code).toBe('error')
+    expect(typeof parsed.error).toBe('string')
+  })
+
+  it('does not crash on a value whose Symbol.toPrimitive itself throws', () => {
+    const evil = {
+      [Symbol.toPrimitive]() {
+        throw new Error('toPrimitive boom')
+      },
+    }
+    const out: string[] = []
+    expect(() => emitError(evil, 'json', (s) => out.push(s))).not.toThrow()
     const parsed = JSON.parse(out.join(''))
     expect(parsed.code).toBe('error')
     expect(typeof parsed.error).toBe('string')

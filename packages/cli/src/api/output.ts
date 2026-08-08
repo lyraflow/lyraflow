@@ -39,6 +39,13 @@ export type Mode = 'human' | 'json'
  * footgun ("works in my terminal, breaks in CI"), which is why the CLI's
  * docs tell an agent to pass `--json` explicitly rather than rely on stdout
  * not being a terminal.
+ *
+ * When BOTH `--json` and `--human` are passed, `json` wins — pinned, not
+ * incidental (`flags.json` is checked first). This is the safer default for
+ * an ambiguous request: a script that asked for `--json` and gets a table
+ * back breaks silently (the output still "parses" as text, just not as the
+ * shape the caller expected), while a human who asked for `--human` and
+ * gets JSON back just sees JSON — readable, if not the format requested.
  */
 export function resolveMode(flags: { json?: boolean; human?: boolean }, isTty: boolean): Mode {
   if (flags.json) return 'json'
@@ -93,6 +100,35 @@ function toCell(value: unknown): string {
 }
 
 /**
+ * `JSON.stringify` throws for a handful of values it cannot represent —
+ * a `bigint` anywhere in the structure (`TypeError: Do not know how to
+ * serialize a BigInt`) is the practical one, since ClickHouse counts can
+ * exceed `Number.MAX_SAFE_INTEGER` and a future command that reads one
+ * directly (rather than through Task 4's client, which only ever hands this
+ * module the output of `res.json()`, and native `JSON.parse` never produces
+ * a `bigint`) is a plausible caller.
+ *
+ * NDJSON's whole value is that a consumer can read it line by line without
+ * holding the full response in memory — so a record this module cannot
+ * serialise must still produce exactly one line, not zero (a silently
+ * truncated stream) and not a thrown exception (which would abort every
+ * record after it, not just the bad one). The fallback line is honest about
+ * what happened rather than inventing a value: it says the record could not
+ * be serialised and includes the real error's message, not a guess at the
+ * record's shape.
+ */
+function safeJsonLine(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? 'null'
+  } catch (err) {
+    return JSON.stringify({
+      error: 'this record could not be serialised as JSON',
+      detail: err instanceof Error ? err.message : String(err),
+    })
+  }
+}
+
+/**
  * Calls a caller-supplied `Column.get` defensively. `Column.get`'s type
  * says it always returns a `string` for a well-formed `row`, but nothing
  * at runtime enforces that: a getter written as `row.field` throws when
@@ -136,10 +172,7 @@ export function emitRecords(
   if (records.length === 0) return
 
   if (mode === 'json') {
-    for (const record of records) {
-      const json = JSON.stringify(record)
-      write(`${json ?? 'null'}\n`)
-    }
+    for (const record of records) write(`${safeJsonLine(record)}\n`)
     return
   }
 
@@ -167,8 +200,7 @@ export function emitRecords(
  */
 export function emitObject(record: unknown, mode: Mode, write: (s: string) => void): void {
   if (mode === 'json') {
-    const json = JSON.stringify(record)
-    write(`${json ?? 'null'}\n`)
+    write(`${safeJsonLine(record)}\n`)
     return
   }
 
@@ -219,5 +251,23 @@ function describeError(err: unknown): { error: string; code: string } {
   if (err instanceof ApiError) return { error: err.message, code: err.code }
   if (err instanceof UsageError) return { error: err.message, code: 'usage_error' }
   if (err instanceof Error) return { error: err.message, code: 'error' }
-  return { error: String(err), code: 'error' }
+  return { error: safeDescribe(err), code: 'error' }
+}
+
+/**
+ * `String(value)` invokes `value`'s own `toString`/`Symbol.toPrimitive`
+ * unguarded — for anything that isn't a plain, well-behaved value, that can
+ * itself throw (a thrown object with a `toString()` that throws, or a
+ * `Symbol.toPrimitive` that does). `emitError`'s entire job is to render
+ * every value it is handed without crashing; an error handler that itself
+ * throws hides the original failure behind a confusing new one from the
+ * reporting path. The fallback here is honest rather than inventive: it
+ * says the value could not be described, not a guess at what it might be.
+ */
+function safeDescribe(value: unknown): string {
+  try {
+    return String(value)
+  } catch {
+    return 'an error value that could not be described (its own stringification threw)'
+  }
 }
