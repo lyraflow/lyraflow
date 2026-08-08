@@ -46,7 +46,13 @@ describe('notSuppressedExpr', () => {
     // pin. The literal is parsed out of the GENERATED SQL rather than taken
     // from SUPPRESSION_NEVER, so an edit that flips the constant toward the
     // past fails here regardless of what literal replaces it.
-    const match = sql.match(/toDateTime\((\d+)\)/)
+    //
+    // Matches `toDateTime(N)` or `toDateTime64(N, scale)` — the function
+    // name gained the `64` and a scale argument when the dictionary's own
+    // `suppressed_at` attribute changed from `DateTime` to `DateTime64(6)`
+    // (dictionaries.ts), but the first captured group is still the same
+    // epoch-SECONDS integer either way.
+    const match = sql.match(/toDateTime(?:64)?\((\d+)/)
     expect(match).not.toBeNull()
     const denotedMs = Number(match?.[1]) * 1000
     const tenYearsFromNowMs = Date.now() + 10 * 365 * 24 * 3600 * 1000
@@ -62,9 +68,9 @@ describe('notSuppressedExpr', () => {
       person: 'p',
       instant: 't',
     })
-    // SUPPRESSION_NEVER ("toDateTime(4294967295)") itself contains the digit
-    // '7', so a bare `not.toContain('7')` would fail even against a correct
-    // implementation. Strip that expected constant out first, and only then
+    // SUPPRESSION_NEVER ("toDateTime64(4294967295, 6)") itself contains the
+    // digit '7', so a bare `not.toContain('7')` would fail even against a
+    // correct implementation. Strip that expected constant out first, and only then
     // confirm no OTHER raw '7' (i.e. the interpolated projectId) survives.
     expect(sql.replace(SUPPRESSION_NEVER, '')).not.toContain('7')
     expect(Object.values(params.values)).toContain(7)

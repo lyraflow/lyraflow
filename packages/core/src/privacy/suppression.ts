@@ -8,9 +8,15 @@ import type { Params } from '../segments/params.js'
  * DateTime is stored as an unsigned epoch-second count — so a numeric literal
  * means exactly the same thing regardless of the server's timezone setting,
  * where `toDateTime('2106-02-07 06:28:15')` would be parsed IN that timezone
- * and land somewhere else on a server that is not UTC.
+ * and land somewhere else on a server that is not UTC. Wrapped in
+ * `toDateTime64(..., 6)`, not `toDateTime(...)`, to match the
+ * `suppressed_persons` dictionary's own `suppressed_at DateTime64(6)`
+ * attribute (dictionaries.ts) — a plain integer still means the same
+ * epoch-second instant regardless of scale, `toDateTime64(4294967295, 6)`
+ * resolves to the identical 2106-02-07 06:28:15 instant `toDateTime` did,
+ * just carrying six (zero) fractional digits instead of none.
  */
-export const SUPPRESSION_NEVER = 'toDateTime(4294967295)'
+export const SUPPRESSION_NEVER = 'toDateTime64(4294967295, 6)'
 
 /**
  * "This row survives suppression" — the one derivation of the dictionary-side

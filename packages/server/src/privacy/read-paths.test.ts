@@ -55,7 +55,8 @@ let projectId: number
 const STRADDLER = 'rp-straddler'
 const FULLY_ERASED = 'rp-fully-erased'
 const UNTOUCHED = 'rp-untouched'
-const ALL_IDS = [STRADDLER, FULLY_ERASED, UNTOUCHED]
+const SUBSECOND = 'rp-subsecond'
+const ALL_IDS = [STRADDLER, FULLY_ERASED, UNTOUCHED, SUBSECOND]
 
 // Anchored to the run, not an absolute date: the ingest clamp is irrelevant
 // here (every event below is written straight to ClickHouse, bypassing it),
@@ -63,18 +64,18 @@ const ALL_IDS = [STRADDLER, FULLY_ERASED, UNTOUCHED]
 // red mid-afternoon before over exactly this (see person.test.ts's BASE_MS
 // docstring for the incident). NOW is captured once so every offset below,
 // and every assertion against it, agrees for the life of this file's run.
-// Floored to a whole second, not raw Date.now(): the suppressed_persons
-// ClickHouse DICTIONARY declares `suppressed_at DateTime` — second precision,
-// not DateTime64 — so any sub-second component on a suppressed_at value is
-// silently truncated the moment it's loaded from Postgres. An event's own
-// `timestamp` stays DateTime64(3) (millisecond) throughout. Without this
-// floor, a boundary-instant event built from an un-floored `now` could sit
-// up to 999ms AFTER its own (truncated) boundary as ClickHouse sees it —
-// putting the one fixture event this task exists to test on the wrong side
-// of the very comparison it's meant to pin, for a reason with nothing to do
-// with the code under test. Found by running this file's own new assertions
-// against unmutated code and watching them fail.
-const NOW = Math.floor(Date.now() / 1000) * 1000
+//
+// Deliberately NOT floored to a whole second. `suppressed_at` is Postgres
+// `now()` at deletion time and almost always carries a fractional second; an
+// earlier version of this file floored `NOW` to work around a real
+// dictionary defect (`suppressed_persons` used to declare `suppressed_at
+// DateTime` — second precision — so ClickHouse silently floored any
+// sub-second component on load, measured directly against a live server).
+// That defect is now fixed at its source (dictionaries.ts declares
+// `DateTime64(6)`), so this file no longer needs to route around it — and
+// keeping a raw, millisecond-bearing `NOW` is what proves the fix rather
+// than hiding whether it is still needed.
+const NOW = Date.now()
 const hoursAgo = (h: number) => NOW - h * 3_600_000
 const chStamp = (ms: number) => new Date(ms).toISOString().replace('T', ' ').replace('Z', '')
 const isoStamp = (ms: number) => new Date(ms).toISOString()
@@ -106,6 +107,23 @@ const T_F_BOUNDARY = BOUNDARY_FULLY_ERASED.getTime() // rp_event — exactly on 
 // untouched: never suppressed at all.
 const T_U1 = hoursAgo(2.5) // $identify
 const T_U2 = hoursAgo(1.5) // rp_event
+
+// subsecond: the precision defect itself, not just the exact-instant case
+// above. `suppressed_at` is Postgres `now()` at deletion time, so it almost
+// always carries a fractional second — this person's boundary is built with
+// one explicitly (`+777` below), independent of NOW's own arbitrary
+// millisecond, so the gap this tests is a fixed, sizeable 777ms rather than
+// whatever fraction of a second NOW happened to land on. One event sits
+// strictly BETWEEN the truncated (whole-second-floored) instant a `DateTime`
+// dictionary attribute used to report and the TRUE boundary Postgres holds —
+// exactly the window where the ClickHouse-side paths used to disagree with
+// the exact Postgres-side ones about whether an event that genuinely
+// predates the deletion request is suppressed.
+const secondFloor = (ms: number) => Math.floor(ms / 1000) * 1000
+const SUBSECOND_BOUNDARY_MS = secondFloor(hoursAgo(2)) + 777
+const BOUNDARY_SUBSECOND = new Date(SUBSECOND_BOUNDARY_MS)
+const T_SUB_IDENTIFY = hoursAgo(7) // $identify — hours clear of any ambiguity, always erased
+const T_SUB_GAP = SUBSECOND_BOUNDARY_MS - 300 // rp_event — inside the truncation gap, always erased
 
 // A single reference point strictly between every erased timestamp and every
 // surviving one (T_S1, T_S2, T_F1, T_F2 all fall before it; T_S3, T_U1, T_U2
@@ -257,8 +275,17 @@ beforeAll(async () => {
   })
   await insertEvent({ userId: UNTOUCHED, eventName: 'rp_event', timestampMs: T_U2 })
 
+  await insertEvent({
+    userId: SUBSECOND,
+    eventName: '$identify',
+    timestampMs: T_SUB_IDENTIFY,
+    properties: { rp_probe: SUBSECOND },
+  })
+  await insertEvent({ userId: SUBSECOND, eventName: 'rp_event', timestampMs: T_SUB_GAP })
+
   await suppress(STRADDLER, BOUNDARY_STRADDLER)
   await suppress(FULLY_ERASED, BOUNDARY_FULLY_ERASED)
+  await suppress(SUBSECOND, BOUNDARY_SUBSECOND)
   // UNTOUCHED gets no suppressed_persons row at all.
 })
 
@@ -356,6 +383,7 @@ const PROBES: Array<{ owner: string; atMs: number }> = [
   { owner: FULLY_ERASED, atMs: T_F_BOUNDARY },
   { owner: UNTOUCHED, atMs: T_U1 },
   { owner: UNTOUCHED, atMs: T_U2 },
+  { owner: SUBSECOND, atMs: T_SUB_GAP },
 ]
 
 const countFor = async (): Promise<Snapshot> => {
@@ -488,5 +516,20 @@ describe.each([
     for (const ts of BOUNDARY_INSTANTS) {
       expect(snap.eventTimestamps.has(ts)).toBe(false)
     }
+  })
+
+  // THE divergence test: a boundary that carries milliseconds (as every real
+  // one does — suppressed_at is Postgres now()), with an event sitting in
+  // the sub-second gap between the true boundary and the whole second a
+  // `DateTime`-typed dictionary attribute used to floor it to. Before the
+  // suppressed_persons dictionary declared `suppressed_at DateTime64(6)`
+  // (dictionaries.ts), this person's own last-seen event (the gap event, the
+  // later of their two) compared as AFTER the truncated boundary on the
+  // ClickHouse side — visible via segment count/members — while the exact
+  // Postgres-side boundary correctly kept it hidden on person read/export.
+  // All four must agree the person is gone.
+  it('hides a person whose only recent event sits in a truncated boundary sub-second gap', async () => {
+    const snap = await run()
+    expect(snap.personIds.has(SUBSECOND)).toBe(false)
   })
 })

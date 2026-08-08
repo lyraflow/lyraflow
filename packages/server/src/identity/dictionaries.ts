@@ -283,10 +283,37 @@ export async function ensureIdentityDictionaries(
   // UPDATES a row rather than only inserting one. `suppressed_at` is always
   // now(), so any write — insert or upsert — becomes the new max(), and the
   // scalar changes. A reload is skipped only when nothing was written at all.
+  //
+  // `suppressed_at DateTime64(6)`, not `DateTime`. `suppressed_at` is a
+  // Postgres `timestamptz` — `now()` at the moment of deletion, so it almost
+  // always carries a fractional second — and this dictionary's own
+  // `notSuppressedExpr` (suppression.ts) compares it directly against an
+  // event's `timestamp`, itself `DateTime64(3)`. A plain `DateTime` attribute
+  // (second precision) used to floor that value on load — measured directly
+  // against a live server: `dictGetOrDefault` returned the whole second with
+  // the fractional part silently gone, never rounded, never rejected — which
+  // opened a real, up-to-999ms gap where an event genuinely BEFORE the
+  // deletion instant compared as NOT suppressed here while the exact,
+  // Postgres-backed person-read/export paths (which read `suppressed_at`
+  // with no such truncation) correctly hid it. Two routes disagreeing about
+  // a person deleted in the same second they acted — the exact defect shape
+  // Task 11 exists to make impossible, just one layer further down than that
+  // task's own fixture could reach until it grew a boundary-instant case.
+  //
+  // The attribute is declared `(6)`, not `(3)`, to match what ClickHouse's
+  // PostgreSQL source itself infers for a `timestamptz` column (confirmed
+  // directly: `SELECT ... FROM postgresql(...)` with no explicit structure
+  // reports `DateTime64(6)`) — also measured directly: declaring the
+  // dictionary attribute at a DIFFERENT scale than the source infers (`(3)`
+  // against a `(6)` source) does not cleanly truncate or convert, it
+  // silently reinterprets the underlying integer at the wrong unit and
+  // returns a garbage instant more than a hundred years off. Matching the
+  // source's own inferred scale exactly is what makes this a value it can
+  // load correctly, not merely a value it can declare.
   try {
     await ch.command({
       query: `CREATE OR REPLACE DICTIONARY suppressed_persons (
-      project_id UInt32, person_id String, suppressed UInt8, suppressed_at DateTime
+      project_id UInt32, person_id String, suppressed UInt8, suppressed_at DateTime64(6)
     )
     PRIMARY KEY project_id, person_id
     ${source(
