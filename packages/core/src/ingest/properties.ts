@@ -1,4 +1,6 @@
 export const MAX_ID_LENGTH = 128
+/** Shared with the browser SDK, which warns before sending rather than after. */
+export const MAX_PROPERTIES_PER_EVENT = 250
 
 export type PropertyValue = string | number | boolean | null
 
