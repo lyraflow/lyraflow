@@ -4,9 +4,9 @@
  * "how much, over time".
  */
 
-import type { CommandContext } from '../../index.js'
-import { UsageError, parseCommandArgs, resolveInstant } from '../args.js'
+import { UsageError, hasRawFlag, parseCommandArgs, resolveInstant } from '../args.js'
 import { ApiError } from '../client.js'
+import type { CommandContext } from '../context.js'
 import { type Column, emitError, emitRecords, resolveMode } from '../output.js'
 
 /** One row of GET /v1/events/stats — flat, per events/routes.ts's own docstring on why. */
@@ -47,6 +47,11 @@ function parseInterval(raw: string): Interval {
   return raw
 }
 
+/** See isEpipe in events.ts for the full reasoning — same guarantee, same shape. */
+function isEpipe(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'EPIPE'
+}
+
 /**
  * The CLI's own default `since` when omitted: 24 hours, matching the
  * documented default at the default (`1h`) interval. At any other interval
@@ -58,6 +63,14 @@ function parseInterval(raw: string): Interval {
  * dependency on and should not track for drift), `since` is simply left
  * unsent at any non-default interval, so the server's own default window
  * applies instead.
+ *
+ * For the record (so Task 10's docs can state all three truthfully rather
+ * than only the one this CLI computes itself): the server's own defaults
+ * at the other two intervals are `1m` → 1h, `1d` → 7d
+ * (`STATS_DEFAULT_WINDOW_MS`, events/routes.ts) — this CLI's 24h figure at
+ * `1h` is not a separate decision, it is that same table's `1h` entry
+ * computed here instead of left to the server, purely so the resolved
+ * `since` is visible in `--json` output like every other explicit query.
  */
 function defaultSince(interval: Interval, now: Date): Date | undefined {
   if (interval !== '1h') return undefined
@@ -72,18 +85,40 @@ function defaultSince(interval: Interval, now: Date): Date | undefined {
  */
 export async function runStats(argv: string[], ctx: CommandContext): Promise<number> {
   let flags: Record<string, string | boolean>
+  let positionals: string[]
   try {
-    ;({ flags } = parseCommandArgs(argv, {
+    ;({ flags, positionals } = parseCommandArgs(argv, {
       strings: ['since', 'until', 'interval', 'host', 'server-key'],
       booleans: ['by-event', 'json', 'human'],
     }))
   } catch (err) {
     if (!(err instanceof UsageError)) throw err
-    emitError(err, resolveMode({}, ctx.isTty), ctx.writeErr)
+    const failMode = resolveMode(
+      { json: hasRawFlag(argv, 'json'), human: hasRawFlag(argv, 'human') },
+      ctx.isTty,
+    )
+    try {
+      emitError(err, failMode, ctx.writeErr)
+    } catch (writeErr) {
+      if (!isEpipe(writeErr)) throw writeErr
+    }
     return 2
   }
 
   const mode = resolveMode(flags, ctx.isTty)
+
+  if (positionals.length > 0) {
+    try {
+      emitError(
+        new UsageError(`unexpected argument(s): ${positionals.join(' ')}`),
+        mode,
+        ctx.writeErr,
+      )
+    } catch (writeErr) {
+      if (!isEpipe(writeErr)) throw writeErr
+    }
+    return 2
+  }
 
   let interval: Interval
   let since: Date | undefined
@@ -99,9 +134,18 @@ export async function runStats(argv: string[], ctx: CommandContext): Promise<num
     if (typeof flags.until === 'string') {
       until = resolveInstant(flags.until, ctx.now())
     }
+    if (since && until && since.getTime() > until.getTime()) {
+      throw new UsageError(
+        `--since (${since.toISOString()}) is after --until (${until.toISOString()})`,
+      )
+    }
   } catch (err) {
     if (!(err instanceof UsageError)) throw err
-    emitError(err, mode, ctx.writeErr)
+    try {
+      emitError(err, mode, ctx.writeErr)
+    } catch (writeErr) {
+      if (!isEpipe(writeErr)) throw writeErr
+    }
     return 2
   }
 
@@ -117,8 +161,14 @@ export async function runStats(argv: string[], ctx: CommandContext): Promise<num
     emitRecords(res.buckets, mode, STATS_COLUMNS, ctx.write)
     return 0
   } catch (err) {
+    if (isEpipe(err)) return 0
     if (!(err instanceof ApiError)) throw err
-    emitError(err, mode, ctx.writeErr)
+    try {
+      emitError(err, mode, ctx.writeErr)
+    } catch (writeErr) {
+      if (isEpipe(writeErr)) return 0
+      throw writeErr
+    }
     return 1
   }
 }

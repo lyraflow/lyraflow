@@ -7,6 +7,7 @@ import { UsageError, parseCommandArgs } from './api/args.js'
 import { Client } from './api/client.js'
 import { runEvents } from './api/commands/events.js'
 import { runStats } from './api/commands/stats.js'
+import type { CommandContext } from './api/context.js'
 import {
   CLI_VERSION,
   OUTPUT_SCHEMA_VERSION,
@@ -15,6 +16,11 @@ import {
   resolveMode,
 } from './api/output.js'
 import { ProjectExistsError, createProject } from './create-project.js'
+
+// Re-exported so existing call sites (`import type { CommandContext } from
+// './index.js'`) keep working — the interface itself lives in
+// api/context.ts now; see that file's docstring for why.
+export type { CommandContext } from './api/context.js'
 
 function env(key: string): string {
   const v = process.env[key]
@@ -32,37 +38,6 @@ function clients() {
       database: env('LYRAFLOW_CLICKHOUSE_DB'),
     }),
   }
-}
-
-/**
- * What a command handler needs from the outside world. Task 6 defined the
- * `write`/`isTty` pair for `runVersion`, which needs nothing else; Task 7
- * (`events`/`stats`) extends it rather than declaring a second context,
- * so `runVersion`'s existing call sites keep compiling unchanged.
- */
-export interface CommandContext {
-  /** The configured API client — `events`/`stats` compose on this rather
-   * than calling `fetch` themselves. Unused by `runVersion`, which talks
-   * to nothing over the network. */
-  client: Client
-  /** Whether the destination is a real terminal — `resolveMode`'s second
-   * argument, threaded through here so a test can fake it without a real
-   * TTY. */
-  isTty: boolean
-  /** Where normal output goes. Never `console.log`/`console.error` directly
-   * from a command handler — writing through this is what lets a test
-   * capture output without touching real stdout. */
-  write: (s: string) => void
-  /** Where error output goes — kept separate from `write` so an error line
-   * never lands mixed into a stream of otherwise-valid NDJSON records. */
-  writeErr: (s: string) => void
-  /** The current time, as the command should see it. Injected so a test can
-   * fix "now" rather than racing the real clock — `--since`'s relative
-   * defaults (e.g. "the last 15 minutes") are resolved against this. */
-  now: () => Date
-  /** Injected so `--follow` can be tested without real time passing; also
-   * the hook a real dispatch would wire to cancellation (e.g. SIGINT). */
-  sleep: (ms: number) => Promise<void>
 }
 
 /**
@@ -163,8 +138,12 @@ async function main(): Promise<void> {
         process.stderr.write(s)
       }
 
-      const host = extractOverride(args, 'host') ?? process.env.LYRAFLOW_HOST
-      const serverKey = extractOverride(args, 'server-key') ?? process.env.LYRAFLOW_SERVER_KEY
+      // `||`, not `??`: an explicit but empty `--host=`/`--server-key=`
+      // must fall back to the env var too, not silently win as `''` — a
+      // Client built with an empty host fails later with a confusing URL
+      // error instead of this branch's clear "must be set" message.
+      const host = extractOverride(args, 'host') || process.env.LYRAFLOW_HOST
+      const serverKey = extractOverride(args, 'server-key') || process.env.LYRAFLOW_SERVER_KEY
       if (!host || !serverKey) {
         // process.exitCode, not process.exit(2): see the create-project
         // case above for why — the writeErr call just above this needs to
@@ -207,12 +186,19 @@ async function main(): Promise<void> {
  * This only extracts the two flags that decide which server to talk to,
  * before the command's own (fuller) parse runs; a repeated flag keeps the
  * last occurrence, the same convention `parseCommandArgs` itself uses.
+ *
+ * Stops at a bare `--`, the same "everything after this is positional"
+ * convention `node:util`'s `parseArgs` (and this file's own commands, via
+ * `hasRawFlag`) honour — without this, `events --host H -- --server-key K`
+ * would have this scanner treat a deliberate positional as the real
+ * override, disagreeing with what the strict command-level parser sees.
  */
-function extractOverride(args: string[], flag: string): string | undefined {
+export function extractOverride(args: string[], flag: string): string | undefined {
   const prefix = `--${flag}=`
   let value: string | undefined
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]
+    if (arg === '--') break
     if (arg === `--${flag}`) {
       value = args[i + 1]
     } else if (arg?.startsWith(prefix)) {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import type { CommandContext } from '../../index.js'
 import type { Client } from '../client.js'
 import { ApiError } from '../client.js'
+import type { CommandContext } from '../context.js'
 import { runStats } from './stats.js'
 
 const NOW = new Date('2026-08-08T12:00:00.000Z')
@@ -23,7 +23,14 @@ function makeClient(response: unknown): { client: Client; calls: FakeCall[] } {
   return { client: client as unknown as Client, calls }
 }
 
-function makeCtx(client: Client): { ctx: CommandContext; out: string[]; errOut: string[] } {
+function epipe(): Error {
+  return Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })
+}
+
+function makeCtx(
+  client: Client,
+  overrides: Partial<CommandContext> = {},
+): { ctx: CommandContext; out: string[]; errOut: string[] } {
   const out: string[] = []
   const errOut: string[] = []
   return {
@@ -34,6 +41,7 @@ function makeCtx(client: Client): { ctx: CommandContext; out: string[]; errOut: 
       writeErr: (s) => errOut.push(s),
       now: () => NOW,
       sleep: () => Promise.resolve(),
+      ...overrides,
     },
     out,
     errOut,
@@ -126,5 +134,56 @@ describe('runStats', () => {
     const { ctx } = makeCtx(client)
     await runStats(['--interval', '1m', '--since', '30m'], ctx)
     expect(calls[0]?.query.since).toBe('2026-08-08T11:30:00.000Z')
+  })
+
+  it('rejects an inverted window (--since after --until) as a usage error, without calling the API', async () => {
+    const { client, calls } = makeClient({ buckets: [] })
+    const { ctx } = makeCtx(client)
+    const code = await runStats(
+      ['--since', '2026-08-08T11:00:00.000Z', '--until', '2026-08-08T10:00:00.000Z'],
+      ctx,
+    )
+    expect(code).toBe(2)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('rejects unexpected positional arguments as a usage error, without calling the API', async () => {
+    const { client, calls } = makeClient({ buckets: [] })
+    const { ctx } = makeCtx(client)
+    const code = await runStats(['gimme', 'everything'], ctx)
+    expect(code).toBe(2)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('honours a --json that did parse when an unrelated flag fails to, rather than defaulting from isTty', async () => {
+    const { client, calls } = makeClient({ buckets: [] })
+    const { ctx, errOut } = makeCtx(client, { isTty: true })
+    const code = await runStats(['--json', '--this-flag-does-not-exist'], ctx)
+    expect(code).toBe(2)
+    expect(calls).toHaveLength(0)
+    expect(() => JSON.parse(errOut.join(''))).not.toThrow()
+  })
+
+  it('treats a write EPIPE (a closed pipe, e.g. `| head`) as a clean stop, not a crash — exit 0', async () => {
+    const response = { buckets: [{ bucket: '2026-08-08T10:00:00.000Z', events: 3 }] }
+    const { client } = makeClient(response)
+    const { ctx } = makeCtx(client, {
+      write: () => {
+        throw epipe()
+      },
+    })
+    await expect(runStats([], ctx)).resolves.toBe(0)
+  })
+
+  it('a write error that is not EPIPE still propagates rather than being swallowed', async () => {
+    const response = { buckets: [{ bucket: '2026-08-08T10:00:00.000Z', events: 3 }] }
+    const { client } = makeClient(response)
+    const boom = new Error('disk full')
+    const { ctx } = makeCtx(client, {
+      write: () => {
+        throw boom
+      },
+    })
+    await expect(runStats([], ctx)).rejects.toBe(boom)
   })
 })

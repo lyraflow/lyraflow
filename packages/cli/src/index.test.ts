@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { Client } from './api/client.js'
 import { CLI_VERSION, OUTPUT_SCHEMA_VERSION } from './api/output.js'
-import { type CommandContext, runVersion } from './index.js'
+import { type CommandContext, extractOverride, runVersion } from './index.js'
 
 // `runVersion` itself only ever touches `write`/`isTty` — the rest of
 // `CommandContext` exists for Task 7's `events`/`stats`, but the interface
@@ -60,5 +60,39 @@ describe('runVersion', () => {
     await runVersion(['--human'], ctx)
     const text = out.join('')
     expect(text).toBe(`version: ${CLI_VERSION}  output_schema: ${OUTPUT_SCHEMA_VERSION}\n`)
+  })
+})
+
+describe('extractOverride', () => {
+  it('reads --flag value form', () => {
+    expect(extractOverride(['--host', 'https://a.test'], 'host')).toBe('https://a.test')
+  })
+
+  it('reads --flag=value form', () => {
+    expect(extractOverride(['--host=https://a.test'], 'host')).toBe('https://a.test')
+  })
+
+  it("extracts a literal empty string for --host= — it is main()'s `||`, not this function, that treats that as absent", () => {
+    // This function is a faithful extraction, nothing more: `--host=`
+    // really was passed with an empty value, so it returns `''`. The env
+    // fallback for that case lives in main() (`host || process.env...`,
+    // not `??`) precisely because this function does not — and must not —
+    // guess that an empty string means "try somewhere else".
+    expect(extractOverride(['--host='], 'host')).toBe('')
+  })
+
+  it('stops scanning at a bare `--`, agreeing with the strict parser about what is a flag', () => {
+    // `events --host H -- --server-key K`: after `--`, `--server-key` is a
+    // positional to the strict command-level parser, not the real
+    // override. This scanner must agree, or the two layers see different
+    // things for the identical argv.
+    expect(
+      extractOverride(['--host', 'H', '--', '--server-key', 'K'], 'server-key'),
+    ).toBeUndefined()
+    expect(extractOverride(['--host', 'H', '--', '--server-key', 'K'], 'host')).toBe('H')
+  })
+
+  it('keeps the last occurrence of a repeated flag, the same convention parseCommandArgs uses', () => {
+    expect(extractOverride(['--host', 'first', '--host', 'second'], 'host')).toBe('second')
   })
 })

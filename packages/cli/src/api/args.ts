@@ -247,3 +247,23 @@ export function parseCommandArgs(argv: string[], spec: ArgSpec): ParsedArgs {
     positionals: parsed.positionals,
   }
 }
+
+/**
+ * A deliberately dumb pre-scan for one boolean flag's presence, usable even
+ * when `parseCommandArgs` itself has thrown (e.g. an unrelated unknown
+ * flag) and so has no `ParsedArgs` to offer. A command's `catch` block for
+ * that failure still needs to decide human vs. json rendering for the
+ * *error* it is about to print — this is how it can honour a `--json` that
+ * DID appear in argv even though the parse as a whole failed. Stops at a
+ * bare `--` (the same "everything after this is positional" convention
+ * `node:util`'s `parseArgs` itself honours), so a positional that happens
+ * to spell `--json` after the terminator is never mistaken for the flag.
+ */
+export function hasRawFlag(argv: string[], name: string): boolean {
+  const flag = `--${name}`
+  for (const arg of argv) {
+    if (arg === '--') break
+    if (arg === flag) return true
+  }
+  return false
+}
