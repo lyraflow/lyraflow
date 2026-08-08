@@ -330,6 +330,25 @@ function parseLines(body: string): Array<Record<string, unknown>> {
     .map((l) => JSON.parse(l))
 }
 
+/**
+ * GET /v1/events over the whole fixture window. `since` is passed explicitly
+ * — the route's own default is 24h before the REQUEST's `now`, not this
+ * file's `NOW`, and every fixture event sits within 10 hours of `NOW`
+ * (T_F1, the oldest, is `hoursAgo(10)`), so a naive omission would happen to
+ * pass today but silently stop asserting anything the moment this suite's
+ * own fixture offsets grew past 24h. `hoursAgo(24)` leaves 14 hours of
+ * margin under the oldest fixture event, and `limit` covers every one of the
+ * eleven events `beforeAll` inserts with room to spare.
+ */
+function eventsFeed(query: Record<string, string>) {
+  const qs = new URLSearchParams(query).toString()
+  return app.inject({
+    method: 'GET',
+    url: `/v1/events?${qs}`,
+    headers: { 'x-lyraflow-server-key': SERVER_KEY },
+  })
+}
+
 /** The normalised shape every path's helper returns — see the file's own docstring. */
 interface Snapshot {
   personIds: Set<string>
@@ -467,11 +486,43 @@ const exportFor = async (): Promise<Snapshot> => {
   return { personIds, eventTimestamps }
 }
 
+/**
+ * The feed normalises differently from the other four paths: it has no
+ * per-id lookup, so this makes one project-wide call over the fixture
+ * window and derives both sets from whichever rows come back, rather than
+ * probing ALL_IDS/PROBES one at a time. `personIds` is each row's `user_id`
+ * (falling back to `anonymous_id`) — every fixture event carries its own
+ * `user_id` and an empty `anonymous_id` (`insertEvent`'s hard-coded ''), so
+ * this fixture never exercises the fallback for real, and never exercises
+ * identity resolution either: the feed returns each row's raw `user_id`
+ * unresolved, where the other four paths report a *resolved* person id.
+ * They agree here only because this fixture's ids never merge (see
+ * `beforeAll`'s own "identity resolution short-circuits on stage 1"
+ * comment) — a fixture with a merged device would be able to tell those
+ * apart, and this one cannot.
+ */
+const eventsFeedFor = async (): Promise<Snapshot> => {
+  const res = await eventsFeed({ since: isoStamp(hoursAgo(24)), limit: '100' })
+  expect(res.statusCode).toBe(200)
+  const body = res.json() as {
+    events: Array<{ user_id: string; anonymous_id: string; timestamp: string }>
+  }
+  const personIds = new Set<string>()
+  const eventTimestamps = new Set<number>()
+  for (const e of body.events) {
+    const id = e.user_id || e.anonymous_id
+    if (id) personIds.add(id)
+    eventTimestamps.add(new Date(e.timestamp).getTime())
+  }
+  return { personIds, eventTimestamps }
+}
+
 describe.each([
   ['segment count', countFor],
   ['segment members', membersFor],
   ['person read', personFor],
   ['export', exportFor],
+  ['events feed', eventsFeedFor],
 ] as const)('%s', (_name, run) => {
   it('hides a person whose whole history predates the boundary', async () => {
     const snap = await run()
