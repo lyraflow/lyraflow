@@ -1,7 +1,8 @@
 /** @vitest-environment happy-dom */
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   AID_COOKIE,
+  UID_COOKIE,
   loadIdentity,
   newUuid,
   probeCookieDomain,
@@ -34,6 +35,23 @@ describe('newUuid', () => {
       )
     } finally {
       globalThis.crypto.randomUUID = original
+    }
+  })
+
+  it('does not throw when the Web Crypto API is entirely missing', () => {
+    // An analytics SDK must never break the host page during init. The
+    // randomUUID-only fallback still called crypto.getRandomValues
+    // unguarded, which threw in an embedding context with no crypto API
+    // at all (not just a missing randomUUID). `globalThis.crypto` is a
+    // getter-only accessor here, so plain assignment throws — vi.stubGlobal
+    // is the supported way to override it for the duration of one test.
+    vi.stubGlobal('crypto', undefined)
+    try {
+      expect(newUuid()).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      )
+    } finally {
+      vi.unstubAllGlobals()
     }
   })
 })
@@ -86,5 +104,67 @@ describe('identity', () => {
     expect(after.anonymousId).not.toBe(before.anonymousId)
     expect(after.userId).toBeUndefined()
     expect(loadIdentity({}).userId).toBeUndefined()
+  })
+
+  it('treats a present-but-empty anonymous id cookie as absent, not as a real id', () => {
+    // A cookie can end up present with an empty value for reasons that have
+    // nothing to do with this SDK — a proxy or extension rewriting it, a
+    // deletion elsewhere that only blanked rather than removed it. Adopting
+    // '' as the anonymous id would silently persist a non-UUID id forever
+    // once loadIdentity rewrites the cookie below. This pins that specific
+    // failure mode directly (`document.cookie` is set by hand here, not
+    // produced through this module), independent of how deletion behaves.
+    document.cookie = `${AID_COOKIE}=; Path=/`
+    expect(loadIdentity({}).anonymousId).toMatch(/^[0-9a-f-]{36}$/)
+  })
+
+  it('actually removes the user cookie on reset, not just blanks it', () => {
+    // Pins deletion as real removal, independent of loadIdentity's handling
+    // of a blank cookie above — reverting either fix alone must redden
+    // exactly one of these two tests, not both or neither.
+    loadIdentity({})
+    setUserId('user-42', {})
+    resetIdentity({})
+    expect(document.cookie).not.toMatch(new RegExp(UID_COOKIE))
+  })
+
+  it('refreshes the anonymous id cookie on every load, not only when minted', () => {
+    // Decision: this cookie's whole purpose is long-lived identity, so its
+    // two-year window should run from the visitor's most recent visit, not
+    // their first — otherwise a daily visitor still ages out on day 731.
+    //
+    // vi.spyOn(document, 'cookie', 'set') isn't usable here: happy-dom's
+    // get/set pair lives on its internal Document class, several levels up
+    // the prototype chain from `document` itself, not as an own property —
+    // spying only the setter there silently drops the getter, so
+    // readCookie's `doc.cookie.split(...)` blows up on `undefined`. Walking
+    // to the actual owner and wrapping both accessors keeps both live.
+    let proto: object | null = document
+    while (proto && !Object.getOwnPropertyDescriptor(proto, 'cookie')) {
+      proto = Object.getPrototypeOf(proto)
+    }
+    const original = proto && Object.getOwnPropertyDescriptor(proto, 'cookie')
+    const originalGet = original?.get
+    const originalSet = original?.set
+    if (!proto || !original || !originalGet || !originalSet)
+      throw new Error('could not locate the cookie accessor')
+    let setCount = 0
+    Object.defineProperty(proto, 'cookie', {
+      configurable: true,
+      get(this: Document) {
+        return originalGet.call(this)
+      },
+      set(this: Document, value: string) {
+        setCount += 1
+        originalSet.call(this, value)
+      },
+    })
+    try {
+      loadIdentity({})
+      loadIdentity({})
+      expect(setCount).toBeGreaterThan(0)
+    } finally {
+      Object.defineProperty(proto, 'cookie', original)
+    }
   })
 })

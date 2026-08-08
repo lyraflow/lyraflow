@@ -12,7 +12,16 @@ export function newUuid(): string {
   const c = globalThis.crypto
   if (typeof c?.randomUUID === 'function') return c.randomUUID()
   const bytes = new Uint8Array(16)
-  c.getRandomValues(bytes)
+  if (typeof c?.getRandomValues === 'function') {
+    c.getRandomValues(bytes)
+  } else {
+    // No Web Crypto API at all — not even getRandomValues. An analytics SDK
+    // must never throw during init and break the host page, so this still
+    // has to produce a v4-shaped id. Math.random is weaker, but the ingest
+    // server only checks shape, and this path is for an embedding context
+    // with no crypto API, not the common case.
+    for (let i = 0; i < bytes.length; i += 1) bytes[i] = Math.floor(Math.random() * 256)
+  }
   // Set the version (4) and variant (10xx) bits the format requires.
   bytes[6] = ((bytes[6] as number) & 0x0f) | 0x40
   bytes[8] = ((bytes[8] as number) & 0x3f) | 0x80
@@ -88,7 +97,16 @@ export function loadIdentity(opts: { cookieDomain?: string }): Identity {
   // a real anonymous id — it isn't UUID-shaped, and it would silently persist
   // forever once rewritten below.
   const anonymousId = existing || newUuid()
-  if (!existing) writeCookie(AID_COOKIE, anonymousId, domainFor(opts), document)
+  // Written on every load, not only when minted. This cookie's entire job is
+  // long-lived identity, so its two-year window should measure from the
+  // visitor's most recent visit, not their first — otherwise a daily visitor
+  // still drops off the far end of the window on day 731. The cost is one
+  // extra cookie write per page load; that's a deliberate trade, not an
+  // oversight. (Caller's note: `domainFor` re-probes on every call unless
+  // `opts.cookieDomain` is supplied — a caller that loads identity on every
+  // page should probe once and pass the result back in, not rely on this
+  // function to cache it.)
+  writeCookie(AID_COOKIE, anonymousId, domainFor(opts), document)
   const uid = readCookie(UID_COOKIE, document)
   return { anonymousId, userId: uid || undefined }
 }
