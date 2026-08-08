@@ -14,6 +14,7 @@ import { hashServerKey } from '../auth/project-cache.js'
 import { loadConfig } from '../config.js'
 import { Readiness } from '../health.js'
 import { type PgDictionarySource, ensureIdentityDictionaries } from '../identity/dictionaries.js'
+import { type PersonDeps, registerPersonRoutes } from '../identity/person.js'
 import { MAX_PERSON_RANGE_CLAUSES } from '../identity/scope.js'
 import { registerExportRoute } from './export.js'
 import type { PrivacyDeps } from './routes.js'
@@ -698,6 +699,119 @@ describe('GET /v1/persons/:id/export (mocked ClickHouse): mid-stream failure', (
     // The terminator is the caller's signal that the export is complete —
     // its absence here is the entire point of this test.
     expect(lines.some((l) => l.type === 'end')).toBe(false)
+
+    await mockedApp.close()
+  })
+})
+
+/**
+ * The export's own summary query must NOT run under the interactive 30s
+ * default GET /v1/persons/:id and the deletion route's existence check
+ * keep — it is the first query a subject-access request issues, over
+ * potentially this person's entire history, and it runs BEFORE the
+ * response commits (see personEventSummary's own docstring, scope.ts).
+ *
+ * Registers BOTH routes against ONE fake ClickHouse client so the same
+ * `personEventSummary` call site (`count(DISTINCT event_id)`, the query's
+ * own fingerprint) can be captured from two different callers and compared
+ * directly, rather than trusting each route's behaviour in isolation.
+ *
+ * The expected values (30, 300) are written as LITERALS, not imported from
+ * `identity/scope.ts` or `privacy/export.ts` — the modules under test. An
+ * assertion built from the same constant the implementation uses cannot
+ * fail when that constant changes; both sides would move together and the
+ * test would keep passing while proving nothing. Literals are the only
+ * form of this assertion that can actually catch a regression.
+ */
+describe('ClickHouse execution-time ceiling: personEventSummary override', () => {
+  it("uses the export's longer ceiling for its summary query, and the person read's shorter default for its own", async () => {
+    const summaryExecutionTimes: unknown[] = []
+    const fakeCh = {
+      query: async (opts: { query: string; clickhouse_settings?: Record<string, unknown> }) => {
+        if (opts.query.includes('count(DISTINCT event_id)')) {
+          summaryExecutionTimes.push(opts.clickhouse_settings?.max_execution_time)
+          return {
+            json: async () => [
+              {
+                first_seen: '2026-01-01 00:00:00.000',
+                last_seen: '2026-01-01 00:00:00.000',
+                events: '1',
+              },
+            ],
+          }
+        }
+        if (opts.query.includes('FROM person_traits')) {
+          return { json: async () => [] }
+        }
+        // The export's per-event query — irrelevant to this test, answered
+        // with no rows so the stream ends quickly.
+        return {
+          stream: () => {
+            async function* rows() {}
+            return rows()
+          },
+        }
+      },
+    } as unknown as ClickHouseClient
+
+    const fakeProjects = {
+      byServerKey: async (key: string) =>
+        key === 'sk_fake_ceiling'
+          ? { id: 1, slug: 'fake', retentionMonths: 1, monthlyEventQuota: 1 }
+          : null,
+    } as unknown as PrivacyDeps['projects'] & PersonDeps['projects']
+    const fakeBindings = {
+      devicesForAny: async () => [],
+      mostRecentPersonFor: async () => null,
+      bindEventsForDevices: async () => new Map(),
+    } as unknown as PrivacyDeps['bindings'] & PersonDeps['bindings']
+    const fakeAliases = {
+      canonicalFor: async (_p: number, id: string) => id,
+      mergedFrom: async () => [],
+    } as unknown as PrivacyDeps['aliases'] & PersonDeps['aliases']
+    // Non-null: skips the export's traits query, which this test has no
+    // opinion on.
+    const fakeSuppression = {
+      boundaryFor: async () => new Date('2026-01-01T00:00:00.000Z'),
+    } as unknown as PrivacyDeps['suppression']
+
+    const readiness = new Readiness()
+    readiness.markReady()
+    const mockedApp = Fastify()
+    registerPersonRoutes(mockedApp, {
+      projects: fakeProjects,
+      readiness,
+      ch: fakeCh,
+      bindings: fakeBindings,
+      aliases: fakeAliases,
+      suppression: fakeSuppression,
+    })
+    registerExportRoute(mockedApp, {
+      projects: fakeProjects,
+      readiness,
+      ch: fakeCh,
+      bindings: fakeBindings,
+      aliases: fakeAliases,
+      suppression: fakeSuppression,
+    } as unknown as PrivacyDeps)
+
+    const readRes = await mockedApp.inject({
+      method: 'GET',
+      url: '/v1/persons/ceiling-user',
+      headers: { 'x-lyraflow-server-key': 'sk_fake_ceiling' },
+    })
+    expect(readRes.statusCode).toBe(200)
+
+    const exportRes = await mockedApp.inject({
+      method: 'GET',
+      url: '/v1/persons/ceiling-user/export',
+      headers: { 'x-lyraflow-server-key': 'sk_fake_ceiling' },
+    })
+    expect(exportRes.statusCode).toBe(200)
+
+    // One summary call per request, captured in call order: the person
+    // read first, the export second.
+    expect(summaryExecutionTimes).toEqual([30, 300])
 
     await mockedApp.close()
   })

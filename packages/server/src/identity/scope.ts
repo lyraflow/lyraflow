@@ -312,12 +312,26 @@ export interface PersonEventSummary {
  * chunks a single person's windows across several calls (the deletion
  * route's existence check) still passes a distinct prefix per chunk, so
  * that never becomes true by accident later.
+ *
+ * `opts.maxExecutionSeconds` overrides the default execution-time ceiling
+ * (`SEGMENT_MAX_EXECUTION_SECONDS`, 30s) without touching the memory
+ * ceiling, which stays shared. 30s is right for the person read and the
+ * deletion route's existence check — both interactive, both answered to a
+ * human or a script waiting synchronously. It is not right for the export
+ * route: this is the FIRST query a subject-access request runs, over
+ * potentially this person's ENTIRE history, and unlike the per-event query
+ * that streams afterward, a timeout here happens BEFORE the response
+ * commits — it surfaces as a `503` through app.ts's generic error handler,
+ * not as the silent, no-`end`-line truncation the streamed half of the
+ * export produces. The export passes its own, longer ceiling
+ * (`EXPORT_MAX_EXECUTION_SECONDS`) here for exactly that reason; the other
+ * two callers pass nothing and keep the interactive default.
  */
 export async function personEventSummary(
   ch: ClickHouseClient,
   projectId: number,
   scope: Pick<PersonScope, 'group' | 'windows'>,
-  opts: { after?: Date; prefix?: string } = {},
+  opts: { after?: Date; prefix?: string; maxExecutionSeconds?: number } = {},
 ): Promise<PersonEventSummary> {
   const prefix = opts.prefix ?? ''
   const params: Record<string, unknown> = { [`${prefix}projectId`]: projectId }
@@ -345,9 +359,11 @@ export async function personEventSummary(
     // check, and the export route), all reachable by an authenticated
     // caller on repeat, none of them otherwise bounded — segments/execute.ts
     // ceilings reused rather than a fourth pair of magic numbers, since this
-    // is now the most-shared query in the identity/privacy subsystem.
+    // is now the most-shared query in the identity/privacy subsystem. Time
+    // is overridable per opts.maxExecutionSeconds's own docstring above;
+    // memory is not — nothing here has a reason to raise it per caller.
     clickhouse_settings: {
-      max_execution_time: SEGMENT_MAX_EXECUTION_SECONDS,
+      max_execution_time: opts.maxExecutionSeconds ?? SEGMENT_MAX_EXECUTION_SECONDS,
       max_memory_usage: String(SEGMENT_MAX_MEMORY_BYTES),
       timeout_overflow_mode: 'throw',
     },

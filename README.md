@@ -802,16 +802,27 @@ past 200 device windows the export answers `400`
 most fragmented people, refusing to *render* an export for them is an
 acceptable answer — nothing about their data goes unerased because of it.
 
-Every query behind this endpoint runs under a ceiling — 300 seconds and 4
-GiB, the same memory ceiling segment queries use. For almost every person
-this is invisible; for someone with an exceptionally large recorded history,
-hitting either ceiling mid-export is expected behaviour, not a bug, and it
-looks exactly like the mid-stream failure above: the response ends without
-its final `end` line. The discard rule already covers it — a response
-missing `end` is always incomplete, whatever the underlying cause — but if
-you self-host and export is being cut short for one particular person, an
-unusually large history hitting these ceilings is the first thing to check
-before assuming something is broken.
+Every query behind this endpoint runs under a ceiling — 300 seconds and the
+same 4 GiB memory ceiling segment queries use. For almost every person this
+is invisible; for someone with an exceptionally large recorded history,
+hitting one is expected behaviour, not a bug, but which one you hit produces
+a different, distinguishable symptom, and it matters which:
+
+- The **summary** query and, when it runs, the **traits** lookup both
+  execute *before* the response is sent at all. If either one hits a
+  ceiling, the export never starts: you get a `503` — the same generic
+  failure response every other endpoint gives an internal error, with
+  `retry-after` set.
+- The **per-event** query streams *after* the response has already started.
+  If it hits a ceiling partway through, the export cannot become an HTTP
+  error any more — the stream simply ends, without its final `end` line,
+  exactly like any other mid-stream failure above. This is the only one of
+  the three the discard rule was written for.
+
+If you self-host and an export is being cut short for one particular
+person, an unusually large history hitting one of these ceilings is the
+first thing to check: a `503` means it never started, a response missing
+`end` means it started and was cut short — before assuming either is a bug.
 
 `401` for a missing or invalid server key.
 

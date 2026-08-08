@@ -193,8 +193,17 @@ export function registerExportRoute(app: FastifyInstance, deps: PrivacyDeps): vo
     // and the deletion route's existence check use — never a third
     // hand-rolled copy of it (see scope.ts's own docstring for why that
     // convergence matters).
+    //
+    // maxExecutionSeconds is this route's own EXPORT_MAX_EXECUTION_SECONDS,
+    // not the interactive 30s default the other two callers keep: this is
+    // the first query a subject-access request runs, over potentially this
+    // person's entire history, and — unlike the per-event query below —
+    // it runs BEFORE the response commits, so timing it out too early would
+    // trade a real answer for an early, avoidable 503 on exactly the large
+    // histories this endpoint most needs to finish for.
     const totals = await personEventSummary(ch, project.id, scope, {
       after: boundary ?? undefined,
+      maxExecutionSeconds: EXPORT_MAX_EXECUTION_SECONDS,
     })
     if (totals.events === 0) {
       return reply.code(404).send({ error: 'person_not_found' })
