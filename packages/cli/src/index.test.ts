@@ -1,10 +1,27 @@
 import { describe, expect, it } from 'vitest'
+import type { Client } from './api/client.js'
 import { CLI_VERSION, OUTPUT_SCHEMA_VERSION } from './api/output.js'
 import { type CommandContext, runVersion } from './index.js'
 
+// `runVersion` itself only ever touches `write`/`isTty` — the rest of
+// `CommandContext` exists for Task 7's `events`/`stats`, but the interface
+// is shared, so a test context still has to satisfy all of it. `client` is
+// never called here, so an unused fake stands in rather than a real one.
 function makeCtx(isTty: boolean): { ctx: CommandContext; out: string[] } {
   const out: string[] = []
-  return { ctx: { write: (s) => out.push(s), isTty }, out }
+  return {
+    ctx: {
+      client: {} as Client,
+      write: (s) => out.push(s),
+      writeErr: () => {
+        throw new Error('runVersion should never write to stderr')
+      },
+      isTty,
+      now: () => new Date('2026-08-08T12:00:00.000Z'),
+      sleep: () => Promise.resolve(),
+    },
+    out,
+  }
 }
 
 describe('runVersion', () => {

@@ -3,8 +3,17 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { SCHEMA_VERSION } from '@lyraflow/core'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
-import { parseCommandArgs } from './api/args.js'
-import { CLI_VERSION, OUTPUT_SCHEMA_VERSION, emitObject, resolveMode } from './api/output.js'
+import { UsageError, parseCommandArgs } from './api/args.js'
+import { Client } from './api/client.js'
+import { runEvents } from './api/commands/events.js'
+import { runStats } from './api/commands/stats.js'
+import {
+  CLI_VERSION,
+  OUTPUT_SCHEMA_VERSION,
+  emitError,
+  emitObject,
+  resolveMode,
+} from './api/output.js'
 import { ProjectExistsError, createProject } from './create-project.js'
 
 function env(key: string): string {
@@ -26,21 +35,34 @@ function clients() {
 }
 
 /**
- * What a command handler needs from the outside world, kept deliberately
- * small — this task only needs `write` and `isTty` for `runVersion`. Task 7
- * (wiring the read/privacy commands) extends this rather than replacing it;
- * see the CLI task 6 report for the reasoning.
+ * What a command handler needs from the outside world. Task 6 defined the
+ * `write`/`isTty` pair for `runVersion`, which needs nothing else; Task 7
+ * (`events`/`stats`) extends it rather than declaring a second context,
+ * so `runVersion`'s existing call sites keep compiling unchanged.
  */
 export interface CommandContext {
-  /** Where output goes. Never `console.log`/`console.error` directly from a
-   * command handler — writing through this is what lets a test capture
-   * output without touching real stdout, and what would let a future
-   * caller redirect it (e.g. to stderr for an error path) in one place. */
-  write: (s: string) => void
+  /** The configured API client — `events`/`stats` compose on this rather
+   * than calling `fetch` themselves. Unused by `runVersion`, which talks
+   * to nothing over the network. */
+  client: Client
   /** Whether the destination is a real terminal — `resolveMode`'s second
    * argument, threaded through here so a test can fake it without a real
    * TTY. */
   isTty: boolean
+  /** Where normal output goes. Never `console.log`/`console.error` directly
+   * from a command handler — writing through this is what lets a test
+   * capture output without touching real stdout. */
+  write: (s: string) => void
+  /** Where error output goes — kept separate from `write` so an error line
+   * never lands mixed into a stream of otherwise-valid NDJSON records. */
+  writeErr: (s: string) => void
+  /** The current time, as the command should see it. Injected so a test can
+   * fix "now" rather than racing the real clock — `--since`'s relative
+   * defaults (e.g. "the last 15 minutes") are resolved against this. */
+  now: () => Date
+  /** Injected so `--follow` can be tested without real time passing; also
+   * the hook a real dispatch would wire to cancellation (e.g. SIGINT). */
+  sleep: (ms: number) => Promise<void>
 }
 
 /**
@@ -62,9 +84,18 @@ async function main(): Promise<void> {
 
   switch (command) {
     case '--version': {
+      // `runVersion` never touches `client`/`writeErr`/`now`/`sleep` — the
+      // client is built with placeholder config purely to satisfy the
+      // shared `CommandContext` shape; constructing a `Client` does no I/O
+      // and never validates its config (see client.ts), so this is safe
+      // even with no real host/key configured.
       await runVersion(args, {
+        client: new Client({ host: '', serverKey: '' }),
         write: (s) => process.stdout.write(s),
+        writeErr: (s) => process.stderr.write(s),
         isTty: process.stdout.isTTY ?? false,
+        now: () => new Date(),
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
       })
       break
     }
@@ -122,10 +153,73 @@ async function main(): Promise<void> {
       break
     }
 
+    case 'events':
+    case 'stats': {
+      const isTty = process.stdout.isTTY ?? false
+      const write = (s: string) => {
+        process.stdout.write(s)
+      }
+      const writeErr = (s: string) => {
+        process.stderr.write(s)
+      }
+
+      const host = extractOverride(args, 'host') ?? process.env.LYRAFLOW_HOST
+      const serverKey = extractOverride(args, 'server-key') ?? process.env.LYRAFLOW_SERVER_KEY
+      if (!host || !serverKey) {
+        // process.exitCode, not process.exit(2): see the create-project
+        // case above for why — the writeErr call just above this needs to
+        // actually flush before the process ends.
+        emitError(
+          new UsageError(
+            'LYRAFLOW_HOST and LYRAFLOW_SERVER_KEY must be set (or pass --host/--server-key)',
+          ),
+          resolveMode({}, isTty),
+          writeErr,
+        )
+        process.exitCode = 2
+        break
+      }
+
+      const ctx: CommandContext = {
+        client: new Client({ host, serverKey }),
+        isTty,
+        write,
+        writeErr,
+        now: () => new Date(),
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      }
+      process.exitCode =
+        command === 'events' ? await runEvents(args, ctx) : await runStats(args, ctx)
+      break
+    }
+
     default:
-      console.error('Usage: lyraflow <--version|migrate|create-project|healthcheck>')
+      console.error('Usage: lyraflow <--version|migrate|create-project|healthcheck|events|stats>')
       process.exit(2)
   }
+}
+
+/**
+ * A deliberately small, hand-rolled scan for `--host`/`--server-key` —
+ * NOT `parseCommandArgs`, because that runs in `strict` mode and would
+ * reject every other flag a specific command accepts (`--since`,
+ * `--follow`, ...) that this dispatch layer has no reason to know about.
+ * This only extracts the two flags that decide which server to talk to,
+ * before the command's own (fuller) parse runs; a repeated flag keeps the
+ * last occurrence, the same convention `parseCommandArgs` itself uses.
+ */
+function extractOverride(args: string[], flag: string): string | undefined {
+  const prefix = `--${flag}=`
+  let value: string | undefined
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]
+    if (arg === `--${flag}`) {
+      value = args[i + 1]
+    } else if (arg?.startsWith(prefix)) {
+      value = arg.slice(prefix.length)
+    }
+  }
+  return value
 }
 
 // Runs `main()` only when this file is the process entry point (`node
