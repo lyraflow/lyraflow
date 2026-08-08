@@ -6,6 +6,7 @@ import { type Readiness, registerHealth } from './health.js'
 import { PersonAliases } from './identity/aliases.js'
 import { IdentityBindings } from './identity/bindings.js'
 import { registerPersonRoutes } from './identity/person.js'
+import { resolvePersonScope } from './identity/scope.js'
 import { IngestBuffer } from './ingest/buffer.js'
 import { IngestCounters } from './ingest/counters.js'
 import { NullGeoResolver } from './ingest/geo.js'
@@ -13,7 +14,14 @@ import { CardinalityTracker } from './ingest/limits.js'
 import { registerIngestRoutes } from './ingest/routes.js'
 import type { EventRow } from './ingest/row.js'
 import { registerMetrics } from './metrics.js'
+import { DeletionStore } from './privacy/deletion-store.js'
+import { registerExportRoute } from './privacy/export.js'
+import { purgePerson } from './privacy/purge.js'
+import { registerPrivacyRoutes } from './privacy/routes.js'
+import { SuppressionStore } from './privacy/suppression-store.js'
+import { PurgeWorker } from './privacy/worker.js'
 import { registerSchemaRoutes } from './schema/routes.js'
+import { SegmentCache } from './segments/cache.js'
 import { registerSegmentRoutes } from './segments/routes.js'
 
 export interface AppDeps {
@@ -23,6 +31,15 @@ export interface AppDeps {
   readiness: Readiness
   buffer: IngestBuffer<EventRow>
   counters: IngestCounters
+  purge: PurgeWorker
+  /**
+   * Exposed for the same reason `buffer`/`counters`/`purge` already are:
+   * tests need to reach the EXACT instance the routes share, not a
+   * lookalike constructed separately — see privacy/routes.test.ts's
+   * "still returns 202 when the cache invalidation fails" for a spy that
+   * depends on this being the real, shared object.
+   */
+  segmentCache: SegmentCache
 }
 
 export function buildApp(input: {
@@ -79,7 +96,47 @@ export function buildApp(input: {
     app.log.error({ err, failed }, 'ingest counters flush failed'),
   )
 
-  app.decorate('deps', { config, pg, ch, readiness, buffer, counters } satisfies AppDeps)
+  // Shared across every registration below, not one instance per
+  // registration: registerPersonRoutes's reads must see the same
+  // authoritative state (and the same ProjectCache) the write path just
+  // wrote through, and constructing a second ProjectCache would also double
+  // the Postgres load an identical key lookup produces. Same reasoning is
+  // why there is exactly one SuppressionStore/DeletionStore/PurgeWorker: the
+  // worker's reads and the routes' writes have to see each other's effects
+  // immediately, and a second ProjectCache-shaped duplicate would double the
+  // Postgres load an identical lookup produces.
+  const projects = new ProjectCache(pg, 60_000)
+  const bindings = new IdentityBindings(pg)
+  const aliases = new PersonAliases(pg)
+  const suppression = new SuppressionStore(pg)
+  const deletions = new DeletionStore(pg, suppression)
+  // Shared with the privacy routes for the same reason: DELETE
+  // /v1/persons/:id must invalidate the SAME cache a preview request can hit
+  // within its 30s TTL, or a suppressed person's row can be served back out
+  // of a cache that has never heard the deletion happened (see
+  // segments/cache.ts's clearProject and privacy/routes.ts's own call to it).
+  const segmentCache = new SegmentCache()
+  const purge = new PurgeWorker({
+    deletions,
+    resolve: (projectId, personId, restrictTo) =>
+      resolvePersonScope({ bindings, aliases }, projectId, personId, restrictTo),
+    purge: (projectId, scope) => purgePerson({ ch, pg, projectId, scope }),
+    intervalMs: config.purgeIntervalMs,
+    leaseMs: config.purgeLeaseMs,
+    maxAttempts: config.purgeMaxAttempts,
+    onError: (err, ctx) => app.log.error({ err, ...ctx }, 'purge failed'),
+  })
+
+  app.decorate('deps', {
+    config,
+    pg,
+    ch,
+    readiness,
+    buffer,
+    counters,
+    purge,
+    segmentCache,
+  } satisfies AppDeps)
   registerHealth(app, readiness)
   // Sourced from IngestCounters, not an onResponse hook counting HTTP
   // responses: /v1/batch answers with a single response for up to 500
@@ -91,14 +148,6 @@ export function buildApp(input: {
     bufferDepth: () => buffer.depth,
     totals: () => counters.totals(),
   })
-  // Shared across both route registrations below, not one instance per
-  // registration: registerPersonRoutes's reads must see the same
-  // authoritative state (and the same ProjectCache) the write path just
-  // wrote through, and constructing a second ProjectCache would also double
-  // the Postgres load an identical key lookup produces.
-  const projects = new ProjectCache(pg, 60_000)
-  const bindings = new IdentityBindings(pg)
-  const aliases = new PersonAliases(pg)
 
   registerIngestRoutes(app, {
     buffer,
@@ -111,10 +160,46 @@ export function buildApp(input: {
     bindings,
     aliases,
   })
-  registerPersonRoutes(app, { projects, readiness, ch, bindings, aliases })
-  registerSegmentRoutes(app, { projects, readiness, ch, pg, database: config.ch.database })
+  registerPersonRoutes(app, { projects, readiness, ch, bindings, aliases, suppression })
+  registerSegmentRoutes(app, {
+    projects,
+    readiness,
+    ch,
+    pg,
+    database: config.ch.database,
+    cache: segmentCache,
+  })
   registerSchemaRoutes(app, { projects, readiness, ch })
+  // One shared object, not one built per registration: registerExportRoute
+  // takes the exact same PrivacyDeps registerPrivacyRoutes does (export.ts's
+  // own docstring), and constructing a second literal here is exactly the
+  // "define a second deps object" that invites the two to drift apart.
+  // maxAttempts/leaseMs are the SAME configured values the PurgeWorker above
+  // was built with — the status endpoint (routes.ts) uses them to decide
+  // "failed" vs "in_progress", and a value that drifted from the worker's
+  // own would make that endpoint lie about state the worker itself defines.
+  const privacyDeps = {
+    projects,
+    readiness,
+    pg,
+    ch,
+    bindings,
+    aliases,
+    deletions,
+    suppression,
+    segmentCache,
+    maxAttempts: config.purgeMaxAttempts,
+    leaseMs: config.purgeLeaseMs,
+  }
+  registerPrivacyRoutes(app, privacyDeps)
+  registerExportRoute(app, privacyDeps)
 
+  // Deliberately NOT started here: every route test in this codebase calls
+  // buildApp, and a live timer claiming real deletion requests during
+  // unrelated tests is exactly the cross-file interference the
+  // shared-database rule exists to prevent (see purge/worker.test.ts and
+  // this file's own callers). index.ts starts it, once boot has actually
+  // succeeded.
   return app
 }
 

@@ -1,0 +1,49 @@
+-- 009_deletion_request_ids: pin a deletion request to the id set that was
+-- resolved when it was accepted, so the purge can NARROW but never WIDEN.
+--
+-- 008 records only `person_id`, the canonical resolved at request time, and
+-- the purge worker deliberately re-resolves the full scope from that id at
+-- purge time (Postgres directly, never the lagging ClickHouse dictionaries —
+-- a device bound moments before the request must still be erased). Both of
+-- those are correct on their own, and together they were a hole: `/v1/alias`
+-- landing between the `202` and the purge CHANGES the id graph the worker
+-- re-resolves from. `PersonAliases.alias` repoints the whole from-group at
+-- the to-canonical, so after a merge `resolvePersonScope(deletedId)` returns
+-- the OTHER person's group, devices and windows — and the purge erases all of
+-- it: their events, device_index, person_traits, dead-letter rows and
+-- identity graph, with no suppression row recording it and the status
+-- endpoint reporting `completed`.
+--
+-- BOTH merge directions do it, which is why the cheap guard is not enough:
+-- refusing when `canonicalFor(person_id) <> person_id` catches the deleted
+-- person being merged INTO someone else, but merging a live person INTO the
+-- deleted one leaves the canonical unchanged while `mergedFrom` pulls the
+-- live person's ids into the group.
+--
+-- So the id set is recorded here, at request time, and the freshly-resolved
+-- group is INTERSECTED against it before anything is deleted. Devices and
+-- windows are then derived from the RESTRICTED group (identity/scope.ts's
+-- `restrictTo`), not filtered afterwards — that ordering is what keeps a
+-- device legitimately bound to the same person after the `202` in scope while
+-- making it impossible for another person's device to enter it.
+--
+-- Same set as the `suppressed_persons` rows the same transaction fans out
+-- (`DeletionStore.request`): the canonical, every id merged into it, and every
+-- device — `PersonScope.ids`.
+--
+-- THE EMPTY ARRAY MEANS "NO RESTRICTION", AND THAT IS A DECISION, NOT A
+-- FALLBACK. Every row written before this migration gets `'{}'` from the
+-- DEFAULT, and those are real in-flight requests: an operator upgrading with a
+-- queued, not-yet-purged deletion must still get that deletion carried out.
+-- Treating empty as "restrict to nothing" would intersect their group down to
+-- nothing and silently complete a purge that erased NOTHING — a deletion
+-- reported as done and never performed, which is the worse failure of the two
+-- by a wide margin (a compliance claim that is false, versus a hole that needs
+-- a merge landing inside a ~15s window to trigger). So empty means unrestricted,
+-- preserving exactly today's behaviour for the handful of requests that can
+-- carry it. Every row written from now on is non-empty by construction:
+-- `DeletionStore.request` requires `personId` to be a member of `ids`, so the
+-- set can never be empty for a request this version accepts. The window in
+-- which an empty array can exist at all is therefore one upgrade long.
+ALTER TABLE deletion_requests
+  ADD COLUMN IF NOT EXISTS person_ids text[] NOT NULL DEFAULT '{}';

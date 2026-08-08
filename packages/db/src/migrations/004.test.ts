@@ -30,6 +30,15 @@ beforeAll(async () => {
   for (const t of ['person_traits_str_mv', 'person_traits_num_mv', 'person_traits']) {
     await ch.command({ query: `DROP TABLE IF EXISTS ${t}` })
   }
+  // suppressed_persons_dict_src is the one Postgres object that is NOT
+  // safely replayable by "IF NOT EXISTS" alone: 008_deletion_requests.sql
+  // widens it with `CREATE OR REPLACE VIEW`, which Postgres refuses once the
+  // live view already carries the extra column ("cannot drop columns from
+  // view") — exactly the state an earlier full replay in this same,
+  // fileParallelism-false suite can leave it in. Dropped here so 005's
+  // original, unmodified 3-column definition always has a clean slate to
+  // replay against.
+  await pg.query('DROP VIEW IF EXISTS suppressed_persons_dict_src')
   await pg.query('DROP TABLE IF EXISTS schema_migrations')
   await migrate({
     pg,

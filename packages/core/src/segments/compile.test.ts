@@ -26,6 +26,24 @@ describe('compileSegment', () => {
     expect(compile(trait).sql).toContain('suppressed_persons')
   })
 
+  it('scopes the base population to the suppression boundary, not presence alone', () => {
+    const compiled = compileSegment({
+      query: { ast_version: 1, filter: trait } as SegmentQuery,
+      projectId: 7,
+      database: 'lyraflow',
+      now: new Date('2026-08-07T00:00:00.000Z'),
+    })
+    // The person survives if they have activity AFTER the boundary. Asserting
+    // only that "dictHas" appears would pass for the old permanent-suppression
+    // predicate too, which is exactly what this change replaces.
+    expect(compiled.sql).toContain("last_seen <= dictGetOrDefault('lyraflow.suppressed_persons'")
+    // The OLD predicate, gone: `dictHas(...) = 0`. Matched narrowly rather than
+    // as a bare `= 0`, which appears legitimately elsewhere in a compiled tree
+    // (a numeric trait predicate, `has_num` checks) and would make this
+    // assertion fail for reasons unrelated to suppression.
+    expect(compiled.sql).not.toMatch(/dictHas\('lyraflow\.suppressed_persons'[^)]*\)\)\s*= 0/)
+  })
+
   it('injects project_id as a bound parameter and never from the tree', () => {
     const { sql, params } = compile(trait)
     expect(sql).not.toMatch(/project_id = 42/)
@@ -189,7 +207,13 @@ describe('compileSegment', () => {
   })
 
   it('emits no cursor predicate on the first page', () => {
-    expect(members(trait).sql).not.toContain('last_seen <')
+    // Not a bare `.not.toContain('last_seen <')`: the suppression predicate
+    // now reads `last_seen <= dictGetOrDefault(...)`, and `<=` starts with
+    // `<`, so that substring is present on every compiled query regardless
+    // of cursor. Anchored to the cursor predicate's own shape instead —
+    // `last_seen < {` followed by a bound parameter — which suppression's
+    // `<=` never produces.
+    expect(members(trait).sql).not.toMatch(/last_seen < \{/)
   })
 
   it('still counts when select is omitted', () => {
@@ -214,6 +238,8 @@ describe('compileSegment', () => {
       },
     })
     expect(sql).toContain('SELECT count()')
-    expect(sql).not.toContain('last_seen <')
+    // See "emits no cursor predicate on the first page" for why this is a
+    // regex anchored to the cursor shape rather than a bare substring check.
+    expect(sql).not.toMatch(/last_seen < \{/)
   })
 })

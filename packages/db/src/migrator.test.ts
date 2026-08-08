@@ -150,6 +150,16 @@ describe('migrate', () => {
   // would be left dropped for whichever test file vitest runs next in the
   // shared, `fileParallelism: false` suite (see the Task 6 review fix).
   beforeEach(async () => {
+    // suppressed_persons_dict_src is not safely replayable by "IF NOT
+    // EXISTS" alone: 008_deletion_requests.sql widens it with `CREATE OR
+    // REPLACE VIEW`, which Postgres refuses once the live view already
+    // carries the extra column ("cannot drop columns from view"). Dropping
+    // schema_migrations here (for these fixture-only migrations) leaves the
+    // REAL ledger looking incomplete for whichever test file vitest runs
+    // next (see the comment above) — that file's full replay of the real
+    // migrations then re-runs 005's original 3-column definition, which
+    // fails unless the view is also clean. Dropped here so it always is.
+    await pg.query('DROP VIEW IF EXISTS suppressed_persons_dict_src')
     await pg.query('DROP TABLE IF EXISTS widgets, schema_migrations')
     await ch.command({ query: 'DROP TABLE IF EXISTS gadgets' })
   })

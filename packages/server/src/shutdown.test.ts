@@ -16,8 +16,9 @@ function harness(insert: (rows: unknown[]) => Promise<void>) {
     insert: insert as (rows: { n: number }[]) => Promise<void>,
   })
   const counters = { flush: vi.fn(async () => {}) } as unknown as IngestCounters
+  const purge = { stop: vi.fn() }
   const app = Fastify()
-  return { readiness, buffer, counters, app }
+  return { readiness, buffer, counters, purge, app }
 }
 
 // installShutdownHandlers only calls buffer.add()/drain() generically — it
@@ -42,6 +43,7 @@ describe('installShutdownHandlers', () => {
       readiness: h.readiness,
       buffer: asEventBuffer(h.buffer),
       counters: h.counters,
+      purge: h.purge,
       drainDeadlineMs: 5000,
       onExit: () => {},
     })
@@ -52,6 +54,54 @@ describe('installShutdownHandlers', () => {
     expect(h.readiness.draining).toBe(true)
     expect(inserted.flat()).toHaveLength(1)
     expect(h.counters.flush).toHaveBeenCalled()
+    expect(h.purge.stop).toHaveBeenCalled()
+  })
+
+  it('stops the purge worker before the drain completes', async () => {
+    // A stub worker whose stop() records when it was called, and an insert
+    // that blocks on a gate this test controls — so `buffer.drain()` cannot
+    // complete until the test says so. If `purge.stop()` were called AFTER
+    // the drain (or not at all), the assertion below — taken while drain is
+    // still genuinely in flight — would fail.
+    let releaseInsert: () => void = () => {}
+    const insertGate = new Promise<void>((resolve) => {
+      releaseInsert = resolve
+    })
+    const h = harness(async () => {
+      await insertGate
+    })
+    const shutdown = installShutdownHandlers({
+      app: h.app,
+      readiness: h.readiness,
+      buffer: asEventBuffer(h.buffer),
+      counters: h.counters,
+      purge: h.purge,
+      drainDeadlineMs: 5000,
+      onExit: () => {},
+    })
+
+    h.buffer.add({ n: 1 })
+    const shutdownPromise = shutdown()
+
+    // Drain the microtask queue so shutdown() has run everything up to (and
+    // including) `readiness.markDraining()`/`purge.stop()` and started
+    // draining the buffer — without this, checking `purge.stop` here would
+    // race the async function body rather than observe it deterministically.
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(h.purge.stop).toHaveBeenCalledTimes(1)
+    // The drain is still genuinely unresolved at this point — proof that the
+    // assertion above observed `purge.stop()` BEFORE the drain completed,
+    // not merely before the whole shutdown() settled.
+    const stillDraining = await Promise.race([
+      shutdownPromise.then(() => 'settled' as const),
+      new Promise<'pending'>((resolve) => setTimeout(() => resolve('pending'), 0)),
+    ])
+    expect(stillDraining).toBe('pending')
+
+    releaseInsert()
+    await shutdownPromise
   })
 
   it('exits non-zero when the drain deadline passes with rows still buffered', async () => {
@@ -62,6 +112,7 @@ describe('installShutdownHandlers', () => {
       readiness: h.readiness,
       buffer: asEventBuffer(h.buffer),
       counters: h.counters,
+      purge: h.purge,
       drainDeadlineMs: 50,
       onExit: (code) => exits.push(code),
     })
@@ -81,6 +132,7 @@ describe('installShutdownHandlers', () => {
       readiness: h.readiness,
       buffer: asEventBuffer(h.buffer),
       counters: h.counters,
+      purge: h.purge,
       drainDeadlineMs: 5000,
       onExit: () => {},
     })

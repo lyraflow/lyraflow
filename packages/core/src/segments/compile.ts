@@ -1,4 +1,5 @@
 import { RESOLVED_PERSON_ALIAS, resolvedPersonExpr } from '../identity/resolve.js'
+import { notSuppressedExpr } from '../privacy/suppression.js'
 import type { Behavior, FilterNode, SegmentQuery } from './ast.js'
 import { CONTEXT_FIELDS } from './ast.js'
 import { CONTEXT_COLUMNS, baseCte } from './base.js'
@@ -65,6 +66,10 @@ function memberProjection(): string {
  *   suppression — every result excludes people on the suppression list. A
  *                 caller cannot opt out because there is nothing to opt out
  *                 of; the predicate is added after the tree is compiled.
+ *                 Time-scoped, not presence-only: every result excludes
+ *                 events at or before a person's deletion boundary, and
+ *                 excludes the person entirely when nothing of theirs
+ *                 survives it.
  *
  * Validation runs BEFORE any SQL is built, so a tree past the caps costs a
  * tree walk rather than a query.
@@ -123,9 +128,26 @@ export function compileSegment(opts: {
 
   const behJoin = pass.cte ? `LEFT JOIN beh USING (${RESOLVED_PERSON_ALIAS})` : ''
 
-  const suppressed =
-    `dictHas('${database}.suppressed_persons', ` +
-    `(${params.add(projectId, 'UInt32')}, base.${RESOLVED_PERSON_ALIAS})) = 0`
+  // TIME-SCOPED, not permanent. The person survives if they have activity
+  // after their boundary: someone whose entire history predates the request
+  // disappears; someone who kept using the customer's application stays.
+  //
+  // The comparison is the person-level `last_seen`, which is derived from
+  // device_index — pre-aggregated per (device, month), so a month straddling
+  // the boundary cannot be split. A person whose activity straddles it may
+  // therefore still carry erased events inside these aggregates until the
+  // purge runs, typically minutes. Event-level reads (the behavioural pass
+  // below, the person read, the export) are exact throughout. Suppression is
+  // a shield until the purge completes; the purge is the guarantee. The
+  // README states that window rather than implying an exactness the storage
+  // cannot give.
+  const suppressed = notSuppressedExpr({
+    database,
+    projectId,
+    params,
+    person: `base.${RESOLVED_PERSON_ALIAS}`,
+    instant: 'base.last_seen',
+  })
 
   // Keyset continuation on the same (last_seen DESC, person_id ASC) ordering
   // the projection uses. Strictly lexicographic: a row is "after" the cursor

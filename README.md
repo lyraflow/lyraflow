@@ -4,7 +4,7 @@
 
 Lyraflow helps you understand the full path your customers take — from first touch to conversion, retention, and beyond — on infrastructure you control. Your customer data stays yours.
 
-> ⚠️ **Early days.** Lyraflow currently ships the ingest spine, identity resolution, and a segment query API — you can self-host it, create a project, send it events, stitch anonymous and known activity into one person, and count or list the people matching a filter tree. There is no builder UI yet (segments, journeys, dashboards) and no journey/funnel analysis. Watch the repo to follow along.
+> ⚠️ **Early days.** Lyraflow currently ships the ingest spine, identity resolution, a segment query API, and per-person deletion and export — you can self-host it, create a project, send it events, stitch anonymous and known activity into one person, count or list the people matching a filter tree, and erase or export any one person's data on request. There is no builder UI yet (segments, journeys, dashboards) and no journey/funnel analysis. Watch the repo to follow along.
 
 ## Why Lyraflow?
 
@@ -55,9 +55,9 @@ export LYRAFLOW_WRITE_KEY=wk_...   # the write key printed above
 
 The **server key** (`sk_…`) is secret and shown only once — write it down. It
 is not needed for sending events; it authenticates `/v1/alias` and
-`GET /v1/persons/:id` (see *Identity resolution* below), and later releases
-use it for deletion and export too. The *Identity resolution* examples use it
-the same way:
+`GET /v1/persons/:id` (see *Identity resolution* below), and deletion and
+export too (see *Privacy: deletion and export* below). The *Identity
+resolution* examples use it the same way:
 
 ```sh
 export LYRAFLOW_SERVER_KEY=sk_...  # the server key printed above
@@ -66,12 +66,12 @@ export LYRAFLOW_SERVER_KEY=sk_...  # the server key printed above
 ## Sending your first event
 
 Everything below is the whole of v0.1's public surface. There is still no UI
-and no general query API (filtering, journeys, dashboards) — events land in
-ClickHouse, and you read them with your own ClickHouse client until the query
-layer ships. What v0.1 does add is identity resolution: `/v1/identify` binds a
-device to a person, `/v1/alias` merges two known people, and
-`GET /v1/persons/:id` reads one person's stitched profile back out — see
-*Identity resolution* below.
+and no journey/funnel analysis — v0.1 adds identity resolution
+(`/v1/identify` binds a device to a person, `/v1/alias` merges two known
+people, `GET /v1/persons/:id` reads one person's stitched profile back out —
+see *Identity resolution* below), a segment query API for counting and
+listing people matching a filter tree (see *Segments* below), and per-person
+deletion and export (see *Privacy: deletion and export* below).
 
 Ingest listens on port 3000. Every ingest request — `/v1/track`, `/v1/page`,
 `/v1/identify`, `/v1/batch` — authenticates with the project's **write key**
@@ -655,6 +655,259 @@ that moment, so you cannot ask "who matched this segment last Tuesday".
 Membership is also not recomputed automatically on any schedule; a saved
 segment's snapshot only updates when you explicitly run it. Those are
 planned; none of them exist today.
+
+
+## Privacy: deletion and export
+
+`DELETE /v1/persons/:id` erases a person's data — the same subject
+`GET /v1/persons/:id` describes: the id is resolved through the same alias and
+device-id lookup, so deleting a device id or a since-merged id reaches the
+right person. Server-key only, like every endpoint below it that reads or
+mutates a person's data.
+
+```sh
+curl -i -X DELETE http://localhost:3000/v1/persons/user-42 \
+  -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY"
+```
+
+```json
+{
+  "request_id": 118,
+  "person_id": "user-42",
+  "suppressed_at": "2026-08-07T09:30:00.000Z"
+}
+```
+
+`person_id` is the **canonical** id, which can differ from the one you sent —
+deleting an id that was later merged into another still resolves to, and
+erases, the survivor of that merge. `suppressed_at` is the boundary: events at
+or before it stop appearing anywhere, immediately.
+
+The boundary belongs to the **person**, not to the single id you named, and a
+person is every id merged into them. So the boundary that applies to a read
+can move as identities merge: if two people who were each deleted at different
+times are later merged with `/v1/alias`, the surviving person carries the
+**later** of the two boundaries, and events after the earlier deletion but at
+or before the later one become hidden too.
+
+That direction holds for the profile read and the export, which resolve the
+whole merged group and take the strictest boundary in it. **It does not hold
+for segment counts and member lists.** Those resolve a person through the
+identity dictionaries and read whichever person the merge produced — so merging
+a recently-deleted person *into* one deleted earlier can make some of the first
+person's erased events countable in a segment again, until the purge worker
+removes the rows for real. This only ever concerns subjects who have already
+been deleted, it is bounded by the purge (usually under a minute), and no
+never-deleted person is affected. If you need the guarantee to be absolute
+rather than eventual, wait for `GET /v1/deletions/:id` to report `completed`
+before treating a deletion as final — which is the right thing to do anyway,
+since only the purge actually removes data.
+
+Deletion is asynchronous. The moment the API answers `202`, the person's past
+data stops appearing in segment counts, member lists, profile reads and
+exports — that is the suppression list, and it takes effect immediately,
+including for a `/v1/segments/preview` result already sitting in the
+in-process cache (see *Segments* above): a `DELETE` clears that
+project's cached entries as part of the same request. The rows are then
+erased for real by a worker inside the server process, usually within a
+minute. Until it finishes, person-level aggregates (`first_seen`, `last_seen`,
+event counts) can still reflect erased events for someone whose activity
+straddles the deletion instant, because those are pre-aggregated per month
+and a month cannot be split. Event-level reads are exact throughout. Poll
+`GET /v1/deletions/:id` for `status: "completed"`.
+
+**A saved segment's `last_count` does not know a deletion happened.** It is a
+snapshot from whenever the segment was last run (`POST /v1/segments/:id/preview`
+or its own creation), not a live figure — a deletion changes what an ad hoc
+`/v1/segments/preview` reports on the very next call, but it does not touch
+`last_count` on any saved segment, which stays exactly as stale as it already
+was until something explicitly re-runs that segment. This is true regardless
+of caching; it is simply what "snapshot, not a live count" already meant.
+
+Suppression is scoped in time, not permanent. Erasure is a right to have past
+data deleted, not a promise never to be measured again — if the same user
+keeps using your application, they eventually reappear as a person with a
+history of their own.
+
+**But that history does not start at the `202`.** Under suppression alone,
+an event recorded between the `202` and the purge finishing genuinely is
+visible — every read path filters by the boundary, and this new event is
+after it. The purge, though, is not boundary-aware: by design, it deletes
+*every* event the person has, with no "at or before `suppressed_at`" clause
+— honouring the boundary here would mean keeping the identity bindings that
+say those events are this person's, and unsuppressed bindings for a deleted
+person are the exact leak the purge's step order exists to prevent. So an
+event landing in that gap is shown by every read path for the minute or so
+the purge takes, and then erased along with everything older. The person's
+surviving history begins after the **purge completes**, not after the
+request is accepted, and activity recorded in that gap does not survive — it
+is erased with the rest. Requesting deletion again moves the boundary
+forward and erases whatever accumulated since, including while a previous
+request is still waiting on the purge worker, which is exactly the case an
+operator re-requesting after a failed attempt needs to work. If a previous
+request failed part way through — its events already erased, its identity rows
+not — the repeat `DELETE` reopens **that** request and returns its original
+`request_id`, instead of reporting the now-eventless person as `404`. Once the
+purge has actually *finished*, a repeat request for a person with no activity
+since then finds nothing left to erase, and answers `404` like any other id
+nothing has recorded.
+
+**Not covered:** backups. Lyraflow deletes from the live stores it manages. A
+backup you took before the deletion still contains the person's data, and
+restoring it will restore them — the suppression list itself is in Postgres
+and is backed up with it, so a restored person stays hidden from queries, but
+their rows are back. Rotating or re-taking backups after a deletion is the
+operator's responsibility, and this is stated rather than pretended.
+
+One exception to "stays hidden": a device the erased person used, later
+bound to a genuinely DIFFERENT person, then a backup from before the
+deletion restored after that. The erased person's anonymous activity on that
+device is attributed by device id when nothing else claims it; once someone
+else's identity has since taken over that device, a restored anonymous event
+resolves to the NEW person instead, and nothing hides it — it appears as
+theirs, inflating their history. This needs all three of the purge having
+completed, that device rebound to someone else, and a backup predating the
+original deletion restored afterwards; a person's own identified events
+(anything carrying its own user id) are unaffected regardless. Narrow, and
+stated rather than silently left for an operator to discover.
+
+A deletion request with no subject is `404`:
+
+```json
+{ "error": "person_not_found" }
+```
+
+**Read that `404` carefully — it does not mean "this id was never seen."** It
+means no events could be resolved *for a person* from the id you sent. Erasure,
+export and the profile read all cover people the **identity graph** knows
+about, and an id only enters that graph through `/v1/identify` (or `/v1/alias`).
+A purely anonymous visitor — an `anonymous_id` that has sent events but has
+never been identified — cannot be resolved from that `anonymous_id` alone, and
+answers `404` here even though their events are sitting in the store. If you
+have been handed a raw cookie or device id by a data-subject request and get a
+`404`, that is the case to rule out first: it is not evidence the id was never
+recorded. Resolve it to a user id (anything you have ever called `/v1/identify`
+with for that device) and request erasure for that instead. Widening resolution
+to cover never-identified visitors is a change we intend to make; today it is a
+documented limit rather than a silent one.
+
+`401` for a missing or invalid server key.
+
+### Checking on a deletion
+
+`GET /v1/deletions/:id` reports what happened to a request returned by the
+`DELETE` above:
+
+```sh
+curl -s http://localhost:3000/v1/deletions/118 \
+  -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY"
+```
+
+```json
+{ "status": "completed", "requested_at": "2026-08-07T09:30:00.000Z", "completed_at": "2026-08-07T09:30:41.000Z" }
+```
+
+| `status` | Meaning |
+| --- | --- |
+| `pending` | Waiting for the purge worker. If an attempt has already failed, `error` carries why and the request is waiting to be retried |
+| `in_progress` | A worker is erasing this person's rows right now |
+| `completed` | Erasure finished — `completed_at` is set |
+| `failed` | The worker gave up after repeated attempts; `error` carries the last one. This is not an API error — the request was accepted, and this is telling you it did not finish |
+
+**`failed` does not mean nothing happened.** The purge erases in a fixed order
+— events first, identity last — so a request that failed part way through has
+usually already deleted some of the person's data. Treat `failed` as "partly
+erased, stopped", never as "no change". The recovery is to send the same
+`DELETE /v1/persons/:id` again: it picks the unfinished request back up and
+returns `202` with **the same `request_id`**, rather than `404`-ing a person
+whose events are already gone. Keep polling that id.
+
+`:id` belonging to another project, or to no request at all, is `404` with
+`{ "error": "deletion_not_found" }` — never `403`, which would confirm the id
+exists. A non-numeric `:id` is `400` with `{ "error": "invalid_deletion_id" }`.
+
+### Exporting a person
+
+`GET /v1/persons/:id/export` answers a subject-access request: everything
+Lyraflow has recorded about one person, as streamed NDJSON — one JSON object
+per line, not a single JSON document. Server-key only, like every endpoint in
+this section.
+
+```sh
+curl -s http://localhost:3000/v1/persons/user-42/export \
+  -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY"
+```
+
+```json
+{"type":"person","person_id":"user-42","ids":["user-42","visitor-1"],"traits":{"plan":"pro"},"first_seen":"2026-08-01T12:00:00.000Z","last_seen":"2026-08-06T09:30:00.000Z"}
+{"type":"event","event_id":"…","timestamp":"2026-08-01T12:00:00.000Z","event_name":"page","properties":{…},…}
+{"type":"event","event_id":"…","timestamp":"2026-08-06T09:30:00.000Z","event_name":"import_started","properties":{…},…}
+{"type":"end","events":2}
+```
+
+Three line shapes. The first line is always `type: "person"` — the same
+identity `GET /v1/persons/:id` returns (`person_id`, `ids`, `first_seen`,
+`last_seen`), plus `traits`, and *without* that read's `events` count: the
+count moved to the terminator below, where it can be checked against what
+was actually received. Then one `type: "event"` line per event, oldest
+first, carrying every field recorded for it. The last line is always `type:
+"end"`, and `events` is the number of `event` lines that actually preceded
+it.
+
+**The export is a stream, and it terminates itself.** The response status and
+headers are sent before the first line, which means a failure part-way
+through cannot be reported as an HTTP error — the connection would already
+be committed to `200`. Instead, on a mid-stream failure the response simply
+ends without ever writing the final `end` line. **A response without a
+final `{"type":"end","events":N}` line is incomplete and must be discarded.**
+Always check for that line, and check that its `events` count matches the
+number of `event` lines you actually received — a truncated response that
+happens to look complete is exactly the failure a subject-access export
+cannot afford to miss.
+
+The export honours deletion the same way the person read does: a person who
+has been deleted exports only the events recorded after the deletion
+boundary, and a person with nothing left after that boundary is `404`, the
+same `{ "error": "person_not_found" }` an unresolvable id gets. As with
+`DELETE`, that `404` also covers a visitor who has never been through
+`/v1/identify` — see *Deleting a person* above, where the same limit is
+described in full. An `anonymous_id` alone is not enough to export a subject.
+Traits are omitted entirely once a boundary exists — a trait carries no
+event time (it is the *latest* value known for that key, not a timestamped
+fact), so it cannot be split at the deletion instant the way an event can;
+returning it would be a way to read back exactly what the deletion asked to
+remove.
+
+The same device-window cap `GET /v1/persons/:id` enforces applies here too:
+past 200 device windows the export answers `400`
+`person_history_too_fragmented`, identically to the person read. Unlike
+`DELETE /v1/persons/:id`, which chunks and must never refuse to erase the
+most fragmented people, refusing to *render* an export for them is an
+acceptable answer — nothing about their data goes unerased because of it.
+
+Every query behind this endpoint runs under a ceiling — 300 seconds and the
+same 4 GiB memory ceiling segment queries use. For almost every person this
+is invisible; for someone with an exceptionally large recorded history,
+hitting one is expected behaviour, not a bug, but which one you hit produces
+a different, distinguishable symptom, and it matters which:
+
+- The **summary** query and, when it runs, the **traits** lookup both
+  execute *before* the response is sent at all. If either one hits a
+  ceiling, the export never starts: you get a `503` — the same generic
+  failure response every other endpoint gives an internal error, with
+  `retry-after` set.
+- The **per-event** query streams *after* the response has already started.
+  If it hits a ceiling partway through, the export cannot become an HTTP
+  error any more — the stream simply ends, without its final `end` line,
+  exactly like any other mid-stream failure above. This is the only one of
+  the three the discard rule was written for.
+
+If you self-host and an export is being cut short for one particular
+person, an unusually large history hitting one of these ceilings is the
+first thing to check: a `503` means it never started, a response missing
+`end` means it started and was cut short — before assuming either is a bug.
+
+`401` for a missing or invalid server key.
 
 
 ## Upgrading

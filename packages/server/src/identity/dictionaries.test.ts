@@ -645,4 +645,44 @@ describe('ensureIdentityDictionaries (live ClickHouse + Postgres)', () => {
     const [hit] = await hits.json<{ gone: number; here: number }>()
     expect(hit).toEqual({ gone: 1, here: 0 })
   })
+
+  /**
+   * THE test for the precision defect found while building Task 11's
+   * boundary-instant coverage: `suppressed_at` is `now()` at deletion time,
+   * so it almost always carries a fractional second, and this dictionary's
+   * `suppressed_at` used to be declared `DateTime` — whole seconds only. A
+   * live server, measured directly, FLOORED the fractional part on load
+   * rather than rounding or rejecting it — silently opening a real,
+   * up-to-999ms window where the ClickHouse-side suppression check (this
+   * dictionary) disagreed with the exact, Postgres-backed person-read/export
+   * paths about whether an event genuinely preceding the deletion instant
+   * was suppressed. `at` is deliberately built with a non-zero millisecond
+   * component so a regression back to `DateTime` fails this loudly, not by
+   * accident of a fixture that happened to land on a whole second.
+   */
+  it('exposes suppressed_at through the dictionary at full sub-second precision', async () => {
+    const at = new Date(Date.now() - 3 * 3_600_000 - 337) // carries a sub-second component
+    await pg.query(
+      `INSERT INTO suppressed_persons (project_id, person_id, suppressed_at)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (project_id, person_id) DO UPDATE SET suppressed_at = EXCLUDED.suppressed_at`,
+      [projectId, 'sup-dict-1', at],
+    )
+    await ensureIdentityDictionaries(ch, pgSource)
+    await ch.command({ query: `SYSTEM RELOAD DICTIONARY ${CH_DB}.suppressed_persons` })
+    const rs = await ch.query({
+      query: `SELECT
+                dictHas('${CH_DB}.suppressed_persons', ({p:UInt32}, {id:String})) AS present,
+                toString(dictGetOrDefault('${CH_DB}.suppressed_persons',
+                  'suppressed_at', ({p:UInt32}, {id:String}), toDateTime64(0, 6))) AS at`,
+      query_params: { p: projectId, id: 'sup-dict-1' },
+      format: 'JSONEachRow',
+    })
+    const [row] = await rs.json<{ present: number; at: string }>()
+    expect(Number(row?.present)).toBe(1)
+    // Millisecond-exact, not floored to the second: the dictionary attribute
+    // is DateTime64(6), matching what ClickHouse's own PostgreSQL source
+    // infers for `suppressed_at`'s native `timestamptz` column.
+    expect(new Date(`${row?.at.replace(' ', 'T')}Z`).getTime()).toBe(at.getTime())
+  })
 })

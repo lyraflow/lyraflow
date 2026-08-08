@@ -26,6 +26,7 @@ installShutdownHandlers({
   readiness,
   buffer: app.deps.buffer,
   counters: app.deps.counters,
+  purge: app.deps.purge,
   drainDeadlineMs: config.drainDeadlineMs,
 })
 
@@ -85,6 +86,11 @@ try {
 // callback buildApp already wired to the Fastify logger — so this
 // fire-and-forget interval can never become an unhandled rejection.
 setInterval(() => void app.deps.counters.flush(), 10_000).unref()
+
+// Started only after the dictionaries are up: a purge resolves identity from
+// Postgres and does not need them, but a process that failed either boot step
+// exits, and starting a timer that outlives that decision is pointless.
+app.deps.purge.start()
 
 await app.listen({ port: config.port, host: '0.0.0.0' })
 readiness.markReady()

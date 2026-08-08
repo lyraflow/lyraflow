@@ -16,7 +16,7 @@ import { z } from 'zod'
 import type { Project, ProjectCache } from '../auth/project-cache.js'
 import type { Readiness } from '../health.js'
 import { SERVER_KEY_HEADER, makeAuthenticator } from '../ingest/routes.js'
-import { type MemberRow, SegmentCache } from './cache.js'
+import type { MemberRow, SegmentCache } from './cache.js'
 import { SegmentTimeoutError, runSegment, runSegmentMembers } from './execute.js'
 import {
   DuplicateNameError,
@@ -33,6 +33,15 @@ export interface SegmentDeps {
   pg: Pool
   /** The configured ClickHouse database; the dictionaries live in it. */
   database: string
+  /**
+   * Shared with the privacy routes, not constructed here — DELETE
+   * /v1/persons/:id calls `cache.clearProject()` on this exact instance the
+   * moment a deletion is accepted, so a preview served from cache can never
+   * hand back a suppressed person's row within the TTL. A second,
+   * locally-constructed cache would make that invalidation call reach an
+   * instance nothing here ever reads from.
+   */
+  cache: SegmentCache
 }
 
 /**
@@ -236,7 +245,7 @@ function decodeWalkCursor(s: string, key: Buffer): WalkCursor {
  * segment count is aggregate information about every person in the project.
  */
 export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): void {
-  const { projects, readiness, ch, pg, database } = deps
+  const { projects, readiness, ch, pg, database, cache } = deps
 
   const authenticateServer = makeAuthenticator(
     readiness,
@@ -246,7 +255,6 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
     'invalid_server_key',
   )
 
-  const cache = new SegmentCache()
   const store = new SegmentStore(pg)
 
   /**
@@ -297,6 +305,14 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
       count = cachedCount.count
       countAsOf = cachedCount.asOf
     } else {
+      // Captured BEFORE the query below runs, not after — see
+      // SegmentCache.set's own docstring for why the ordering matters: a
+      // DELETE's clearProject() landing while this exact query is still in
+      // flight against ClickHouse must make the `cache.set` below a no-op,
+      // and it can only do that by comparing against the generation this
+      // query started under, not whatever the generation happens to be once
+      // the query finally returns.
+      const countGeneration = cache.generation(projectId)
       const compiled = compileSegment({
         query,
         projectId,
@@ -306,7 +322,7 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
       })
       count = await runSegment({ client: ch, compiled })
       countAsOf = asOf
-      cache.set(countKey, { count, members: [], asOf: countAsOf })
+      cache.set(countKey, { count, members: [], asOf: countAsOf }, projectId, countGeneration)
     }
 
     if (!opts.wantMembers) {
@@ -344,6 +360,9 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
       members = cachedPage.members
       pageAsOf = cachedPage.asOf
     } else {
+      // Same reasoning as countGeneration above: captured before the query
+      // that will produce the value this generation guards.
+      const pageGeneration = cache.generation(projectId)
       const compiledMembers = compileSegment({
         query,
         projectId,
@@ -354,7 +373,7 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
       })
       members = await runSegmentMembers({ client: ch, compiled: compiledMembers })
       pageAsOf = asOf
-      cache.set(pageKey, { count, members, asOf: pageAsOf })
+      cache.set(pageKey, { count, members, asOf: pageAsOf }, projectId, pageGeneration)
     }
 
     const pagesServedNow = pagesServed + 1

@@ -488,6 +488,147 @@ describe('POST /v1/segments/preview', () => {
     expect(hit.statusCode).toBe(200)
     expect(hit.json().as_of).toBe(miss.json().as_of)
   })
+
+  // Relative to Date.now(), not an absolute date: the ingest path clamps a
+  // client timestamp older than 24h to `now − 24h` (see clampTimestamp), so a
+  // hardcoded date would drift out of range and start failing on a wall-clock
+  // schedule with no code change — exactly the failure this suite hit once
+  // already.
+  const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString()
+
+  const suppress = async (personId: string, at: Date) => {
+    await pg.query(
+      `INSERT INTO suppressed_persons (project_id, person_id, suppressed_at)
+       VALUES ($1, $2, $3)`,
+      [projectId, personId, at],
+    )
+    // The dictionary, not the table, is what the compiled query reads —
+    // there is no deletion endpoint yet (Task 6) to do this reload for us.
+    await ch.command({ query: `SYSTEM RELOAD DICTIONARY ${CH.database}.suppressed_persons` })
+  }
+
+  it('hides a person whose whole history predates their deletion boundary', async () => {
+    // Two people, identical behaviour. One is suppressed with a boundary
+    // AFTER both of their events; the other is not.
+    const suppressedUser = 'priv-scope-suppressed'
+    const survivingUser = 'priv-scope-surviving'
+    const cohort = { kind: 'trait', key: 'plan', operator: '=', value: 'privacy-scope-base' }
+
+    await app.inject({
+      method: 'POST',
+      url: '/v1/batch',
+      headers: { 'x-lyraflow-write-key': WRITE_KEY, 'user-agent': 'vitest' },
+      payload: {
+        batch: [
+          {
+            type: 'identify',
+            message_id: randomUUID(),
+            user_id: suppressedUser,
+            traits: { plan: 'privacy-scope-base' },
+            timestamp: hoursAgo(3),
+          },
+          {
+            type: 'identify',
+            message_id: randomUUID(),
+            user_id: survivingUser,
+            traits: { plan: 'privacy-scope-base' },
+            timestamp: hoursAgo(3),
+          },
+        ],
+      },
+    })
+    await app.deps.buffer.flush()
+
+    // The boundary sits after both of the suppressed person's events, so
+    // their entire history predates it.
+    await suppress(suppressedUser, new Date(Date.now() - 1 * 3_600_000))
+
+    const res = await preview({ ast_version: 1, filter: cohort, include: ['members'] })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    // Count drops by exactly one, out of the two identical people seeded.
+    expect(body.person_count).toBe(1)
+    const memberIds = (body.members as Array<{ person_id: string }>).map((m) => m.person_id)
+    expect(memberIds).toContain(survivingUser)
+    expect(memberIds).not.toContain(suppressedUser)
+  })
+
+  it('keeps a person who returned after the boundary, counting only later events', async () => {
+    // One person: two events before the boundary, one after.
+    const user = 'priv-scope-returned'
+    const eventName = 'privacy_timescope_event'
+
+    await app.inject({
+      method: 'POST',
+      url: '/v1/batch',
+      headers: { 'x-lyraflow-write-key': WRITE_KEY, 'user-agent': 'vitest' },
+      payload: {
+        batch: [
+          {
+            type: 'track',
+            message_id: randomUUID(),
+            user_id: user,
+            event: eventName,
+            timestamp: hoursAgo(5),
+          },
+          {
+            type: 'track',
+            message_id: randomUUID(),
+            user_id: user,
+            event: eventName,
+            timestamp: hoursAgo(4),
+          },
+          {
+            type: 'track',
+            message_id: randomUUID(),
+            user_id: user,
+            event: eventName,
+            timestamp: hoursAgo(1),
+          },
+        ],
+      },
+    })
+    await app.deps.buffer.flush()
+
+    // Strictly between the two early events and the later one: two events
+    // are erased, one survives.
+    await suppress(user, new Date(Date.now() - 2 * 3_600_000))
+
+    // A behavioural condition of "did X at least 3 times" must NOT match —
+    // only one event survives the boundary. This is the test that
+    // discriminates the per-event filter from a person-level one: a
+    // person-level filter would still see all three events and match.
+    const atLeastThree = await preview({
+      ast_version: 1,
+      filter: {
+        kind: 'behavior',
+        event: eventName,
+        aggregate: 'count',
+        operator: '>=',
+        value: 3,
+        window: { kind: 'ever' },
+      },
+    })
+    expect(atLeastThree.statusCode).toBe(200)
+    expect(atLeastThree.json().person_count).toBe(0)
+
+    // "At least once" must match: the person themself survives the base
+    // population filter (they have activity after their boundary), and the
+    // one surviving event satisfies the behavioural condition.
+    const atLeastOnce = await preview({
+      ast_version: 1,
+      filter: {
+        kind: 'behavior',
+        event: eventName,
+        aggregate: 'count',
+        operator: '>=',
+        value: 1,
+        window: { kind: 'ever' },
+      },
+    })
+    expect(atLeastOnce.statusCode).toBe(200)
+    expect(atLeastOnce.json().person_count).toBe(1)
+  })
 })
 
 describe('/v1/segments CRUD and run', () => {

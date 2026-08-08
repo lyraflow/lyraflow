@@ -29,6 +29,16 @@ describe('behaviourCte', () => {
     expect(build([]).pass.cte).toBeNull()
   })
 
+  it('excludes suppressed events from the single scan', () => {
+    const { pass } = build([beh()])
+    // Per-EVENT, inside the pass, so "ran import 3 times" counts only
+    // surviving events. Filtering at the person level here would count
+    // erased events toward a threshold and then hide the person only if the
+    // whole history predates the boundary.
+    expect(pass.cte).toContain('timestamp <= dictGetOrDefault(')
+    expect(pass.cte).toMatch(/\) AS e\s*\n\s*WHERE NOT \(dictHas/)
+  })
+
   it('collapses many behaviours into one GROUP BY', () => {
     const { pass } = build([beh(), beh({ event: 'invite_teammate' })])
     const sql = pass.cte ?? ''
@@ -36,10 +46,17 @@ describe('behaviourCte', () => {
     expect(sql.match(/FROM events/g)).toHaveLength(1)
   })
 
-  it('emits the identity expression exactly once', () => {
+  // Three, not one: `resolved` is substituted once to project the join key
+  // (the SELECT), and twice more inside the per-event suppression guard —
+  // notSuppressedExpr binds `person` into a shared `key` expression and then
+  // uses that key in BOTH the dictHas guard and the dictGetOrDefault lookup,
+  // so the text appears twice there even though behaviourCte passes it in
+  // only once. Fixed at three regardless of how many behavioural nodes are
+  // in the tree, i.e. it is not re-evaluated per node.
+  it('emits the identity expression exactly three times — the projection, and twice inside the suppression guard', () => {
     const { pass } = build([beh(), beh({ event: 'a' }), beh({ event: 'b' })])
     const sql = pass.cte ?? ''
-    expect(sql.match(/two-stage identity resolution/g)).toHaveLength(1)
+    expect(sql.match(/two-stage identity resolution/g)).toHaveLength(3)
   })
 
   it('deduplicates by event_id so retried deliveries are not double-counted', () => {

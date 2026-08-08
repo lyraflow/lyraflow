@@ -46,6 +46,13 @@ interface Entry {
 export class SegmentCache {
   readonly #entries = new Map<string, Entry>()
   #rows = 0
+  // One counter per project that has ever had `clearProject()` called on it
+  // — bounded by the number of DISTINCT projects a deletion has ever run
+  // against, the same shape (and the same "stays small for a self-hosted,
+  // one-tenant-per-project product" argument) as every other per-project
+  // in-memory map in this codebase (e.g. ProjectCache's own entries). See
+  // `set()`'s docstring for what this guards.
+  readonly #generations = new Map<number, number>()
 
   get size(): number {
     return this.#entries.size
@@ -53,6 +60,18 @@ export class SegmentCache {
 
   get rows(): number {
     return this.#rows
+  }
+
+  /**
+   * The project's current generation — 0 until `clearProject()` has run for
+   * it at least once. A caller about to issue the query behind a cache MISS
+   * captures this BEFORE issuing it (`routes.ts`'s `runTree`), and passes it
+   * back to `set()` once the query resolves — see `set()`'s own docstring
+   * for why that round trip is what closes the race `clearProject()` alone
+   * cannot.
+   */
+  generation(projectId: number): number {
+    return this.#generations.get(projectId) ?? 0
   }
 
   get(key: string): CachedResult | undefined {
@@ -69,7 +88,29 @@ export class SegmentCache {
     return hit.value
   }
 
-  set(key: string, value: CachedResult): void {
+  /**
+   * `projectId`/`generation` are not optional bookkeeping — they are what
+   * stops a query that started BEFORE a `clearProject()` call from
+   * re-poisoning the cache by finishing and calling `set()` AFTER it.
+   * `clearProject()` alone only handles entries that already exist at the
+   * instant it runs; it cannot reach into a `runTree()` call that is still
+   * mid-flight against ClickHouse, computing a count/member page against the
+   * pre-deletion world, whose OWN `set()` call is still to come. Without this
+   * check, that in-flight write lands after the clear and reinstates the
+   * erased person's row for a fresh 30-second TTL — the exact failure
+   * `clearProject()` exists to prevent, just arriving one request later.
+   *
+   * The caller captures `cache.generation(projectId)` before it issues its
+   * query (a plain number, copied by value — there is nothing further to
+   * keep in sync) and passes that same value back here. If `clearProject()`
+   * has run for this project in between, the current generation has moved on
+   * and this write is silently discarded: a result computed against a world
+   * that no longer exists simply is not cached, rather than being cached for
+   * the next 30 seconds regardless of the deletion that has already been
+   * accepted.
+   */
+  set(key: string, value: CachedResult, projectId: number, generation: number): void {
+    if (generation !== this.generation(projectId)) return
     this.#drop(key)
     // An entry bigger than the whole budget can never be stored without
     // violating the bound, so it is simply not cached. Refusing to store is
@@ -92,6 +133,38 @@ export class SegmentCache {
       const oldest = this.#entries.keys().next()
       if (oldest.done) break
       this.#drop(oldest.value)
+    }
+  }
+
+  /**
+   * Drops every entry for one project, regardless of TTL, AND bumps its
+   * generation so a `set()` still in flight from before this call cannot
+   * land afterward — see `set()`'s own docstring for that half. Called after
+   * a deletion request is accepted (privacy/routes.ts), so a preview served
+   * from cache can never hand back a person's row within the 30-second TTL
+   * after the API has already promised — via the `202` — that their data
+   * stops appearing immediately. Without the entry drop, `get()`'s own TTL
+   * would be the only thing standing between a `DELETE` and a stale hit, and
+   * without the generation bump a query racing that exact `DELETE` could
+   * still reinstate one; 30 seconds of "stopped appearing" that in fact
+   * still shows the erased person's own `first_seen`/`last_seen`/context row
+   * is not a stale number, it is their personal data served back out after
+   * the API said it would not be.
+   *
+   * Entry drop is project-scoped by key prefix, not a full clear: every key
+   * this cache ever stores is `${projectId}:...` (both `countKey` and
+   * `pageKey` in routes.ts), so a prefix match is exactly "every entry this
+   * project could have written" with no separate per-entry project id to
+   * maintain. Keys are snapshotted into an array before dropping any of them
+   * — deleting the CURRENT key mid-iteration over a live `Map` iterator is
+   * documented-safe, but taking a copy first removes any doubt without
+   * relying on that.
+   */
+  clearProject(projectId: number): void {
+    this.#generations.set(projectId, this.generation(projectId) + 1)
+    const prefix = `${projectId}:`
+    for (const key of [...this.#entries.keys()]) {
+      if (key.startsWith(prefix)) this.#drop(key)
     }
   }
 }

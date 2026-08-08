@@ -279,10 +279,52 @@ export async function ensureIdentityDictionaries(
   // only actually happens once a row has been added — rows are never removed,
   // so the count and the newest timestamp together change if and only if the
   // list grew.
+  // The invalidate_query still fires correctly now that a REPEAT deletion
+  // UPDATES a row rather than only inserting one. `suppressed_at` is always
+  // now(), so any write — insert or upsert — becomes the new max(), and the
+  // scalar changes. A reload is skipped only when nothing was written at all.
+  //
+  // `suppressed_at DateTime64(6)`, not `DateTime`. `suppressed_at` is a
+  // Postgres `timestamptz` — `now()` at the moment of deletion, so it almost
+  // always carries a fractional second — and this dictionary's own
+  // `notSuppressedExpr` (suppression.ts) compares it directly against an
+  // event's `timestamp`, itself `DateTime64(3)`. A plain `DateTime` attribute
+  // (second precision) used to floor that value on load — measured directly
+  // against a live server: `dictGetOrDefault` returned the whole second with
+  // the fractional part silently gone, never rounded, never rejected — which
+  // opened a real, up-to-999ms gap where an event genuinely BEFORE the
+  // deletion instant compared as NOT suppressed here while the exact,
+  // Postgres-backed person-read/export paths (which read `suppressed_at`
+  // with no such truncation) correctly hid it. Two routes disagreeing about
+  // a person deleted in the same second they acted — the exact defect shape
+  // Task 11 exists to make impossible, just one layer further down than that
+  // task's own fixture could reach until it grew a boundary-instant case.
+  //
+  // The attribute is declared `(6)`, not `(3)` (to match `events.timestamp`)
+  // or `(9)` ("more precision is safer"). Both of those instincts are
+  // plausible, and both are wrong in a way that is silent and bidirectional:
+  // getting the scale wrong does not fail to load, it loads clean and reads
+  // back a garbage instant. Measured directly against a live server, with a
+  // single `suppressed_persons` row holding `2026-08-08 12:00:00.123456`:
+  //   - `DateTime64(3)` reads back as `2299-12-31` — a far-future boundary,
+  //     which SUPPRESSES EVERY EVENT for that person, forever.
+  //   - `DateTime64(9)` reads back as `1970-01-21` — a far-past boundary,
+  //     which REPUBLISHES EVERY DELETED PERSON, the exact leak this feature
+  //     exists to prevent.
+  //   - `DateTime64(6)` reads back correctly.
+  // All four scales tried ((3), (6), (9), and no explicit structure) load
+  // with dictionary status `LOADED` and an empty `last_exception` — nothing
+  // errors, nothing warns, at either the wrong scales or the right one. `(6)`
+  // is not a tuning choice; it is what ClickHouse's own `postgresql()` source
+  // infers for a `timestamptz` column with no explicit structure given
+  // (confirmed directly: `SELECT ... FROM postgresql(...)` reports
+  // `DateTime64(6)`), and matching that inferred scale exactly is what makes
+  // this a value the dictionary loads correctly rather than merely a value
+  // it accepts declaring.
   try {
     await ch.command({
       query: `CREATE OR REPLACE DICTIONARY suppressed_persons (
-      project_id UInt32, person_id String, suppressed UInt8
+      project_id UInt32, person_id String, suppressed UInt8, suppressed_at DateTime64(6)
     )
     PRIMARY KEY project_id, person_id
     ${source(

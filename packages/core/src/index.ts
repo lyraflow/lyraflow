@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 7
+export const SCHEMA_VERSION = 9
 
 export * from './ingest/payloads.js'
 export * from './ingest/properties.js'
@@ -14,3 +14,4 @@ export * from './segments/base.js'
 export * from './segments/compile.js'
 export * from './segments/hash.js'
 export * from './segments/cursor.js'
+export * from './privacy/suppression.js'

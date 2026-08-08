@@ -48,15 +48,18 @@ matching people. Segments can be saved, listed, updated and re-run, and
 `/v1/schema/events` and `/v1/schema/properties` expose what a project has recorded, for
 autocomplete.
 
-There is still **no UI**, no person deletion or export, and no reporting layer — funnels,
-cohorts and retention are v0.2. `README.md` documents the whole public surface; keep it
-accurate when the API changes, because it is the only thing standing between a new
-self-hoster and a working install. It has drifted twice; both times a shipped endpoint
-went undocumented because the task that added it had no documentation step.
+Privacy ships too: `DELETE /v1/persons/:id` and `GET /v1/persons/:id/export` cover
+deletion and subject-access export for the same subject `GET /v1/persons/:id` describes,
+an in-process purge worker erases the underlying rows, and every read path — segment
+counts and members, the person read, the export itself — is filtered against the
+suppression boundary the moment a deletion is accepted.
 
-`README.md` documents the endpoints and payload shape; keep it accurate when the API
-changes, because it is the only thing standing between a new self-hoster and a working
-install.
+There is still **no UI** and no reporting layer — funnels, cohorts and retention are
+v0.2; that is now the whole remaining v0.1 gap. `README.md` documents the whole public
+surface; keep it accurate when the API changes, because it is the only thing standing
+between a new self-hoster and a working install. It has drifted twice; both times a
+shipped endpoint went undocumented because the task that added it had no documentation
+step.
 
 ## Stack and layout
 

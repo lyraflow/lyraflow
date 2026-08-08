@@ -31,6 +31,17 @@ beforeAll(async () => {
   // Unconditional, like schema-postgres.test.ts: safe whether or not the
   // table currently exists, since every migration (including 001_core.sql)
   // is fully `IF NOT EXISTS` and migrate() recreates the ledger itself.
+  //
+  // suppressed_persons_dict_src is the one exception to "IF NOT EXISTS is
+  // enough": 008_deletion_requests.sql widens it with an extra column via
+  // `CREATE OR REPLACE VIEW`, and Postgres refuses to replace a view with
+  // one that has fewer columns ("cannot drop columns from view"). A replay
+  // of every migration from scratch runs 005's original 3-column definition
+  // before 008's 4-column one — harmless against a view that does not exist
+  // yet, but fatal against one this same replay (or an earlier file's) has
+  // already widened. Dropping it here, alongside the ledger, guarantees 005
+  // always starts from a clean slate.
+  await pg.query('DROP VIEW IF EXISTS suppressed_persons_dict_src')
   await pg.query('DROP TABLE IF EXISTS schema_migrations')
   const root = join(import.meta.dirname, '..', 'migrations')
   await migrate({ pg, ch, migrations: loadMigrations(root), appSchemaVersion: 999 })

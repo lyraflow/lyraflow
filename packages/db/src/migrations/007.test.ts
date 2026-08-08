@@ -15,6 +15,14 @@ let projectId: number
 
 beforeAll(async () => {
   await pg.query('DROP TABLE IF EXISTS segments')
+  // suppressed_persons_dict_src is not safely replayable by "IF NOT EXISTS"
+  // alone: 008_deletion_requests.sql widens it with `CREATE OR REPLACE VIEW`,
+  // which Postgres refuses once the live view already carries the extra
+  // column ("cannot drop columns from view") — exactly the state an earlier
+  // full replay in this same, fileParallelism-false suite can leave it in.
+  // Dropped here so 005's original, unmodified 3-column definition always
+  // has a clean slate to replay against.
+  await pg.query('DROP VIEW IF EXISTS suppressed_persons_dict_src')
   await pg.query('DROP TABLE IF EXISTS schema_migrations')
   await migrate({
     pg,
@@ -120,6 +128,8 @@ describe('segments table', () => {
         updated_at timestamptz NOT NULL DEFAULT now(),
         UNIQUE (project_id, name)
       )`)
+    // See the beforeAll above for why this view has to go too.
+    await pg.query('DROP VIEW IF EXISTS suppressed_persons_dict_src')
     await pg.query('DROP TABLE IF EXISTS schema_migrations')
     await migrate({
       pg,
