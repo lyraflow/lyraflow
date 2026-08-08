@@ -30,6 +30,10 @@ export class PurgeWorker {
   constructor(private readonly opts: PurgeWorkerOptions) {}
 
   start(): void {
+    // #stopped is one-way once set by stop(); clearing it here is what
+    // makes a subsequent start() actually resume claiming instead of
+    // installing a live interval whose every tick returns 'idle' forever.
+    this.#stopped = false
     if (this.#timer) return
     // unref'd: a pending purge tick must never be the reason the process
     // stays alive.
@@ -74,17 +78,28 @@ export class PurgeWorker {
       await this.opts.deletions.complete(claimed.id)
       return 'purged'
     } catch (err) {
-      // Reporting the failure must not itself be able to reject.
-      try {
-        this.opts.onError(err, { requestId: claimed?.id })
-        if (claimed) {
+      // Recording the failure must not itself be able to reject, AND must
+      // not depend on the caller-supplied `onError` surviving: it used to
+      // run before `fail()`, so a throwing logger left `completed_at` and
+      // `last_error` BOTH null — indistinguishable from "still pending" on
+      // the status endpoint, and permanent once `attempts` hits the cap.
+      // `fail()` goes first now, and each call gets its own try/catch, so a
+      // throw from either one cannot take out the other or escape here.
+      if (claimed) {
+        try {
           await this.opts.deletions.fail(
             claimed.id,
             err instanceof Error ? err.message : String(err),
           )
+        } catch {
+          /* nothing left to escalate to; the lease will bring the request back */
         }
+      }
+      try {
+        this.opts.onError(err, { requestId: claimed?.id })
       } catch {
-        /* nothing left to escalate to; the lease will bring the request back */
+        /* the failure is already durably recorded above; a broken logger
+           must not be able to reject runOnce() */
       }
       return 'failed'
     } finally {

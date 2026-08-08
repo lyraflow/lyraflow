@@ -278,7 +278,18 @@ describe('PurgeWorker', () => {
       await purgeStartedPromise
       const p2 = worker.runOnce()
 
-      expect(await p2).toBe('idle')
+      // p2 must resolve to 'idle' almost immediately — it is a synchronous
+      // guard, no I/O involved. Racing it against a short, bounded timer,
+      // rather than awaiting it directly, is what keeps a REGRESSION (the
+      // guard missing, p2 proceeding to claim the second row and block on
+      // `held` forever, exactly like p1) from turning into a 30-second
+      // suite timeout that reads like flake: with the guard gone this
+      // assertion fails in well under a second instead.
+      const outcome = await Promise.race([
+        p2,
+        new Promise<'timed-out'>((resolve) => setTimeout(() => resolve('timed-out'), 500)),
+      ])
+      expect(outcome).toBe('idle')
       expect(claimSpy).toHaveBeenCalledTimes(1)
       expect(purgeStarts).toBe(1)
 
@@ -330,12 +341,47 @@ describe('PurgeWorker', () => {
     const held = new Promise<void>((resolve) => {
       release = resolve
     })
-    const worker = makeWorker({ purge: async () => held })
+    let purgeStarted: () => void = () => {}
+    const purgeStartedPromise = new Promise<void>((resolve) => {
+      purgeStarted = resolve
+    })
+    const worker = makeWorker({
+      purge: async () => {
+        purgeStarted()
+        await held
+      },
+    })
 
     const p1 = worker.runOnce()
-    // stop() is synchronous (`stop(): void`) and must return without
-    // waiting on `held`, which is not resolved until after this call.
-    worker.stop()
+    await purgeStartedPromise // the purge is genuinely in flight, blocked on `held`
+
+    // The property under test is ORDERING, not merely "stop() eventually
+    // returns": stop()'s declared type is `void`, but a broken
+    // implementation could still be rewritten `async` and internally
+    // `await` the in-flight cycle — TypeScript would not catch that here,
+    // since nothing else in this codebase yet calls `.stop()` and depends
+    // on its return type. A prior version of this test called `stop()`
+    // without inspecting its return value and only checked that the purge
+    // finished AFTERWARDS — that proves stop() doesn't CANCEL the purge,
+    // not that it doesn't AWAIT it, and an async, awaiting stop() passed it
+    // undetected.
+    //
+    // `held` is deliberately NOT released before this race. `stop()`'s
+    // return value is wrapped in `Promise.resolve` and raced against a 0ms
+    // timer — not a wait for "enough time to pass", but exploiting a JS
+    // ordering guarantee: the microtask queue always drains completely
+    // before the next macrotask (a `setTimeout` callback, even at 0ms) runs.
+    // A truly synchronous `stop()` settles the SETTLED branch on a
+    // microtask, which is guaranteed to win. An `async stop()` that awaits
+    // `held` cannot settle until `held` resolves — which never happens
+    // before the race is decided — so the timer branch wins instead,
+    // deterministically, not by chance.
+    const SETTLED = Symbol('stop settled synchronously')
+    const race = await Promise.race([
+      Promise.resolve(worker.stop()).then(() => SETTLED),
+      new Promise<'timed-out'>((resolve) => setTimeout(() => resolve('timed-out'), 0)),
+    ])
+    expect(race).toBe(SETTLED)
 
     // No new work is taken post-stop, proven independently above; here the
     // point is that the ALREADY-in-flight purge is unaffected by stop().
@@ -343,5 +389,108 @@ describe('PurgeWorker', () => {
     expect(await p1).toBe('purged')
     const row = await store.get(projectId, id)
     expect(row?.completedAt).not.toBeNull()
+  })
+
+  it('start() unrefs its timer so a pending tick cannot keep the process alive', () => {
+    const originalSetInterval = globalThis.setInterval
+    let unrefCalled = false
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval').mockImplementation(((
+      handler: () => void,
+      timeout?: number,
+    ) => {
+      const t = originalSetInterval(handler, timeout)
+      const originalUnref = t.unref.bind(t)
+      t.unref = () => {
+        unrefCalled = true
+        return originalUnref()
+      }
+      return t
+    }) as typeof setInterval)
+
+    const worker = makeWorker()
+    try {
+      worker.start()
+      expect(unrefCalled).toBe(true)
+    } finally {
+      worker.stop()
+      setIntervalSpy.mockRestore()
+    }
+  })
+
+  it('start() is idempotent: a second call does not install a second interval', () => {
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval')
+    const worker = makeWorker()
+    try {
+      worker.start()
+      worker.start()
+      expect(setIntervalSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      worker.stop()
+      setIntervalSpy.mockRestore()
+    }
+  })
+
+  it('start() after stop() resumes claiming (clears the stopped flag)', async () => {
+    const { id } = await store.request(projectId, 'restart-1', ['restart-1'], new Date())
+    const worker = makeWorker()
+    worker.stop()
+    worker.start()
+    try {
+      expect(await worker.runOnce()).toBe('purged')
+      const row = await store.get(projectId, id)
+      expect(row?.completedAt).not.toBeNull()
+    } finally {
+      worker.stop()
+    }
+  })
+
+  it('records the failure even when onError itself throws', async () => {
+    // onError used to run BEFORE fail(); a throwing logger would then erase
+    // the durable record entirely, leaving both completed_at and last_error
+    // null — indistinguishable from "still pending" on the status endpoint.
+    const { id } = await store.request(
+      projectId,
+      'onerror-throws-1',
+      ['onerror-throws-1'],
+      new Date(),
+    )
+    const worker = makeWorker({
+      purge: async () => {
+        throw new Error('purge boom')
+      },
+      onError: () => {
+        throw new Error('logger exploded')
+      },
+    })
+
+    await expect(worker.runOnce()).resolves.toBe('failed')
+
+    const row = await store.get(projectId, id)
+    expect(row?.lastError ?? '').toContain('purge boom')
+    expect(row?.completedAt).toBeNull()
+  })
+
+  it('does not reject when fail() itself throws for the same underlying reason as the step that failed', async () => {
+    // The correlated case this class exists to survive: Postgres goes away,
+    // so the step that failed (purge, standing in for any step) AND the
+    // call meant to record that failure both throw. The inner try/catch
+    // around fail() is what stops that second throw from escaping the outer
+    // catch block and rejecting runOnce() itself.
+    await store.request(projectId, 'correlated-1', ['correlated-1'], new Date())
+    const failSpy = vi.spyOn(store, 'fail').mockRejectedValueOnce(new Error('db gone'))
+    const onError = vi.fn()
+    const worker = makeWorker({
+      purge: async () => {
+        throw new Error('purge boom')
+      },
+      onError,
+    })
+
+    try {
+      await expect(worker.runOnce()).resolves.toBe('failed')
+      expect(onError).toHaveBeenCalledTimes(1)
+    } finally {
+      failSpy.mockRestore()
+    }
   })
 })
