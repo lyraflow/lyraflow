@@ -12,9 +12,17 @@ import { type PgDictionarySource, ensureIdentityDictionaries } from '../identity
 /**
  * One suppression rule, five read paths that must agree on it — but only
  * three `notSuppressedExpr` (@lyraflow/core/privacy/suppression.ts) call
- * sites, not five, and one Postgres derivation independent of all three.
+ * sites between them, not five, and one Postgres derivation independent of
+ * all three.
  *
- * The three ClickHouse, dictionary-side call sites:
+ * A fourth call site exists outside this matrix: `GET /v1/events/stats`
+ * (events/routes.ts), per-event against each row's own `timestamp`, the
+ * same shape as the feed. It is absent here because it returns counts
+ * rather than people, so it has no `personIds` to assert on — it carries
+ * its own targeted erased-person test instead. Any sixth read path that
+ * DOES return people belongs in the matrix below.
+ *
+ * The three ClickHouse, dictionary-side call sites the five paths reach:
  *   - the base population (compile.ts), compared against a PERSON-LEVEL
  *     `last_seen` — derived from device_index, pre-aggregated per (device,
  *     month), so exact only once the purge has run (compile.ts's own
