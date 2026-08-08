@@ -23,6 +23,11 @@ export const MAX_USER_AGENT_LENGTH = 1024
  * property on it. The remaining context fields (the five `utm_*`) are capped
  * at `MAX_ID_LENGTH`, and are not truncated here: a mangled campaign name
  * silently attributed to the wrong campaign is worse than a warning.
+ *
+ * That choice means an over-long `utm_*` still costs the whole event, by
+ * design. The transport's `rejected` warning (`#reportRejected`) is the only
+ * thing standing between that case and complete silence — if that ever goes,
+ * this decision has to be revisited with it.
  */
 const CONTEXT_LIMITS: [string, number][] = [
   ['url', MAX_URL_LENGTH],
@@ -39,6 +44,13 @@ const CONTEXT_LIMITS: [string, number][] = [
  * shortened `url` costs the query string of one event, while sending it whole
  * costs the event, its properties and the identity attached to it — silently,
  * behind a `202`.
+ *
+ * The cut is by code unit and can land inside a percent-escape, leaving a
+ * trailing bare `%` — so the stored value is not strictly a valid URL. It is
+ * accepted: it happens once (this runs before the event is queued, never on a
+ * retry), it is idempotent, and nothing downstream decodes stored URLs.
+ * Trimming to an escape boundary would cost bytes in a bundle with a hard
+ * ceiling to buy correctness nothing reads.
  */
 function contextProblems(e: QueuedEvent, truncate: boolean): string[] {
   const out: string[] = []

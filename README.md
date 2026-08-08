@@ -227,11 +227,13 @@ Paste this before `</head>`:
 The first block is a stub: it queues any call made before the async script
 finishes loading, so a `track()` fired the instant the page renders is never
 lost to a race with the network. **`init` is queued the same way as every
-other method** — the third block runs long before the async script has
-loaded, which is exactly why `init` has to be in the stub's method list. The
-moment the real script loads it replaces the stub on `window.lyraflow` and
-replays the queue, running the queued `init` first whatever order the calls
-were made in. Replace both
+other method** — the third block usually runs long before the async script
+has loaded, which is exactly why `init` has to be in the stub's method list.
+The moment the real script loads it replaces the stub on `window.lyraflow`
+and takes the queue with it, running the queued `init` first whatever order
+the calls were made in. On a repeat visit the cached script can run *before*
+the third block; the queue is then held until that `init` arrives, and drained
+by it. Either way nothing queued is lost. Replace both
 occurrences of `https://analytics.example.com` with your own Lyraflow host,
 and `writeKey` with the `wk_…` key from *Running Lyraflow* above — the same
 one your server-side calls already use.

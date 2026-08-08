@@ -96,6 +96,15 @@ function newPage(): {
   return { run, sent, api }
 }
 
+/** The built bundle and the README's two inline blocks, in document order. */
+function snippetParts(): { bundle: string; stub: string; initCall: string } {
+  expect(existsSync(BUNDLE_PATH), 'dist/lyraflow.js is missing — run pnpm build first').toBe(true)
+  const { inline } = readSnippet()
+  expect(inline.length, 'the snippet should have two inline scripts').toBe(2)
+  const [stub, initCall] = inline as [string, string]
+  return { bundle: readFileSync(BUNDLE_PATH, 'utf8'), stub, initCall }
+}
+
 /** Every event name the fake transport actually received, across all batches. */
 function delivered(sent: string[]): string[] {
   return sent.flatMap((body) =>
@@ -109,12 +118,7 @@ describe('the README snippet, against the built bundle', () => {
   })
 
   it('initialises the SDK and delivers events queued before the script loaded', async () => {
-    expect(existsSync(BUNDLE_PATH), 'dist/lyraflow.js is missing — run pnpm build first').toBe(true)
-    const bundle = readFileSync(BUNDLE_PATH, 'utf8')
-    const { inline } = readSnippet()
-    expect(inline.length, 'the snippet should have two inline scripts').toBe(2)
-    const [stub, initCall] = inline as [string, string]
-
+    const { bundle, stub, initCall } = snippetParts()
     const { run, sent, api } = newPage()
 
     // 1. The stub, exactly as documented.
@@ -151,5 +155,32 @@ describe('the README snippet, against the built bundle', () => {
       properties: { plan: 'trial' },
       context: { url: 'https://shop.example.com/checkout' },
     })
+  })
+
+  it('delivers the same events when a cached bundle runs before the init block', async () => {
+    // The warm-cache ordering, and the ordinary repeat visit: an `async`
+    // script runs the moment it is FETCHED, so a bundle already in cache can
+    // execute before the inline block that calls `init` has been parsed. The
+    // queue therefore reaches the bundle with no `init` in it.
+    //
+    // Replaying it there fed every call to an SDK with no state — dropped one
+    // by one as "called before init()" — and then discarded the queue with
+    // the stub, so `init()`'s own drain found nothing either. The README's
+    // promise that "a track() fired the instant the page renders is never
+    // lost" was false on exactly the visit where the page renders fastest.
+    const { bundle, stub, initCall } = snippetParts()
+    const { run, sent, api } = newPage()
+
+    run(stub)
+    run('window.lyraflow.track("early_signup", { plan: "trial" })')
+    // The bundle, BEFORE the init block — the only difference from the test
+    // above.
+    run(bundle)
+    run(initCall)
+
+    api().track('after_load', { plan: 'pro' })
+    await api().flush()
+
+    expect(delivered(sent)).toEqual(['early_signup', 'after_load'])
   })
 })

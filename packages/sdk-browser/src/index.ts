@@ -210,6 +210,10 @@ function drainSnippetQueue(): void {
  * block, a `consent()` restored from a banner script) and would leave the
  * SDK uninitialised for the whole first pass besides.
  *
+ * Callers must not hand this a queue with no `init` in it unless the SDK is
+ * already initialised — see `installGlobal`, which carries such a queue
+ * forward instead of replaying it into a dropped-on-the-floor SDK.
+ *
  * Re-entry is not a hazard: every caller clears the queue it hands over
  * before calling this, so the `drainSnippetQueue()` inside `init()` finds
  * nothing left to replay.
@@ -447,6 +451,18 @@ const api = { init, track, page, identify, consent, reset, flush }
  * This is now the bundle's ONLY global; `scripts/bundle.mjs` no longer sets
  * an esbuild `globalName`, which named a handle no documentation mentioned.
  *
+ * A queue with no `init` in it is CARRIED FORWARD, not replayed. That is the
+ * warm-cache ordering and it is the ordinary repeat visit: an `async` script
+ * runs the moment it is fetched, so a cached bundle can execute before the
+ * inline block that calls `init` has even been parsed. Replaying there would
+ * feed every queued call to an SDK that has no state yet — each one dropped
+ * with a "called before init()" warning — and then discard the queue along
+ * with the stub, leaving `init()`'s own drain nothing to find. Carrying it
+ * onto `api.q` instead keeps the stub's one promise (a call made before the
+ * script loaded is never lost) true in both orderings: `init()` drains this
+ * array through `drainSnippetQueue` exactly as it would have drained the
+ * stub's.
+ *
  * A no-op off the browser (the server imports `VERSION` from this module in
  * a Node process).
  */
@@ -455,7 +471,9 @@ function installGlobal(): void {
   const w = window as unknown as { lyraflow?: unknown }
   const queued = (w.lyraflow as SnippetStub | undefined)?.q
   w.lyraflow = api
-  if (Array.isArray(queued)) replay(queued)
+  if (!Array.isArray(queued)) return
+  if (queued.some((call) => Array.isArray(call) && call[0] === 'init')) replay(queued)
+  else (api as unknown as SnippetStub).q = queued
 }
 
 installGlobal()
