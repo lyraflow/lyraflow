@@ -7,6 +7,7 @@
   "engines": { "node": ">=22 <23" },
   "scripts": { "build": "tsc -b", "start": "node dist/index.js" },
   "dependencies": {
+    "@fastify/cors": "^11.3.0",
     "@lyraflow/core": "workspace:*",
     "@lyraflow/db": "workspace:*",
     "fastify": "^5.2.0",

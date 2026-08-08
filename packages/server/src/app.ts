@@ -159,6 +159,7 @@ export function buildApp(input: {
     ch,
     bindings,
     aliases,
+    allowedOrigins: config.allowedOrigins,
   })
   registerPersonRoutes(app, { projects, readiness, ch, bindings, aliases, suppression })
   registerSegmentRoutes(app, {

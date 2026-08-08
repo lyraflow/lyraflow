@@ -11,6 +11,7 @@ export interface Config {
   purgeIntervalMs: number
   purgeLeaseMs: number
   purgeMaxAttempts: number
+  allowedOrigins: string[]
 }
 
 /**
@@ -75,5 +76,21 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     // A poisoned request stops being claimed past this, with last_error
     // saying why, rather than spinning forever.
     purgeMaxAttempts: num(env, 'LYRAFLOW_PURGE_MAX_ATTEMPTS', 5),
+    // Origins permitted to call the write-key ingest routes from a browser.
+    // Empty means any origin.
+    //
+    // This is NOT a security boundary. The write key is public by design — it
+    // ships in page source — and any non-browser client ignores CORS entirely.
+    // What an allowlist buys is stopping someone pasting your key on their own
+    // site and polluting your data: a product limit made tamper-evident, the same
+    // category as the segment cursor's signature. Do not lean on it for anything
+    // else.
+    //
+    // Defaulting to deny would mean a fresh install's snippet fails silently on
+    // first paste, which is a worse failure than the one it prevents.
+    allowedOrigins: (env.LYRAFLOW_ALLOWED_ORIGINS ?? '')
+      .split(',')
+      .map((o) => o.trim())
+      .filter((o) => o.length > 0),
   }
 }

@@ -53,4 +53,33 @@ describe('loadConfig', () => {
       } as NodeJS.ProcessEnv),
     ).toThrow(/LYRAFLOW_PURGE_MAX_ATTEMPTS must be a number, got "not-a-number"/)
   })
+
+  it('defaults allowedOrigins to an empty array when unset', () => {
+    const c = loadConfig({ ...required } as NodeJS.ProcessEnv)
+    expect(c.allowedOrigins).toEqual([])
+  })
+
+  it('parses a single allowed origin', () => {
+    const c = loadConfig({
+      ...required,
+      LYRAFLOW_ALLOWED_ORIGINS: 'https://app.example.com',
+    } as NodeJS.ProcessEnv)
+    expect(c.allowedOrigins).toEqual(['https://app.example.com'])
+  })
+
+  it('parses several allowed origins and trims whitespace', () => {
+    const c = loadConfig({
+      ...required,
+      LYRAFLOW_ALLOWED_ORIGINS: ' https://app.example.com , https://other.example.com ',
+    } as NodeJS.ProcessEnv)
+    expect(c.allowedOrigins).toEqual(['https://app.example.com', 'https://other.example.com'])
+  })
+
+  it('does not produce an empty entry from a trailing comma', () => {
+    const c = loadConfig({
+      ...required,
+      LYRAFLOW_ALLOWED_ORIGINS: 'https://app.example.com,',
+    } as NodeJS.ProcessEnv)
+    expect(c.allowedOrigins).toEqual(['https://app.example.com'])
+  })
 })
