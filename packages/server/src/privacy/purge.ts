@@ -105,7 +105,13 @@ export async function purgePerson(opts: {
   // matching inside `bobby`; it is still a substring match over unparsed
   // text, which is the most that can be said about a payload that failed to
   // parse. Erring toward deleting a diagnostic row is the right direction
-  // here.
+  // here. One known gap, not worth code against: buildDeadLetterRow
+  // (ingest/routes.ts) truncates the stored payload at 8000 characters, so a
+  // cut that lands mid-token can leave e.g. `…"user_id":"alice` with no
+  // closing quote — the quoted-form match below then misses it. The
+  // alternative (matching the bare substring) reintroduces the `bob`-inside-
+  // `bobby` collision this quoting exists to prevent, which is the worse
+  // failure mode of the two.
   await mutate(
     ch,
     `ALTER TABLE events_dead_letter DELETE WHERE project_id = {projectId:UInt32}

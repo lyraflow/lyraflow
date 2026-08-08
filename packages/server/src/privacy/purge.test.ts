@@ -11,7 +11,12 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { hashServerKey } from '../auth/project-cache.js'
 import { PersonAliases } from '../identity/aliases.js'
 import { IdentityBindings } from '../identity/bindings.js'
-import { resolvePersonScope } from '../identity/scope.js'
+import {
+  MAX_PERSON_RANGE_CLAUSES,
+  type PersonScope,
+  type PersonWindow,
+  resolvePersonScope,
+} from '../identity/scope.js'
 import { purgePerson } from './purge.js'
 
 const CH_DB = 'lyraflow_test'
@@ -386,7 +391,14 @@ describe('purgePerson', () => {
 
   it("removes dead-letter rows carrying the person's ids", async () => {
     const person = `dl-person-${randomUUID()}`
+    const device = `dl-device-${randomUUID()}`
     const other = `dl-other-${randomUUID()}`
+    const bindAt = new Date(BASE_MS + 10 * 60_000)
+
+    // A device bound to the person — so `scope.ids` (group ∪ devices) has a
+    // device id in it, not just the person id, and the dead-letter match can
+    // be checked against BOTH halves of `{ids:Array(String)}` independently.
+    await bindings.bind(projectA, device, person, bindAt)
 
     await ch.insert({
       table: 'events_dead_letter',
@@ -398,6 +410,17 @@ describe('purgePerson', () => {
           reason: 'invalid_payload',
           detail: 'test fixture',
           payload: JSON.stringify({ user_id: person, event: 'broken' }),
+        },
+        // Keyed on the DEVICE id, never the person id — only reachable
+        // through `scope.devices`'s contribution to `scope.ids`. A version
+        // that matched dead-letter rows against `scope.group` alone (the
+        // person ids only) would leave this one behind.
+        {
+          project_id: projectA,
+          received_at: chAt(12),
+          reason: 'invalid_payload',
+          detail: 'test fixture',
+          payload: JSON.stringify({ anonymous_id: device, event: 'broken' }),
         },
         {
           project_id: projectA,
@@ -419,6 +442,13 @@ describe('purgePerson', () => {
       { p: person },
     )
     expect(mineLeft).toBe(0)
+    const deviceLeft = await rowCount(
+      'events_dead_letter',
+      projectA,
+      "position(payload, concat('\"', {p:String}, '\"')) > 0",
+      { p: device },
+    )
+    expect(deviceLeft).toBe(0)
     const othersLeft = await rowCount(
       'events_dead_letter',
       projectA,
@@ -466,6 +496,24 @@ describe('purgePerson', () => {
         eventName: '$identify',
         properties: { plan: 'cross' },
       })
+      // A dead-letter row carrying the person's id, in EACH project — cross-
+      // tenant isolation for step 4, which the earlier version of this test
+      // never exercised: it only checked `events` (already project-scoped by
+      // its own `project_id` clause, unaffected by a dead-letter-specific
+      // regression) and Postgres `identity_bindings`.
+      await ch.insert({
+        table: 'events_dead_letter',
+        format: 'JSONEachRow',
+        values: [
+          {
+            project_id: projectId,
+            received_at: chAt(12),
+            reason: 'invalid_payload',
+            detail: 'cross-project fixture',
+            payload: JSON.stringify({ user_id: person, event: 'broken' }),
+          },
+        ],
+      })
     }
 
     const scope = await resolvePersonScope({ bindings, aliases }, projectA, person)
@@ -512,6 +560,21 @@ describe('purgePerson', () => {
       [projectB, device, person],
     )
     expect(bindingInB.rowCount).toBe(1)
+
+    const dlInA = await rowCount(
+      'events_dead_letter',
+      projectA,
+      "position(payload, concat('\"', {p:String}, '\"')) > 0",
+      { p: person },
+    )
+    expect(dlInA).toBe(0)
+    const dlInB = await rowCount(
+      'events_dead_letter',
+      projectB,
+      "position(payload, concat('\"', {p:String}, '\"')) > 0",
+      { p: person },
+    )
+    expect(dlInB).toBe(1)
   })
 
   it('leaves a co-tenant of a shared device identified elsewhere', async () => {
@@ -548,19 +611,38 @@ describe('purgePerson', () => {
       timestamp: chAt(40),
       eventName: 'shared_bob_identified',
     })
+    // THE fixture the window-less "simplification" of the events predicate
+    // would get wrong: anonymous browsing on the SAME device, but strictly
+    // AFTER bob's rebind — outside alice's window entirely. A device-wide
+    // (not time-split) match on `anonymous_id IN devices` would delete this
+    // even though alice never touched the device again once bob took it
+    // over. Without this event, a whole-device predicate and a correctly
+    // time-split one are indistinguishable to this test — every anonymous
+    // event in the fixture happens to fall in alice's own era, so both
+    // implementations would delete the same rows and this test would pass
+    // regardless of whether the code is actually time-splitting anything.
+    await insertEvent({
+      projectId: projectA,
+      anonymousId: device,
+      timestamp: chAt(45),
+      eventName: 'shared_bob_anon',
+    })
 
     const scope = await resolvePersonScope({ bindings, aliases }, projectA, alice)
     await purgePerson({ ch, pg, projectId: projectA, scope })
 
     const aliceLeft = await eventCount(projectA, 'user_id = {p:String}', { p: alice })
     expect(aliceLeft).toBe(0)
-    const aliceAnonLeft = await eventCount(projectA, "anonymous_id = {d:String} AND user_id = ''", {
-      d: device,
-    })
+    const aliceAnonLeft = await eventCount(projectA, "event_name = 'shared_alice_anon'", {})
     expect(aliceAnonLeft).toBe(0)
 
     const bobLeft = await eventCount(projectA, 'user_id = {p:String}', { p: bob })
     expect(bobLeft).toBe(1)
+    // THE load-bearing assertion added for the window-less-predicate
+    // mutation: bob's anonymous browsing, in his own era on the shared
+    // device, must survive a purge of alice.
+    const bobAnonLeft = await eventCount(projectA, "event_name = 'shared_bob_anon'", {})
+    expect(bobAnonLeft).toBe(1)
 
     // The load-bearing assertion for THIS test: bob's own binding row for
     // the shared device must survive — bindings are deleted by PERSON, never
@@ -575,5 +657,173 @@ describe('purgePerson', () => {
       [projectA, device, alice],
     )
     expect(aliceBinding.rowCount).toBe(0)
+  })
+
+  // The `person_aliases` delete has no other coverage in this file: no other
+  // fixture ever creates an alias, so nothing else exercises either the
+  // alias-row deletion itself or `scope.group`'s expansion over a
+  // merged-away id (resolvePersonScope's step 2 — see scope.ts's own
+  // docstring on why that step is not optional).
+  it("purges a merged-away id's alias row and its own events", async () => {
+    const canonical = `merge-canonical-${randomUUID()}`
+    const mergedAway = `merge-away-${randomUUID()}`
+
+    const merged = await aliases.alias(projectA, mergedAway, canonical)
+    expect(merged).toBe('merged')
+
+    await insertEvent({
+      projectId: projectA,
+      userId: canonical,
+      timestamp: chAt(10),
+      eventName: 'merge_canonical_event',
+    })
+    // Recorded under the OLD id — exactly the case scope.ts warns about:
+    // /v1/alias never repoints history already written under the merged-away
+    // id, so it is only reachable at all through `scope.group`'s expansion.
+    await insertEvent({
+      projectId: projectA,
+      userId: mergedAway,
+      timestamp: chAt(11),
+      eventName: 'merge_away_event',
+    })
+
+    const scope = await resolvePersonScope({ bindings, aliases }, projectA, canonical)
+    // The exercise this test is actually about: resolving the CANONICAL id
+    // pulls the merged-away id into the group too.
+    expect(scope.group.sort()).toEqual([canonical, mergedAway].sort())
+
+    await purgePerson({ ch, pg, projectId: projectA, scope })
+
+    const canonicalLeft = await eventCount(projectA, 'user_id = {p:String}', { p: canonical })
+    expect(canonicalLeft).toBe(0)
+    const mergedAwayLeft = await eventCount(projectA, 'user_id = {p:String}', { p: mergedAway })
+    expect(mergedAwayLeft).toBe(0)
+
+    const aliasRow = await pg.query(
+      'SELECT 1 FROM person_aliases WHERE project_id = $1 AND person_id = $2',
+      [projectA, mergedAway],
+    )
+    expect(aliasRow.rowCount).toBe(0)
+  })
+
+  // Neither of these tables is ever written by purgePerson — this is a
+  // negative test with nothing else in the file to catch a future step that
+  // starts touching either. suppressed_persons is the backstop against a
+  // restored backup resurrecting the person (008_deletion_requests.sql);
+  // event_schema has no identity column at all, and deleting from it would
+  // corrupt autocomplete for the whole project, not just this person.
+  it('leaves suppressed_persons and event_schema untouched', async () => {
+    const person = `untouched-person-${randomUUID()}`
+
+    await pg.query(
+      'INSERT INTO suppressed_persons (project_id, person_id, suppressed_at) VALUES ($1, $2, now())',
+      [projectA, person],
+    )
+    await insertEvent({
+      projectId: projectA,
+      userId: person,
+      timestamp: chAt(10),
+      eventName: 'untouched_schema_event',
+      properties: { untouched_key: 'x' },
+    })
+
+    const scope = await resolvePersonScope({ bindings, aliases }, projectA, person)
+    await purgePerson({ ch, pg, projectId: projectA, scope })
+
+    const suppression = await pg.query(
+      'SELECT 1 FROM suppressed_persons WHERE project_id = $1 AND person_id = $2',
+      [projectA, person],
+    )
+    expect(suppression.rowCount).toBe(1)
+
+    const schemaRow = await rowCount(
+      'event_schema',
+      projectA,
+      "event_name = 'untouched_schema_event' AND property_key = 'untouched_key'",
+      {},
+    )
+    expect(schemaRow).toBe(1)
+  })
+
+  // Named on its own, separately from "waits for each mutation" (which also
+  // happens to use a windowless person, incidentally) — so that editing that
+  // test to give its person a device cannot silently delete the only
+  // coverage of chunkWindows's "empty windows still yields one chunk"
+  // contract (scope.ts). Without it, a person whose events all carry their
+  // own user_id (no device ever involved — the common server-side-only
+  // tracking shape) would never have those events deleted at all.
+  it('purges a person whose events carry no device window at all', async () => {
+    const person = `no-window-person-${randomUUID()}`
+    await insertEvent({
+      projectId: projectA,
+      userId: person,
+      timestamp: chAt(10),
+      eventName: 'no_window_event',
+    })
+
+    const scope = await resolvePersonScope({ bindings, aliases }, projectA, person)
+    expect(scope.windows).toHaveLength(0)
+
+    await purgePerson({ ch, pg, projectId: projectA, scope })
+
+    const remaining = await eventCount(projectA, 'user_id = {p:String}', { p: person })
+    expect(remaining).toBe(0)
+  })
+
+  // The multi-chunk path: no fixture elsewhere in this file reaches
+  // MAX_PERSON_RANGE_CLAUSES windows (that would mean 201 real devices,
+  // each needing its own bind event), so this constructs a PersonScope
+  // directly rather than resolving one, and inspects the ACTUAL mutations
+  // purgePerson issues rather than only the end state — chunkWindows's
+  // contract is "every chunk together covers the whole set, none twice",
+  // which final-state assertions alone cannot distinguish from, say, only
+  // ever running the first chunk.
+  it("chunks a fragmented person's windows into disjoint mutations covering the whole set", async () => {
+    const person = `chunk-person-${randomUUID()}`
+    const totalWindows = MAX_PERSON_RANGE_CLAUSES + 1
+    const windows: PersonWindow[] = Array.from({ length: totalWindows }, (_, i) => ({
+      device: `chunk-device-${i}`,
+      from: BASE_MS + i * 1000,
+      to: BASE_MS + i * 1000 + 500,
+    }))
+    const scope: PersonScope = {
+      canonical: person,
+      group: [person],
+      devices: windows.map((w) => w.device),
+      ids: [person, ...windows.map((w) => w.device)].sort(),
+      windows,
+    }
+
+    const eventsCalls: { query_params: Record<string, unknown> }[] = []
+    const capturingCh = {
+      command: (params: Parameters<ClickHouseClient['command']>[0]) => {
+        if (params.query.includes('ALTER TABLE events DELETE')) {
+          eventsCalls.push({
+            query_params: (params.query_params ?? {}) as Record<string, unknown>,
+          })
+        }
+        return ch.command(params)
+      },
+    } as unknown as ClickHouseClient
+
+    await purgePerson({ ch: capturingCh, pg, projectId: projectA, scope })
+
+    // ceil(201 / 200) = 2 chunks, one events mutation each.
+    expect(eventsCalls).toHaveLength(2)
+
+    const devicesPerCall = eventsCalls.map((call) =>
+      Object.entries(call.query_params)
+        .filter(([key]) => /_d\d+$/.test(key))
+        .map(([, value]) => value as string),
+    )
+    expect(devicesPerCall[0]).toHaveLength(MAX_PERSON_RANGE_CLAUSES)
+    expect(devicesPerCall[1]).toHaveLength(1)
+
+    const seen = [...(devicesPerCall[0] ?? []), ...(devicesPerCall[1] ?? [])]
+    // Disjoint: no device bound into more than one chunk's predicate.
+    expect(new Set(seen).size).toBe(totalWindows)
+    // Complete: the union of the chunks is the whole window set — nothing
+    // silently dropped, and nothing left for a would-be third chunk.
+    expect(new Set(seen)).toEqual(new Set(windows.map((w) => w.device)))
   })
 })
