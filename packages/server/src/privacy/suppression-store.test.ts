@@ -60,18 +60,28 @@ describe('SuppressionStore', () => {
     expect((await store.boundaryFor(projectId, ['solo-1']))?.getTime()).toBe(at.getTime())
   })
 
-  it('returns the EARLIEST boundary when several members of a group carry one', async () => {
-    // A person merged from two ids, each deleted at a different time. The
-    // earliest boundary is the strictest, and strictest is the fail-closed
-    // direction: it hides everything either request asked to hide. Taking the
-    // latest would silently un-hide events the first request already erased.
+  it('returns the LATEST boundary when several members of a group carry one', async () => {
+    // A person merged from two ids, each deleted at a different time.
+    //
+    // This test used to assert the EARLIEST, on the reasoning that the
+    // earliest instant is the "strictest" and therefore the fail-closed
+    // direction. That is backwards, and it is worth being explicit about why,
+    // because it reads plausibly: every consumer keeps events with
+    // `timestamp > boundary`, so a SMALLER boundary hides LESS. The earliest
+    // instant in a group is the most permissive value available.
+    //
+    // `max` is the only value that honours every request in the group at
+    // once — it hides everything at or before the most recent deletion, which
+    // necessarily includes everything the earlier ones asked to hide. Under
+    // `min`, merging a person deleted long ago into a person deleted recently
+    // rewound the second person's boundary and handed their erased events
+    // back through the person read and the export
+    // (post-request-mutation.test.ts pins that sequence end to end).
     const early = new Date(Date.now() - 6 * 3_600_000)
     const late = new Date(Date.now() - 1 * 3_600_000)
     await store.upsert(pg, projectId, 'grp-a', early)
     await store.upsert(pg, projectId, 'grp-b', late)
-    expect((await store.boundaryFor(projectId, ['grp-a', 'grp-b']))?.getTime()).toBe(
-      early.getTime(),
-    )
+    expect((await store.boundaryFor(projectId, ['grp-a', 'grp-b']))?.getTime()).toBe(late.getTime())
   })
 
   it("does not see another project's suppression row", async () => {

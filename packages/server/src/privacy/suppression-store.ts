@@ -19,12 +19,34 @@ export class SuppressionStore {
    * The strictest boundary any member of this alias group carries, or null if
    * none does.
    *
-   * MIN, not MAX. A group is a canonical plus every id merged into it, and
-   * each could have been deleted at a different time; the earliest instant
-   * hides everything every one of those requests asked to hide. MAX would
-   * quietly reveal events an earlier request had already erased — and the
-   * whole point of resolving to the canonical at request time is that a merge
-   * cannot undo a deletion.
+   * MAX, not MIN — and which one is "strictest" is the opposite of what it
+   * looks like, so read the comparison before changing this. Every consumer
+   * keeps events with `timestamp > boundary`. A LATER boundary therefore
+   * hides MORE, and the earliest instant in the group is the most permissive
+   * value available, not the safest one.
+   *
+   * A group is a canonical plus every id merged into it, and each could have
+   * been deleted at a different time. `max` is the only value that honours
+   * ALL of those requests at once: it hides everything at or before the most
+   * recent of them, which necessarily includes everything the earlier ones
+   * asked to hide. `min` honours only the oldest request and quietly hands
+   * back every event the later ones erased.
+   *
+   * That was not hypothetical. With `min`, deleting alice at T1 and bob at
+   * T2 > T1 and then merging alice into bob — an ordinary `/v1/alias` call,
+   * with no relationship to either deletion — dropped bob's boundary from T2
+   * to T1 and UN-DELETED him: `GET /v1/persons/bob` went from `404` back to
+   * `200`, and the export streamed his erased events back to the caller. The
+   * merge cannot undo a deletion, and `max` is what makes that true.
+   *
+   * `max` is also what makes the two derivations agree, which matters more
+   * here than either one taken alone. The ClickHouse side (`notSuppressedExpr`
+   * against the `suppressed_persons` dictionary, dictionaries.ts) looks up the
+   * RESOLVED person's own row — bob's, at T2 — so under `min` the two halves
+   * of suppression disagreed about the same event, with the segment paths
+   * hiding it correctly and the person read and export leaking it. Two
+   * derivations that disagree are worse than either being wrong on its own:
+   * whichever one an operator checks, the other is still lying.
    *
    * Both parameters are bound: `personIds` traces back to a caller-supplied
    * URL path segment through alias resolution.
@@ -58,7 +80,7 @@ export class SuppressionStore {
   async boundaryFor(projectId: number, personIds: string[]): Promise<Date | null> {
     if (personIds.length === 0) return null
     const r = await this.pool.query<{ boundary: Date | null }>(
-      `SELECT min(suppressed_at) AS boundary
+      `SELECT max(suppressed_at) AS boundary
          FROM suppressed_persons
         WHERE project_id = $1 AND person_id = ANY($2)`,
       [projectId, personIds],
