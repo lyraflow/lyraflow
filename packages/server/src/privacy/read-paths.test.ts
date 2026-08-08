@@ -10,21 +10,44 @@ import { Readiness } from '../health.js'
 import { type PgDictionarySource, ensureIdentityDictionaries } from '../identity/dictionaries.js'
 
 /**
- * One suppression rule, five read paths that must agree on it — but only two
- * independent DERIVATIONS of the boundary, not five. `notSuppressedExpr`
- * (@lyraflow/core/privacy/suppression.ts) checks each event's own timestamp
- * against the ClickHouse suppression dictionary, and is shared verbatim by
- * segment count (compile.ts), segment members (behaviour.ts), and the events
- * feed (events/routes.ts). `SuppressionStore.boundaryFor`
- * (privacy/suppression-store.ts) checks Postgres directly, at zero
- * replication lag, and is used independently by the person read (person.ts)
- * and the export (export.ts). Plan 4's final review found a guardrail that
- * held on one route and not its neighbour, a defect no per-task review could
- * see because each diff was correct against its own brief. This file is the
- * guard against that shape recurring — and with three of five routes sharing
- * one derivation and two sharing the other, its real job is proving those
- * two derivations still agree with each other, not just that each is
- * internally consistent: one fixture, one assertion body, run against all
+ * One suppression rule, five read paths that must agree on it — but only
+ * three `notSuppressedExpr` (@lyraflow/core/privacy/suppression.ts) call
+ * sites, not five, and one Postgres derivation independent of all three.
+ *
+ * The three ClickHouse, dictionary-side call sites:
+ *   - the base population (compile.ts), compared against a PERSON-LEVEL
+ *     `last_seen` — derived from device_index, pre-aggregated per (device,
+ *     month), so exact only once the purge has run (compile.ts's own
+ *     comment documents the "typically minutes" window that follows).
+ *     Segment count and segment members BOTH compile through this CTE —
+ *     `compileSegment`'s `select` argument (compile.ts) gates only the
+ *     cursor clause, the projection, and the tail, never which CTEs get
+ *     built.
+ *   - the behavioural pass (behaviour.ts), compared per-event against each
+ *     row's own `timestamp` — exact throughout. Segment count and segment
+ *     members BOTH compile this CTE too, whenever the filter carries a
+ *     behavioural node — which is why this file's own `countFor`/
+ *     `membersFor` each issue both shapes below: `presenceFilter` hits the
+ *     base population, `windowProbeFilter` hits the behavioural pass.
+ *     compile.ts and behaviour.ts are two LAYERS of one path, not two
+ *     separate paths.
+ *   - the events feed (events/routes.ts), also compared per-event against
+ *     each row's own `timestamp` — exact throughout, the identical shape
+ *     the behavioural pass uses.
+ *
+ * The one Postgres derivation, `SuppressionStore.boundaryFor`
+ * (privacy/suppression-store.ts) — checked directly against Postgres, at
+ * zero replication lag, exact throughout — is used independently by the
+ * person read (identity/person.ts) and the export (privacy/export.ts).
+ *
+ * Plan 4's final review found a guardrail that held on one route and not
+ * its neighbour, a defect no per-task review could see because each diff
+ * was correct against its own brief. This file is the guard against that
+ * shape recurring, and what it actually proves is narrower than "five
+ * independent copies agree": that the dictionary-side and Postgres-side
+ * derivations agree with each other, and that the two ClickHouse `instant`
+ * shapes — per-event and person-level `last_seen` — agree with each other
+ * wherever both are exact. One fixture, one assertion body, run against all
  * five routes through their real HTTP surface (never compileSegment/
  * runSegment directly — an earlier task routed around the segment route
  * specifically to dodge its 30s result cache, and exercising that cache for
@@ -529,8 +552,19 @@ const eventsFeedFor = async (): Promise<Snapshot> => {
     // docstring above), and a suppressed person's leaked history could hide
     // behind a device id the "hides a person" assertion never checks for.
     // Failing here, immediately, turns that into an error that names its
-    // own cause instead of a matrix row that quietly asserts nothing.
-    expect(e.user_id).not.toBe('')
+    // own cause instead of a matrix row that quietly asserts nothing. Leak-
+    // triggered, not fixture-triggered: an anonymous person whose whole
+    // history stays suppressed never reaches this loop at all (the route's
+    // own suppression check hides them before this test ever sees a row for
+    // them), so this only fires for an anonymous person with a SURVIVING
+    // event — either a new fixture person added without a real user_id, or
+    // suppression failing to hide one that should have stayed hidden. The
+    // message names both, since either reading is honest without more
+    // context, and carries the anonymous_id so the offending row is findable.
+    expect(
+      e.user_id,
+      `feed row has an empty user_id (anonymous_id=${e.anonymous_id}) — either this fixture gained an anonymous/merged person, or suppression let an anonymous person's history leak through`,
+    ).not.toBe('')
     const id = e.user_id || e.anonymous_id
     if (id) personIds.add(id)
     eventTimestamps.add(new Date(e.timestamp).getTime())
