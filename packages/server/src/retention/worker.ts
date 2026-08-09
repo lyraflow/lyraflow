@@ -5,6 +5,14 @@ export interface RetentionWorkerOptions {
   dropExpired: (target: RetentionTarget, now: Date) => Promise<DropResult[]>
   now: () => Date
   intervalMs: number
+  /**
+   * `onError`/`onRun` are typed `=> void`, not `=> void | Promise<void>`,
+   * but that does not mean an `async` implementation is unsupported: it
+   * structurally satisfies `=> void` and is explicitly fine to pass --
+   * `#invokeHandler` swallows a rejection the same way it swallows a
+   * synchronous throw, so a slow or failing handler here can never take
+   * `runOnce()` down with it, whichever way it fails.
+   */
   onError: (err: unknown, context: { projectId?: number }) => void
   onRun: (summary: { partitionsDropped: number; at: Date }) => void
 }
@@ -63,6 +71,16 @@ export class RetentionWorker {
     this.#timer.unref()
   }
 
+  /**
+   * Synchronous, and does not wait for an in-flight run to finish: `#stopped`
+   * blocks every FUTURE call to `runOnce` (including the next timer tick)
+   * immediately, but a run already past its `#stopped` check keeps going --
+   * it completes (or fails) and resets `#inFlight` in its own `finally`,
+   * unaffected by `stop()`. Mirrors `PurgeWorker.stop()`'s reasoning: a
+   * partition drop already issued to ClickHouse completes server-side
+   * whether or not this process is still watching, so there is nothing to
+   * gain and a shutdown deadline to lose by making `stop()` await it.
+   */
   stop(): void {
     this.#stopped = true
     if (this.#timer) clearInterval(this.#timer)
@@ -76,7 +94,9 @@ export class RetentionWorker {
    * inside a single outer try/catch -- not `.catch()`, which cannot absorb a
    * synchronous throw from `listProjects` or `now` -- and every per-project
    * step gets its own inner try/catch, so one project's failure cannot stop
-   * the rest, and a broken `onError`/`onRun` handler cannot escape either.
+   * the rest, and a broken `onError`/`onRun` handler cannot escape either --
+   * see `#invokeHandler` for why "broken" includes an `async` handler that
+   * rejects, not just a synchronous throw.
    *
    * The clock is read exactly ONCE per run, before the project loop starts,
    * and the same `Date` instance is passed to every project's `dropExpired`
@@ -92,11 +112,7 @@ export class RetentionWorker {
     } catch (err) {
       // listProjects (or now()) itself failed, outside any per-project loop
       // -- not attributable to any one project.
-      try {
-        this.opts.onError(err, {})
-      } catch {
-        /* a broken onError must not be able to reject runOnce() */
-      }
+      this.#invokeHandler(this.opts.onError, err, {})
     } finally {
       this.#inFlight = false
     }
@@ -114,19 +130,49 @@ export class RetentionWorker {
         // would make the metric say work happened when none did.
         partitionsDropped += results.filter((r) => r.dropped).length
       } catch (err) {
-        try {
-          this.opts.onError(err, { projectId: target.projectId })
-        } catch {
-          /* the next project must still run; a broken logger must not be
-             able to abort the loop or reject runOnce() */
-        }
+        this.#invokeHandler(this.opts.onError, err, { projectId: target.projectId })
       }
     }
 
+    this.#invokeHandler(this.opts.onRun, { partitionsDropped, at: now })
+  }
+
+  /**
+   * Calls a caller-supplied handler (`onError` or `onRun`) and makes sure
+   * NEITHER a synchronous throw NOR an asynchronous rejection can escape.
+   *
+   * Both handlers are typed `=> void` in `RetentionWorkerOptions`, but that
+   * is a structural TypeScript type: an `async` function returning
+   * `Promise<void>` satisfies it fine, and nothing stops a caller from
+   * passing one -- a metrics counter is a very plausible `async` `onRun`. A
+   * plain `try { handler() } catch {}` only catches a throw that happens
+   * BEFORE the handler's first `await`; a rejection raised after that point
+   * arrives on a promise this method already returned from and never
+   * inspected, which is the exact "runOnce must never reject" failure
+   * `runOnce`'s own try/catch exists to prevent, merely relocated one tick
+   * later into an unhandled rejection instead. Confirmed live: an `onRun`
+   * that awaits 5ms and then throws lets `runOnce()` resolve cleanly while
+   * the process still emits `unhandledRejection`.
+   *
+   * A handler may be sync or async; either way, a throw or a rejection from
+   * it is swallowed here the same way, never re-thrown. Neither this method
+   * nor its caller waits for an async handler to settle -- onError/onRun are
+   * fire-and-forget notifications, not steps in the retention work itself,
+   * so a slow handler must not be able to hold up the next project or the
+   * next tick.
+   */
+  #invokeHandler<Args extends unknown[]>(handler: (...args: Args) => unknown, ...args: Args): void {
     try {
-      this.opts.onRun({ partitionsDropped, at: now })
+      const result = handler(...args)
+      if (result !== null && typeof result === 'object' && 'then' in result) {
+        Promise.resolve(result as Promise<unknown>).catch(() => {
+          /* an async handler's rejection must not become an unhandled
+             rejection -- swallowed the same way a synchronous throw is. */
+        })
+      }
     } catch {
-      /* a broken onRun handler must not be able to reject runOnce() */
+      /* a synchronous throw from the handler must not be able to reject
+         runOnce() or abort whatever loop called this. */
     }
   }
 }

@@ -96,6 +96,31 @@ describe('RetentionWorker', () => {
     expect(runs).toEqual([expect.objectContaining({ partitionsDropped: 1 })])
   })
 
+  it('pins onRun to once per run, summed across every project -- not once per project', async () => {
+    // A single successful project cannot distinguish "once per run, summed"
+    // from "once per project": with only one project, both readings produce
+    // exactly one onRun call carrying that project's own count. TWO
+    // successful projects, each dropping a non-zero count, is what actually
+    // pins the cardinality -- "once per project" would push two entries onto
+    // `runs`, not one, and the summed total would be split across them
+    // instead of combined. This is the semantics Task 4 wires to a counter,
+    // so it needs to be pinned directly, not incidentally covered by a test
+    // aimed at something else.
+    const runs: { partitionsDropped: number }[] = []
+    const worker = makeWorker({
+      listProjects: async () => [targetA, targetB],
+      dropExpired: async (t) => [
+        { projectId: t.projectId, table: 'events', partition: 202401, dropped: true },
+        ...(t.projectId === targetA.projectId
+          ? [{ projectId: t.projectId, table: 'events', partition: 202402, dropped: true }]
+          : []),
+      ],
+      onRun: (s) => runs.push(s),
+    })
+    await worker.runOnce()
+    expect(runs).toEqual([expect.objectContaining({ partitionsDropped: 3 })])
+  })
+
   it('stop() prevents further runs, and start() after stop() resumes', async () => {
     let calls = 0
     const worker = makeWorker({
@@ -180,5 +205,91 @@ describe('RetentionWorker', () => {
     })
     await expect(worker.runOnce()).resolves.toBeUndefined()
     expect(runs).toEqual([expect.objectContaining({ partitionsDropped: 0 })])
+  })
+
+  // --- Fix round: an async onError/onRun that rejects after its own await ---
+  //
+  // RetentionWorkerOptions types both handlers `=> void`, but TypeScript
+  // accepts an `async` function there too (it structurally returns
+  // `Promise<void>`). A plain `try { handler() } catch {}` only catches a
+  // throw that happens BEFORE the handler's first `await` -- a rejection
+  // raised after that point arrives on a promise nobody is holding, and
+  // surfaces as an `unhandledRejection` instead: `runOnce()` resolving
+  // cleanly is not proof of safety here, since that is exactly what the
+  // unguarded code already did while leaking. `process.on('unhandledRejection', ...)`
+  // is what actually distinguishes "swallowed" from "resolved this promise,
+  // rejected a different one nobody awaited."
+
+  it('does not reject when onRun itself throws synchronously', async () => {
+    await expect(
+      makeWorker({
+        onRun: () => {
+          throw new Error('onRun exploded')
+        },
+      }).runOnce(),
+    ).resolves.toBeUndefined()
+  })
+
+  it('a throwing onRun does not propagate to the run-level onError path', async () => {
+    // If onRun's own guard were removed, its throw would propagate out of
+    // the per-run body and land in runOnce's OUTER catch instead -- the same
+    // one that handles listProjects failing -- which calls
+    // onError(err, {}) as if this were a run-level failure. Asserting only
+    // that runOnce() resolves would pass either way; asserting onError was
+    // never called is what actually proves onRun's own guard caught it,
+    // rather than the outer catch catching it by accident.
+    const errors: { projectId?: number }[] = []
+    const worker = makeWorker({
+      onRun: () => {
+        throw new Error('onRun exploded')
+      },
+      onError: (_err, ctx) => errors.push(ctx),
+    })
+    await expect(worker.runOnce()).resolves.toBeUndefined()
+    expect(errors).toEqual([])
+  })
+
+  it('never lets an async onRun rejection (after its own await) become an unhandledRejection', async () => {
+    const unhandled: unknown[] = []
+    const onUnhandledRejection = (err: unknown) => unhandled.push(err)
+    process.on('unhandledRejection', onUnhandledRejection)
+    try {
+      const worker = makeWorker({
+        onRun: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 5))
+          throw new Error('onRun async handler blew up after its own await')
+        },
+      })
+      await expect(worker.runOnce()).resolves.toBeUndefined()
+      // The handler's own await is 5ms; give the rejection room to actually
+      // fire and, if unguarded, surface as an unhandledRejection before
+      // asserting it never did.
+      await new Promise((resolve) => setTimeout(resolve, 40))
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection)
+    }
+  })
+
+  it('never lets an async onError rejection (after its own await) become an unhandledRejection', async () => {
+    const unhandled: unknown[] = []
+    const onUnhandledRejection = (err: unknown) => unhandled.push(err)
+    process.on('unhandledRejection', onUnhandledRejection)
+    try {
+      const worker = makeWorker({
+        dropExpired: async () => {
+          throw new Error('boom')
+        },
+        onError: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 5))
+          throw new Error('onError async handler blew up after its own await')
+        },
+      })
+      await expect(worker.runOnce()).resolves.toBeUndefined()
+      await new Promise((resolve) => setTimeout(resolve, 40))
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection)
+    }
   })
 })
