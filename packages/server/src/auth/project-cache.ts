@@ -5,7 +5,15 @@ export interface Project {
   id: number
   slug: string
   retentionMonths: number
-  monthlyEventQuota: number
+  /**
+   * `null` means unlimited, and after migration 011 that is what every
+   * existing project carries and what every new one gets. It must stay
+   * `null` all the way to `isOverQuota` (ingest/quota.ts), which
+   * short-circuits on it before any usage is read; a quota that arrives as
+   * `0` instead is not "unlimited" but a value that function refuses to
+   * evaluate at all. See `#lookup` for the parse that keeps the two apart.
+   */
+  monthlyEventQuota: number | null
   /**
    * SHA-256 of the project's server key, at rest in Postgres. Nothing that
    * serialises a `Project` to a response ever exists in this codebase, so it
@@ -150,8 +158,13 @@ export class ProjectCache {
       const res = await this.pool.query<{
         id: string
         slug: string
+        // `retention_months` is `integer NOT NULL` (001_core.sql; 010 changed
+        // only its default), and node-postgres parses int4 straight into a JS
+        // number — so it needs neither a null case nor a Number() call.
+        // `monthly_event_quota` is `bigint` and, since 011, nullable: pg hands
+        // back int8 as a STRING, or `null`. Both are handled below.
         retention_months: number
-        monthly_event_quota: string
+        monthly_event_quota: string | null
         server_key_hash: string
       }>(
         `SELECT id, slug, retention_months, monthly_event_quota, server_key_hash
@@ -164,7 +177,17 @@ export class ProjectCache {
             id: Number(row.id),
             slug: row.slug,
             retentionMonths: row.retention_months,
-            monthlyEventQuota: Number(row.monthly_event_quota),
+            // The explicit null test is load-bearing in BOTH directions.
+            // `Number(null)` is `0`, not `null`, so a bare Number() call
+            // turns every unlimited project — which, after 011, is every
+            // project on every existing deployment — into a project with a
+            // quota of zero, and isOverQuota *throws* on that rather than
+            // failing open: every event of every project, a 503. In the
+            // other direction, dropping the Number() and passing the string
+            // through hands isOverQuota `'2'`, which is not an integer, and
+            // it throws on that too.
+            monthlyEventQuota:
+              row.monthly_event_quota === null ? null : Number(row.monthly_event_quota),
             serverKeyHash: row.server_key_hash,
           }
         : null

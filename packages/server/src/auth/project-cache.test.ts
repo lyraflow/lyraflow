@@ -1,20 +1,29 @@
 import { createPgPool } from '@lyraflow/db'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { isOverQuota } from '../ingest/quota.js'
 import { MAX_NEGATIVE_ENTRIES, ProjectCache, hashServerKey } from './project-cache.js'
 
 const pg = createPgPool('postgres://lyraflow:lyraflow@localhost:5433/lyraflow_test')
+const SLUGS = ['cache-test', 'cache-test-unlimited']
 
 beforeAll(async () => {
-  await pg.query('DELETE FROM projects WHERE slug = $1', ['cache-test'])
+  await pg.query('DELETE FROM projects WHERE slug = ANY($1)', [SLUGS])
   await pg.query(
     `INSERT INTO projects (name, slug, write_key, server_key_hash, monthly_event_quota)
      VALUES ('Cache Test', 'cache-test', 'wk_cache', $1, 1000)`,
     [hashServerKey('sk_cache')],
   )
+  // The ordinary state of every project after migration 011, and therefore
+  // the row shape the cache reads on every existing deployment — the one the
+  // fixture above (an explicit quota) does not exercise at all.
+  await pg.query(
+    `INSERT INTO projects (name, slug, write_key, server_key_hash, monthly_event_quota)
+     VALUES ('Cache Unlimited', 'cache-test-unlimited', 'wk_cache_unlimited', 'h', NULL)`,
+  )
 })
 
 afterAll(async () => {
-  await pg.query('DELETE FROM projects WHERE slug = $1', ['cache-test'])
+  await pg.query('DELETE FROM projects WHERE slug = ANY($1)', [SLUGS])
   await pg.end()
 })
 
@@ -23,6 +32,32 @@ describe('ProjectCache', () => {
     const c = new ProjectCache(pg, 60_000)
     const p = await c.byWriteKey('wk_cache')
     expect(p).toMatchObject({ slug: 'cache-test', monthlyEventQuota: 1000 })
+  })
+
+  it('reads a NULL quota back as null, not as zero', async () => {
+    // `Number(null)` is `0`, so the obvious parse turns "unlimited" into
+    // "quota of zero" — and 011 made NULL the value EVERY existing project
+    // carries, so this is not an edge case but the default state of every
+    // deployment. Nothing else in the suite reads a NULL-quota project.
+    const c = new ProjectCache(pg, 60_000)
+    const p = await c.byWriteKey('wk_cache_unlimited')
+    expect(p?.monthlyEventQuota).toBeNull()
+    // The consequence, stated end to end rather than left implied: the
+    // quota decision short-circuits on null and *throws* on 0, so the wrong
+    // parse is a thrown error on every event of every unlimited project,
+    // not a silently generous limit.
+    expect(() => isOverQuota(0, 0, p?.monthlyEventQuota ?? null)).not.toThrow()
+    expect(isOverQuota(0, 0, p?.monthlyEventQuota ?? null)).toBe(false)
+  })
+
+  it('reads a set quota back as a number, since pg returns bigint as a string', async () => {
+    // The other direction of the same parse: dropping the Number() call
+    // leaves `'1000'`, which isOverQuota refuses as a non-integer. toBe, not
+    // toMatchObject, so a string cannot satisfy it by coercion.
+    const c = new ProjectCache(pg, 60_000)
+    const p = await c.byWriteKey('wk_cache')
+    expect(p?.monthlyEventQuota).toBe(1000)
+    expect(() => isOverQuota(0, 0, p?.monthlyEventQuota ?? null)).not.toThrow()
   })
 
   it('resolves a project by server key using the stored hash', async () => {
