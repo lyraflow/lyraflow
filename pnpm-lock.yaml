@@ -32,10 +32,16 @@ importers:
       '@lyraflow/db':
         specifier: workspace:*
         version: link:../db
+      '@lyraflow/sdk-browser':
+        specifier: workspace:*
+        version: link:../sdk-browser
     devDependencies:
       '@lyraflow/server':
         specifier: workspace:*
         version: link:../server
+      happy-dom:
+        specifier: ^15.11.0
+        version: 15.11.7
 
   packages/core:
     dependencies:

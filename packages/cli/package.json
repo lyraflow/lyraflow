@@ -8,9 +8,11 @@
   "scripts": { "build": "tsc -b" },
   "dependencies": {
     "@lyraflow/core": "workspace:*",
-    "@lyraflow/db": "workspace:*"
+    "@lyraflow/db": "workspace:*",
+    "@lyraflow/sdk-browser": "workspace:*"
   },
   "devDependencies": {
-    "@lyraflow/server": "workspace:*"
+    "@lyraflow/server": "workspace:*",
+    "happy-dom": "^15.11.0"
   }
 }

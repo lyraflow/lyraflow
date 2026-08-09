@@ -9,6 +9,24 @@ import { clampContext, validateEvent } from './validate.js'
 
 export const VERSION = '0.1.0'
 
+/**
+ * The methods the install snippet's stub queues, and the single source
+ * `lyraflow snippet` builds that stub from. A public method absent from
+ * this list is silently dropped when called before the async bundle
+ * loads; a listed method with no `drainSnippetQueue` case is queued and
+ * then discarded. Both are invisible at runtime -- no error, no event --
+ * so both are pinned by snippet-methods.test.ts rather than trusted.
+ */
+export const SNIPPET_METHODS = [
+  'init',
+  'track',
+  'page',
+  'identify',
+  'consent',
+  'reset',
+  'flush',
+] as const
+
 export interface InitOptions {
   host: string
   writeKey: string

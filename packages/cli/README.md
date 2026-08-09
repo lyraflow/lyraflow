@@ -6,10 +6,10 @@ property schema — built for scripts and for agents driving Lyraflow directly
 from a terminal, not for browsing. It wraps `GET /v1/events`,
 `GET /v1/events/stats`, `GET /v1/persons/:id`, `GET /v1/persons/:id/export`,
 `DELETE /v1/persons/:id`, `GET /v1/deletions/:id`, `GET /v1/segments`,
-`POST /v1/segments/:id/preview`, `GET /v1/schema/events` and
-`GET /v1/schema/properties` — see the main [README](../../README.md) for what
-each of those endpoints actually does; this document is about the CLI's own
-surface on top of them.
+`POST /v1/segments/:id/preview`, `GET /v1/schema/events`,
+`GET /v1/schema/properties` and `GET /v1/project` — see the main
+[README](../../README.md) for what each of those endpoints actually does;
+this document is about the CLI's own surface on top of them.
 
 `create-project`, `migrate`, and `healthcheck` are separate, operational
 commands this binary also ships (used once per install, not per query) — see
@@ -511,6 +511,161 @@ Only events carrying at least one property are discoverable this way — see
 `--event` only applies to `properties`; passing it to `schema events` is
 rejected as an unexpected flag for that subcommand rather than silently
 ignored.
+
+## `lyraflow snippet`
+
+```
+lyraflow snippet [--since <duration>] [--json|--human]
+```
+
+Prints a paste-ready browser install snippet — this project's own host and
+write key already substituted into the exact block documented under *Sending
+events from a browser* in the main README — plus the SDK's full callable
+surface, and which event names have actually arrived, so you can tell
+"installed but nothing has called `track()` yet" from "instrumented and
+firing." **The only command in this CLI whose job is to print a key.** The
+write key is printed on purpose: it is public by construction (it ships
+inside the browser bundle — see *Sending events from a browser* in the main
+README). The **server key** this CLI authenticates with is never printed,
+here or anywhere else in this CLI's output.
+
+Three requests happen, in order: `GET /v1/project` (the write key — this one
+must succeed, or there is nothing to print), `GET /v1/schema/events`, and
+`GET /v1/events/stats`. **Neither of the last two, alone, is a complete
+event-name list**, and this command combines them rather than trusting
+either on its own:
+
+- `GET /v1/schema/events` lists every event name this project has EVER
+  carried at least one *property* on — all-time, not windowed. But
+  `event_schema` (its source) is fed by a materialized view keyed on the
+  event's property map, so an event that has **never** carried a property —
+  `lyraflow.track('signup')` with no second argument, the single most common
+  first call anyone makes — produces **zero rows there**, no matter how many
+  times it fired. Only events carrying at least one property are
+  discoverable this way — see *Autocomplete: event and property names* in
+  the main README for the same limitation on `lyraflow schema`.
+- `GET /v1/events/stats` reports counts WINDOWED by `--since` (default
+  `7d`), but it aggregates the raw event table directly, so it sees a
+  property-less event just fine, as long as it fired inside the window.
+
+This command reports the **union** of the two name lists. A name present
+only in `schema/events`, with nothing in the window, is shown with a `0`
+count: it fired historically and has since stopped, which is one of the more
+useful things this output can say about instrumentation that used to work. A
+name present only in `events/stats` — a property-less event that fired
+inside the window — is shown with its real count, where reporting from
+`schema/events` alone would have dropped it and, on a project whose events
+carry no properties at all, printed "No events recorded yet" about a
+genuinely working install. Neither source is complete even after the union:
+an event that has **never** carried a property and did not fire within
+`--since` is invisible to both requests — **widen** the window (e.g.
+`--since 30d`) to find it. Narrowing cannot: shrinking `--since` only ever
+removes names from the `events/stats` half of the union, it never adds one.
+
+**Widening has a ceiling, at about 1000 days.** `events/stats` is requested
+at one bucket per day, and the server refuses a request needing more than
+1000 buckets — so a `--since` past roughly two years and nine months comes
+back `window_too_large`. It costs the **counts only**: `schema/events` is
+all-time and un-windowed, so the event *names* still print, with `-` in
+place of every count, and the output says which request went missing. Ask
+for a narrower window to get counts back.
+
+Both requests are informational, and they degrade **independently**: a
+failure in one still prints the snippet *and* whatever the other returned —
+the snippet itself needs neither of them, and neither request needs the
+other.
+
+Captured against a live server (host and write key replaced with the
+placeholders used elsewhere in this doc; the wording, the counts, and which
+names appear are exactly what the command printed):
+
+```sh
+lyraflow snippet --human
+```
+```
+<script>
+  !function(){var l=window.lyraflow=window.lyraflow||{};l.q=l.q||[];
+  ["init","track","page","identify","consent","reset","flush"].forEach(function(m){
+    l[m]=l[m]||function(){l.q.push([m].concat([].slice.call(arguments)))}});
+  }();
+</script>
+<script async src="https://analytics.example.com/lyraflow.js"></script>
+<script>
+  lyraflow.init({ host: "https://analytics.example.com", writeKey: "wk_live_…" })
+</script>
+
+Event counts for 2026-08-02T12:22:49.443Z to 2026-08-09T12:22:49.469Z, every event name that fired in this window, plus every all-time name that has ever carried a property (an all-time, property-less name that fired outside this window will not appear). A zero count means it fired before this window, not that it is broken:
+  legacy_import  0
+  mid_window     1
+  page_view      1
+  raw_click      1
+  signup         2
+```
+
+`raw_click` above never carries a property — `lyraflow.track('raw_click')`,
+no second argument — and `schema/events` alone would never have listed it at
+any `--since`. `mid_window` fired two days before this ran; narrowing the
+window shows both what the union adds and what a real window boundary looks
+like, from the same live server, immediately after:
+
+```sh
+lyraflow snippet --since 1h --json
+```
+```json
+{"host":"https://analytics.example.com","write_key":"wk_live_…","methods":["init","track","page","identify","consent","reset","flush"],"events":{"since":"2026-08-09T11:22:49.621Z","until":"2026-08-09T12:22:49.643Z","counts":[{"event_name":"legacy_import","count":0},{"event_name":"mid_window","count":0},{"event_name":"page_view","count":1},{"event_name":"raw_click","count":1},{"event_name":"signup","count":2}],"truncated":false},"sdk_version":"0.1.0","snippet":"<script>\n  !function(){var l=window.lyraflow=window.lyraflow||{};l.q=l.q||[];\n  [\"init\",\"track\",\"page\",\"identify\",\"consent\",\"reset\",\"flush\"].forEach(function(m){\n    l[m]=l[m]||function(){l.q.push([m].concat([].slice.call(arguments)))}});\n  }();\n</script>\n<script async src=\"https://analytics.example.com/lyraflow.js\"></script>\n<script>\n  lyraflow.init({ host: \"https://analytics.example.com\", writeKey: \"wk_live_…\" })\n</script>"}
+```
+
+`mid_window` drops from `1` to `0` — narrowing `--since` genuinely changes
+counts, not just which zero-count rows appear. `raw_click` and `page_view`
+are unaffected here because both fired well inside even the 1-hour window.
+`legacy_import` stays `0` in both: it fired ten days before this ran, outside
+either window.
+
+**`events` is a union, not always the shape above** — exact-set equality
+only holds within each arm:
+
+- On success: `{"since", "until", "counts", "truncated"}`, as printed above.
+  `truncated: true` means `schema/events` — only that request; `events/stats`
+  has its own, separate ceiling unrelated to this field — came back at
+  exactly the server's own page-size ceiling (100 rows). That is the only
+  available signal that there may be more all-time, property-bearing names,
+  since that endpoint returns no total count to check against. It says
+  nothing about names `events/stats` alone contributed to `counts`, and
+  **`counts.length` can exceed 100 even when `truncated` is `true`**: the
+  window half of the union adds names the 100-row ceiling never applied to
+  in the first place, so 100 property-bearing names plus any number of
+  property-less, in-window names can both be true at once (verified live: a
+  fixture with 130 property-bearing names and one property-less in-window
+  name produced `truncated: true` alongside `counts.length === 131`).
+- When **one** of the two requests failed: the same success shape, plus a
+  `"partial": {"source", "code", "message"}` — `source` is the literal
+  `"schema/events"` or `"events/stats"`, naming the request that did *not*
+  answer. `partial` is **absent** whenever both succeeded, so the exact key
+  set above is unchanged on the ordinary path. Which one is missing changes
+  what `counts` means, which is why the field names it rather than saying
+  "something failed":
+  - `"source": "events/stats"` — the names are the all-time,
+    property-bearing list and are **not windowed**, and every `count` is
+    **`null`**: unknown, not zero. (`null`, not `0`, precisely so a
+    consumer cannot mistake "we could not ask" for "it fired before this
+    window". The human table prints `-`.) `truncated` still applies.
+  - `"source": "schema/events"` — `counts` is exactly what fired inside the
+    window, with real counts; an all-time name that fired only outside it is
+    absent. `truncated` is always `false` here: there was no page to cut.
+- When **both** failed: `{"error": {"code", "message"}}` instead — with **no
+  `counts` field at all**, carrying `schema/events`' error as the first
+  request sent. The command still exits `0`: see *Exit codes* above for why
+  — the snippet itself (host, write key, methods) needs neither request, so
+  losing it over an events list that merely could not be fetched would be
+  the wrong trade. A consumer that reads `.events.counts` unconditionally
+  gets `undefined` on this successful exit, with nothing on stderr to
+  explain it — check for `.events.error` first, and for `.events.partial`
+  before trusting a count.
+
+`methods` is always `["init","track","page","identify","consent","reset","flush"]`
+— the exact list the printed stub's own method array is built from, not a
+second, hand-maintained copy, so it cannot silently drop a method the SDK
+actually exports.
 
 ## `lyraflow --version`
 
