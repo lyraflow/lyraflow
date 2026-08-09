@@ -140,4 +140,29 @@ describe('assertDroppable', () => {
     expect(() => assertDroppable(Number.NaN, 202507, 42)).toThrow(/NaN/)
     expect(() => assertDroppable(202507, Number.NaN, 42)).toThrow(/NaN/)
   })
+
+  it('rejects a negative, zero, or otherwise implausible partition even when it is a well-formed integer', () => {
+    // Number.isInteger(-1) is true, so these pass the finiteness check above
+    // and need their own guard -- the same "parse went wrong" failure class,
+    // just landing on a plausible-looking number instead of NaN.
+    expect(() => assertDroppable(-1, 202507, 42)).toThrow(/partition/)
+    expect(() => assertDroppable(0, 202507, 42)).toThrow(/partition/)
+    expect(() => assertDroppable(999_999, 202507, 42)).toThrow(/partition/)
+  })
+
+  it('rejects a negative, zero, or otherwise implausible boundary month even when it is a well-formed integer', () => {
+    expect(() => assertDroppable(202507, -1, 42)).toThrow(/boundary/)
+    expect(() => assertDroppable(202507, 0, 42)).toThrow(/boundary/)
+    expect(() => assertDroppable(202507, 999_999, 42)).toThrow(/boundary/)
+  })
+
+  it('accepts the edges of the plausible range and rejects one step outside them', () => {
+    // Both ends are droppable-shaped calls (partition older than boundary),
+    // so a value that clears the range check but shouldn't reach this far
+    // would show up as "did not throw" rather than a range-check throw.
+    expect(() => assertDroppable(200_001, 200_002, 42)).not.toThrow()
+    expect(() => assertDroppable(210_011, 210_012, 42)).not.toThrow()
+    expect(() => assertDroppable(200_000, 200_002, 42)).toThrow(/partition/)
+    expect(() => assertDroppable(210_011, 210_013, 42)).toThrow(/boundary/)
+  })
 })
