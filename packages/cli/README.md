@@ -208,7 +208,8 @@ a JSON object, one per line, not prose:
 
 - **The resume cursor.** After a non-`--follow` run (or a `--follow` session
   that stops), the last `next_cursor` seen is written to stderr so a caller
-  can resume later without a separate request:
+  can resume later without a separate request. One case omits it — see the
+  merged-stream note under `--follow` below:
 
   ```
   {"next_cursor":"WyIyMDI2LTA4LTA5IDAzOjE3OjM0LjM3MSIsIjIyMjIyMjIyLTIyMjItMjIyMi0yMjIyLTIyMjIyMjIyMjIyNSJd"}
@@ -260,8 +261,8 @@ precise about what this guarantees and what it does not:
   inherent to the paging scheme, not a bug this CLI works around.
 
 **`--follow` exits `0` on `SIGINT`/`SIGTERM` (e.g. `Ctrl-C`, or the single
-`SIGTERM` `docker stop` and systemd send), writing the resume cursor to
-stderr first, same as a normal non-`--follow` run.** One signal is always
+`SIGTERM` `docker stop` and systemd send), normally writing the resume
+cursor to stderr first, same as a normal non-`--follow` run.** One signal is always
 enough, and it takes effect immediately — including while a poll's own HTTP
 request is still open, which is where a follow session spends most of its
 time. The in-flight request is abandoned rather than waited for; measured
@@ -279,6 +280,20 @@ on stderr, immediately before the cursor it invalidates:
 ```json
 {"warning":"interrupted while output was still being written; some records may not have reached the reader, so the next_cursor below may skip them"}
 ```
+
+**On a merged stream (`2>&1`) that has itself backed up, expect neither
+line.** The warning and the cursor are written together, as one write, so
+that a cursor can never arrive without the warning that says not to trust
+it — a cursor alone would silently skip the records that never left the
+buffer. When stderr shares a congested pipe with stdout there may be no room
+for that write, and rather than emit half of it the CLI emits none. The
+visible result is truncated output, nothing on stderr, and exit `0`, which
+is indistinguishable from a clean stop with nothing to report.
+
+If you interrupt a `--follow` session and no cursor appears, do not assume
+you saw everything: re-run bounded by `--since`/`--until` over the window
+you care about. Keeping stderr on its own stream — the ordinary case, and
+what the examples here assume — avoids the situation entirely.
 
 Only `events --follow` handles these signals. Every other command — `events`
 without `--follow` included — keeps the ordinary behaviour: the signal kills
