@@ -368,4 +368,95 @@ describe('Client', () => {
       expect(() => JSON.parse(line)).not.toThrow()
     }
   })
+
+  // --- post() — Task 8's addition, same guarantees as get()/delete() -----
+
+  it('post() sends POST with a JSON body and returns the parsed response', async () => {
+    const fetchImpl = vi.fn(async () =>
+      reply(200, { person_count: 3, as_of: '2026-08-09T00:00:00.000Z' }),
+    ) as unknown as typeof fetch
+    const client = make(fetchImpl)
+    const result = await client.post<{ person_count: number }>('/v1/segments/1/preview', {
+      include: ['members'],
+    })
+    expect(result.person_count).toBe(3)
+
+    const call = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls[0]
+    if (!call) throw new Error('fetchImpl was not called')
+    const [url, init] = call as [string, RequestInit & { headers: Record<string, string> }]
+    expect(url).toBe('https://a.test/v1/segments/1/preview')
+    expect(init.method).toBe('POST')
+    expect(init.headers['content-type']).toBe('application/json')
+    expect(init.headers['x-lyraflow-server-key']).toBe(SERVER_KEY)
+    expect(init.body).toBe(JSON.stringify({ include: ['members'] }))
+  })
+
+  it('post() sends no body and no content-type header when called with none', async () => {
+    const fetchImpl = vi.fn(async () => reply(200, { person_count: 0 })) as unknown as typeof fetch
+    const client = make(fetchImpl)
+    await client.post('/v1/segments/1/preview')
+
+    const call = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls[0]
+    if (!call) throw new Error('fetchImpl was not called')
+    const [, init] = call as [string, RequestInit & { headers: Record<string, string> }]
+    expect(init.body).toBeUndefined()
+    expect(init.headers['content-type']).toBeUndefined()
+  })
+
+  it('post() does not forward the server key to a redirect target, and fails loudly instead', async () => {
+    // Same real-two-server setup as get()'s redirect test — the forwarding
+    // happens inside the real fetch implementation, which a faked fetchImpl
+    // never exercises.
+    let targetWasHit = false
+    const target = createServer((req, res) => {
+      targetWasHit = true
+      res.end(JSON.stringify({ person_count: 0 }))
+    })
+    const origin = createServer((req, res) => {
+      const targetPort = (target.address() as AddressInfo).port
+      res.writeHead(302, { Location: `http://127.0.0.1:${targetPort}/elsewhere` })
+      res.end()
+    })
+
+    await new Promise<void>((resolve) => target.listen(0, '127.0.0.1', resolve))
+    await new Promise<void>((resolve) => origin.listen(0, '127.0.0.1', resolve))
+    try {
+      const originPort = (origin.address() as AddressInfo).port
+      const client = new Client({
+        host: `http://127.0.0.1:${originPort}`,
+        serverKey: SERVER_KEY,
+      })
+
+      const err = (await client.post('/v1/segments/1/preview', {}).catch((e) => e)) as ApiError
+      expect(err).toBeInstanceOf(ApiError)
+      expect(err.status).toBe(302)
+      expect(err.message).not.toContain(SERVER_KEY)
+      expect(targetWasHit).toBe(false)
+    } finally {
+      await new Promise((resolve) => target.close(resolve))
+      await new Promise((resolve) => origin.close(resolve))
+    }
+  })
+
+  it('post() wraps a non-JSON 2xx body in ApiError instead of a raw SyntaxError', async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response('not json', { status: 200 }),
+    ) as unknown as typeof fetch
+    const client = make(fetchImpl)
+    const err = (await client.post('/v1/segments/1/preview', {}).catch((e) => e)) as ApiError
+    expect(err).toBeInstanceOf(ApiError)
+    expect(err.message).not.toContain('not json')
+    expect(err.message.toLowerCase()).toContain('non-json')
+  })
+
+  it('post() maps a non-2xx status to ApiError the same way get()/delete() do', async () => {
+    const fetchImpl = vi.fn(async () =>
+      reply(404, { error: 'segment_not_found' }),
+    ) as unknown as typeof fetch
+    const client = make(fetchImpl)
+    const err = (await client.post('/v1/segments/999/preview', {}).catch((e) => e)) as ApiError
+    expect(err).toBeInstanceOf(ApiError)
+    expect(err.status).toBe(404)
+    expect(err.code).toBe('segment_not_found')
+  })
 })

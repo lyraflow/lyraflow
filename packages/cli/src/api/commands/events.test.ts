@@ -55,6 +55,7 @@ function makeCtx(
       writeErr: (s) => errOut.push(s),
       now: () => NOW,
       sleep: () => Promise.resolve(),
+      prompt: () => Promise.reject(new Error('runEvents should never prompt')),
       ...overrides,
     },
     out,

@@ -39,4 +39,23 @@ export interface CommandContext {
   /** Injected so `--follow` can be tested without real time passing; also
    * the hook a real dispatch would wire to cancellation (e.g. SIGINT). */
   sleep: (ms: number) => Promise<void>
+  /**
+   * Asks a yes/no confirmation question and resolves the answer — `persons
+   * delete`'s only route to a "are you sure" prompt, injected so the
+   * confirmation is testable without a real terminal attached to the test
+   * runner. `question` is always a fixed, hand-picked string chosen by the
+   * calling command — never built from an argv token, a flag value, or an
+   * id the user typed, the same rule `command-support.ts`'s usage messages
+   * follow, and for the same reason: a positional argument reaching this
+   * far could be a secret typed into the wrong slot, and a prompt shown at
+   * a real terminal is not private storage either (screen readers, shared
+   * screens, terminal scrollback).
+   *
+   * A real dispatch's implementation must resolve `false` — never hang —
+   * when the input stream closes without an answer (e.g. Ctrl+D at a
+   * terminal, or stdin piped from `/dev/null`): an irreversible operation
+   * must not wait forever for a reply nobody is going to give it. See
+   * index.ts's `createPrompt`.
+   */
+  prompt: (question: string) => Promise<boolean>
 }

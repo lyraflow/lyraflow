@@ -1,7 +1,8 @@
+import { PassThrough } from 'node:stream'
 import { describe, expect, it } from 'vitest'
 import type { Client } from './api/client.js'
 import { CLI_VERSION, OUTPUT_SCHEMA_VERSION } from './api/output.js'
-import { type CommandContext, extractOverride, runVersion } from './index.js'
+import { type CommandContext, createPrompt, extractOverride, runVersion } from './index.js'
 
 // `runVersion` itself only ever touches `write`/`isTty` — the rest of
 // `CommandContext` exists for Task 7's `events`/`stats`, but the interface
@@ -19,6 +20,7 @@ function makeCtx(isTty: boolean): { ctx: CommandContext; out: string[] } {
       isTty,
       now: () => new Date('2026-08-08T12:00:00.000Z'),
       sleep: () => Promise.resolve(),
+      prompt: () => Promise.reject(new Error('runVersion should never prompt')),
     },
     out,
   }
@@ -94,5 +96,70 @@ describe('extractOverride', () => {
 
   it('keeps the last occurrence of a repeated flag, the same convention parseCommandArgs uses', () => {
     expect(extractOverride(['--host', 'first', '--host', 'second'], 'host')).toBe('second')
+  })
+})
+
+describe('createPrompt', () => {
+  // The one property `persons delete`'s safety design actually rests on:
+  // an irreversible operation must never hang waiting for an answer nobody
+  // is going to give it. Both "the stream ends outright" (piped from
+  // /dev/null) and "the stream ends after the user typed something but
+  // never pressed enter" (Ctrl+D on a partial/empty line at a real
+  // terminal) close the input stream without ever emitting a 'line' event
+  // — both must resolve `false`, not hang.
+
+  it('resolves false, not hang, when the input stream ends with no answer at all', async () => {
+    const input = new PassThrough()
+    const output = new PassThrough()
+    const prompt = createPrompt(input, output)
+    const result = prompt('Continue?')
+    input.end()
+    await expect(result).resolves.toBe(false)
+  })
+
+  it('resolves false, not hang, when the input stream ends mid-line (no newline ever sent)', async () => {
+    const input = new PassThrough()
+    const output = new PassThrough()
+    const prompt = createPrompt(input, output)
+    const result = prompt('Continue?')
+    input.write('y')
+    input.end()
+    await expect(result).resolves.toBe(false)
+  })
+
+  it('resolves true for "y" and "yes", case-insensitively, once a real line arrives', async () => {
+    for (const answer of ['y', 'Y', 'yes', 'YES']) {
+      const input = new PassThrough()
+      const output = new PassThrough()
+      const prompt = createPrompt(input, output)
+      const result = prompt('Continue?')
+      input.write(`${answer}\n`)
+      await expect(result).resolves.toBe(true)
+    }
+  })
+
+  it('resolves false for anything else, including empty input followed by enter', async () => {
+    for (const answer of ['n', 'no', '', 'sure']) {
+      const input = new PassThrough()
+      const output = new PassThrough()
+      const prompt = createPrompt(input, output)
+      const result = prompt('Continue?')
+      input.write(`${answer}\n`)
+      await expect(result).resolves.toBe(false)
+    }
+  })
+
+  it('writes the question to the output stream, not swallowed silently', async () => {
+    const input = new PassThrough()
+    const output = new PassThrough()
+    let written = ''
+    output.on('data', (chunk: Buffer) => {
+      written += chunk.toString()
+    })
+    const prompt = createPrompt(input, output)
+    const result = prompt('Really delete this?')
+    input.write('n\n')
+    await result
+    expect(written).toContain('Really delete this?')
   })
 })

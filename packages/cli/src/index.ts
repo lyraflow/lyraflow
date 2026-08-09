@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 import { join } from 'node:path'
+import { createInterface } from 'node:readline'
 import { pathToFileURL } from 'node:url'
 import { SCHEMA_VERSION } from '@lyraflow/core'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
 import { UsageError, hasRawFlag, parseCommandArgs } from './api/args.js'
 import { Client } from './api/client.js'
+import { runDeletions, runSchema, runSegments } from './api/commands/catalog.js'
 import { runEvents } from './api/commands/events.js'
+import { runPersons } from './api/commands/persons.js'
 import { runStats } from './api/commands/stats.js'
 import type { CommandContext } from './api/context.js'
 import {
@@ -41,6 +44,48 @@ function clients() {
 }
 
 /**
+ * The real, process-wide implementation of `CommandContext['prompt']` —
+ * `persons delete`'s only route to an interactive "are you sure" question.
+ * Writes the question to STDERR (never stdout — a prompt is not a record),
+ * reads one line from stdin, and answers `true` only for `y`/`yes`
+ * (case-insensitive); anything else, INCLUDING no answer at all, is a
+ * decline.
+ *
+ * MUST NOT HANG. `rl.question`'s callback only fires once a line is
+ * actually submitted — if stdin closes first (piped from `/dev/null`, or a
+ * real terminal's Ctrl+D on an empty line), NOTHING calls that callback,
+ * ever. That is exactly the "wait forever for a reply nobody is going to
+ * give it" failure `context.ts`'s own docstring on `prompt` warns against
+ * for an irreversible operation. Guarded here with an `answered` flag and a
+ * `'close'` listener: if the interface closes before an answer arrives,
+ * the promise still resolves — to `false`, a decline, since "no answer" is
+ * a strictly safer default than "yes" for something that erases data.
+ *
+ * `input`/`output` default to the real `process.stdin`/`process.stderr` —
+ * overridable so index.test.ts can prove the EOF/no-answer behaviour above
+ * against a fake stream instead of the real process's stdin, which a test
+ * runner does not control the same way.
+ */
+export function createPrompt(
+  input: NodeJS.ReadableStream = process.stdin,
+  output: NodeJS.WritableStream = process.stderr,
+): (question: string) => Promise<boolean> {
+  return (question: string) =>
+    new Promise<boolean>((resolve) => {
+      const rl = createInterface({ input, output })
+      let answered = false
+      rl.question(`${question} [y/N] `, (answer) => {
+        answered = true
+        rl.close()
+        resolve(/^y(es)?$/i.test(answer.trim()))
+      })
+      rl.once('close', () => {
+        if (!answered) resolve(false)
+      })
+    })
+}
+
+/**
  * `lyraflow --version` — how an agent learns which JSON contract it is
  * talking to before trusting any field name. Reports two numbers that move
  * for different reasons: `version` (CLI_VERSION) moves with every release;
@@ -71,6 +116,9 @@ async function main(): Promise<void> {
         isTty: process.stdout.isTTY ?? false,
         now: () => new Date(),
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        // runVersion never prompts — placeholder to satisfy CommandContext's
+        // shape, same reasoning as the placeholder Client just above.
+        prompt: () => Promise.resolve(false),
       })
       break
     }
@@ -129,7 +177,11 @@ async function main(): Promise<void> {
     }
 
     case 'events':
-    case 'stats': {
+    case 'stats':
+    case 'persons':
+    case 'deletions':
+    case 'segments':
+    case 'schema': {
       const isTty = process.stdout.isTTY ?? false
       const write = (s: string) => {
         process.stdout.write(s)
@@ -172,14 +224,39 @@ async function main(): Promise<void> {
         writeErr,
         now: () => new Date(),
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        // Built once per invocation, real stdin/stderr — only `persons
+        // delete` (via runPersons) ever actually calls this; every other
+        // command here never reaches it, the same way `stats` never reads
+        // `sleep`.
+        prompt: createPrompt(),
       }
-      process.exitCode =
-        command === 'events' ? await runEvents(args, ctx) : await runStats(args, ctx)
+      switch (command) {
+        case 'events':
+          process.exitCode = await runEvents(args, ctx)
+          break
+        case 'stats':
+          process.exitCode = await runStats(args, ctx)
+          break
+        case 'persons':
+          process.exitCode = await runPersons(args, ctx)
+          break
+        case 'deletions':
+          process.exitCode = await runDeletions(args, ctx)
+          break
+        case 'segments':
+          process.exitCode = await runSegments(args, ctx)
+          break
+        case 'schema':
+          process.exitCode = await runSchema(args, ctx)
+          break
+      }
       break
     }
 
     default:
-      console.error('Usage: lyraflow <--version|migrate|create-project|healthcheck|events|stats>')
+      console.error(
+        'Usage: lyraflow <--version|migrate|create-project|healthcheck|events|stats|persons|deletions|segments|schema>',
+      )
       process.exit(2)
   }
 }

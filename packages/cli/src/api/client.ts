@@ -87,6 +87,22 @@ export class Client {
   }
 
   /**
+   * `body`, when given, is sent as a JSON request body (`content-type:
+   * application/json`) — every POST route this client talks to today
+   * (`/v1/segments/:id/preview`) accepts an optional JSON body of options,
+   * never a form or raw payload. Routes through the same `#request` every
+   * other method uses, so it inherits the same guarantees by construction
+   * rather than by a second copy of them: `redirect: 'manual'` (the key is
+   * never forwarded across an origin change — see `#request`'s own
+   * docstring), and `#readJson` turning a non-JSON 2xx body into `ApiError`
+   * instead of a raw `SyntaxError`.
+   */
+  async post<T>(path: string, body?: unknown): Promise<T> {
+    const res = await this.#request('POST', path, undefined, body)
+    return this.#readJson<T>(res)
+  }
+
+  /**
    * Streams a response body line by line — for NDJSON endpoints (currently
    * only GET /v1/persons/:id/export, whose lines each already end in `\n`;
    * see packages/server/src/privacy/export.ts).
@@ -129,6 +145,7 @@ export class Client {
     method: string,
     path: string,
     query?: Record<string, string | number | undefined>,
+    body?: unknown,
   ): Promise<Response> {
     const url = this.#buildUrl(path, query)
 
@@ -149,7 +166,11 @@ export class Client {
         // the redirect probe in client.test.ts, which proves against two
         // real local servers that the target never receives the header.
         redirect: 'manual',
-        headers: { [SERVER_KEY_HEADER]: this.#serverKey },
+        headers: {
+          [SERVER_KEY_HEADER]: this.#serverKey,
+          ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
+        },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
       })
     } catch {
       // Deliberately not `${(err as Error).message}` or `{ cause: err }`:
