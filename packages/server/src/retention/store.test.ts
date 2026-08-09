@@ -46,6 +46,30 @@ class ForcedDropStore extends RetentionStore {
   }
 }
 
+/**
+ * Proves `dropExpired` is NOT all-or-nothing across `RETENTION_TABLES` (see
+ * that method's own docstring in store.ts) by injecting a failure into the
+ * SECOND table only. `dropOnePartition` is `protected` specifically so
+ * tests can subclass it -- `ForcedDropStore` above does this for Guard 2;
+ * this does it to prove the partial-run behaviour directly, at zero risk,
+ * rather than merely asserting it in prose. `RETENTION_TABLES` is
+ * `['events', 'device_index']`, in that order, so `events`' real drop
+ * completes before `device_index`'s own call ever throws.
+ */
+class FailSecondTableStore extends RetentionStore {
+  protected override async dropOnePartition(
+    projectId: number,
+    table: string,
+    partition: number,
+    boundaryMonth: number,
+  ): Promise<DropResult> {
+    if (table === 'device_index') {
+      throw new Error('injected ClickHouse failure on device_index')
+    }
+    return super.dropOnePartition(projectId, table, partition, boundaryMonth)
+  }
+}
+
 async function dropWithForcedPartition(
   store: ForcedDropStore,
   projectId: number,
@@ -206,49 +230,72 @@ afterAll(async () => {
   await ch.close()
 })
 
-// Fixed, not `new Date()` -- every test below passes this explicitly to
-// `dropExpired`, which is Guard 1 itself (the store never reads the clock).
-// Chosen so `retentionBoundary(NOW, 13)` lands on 2025-07-01 (boundary month
-// 202507): a month strictly after the '2024-01-15' fixture used throughout
-// this file, strictly before the '2026-08-01' one, and exactly equal to the
-// '2025-07-15' one's own partition month -- giving every test below a fixed,
-// non-drifting three-way split (expired / boundary / kept) without each test
-// having to recompute it.
-const NOW = new Date('2026-08-01T00:00:00.000Z')
+// Captured ONCE, from the REAL process clock, when this file loads --
+// `dropExpired` now refuses any `now` more than a day from the real process
+// clock (the fix for the clock-skew hole; see store.ts), so a fixed literal
+// like '2026-08-01' would drift out of that window the moment the real date
+// moves past it. Every fixture below is instead anchored RELATIVE to this
+// one value via `monthsAgo`/`yyyymmAgo`/`monthStartAgo` -- N months before
+// or at NOW's own month -- so the file keeps working regardless of which
+// real date it happens to run on.
+const NOW = new Date()
+
+/** ISO instant for the 15th of the month `n` months before NOW's month. */
+function monthsAgo(n: number): string {
+  return new Date(Date.UTC(NOW.getUTCFullYear(), NOW.getUTCMonth() - n, 15)).toISOString()
+}
+
+/** `YYYYMM` for the month `n` months before NOW's month -- matches `monthsAgo(n)`'s own month. */
+function yyyymmAgo(n: number): number {
+  return toYYYYMM(new Date(Date.UTC(NOW.getUTCFullYear(), NOW.getUTCMonth() - n, 1)))
+}
+
+/** 'YYYY-MM-DD' for the 1st of the month `n` months before NOW's month -- matches `device_index.month`'s text format. */
+function monthStartAgo(n: number): string {
+  return new Date(Date.UTC(NOW.getUTCFullYear(), NOW.getUTCMonth() - n, 1))
+    .toISOString()
+    .slice(0, 10)
+}
 
 describe('RetentionStore', () => {
   it('drops only partitions strictly older than the boundary, and leaves the neighbour byte-intact', async () => {
-    await seedEventAt(projectA, '2024-01-15T00:00:00Z', 'old_evt')
-    await seedEventAt(projectA, '2025-07-15T00:00:00Z', 'boundary_evt')
-    await seedEventAt(projectA, '2026-08-01T00:00:00Z', 'recent_evt')
+    await seedEventAt(projectA, monthsAgo(14), 'old_evt')
+    await seedEventAt(projectA, monthsAgo(13), 'boundary_evt')
+    await seedEventAt(projectA, monthsAgo(0), 'recent_evt')
 
     const results = await store.dropExpired({ projectId: projectA, retentionMonths: 13 }, NOW)
 
-    expect(results.filter((r) => r.dropped).map((r) => r.partition)).toContain(202401)
+    expect(results.filter((r) => r.dropped).map((r) => r.partition)).toContain(yyyymmAgo(14))
     expect(await eventNames(projectA)).toEqual(['boundary_evt', 'recent_evt'])
   })
 
   it('refuses to drop a partition at the boundary month itself', async () => {
-    await seedEventAt(projectA, '2025-07-15T00:00:00Z', 'boundary_evt')
-    await expect(dropWithForcedPartition(store, projectA, 202507, NOW)).rejects.toThrow(
+    await seedEventAt(projectA, monthsAgo(13), 'boundary_evt')
+    await expect(dropWithForcedPartition(store, projectA, yyyymmAgo(13), NOW)).rejects.toThrow(
       /not older than retention boundary month/i,
     )
     expect(await eventNames(projectA)).toEqual(['boundary_evt'])
   })
 
-  // The guard this replaced ("never drop every partition a project has")
-  // refused a project whose data was entirely and legitimately expired --
-  // forever, once per cycle -- and its stated justification ("a real
-  // boundary always keeps at least the current month") was false for a
-  // dormant project, which has no current-month partition at all. Review
-  // established that a negative `retentionMonths` is the only input that
-  // actually produces "everything expired," and it does so by putting the
-  // boundary in the future -- exactly what this assertion catches instead.
-  it('refuses a boundary in the future, which is what a negative retention produces', async () => {
-    await seedEventAt(projectA, '2024-01-15T00:00:00Z', 'only_evt')
+  // ROUND 2: the "boundary can never be in the future" assertion this test
+  // originally pinned has been REMOVED, not merely reworded -- see store.ts's
+  // `dropExpired` docstring for the full reasoning, summarised here: once
+  // `retentionMonths` is validated to an integer in [1, 120] (the range
+  // check below), `retentionBoundary` subtracts at least one whole month
+  // from `now`, so the resulting boundary can never be later than `now` --
+  // BY CONSTRUCTION, not by a second runtime comparison. A dedicated
+  // future-boundary assertion could therefore never independently fire once
+  // this range check exists: proven by a reviewer swapping the two checks'
+  // order and getting the identical failure set either way, with no row
+  // assertion ever distinguishing them. A negative `retentionMonths` is
+  // still refused -- just by the range check, with a message about the real
+  // problem, not a message selected by a check that adds no protection of
+  // its own.
+  it('refuses a negative retentionMonths via the range check, not a dedicated future-boundary message', async () => {
+    await seedEventAt(projectA, monthsAgo(14), 'only_evt')
     await expect(
       store.dropExpired({ projectId: projectA, retentionMonths: -1 }, NOW),
-    ).rejects.toThrow(/boundary .* in the future/i)
+    ).rejects.toThrow(/retentionMonths -1 is not an integer/i)
     expect(await eventNames(projectA)).toEqual(['only_evt'])
   })
 
@@ -256,38 +303,67 @@ describe('RetentionStore', () => {
     // A churned account is exactly the population disk retention exists to
     // free. The old "never drop everything" rule refused this forever, and
     // a dormant project has no current-month partition to save it.
-    await seedEventAt(projectA, '2024-01-15T00:00:00Z', 'old_evt')
+    await seedEventAt(projectA, monthsAgo(14), 'old_evt')
     const results = await store.dropExpired({ projectId: projectA, retentionMonths: 13 }, NOW)
-    expect(results.filter((r) => r.dropped).map((r) => r.partition)).toContain(202401)
+    expect(results.filter((r) => r.dropped).map((r) => r.partition)).toContain(yyyymmAgo(14))
     expect(await eventNames(projectA)).toEqual([])
+  })
+
+  // THE Critical fix. The old "never drop every partition" rule was, by
+  // accident, the only thing standing between a skewed `now` and total
+  // deletion: a `now` far in the future moves the boundary WITH it (the
+  // boundary is COMPUTED FROM `now`), so no comparison between the boundary
+  // and `now` itself -- including the removed future-boundary assertion
+  // above -- can ever detect it. Confirmed live before this guard existed:
+  // `retentionMonths: 13` (perfectly ordinary) with `now = 2099-01-01`
+  // deleted every partition a project had, including the current month, no
+  // throw. `now` is an injected seam on the scheduler's own options object
+  // (see Task 3's brief), not only a broken-machine-clock story.
+  //
+  // Assert on ROWS, not the message. A message-only assertion would pass
+  // against a version that throws for the wrong reason (e.g. the range
+  // check catching an unrelated problem) and still deleted the data.
+  it('refuses a `now` far from the process clock, which would drop everything', async () => {
+    await seedEventAt(projectA, monthsAgo(14), 'old_evt')
+    await seedEventAt(projectA, monthsAgo(0), 'recent_evt')
+    await expect(
+      store.dropExpired(
+        { projectId: projectA, retentionMonths: 13 },
+        new Date('2099-01-01T00:00:00Z'),
+      ),
+    ).rejects.toThrow(/clock/i)
+    expect(await eventNames(projectA)).toEqual(['old_evt', 'recent_evt'])
   })
 
   // A dry run must be refused for exactly the same reason a real run would
   // be -- a preview that silently omitted "this run would in fact be
   // refused" misreports what a real run does.
-  it('a dry run is also refused when the boundary would be in the future', async () => {
+  it('a dry run is also refused when `now` is far from the process clock', async () => {
     const dry = new RetentionStore({ pg, ch, dryRun: true })
-    await seedEventAt(projectA, '2024-01-15T00:00:00Z', 'only_evt')
+    await seedEventAt(projectA, monthsAgo(14), 'only_evt')
     await expect(
-      dry.dropExpired({ projectId: projectA, retentionMonths: -1 }, NOW),
-    ).rejects.toThrow(/boundary .* in the future/i)
+      dry.dropExpired(
+        { projectId: projectA, retentionMonths: 13 },
+        new Date('2099-01-01T00:00:00Z'),
+      ),
+    ).rejects.toThrow(/clock/i)
     expect(await eventNames(projectA)).toEqual(['only_evt'])
   })
 
-  it('the future-boundary refusal names the project id, so a shared log line is attributable', async () => {
+  it('the clock-skew refusal names the project id, so a shared log line is attributable', async () => {
     await expect(
-      store.dropExpired({ projectId: projectA, retentionMonths: -1 }, NOW),
+      store.dropExpired(
+        { projectId: projectA, retentionMonths: 13 },
+        new Date('2099-01-01T00:00:00Z'),
+      ),
     ).rejects.toThrow(new RegExp(String(projectA)))
   })
 
-  // The future-boundary check alone cannot catch this: `retentionMonths: 0`
-  // makes `retentionBoundary` land exactly on the current month, which is
-  // NOT in the future relative to `now` -- so without a separate range
-  // check, a zero would silently pass through and simply expire nothing
-  // (the current month is never droppable), a different but equally silent
-  // wrong answer from a caller that should have been refused outright.
-  it('refuses retentionMonths=0, which the future-boundary check alone cannot catch', async () => {
-    await seedEventAt(projectA, '2024-01-15T00:00:00Z', 'only_evt')
+  // Without this check, `retentionMonths: 0` does not "do nothing" --
+  // `retentionBoundary` lands exactly on the current month, so a genuinely
+  // old partition still compares as expired and gets dropped for real.
+  it('refuses retentionMonths=0 instead of silently dropping real data', async () => {
+    await seedEventAt(projectA, monthsAgo(14), 'only_evt')
     await expect(
       store.dropExpired({ projectId: projectA, retentionMonths: 0 }, NOW),
     ).rejects.toThrow(/retentionMonths 0 is not an integer/i)
@@ -296,13 +372,12 @@ describe('RetentionStore', () => {
 
   // `dropExpired` takes an arbitrary `RetentionTarget`, not only ones read
   // through the Postgres column's `CHECK (retention_months BETWEEN 1 AND
-  // 120)`. A non-finite value clears the future-boundary check silently
-  // (`NaN > nowMonth` is `false`) and, left unvalidated, makes
-  // `expiredPartitions` return `[]` every time -- a clean, silent, zero-drop
-  // "success" a scheduler cannot distinguish from a healthy run with
-  // nothing left to expire.
+  // 120)`. A non-finite value produces a boundary of `Invalid Date`, which
+  // makes `expiredPartitions` return `[]` unconditionally -- a clean,
+  // silent, zero-drop "success" a scheduler cannot distinguish from a
+  // healthy run with nothing left to expire.
   it('refuses a non-finite retentionMonths instead of silently dropping nothing', async () => {
-    await seedEventAt(projectA, '2024-01-15T00:00:00Z', 'only_evt')
+    await seedEventAt(projectA, monthsAgo(14), 'only_evt')
     await expect(
       store.dropExpired({ projectId: projectA, retentionMonths: Number.NaN }, NOW),
     ).rejects.toThrow(/retentionMonths NaN is not an integer/i)
@@ -310,7 +385,7 @@ describe('RetentionStore', () => {
   })
 
   it('accepts retentionMonths at both ends of the permitted range, 1 and 120, without a false refusal', async () => {
-    await seedEventAt(projectA, '2026-08-01T00:00:00Z', 'r1_evt')
+    await seedEventAt(projectA, monthsAgo(0), 'r1_evt')
     await expect(
       store.dropExpired({ projectId: projectA, retentionMonths: 1 }, NOW),
     ).resolves.toBeDefined()
@@ -324,30 +399,30 @@ describe('RetentionStore', () => {
 
   it('a dry run reports what it would drop and drops nothing', async () => {
     const dry = new RetentionStore({ pg, ch, dryRun: true })
-    await seedEventAt(projectA, '2024-01-15T00:00:00Z', 'old_evt')
+    await seedEventAt(projectA, monthsAgo(14), 'old_evt')
     const results = await dry.dropExpired({ projectId: projectA, retentionMonths: 13 }, NOW)
-    expect(results.map((r) => r.partition)).toContain(202401)
+    expect(results.map((r) => r.partition)).toContain(yyyymmAgo(14))
     expect(results.every((r) => r.dropped === false)).toBe(true)
     expect(await eventNames(projectA)).toEqual(['old_evt'])
   })
 
   it('never touches another project, even with an identical partition month', async () => {
-    await seedEventAt(projectA, '2024-01-15T00:00:00Z', 'a_evt')
-    await seedEventAt(projectB, '2024-01-15T00:00:00Z', 'b_evt')
+    await seedEventAt(projectA, monthsAgo(14), 'a_evt')
+    await seedEventAt(projectB, monthsAgo(14), 'b_evt')
     await store.dropExpired({ projectId: projectA, retentionMonths: 13 }, NOW)
     expect(await eventNames(projectB)).toEqual(['b_evt'])
   })
 
   it('drops from device_index as well as events', async () => {
-    await seedEventAt(projectA, '2024-01-15T00:00:00Z', 'old_evt')
-    expect(await deviceIndexMonths(projectA)).toContain('2024-01-01')
+    await seedEventAt(projectA, monthsAgo(14), 'old_evt')
+    expect(await deviceIndexMonths(projectA)).toContain(monthStartAgo(14))
     await store.dropExpired({ projectId: projectA, retentionMonths: 13 }, NOW)
-    expect(await deviceIndexMonths(projectA)).not.toContain('2024-01-01')
+    expect(await deviceIndexMonths(projectA)).not.toContain(monthStartAgo(14))
   })
 
   it('is idempotent — a second run drops nothing and does not throw', async () => {
-    await seedEventAt(projectA, '2024-01-15T00:00:00Z', 'old_evt')
-    await seedEventAt(projectA, '2026-08-01T00:00:00Z', 'recent_evt')
+    await seedEventAt(projectA, monthsAgo(14), 'old_evt')
+    await seedEventAt(projectA, monthsAgo(0), 'recent_evt')
     const first = await store.dropExpired({ projectId: projectA, retentionMonths: 13 }, NOW)
     expect(first.filter((r) => r.dropped)).not.toHaveLength(0)
     const second = await store.dropExpired({ projectId: projectA, retentionMonths: 13 }, NOW)
@@ -375,13 +450,37 @@ describe('RetentionStore', () => {
     expect(results).toEqual([])
   })
 
+  // `dropExpired` is NOT all-or-nothing across `RETENTION_TABLES` -- see the
+  // docstring's own claim, proven here rather than merely asserted. Uses
+  // `FailSecondTableStore` (see above) to inject a real failure on the
+  // SECOND table only, at zero risk to shared infrastructure: no ClickHouse
+  // error is actually forced, just a plain thrown Error from the override,
+  // which `dropExpired`'s per-table loop propagates exactly as it would a
+  // genuine `ALTER TABLE` failure.
+  it('is not all-or-nothing across RETENTION_TABLES: a later table failing leaves an earlier drop in place', async () => {
+    const failing = new FailSecondTableStore({ pg, ch, dryRun: false })
+    await seedEventAt(projectA, monthsAgo(14), 'old_evt')
+
+    await expect(
+      failing.dropExpired({ projectId: projectA, retentionMonths: 13 }, NOW),
+    ).rejects.toThrow(/injected ClickHouse failure/)
+
+    // events (processed first, per RETENTION_TABLES' own order) already,
+    // irreversibly, dropped its expired partition before device_index's own
+    // call ever threw -- the exact shape the docstring warns callers about.
+    expect(await eventNames(projectA)).toEqual([])
+    expect(await deviceIndexMonths(projectA)).toContain(monthStartAgo(14))
+  })
+
   // `listPartitions` scopes its `system.parts` query to `currentDatabase()`
   // because that table is server-wide, not scoped to the client's own
   // database. A second database on the same server, with its own same-named
   // `events` table using the identical `(project_id, month)` partition
   // shape, is exactly the case that filter exists to exclude -- without it,
   // a foreign database's row for this project would inflate the partition
-  // list this store believes it has.
+  // list this store believes it has. Not clock-dependent (this calls
+  // `listPartitions` directly, never `dropExpired`), so the fixture date
+  // stays a plain literal.
   it('does not let a same-named table in a foreign database inflate the partition list', async () => {
     const foreignDb = 'ret_store_foreign_probe'
     await ch.command({ query: `CREATE DATABASE IF NOT EXISTS ${foreignDb}` })
@@ -416,7 +515,8 @@ describe('RetentionStore', () => {
   // `listPartitions` must throw on that shape, not silently skip it: a
   // skipped row makes `listPartitions` under-report a project's true
   // partition set, and there is no downstream guard left that would ever
-  // notice the shortfall.
+  // notice the shortfall. Not clock-dependent (calls `listPartitions`
+  // directly), so the fixture date stays a plain literal.
   it('throws rather than silently skipping an unparseable partition value', async () => {
     await ch.insert({
       table: 'events_dead_letter',

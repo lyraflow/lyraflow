@@ -49,6 +49,14 @@ export interface RetentionStoreOptions {
 export const RETENTION_TABLES: readonly string[] = ['events', 'device_index']
 
 /**
+ * `dropExpired` refuses any `now` further than this from the real process
+ * clock. See that method's docstring for why: a skewed `now` moves the
+ * boundary with it, so no comparison against the boundary itself can ever
+ * detect it.
+ */
+const MAX_CLOCK_SKEW_MS = 24 * 60 * 60 * 1000
+
+/**
  * `system.parts.partition` renders a compound partition key as its tuple's
  * text form, e.g. `(42,202401)` for `(project_id, toYYYYMM(...))` -- no
  * spaces, decimal integers only (confirmed against a live server; both
@@ -164,10 +172,15 @@ export class RetentionStore {
    * strictly older than `retentionBoundary(now, target.retentionMonths)`.
    *
    * Guard 1: `now` is a parameter, read once by the caller, never
-   * `new Date()` here -- a boundary recomputed per partition or per table
-   * could move mid-run.
+   * `new Date()` here to COMPUTE THE BOUNDARY -- a boundary recomputed per
+   * partition or per table could move mid-run. The clock-skew check below
+   * does read the real process clock, once, but only to sanity-check the
+   * `now` argument itself before it is ever used; it is not a second input
+   * to the boundary calculation, and does not run again once the per-table
+   * loop starts. Guard 1 forbids recomputing the boundary mid-run, not
+   * sanity-checking an input once at the top.
    *
-   * NOT all-or-nothing across `RETENTION_TABLES`. The two checks below run
+   * NOT all-or-nothing across `RETENTION_TABLES`. The checks below run
    * once, before any table is touched, so a *rejected* run never drops
    * anything. But once the per-table loop starts issuing real
    * `ALTER TABLE ... DROP PARTITION` calls, there is no transaction across
@@ -175,26 +188,32 @@ export class RetentionStore {
    * leaves whatever an earlier table already, irreversibly, dropped. A
    * caller that sees this reject must not assume zero partitions were
    * removed -- inspect how far the per-table loop got, or re-derive it from
-   * `listPartitions`, before deciding a retry is safe.
+   * `listPartitions`, before deciding a retry is safe. `store.test.ts`
+   * proves this directly, by injecting a failure into the second table of a
+   * live run and confirming the first table's drop survives the throw.
    */
   async dropExpired(target: RetentionTarget, now: Date): Promise<DropResult[]> {
-    const boundary = retentionBoundary(now, target.retentionMonths)
-    const boundaryMonth = toYYYYMM(boundary)
-    const nowMonth = toYYYYMM(now)
-
-    // The boundary can never be in the future. This is the guard that
-    // replaced an earlier "never drop every partition a project has" rule --
-    // see boundary.ts and this project's own history for why that rule was
-    // wrong in both directions: it refused a dormant project's *legitimate*
-    // full expiry forever, while failing to catch two of the three causes it
-    // named (months=0 lands on the current month, not expired; NaN expires
-    // nothing -- see the check below for that one). A negative
-    // `retentionMonths` is the one input that actually produces "everything
-    // expired," and it does so by pushing the boundary into the future,
-    // which is exactly what this checks.
-    if (boundaryMonth > nowMonth) {
+    // Before anything else: `now` must be within a day of the real process
+    // clock. This is the guard that closes the hole a skewed `now` opens --
+    // and it is a REAL hole, not a hypothetical one, because `now` is an
+    // injected seam on the scheduler's own options object (see Task 3's
+    // brief), not something only a broken machine clock could get wrong.
+    //
+    // Neither of this store's other checks can catch a skewed `now`: the
+    // boundary is *computed from* `now` (`now` minus `retentionMonths`
+    // months), so a wrong `now` produces a boundary that is wrong by
+    // exactly the same amount, in the same direction -- any comparison
+    // between the boundary and `now` itself still holds no matter how far
+    // off `now` is. A `now` of 2099, with a perfectly ordinary
+    // `retentionMonths: 13`, silently expires every partition a project
+    // has, including the current month -- confirmed live before this guard
+    // existed: every row gone, no throw. Sanity-checking `now` against the
+    // one clock this process actually trusts is the only place that can
+    // catch it.
+    const skewMs = Math.abs(Date.now() - now.getTime())
+    if (skewMs > MAX_CLOCK_SKEW_MS) {
       throw new Error(
-        `refusing to evaluate retention for project ${target.projectId}: boundary month ${boundaryMonth} is in the future relative to now (${nowMonth})`,
+        `refusing to evaluate retention for project ${target.projectId}: now (${now.toISOString()}) is too far from the process clock (${new Date().toISOString()}) to trust with an irreversible drop -- skew ${skewMs}ms exceeds the ${MAX_CLOCK_SKEW_MS}ms this store allows`,
       )
     }
 
@@ -202,17 +221,30 @@ export class RetentionStore {
     // column's `CHECK (retention_months BETWEEN 1 AND 120)` -- this method
     // takes an arbitrary `RetentionTarget`, and boundary.ts says explicitly
     // that a caller not coming through that column must validate before
-    // calling `retentionBoundary`. This is that validation. It must run
-    // AFTER the future-boundary check above, not before: a negative value
-    // needs to reach the future-boundary error (the message a caller should
-    // see for that specific, real failure), and only a value that does NOT
-    // produce a future boundary -- zero, NaN, or an out-of-range positive --
-    // falls through to be caught here instead. NaN in particular clears the
-    // check above silently (`NaN > nowMonth` is `false`, the same shape of
-    // hazard `assertDroppable` guards against in boundary.ts) and, left
-    // unchecked, makes `expiredPartitions` return an empty list every time
-    // -- a clean, silent, zero-drop "success" indistinguishable in a log
-    // from a project with nothing left to expire.
+    // calling `retentionBoundary`. This is that validation. Without it, a
+    // `retentionMonths` of `0` does not "do nothing": `retentionBoundary`
+    // lands exactly on the current month, so any genuinely old partition
+    // still compares as expired and is dropped for real -- confirmed live.
+    // `NaN`, separately, produces a boundary of `Invalid Date`, which makes
+    // `expiredPartitions` return `[]` unconditionally -- a clean, silent,
+    // zero-drop "success" indistinguishable in a log from a healthy run
+    // with nothing left to expire.
+    //
+    // This is also, now, the ONLY guard against a negative `retentionMonths`
+    // -- see this file's history for why an earlier "boundary can never be
+    // in the future" assertion was removed rather than kept alongside it.
+    // For any `retentionMonths` this check accepts (an integer in
+    // `[1, 120]`), `retentionBoundary` subtracts at least one whole month
+    // from `now`, so the resulting boundary can never be later than `now`
+    // -- the property that assertion checked is now true BY CONSTRUCTION,
+    // not by a second runtime comparison. Proven exhaustively (all 120
+    // valid months, several `now` values): zero violations. Keeping that
+    // assertion once this check and the clock-skew check above both exist
+    // would not add protection -- every input it could ever catch is
+    // already an out-of-range `retentionMonths`, caught here first, with a
+    // message about the real problem. A check that can never independently
+    // fire is not defence-in-depth; it is a second, misleading name for
+    // this one.
     if (
       !Number.isInteger(target.retentionMonths) ||
       target.retentionMonths < 1 ||
@@ -223,6 +255,8 @@ export class RetentionStore {
       )
     }
 
+    const boundary = retentionBoundary(now, target.retentionMonths)
+    const boundaryMonth = toYYYYMM(boundary)
     const results: DropResult[] = []
 
     for (const table of RETENTION_TABLES) {
