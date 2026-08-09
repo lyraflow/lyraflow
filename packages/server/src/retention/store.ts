@@ -32,6 +32,36 @@ export interface RetentionStoreOptions {
   pg: Pool
   ch: ClickHouseClient
   dryRun: boolean
+  /**
+   * Called synchronously from inside `dropOnePartition`, immediately after
+   * each REAL `ALTER TABLE ... DROP PARTITION` command returns -- one call
+   * per partition actually dropped, not one call per project and not one
+   * call per `dropExpired`. Never called for a dry run's Guard-4
+   * short-circuit (`dropped: false`) -- there is no ALTER to be
+   * "immediately after", and Guard 5 is about recording real, irreversible
+   * work.
+   *
+   * This is where Guard 5's log line belongs, and specifically NOT as a
+   * wrapper around `dropExpired`'s returned array: `dropExpired` loops over
+   * every expired partition in BOTH `RETENTION_TABLES` for one project
+   * before it ever returns, so a caller that only inspects the returned
+   * array after `dropExpired` resolves is logging once per PROJECT, with
+   * every partition that project dropped bunched into that one moment. A
+   * process interrupted between two of those real, already-executed drops
+   * -- a SIGTERM mid-project, the crash scenario Guard 5 exists for --
+   * would then lose every log line for that project's drops with nothing
+   * to show for it, however many there were. Calling `onDrop` here instead
+   * writes each line the instant its partition is actually gone, so the
+   * unrecorded window shrinks to the smallest one this store can offer
+   * without a cross-statement transaction: one partition, not one project's
+   * worth. See `shutdown.ts`'s own comment on `retention.stop()` for the
+   * bound this produces together with `RetentionWorker`'s between-project
+   * stop check.
+   *
+   * Optional so every existing construction site and test that does not
+   * care about logging keeps compiling unchanged.
+   */
+  onDrop?: (result: DropResult) => void
 }
 
 /**
@@ -74,11 +104,13 @@ export class RetentionStore {
   readonly #pg: Pool
   readonly #ch: ClickHouseClient
   readonly #dryRun: boolean
+  readonly #onDrop: (result: DropResult) => void
 
   constructor(opts: RetentionStoreOptions) {
     this.#pg = opts.pg
     this.#ch = opts.ch
     this.#dryRun = opts.dryRun
+    this.#onDrop = opts.onDrop ?? (() => {})
   }
 
   /** Every project and the retention it is currently configured with. */
@@ -164,7 +196,12 @@ export class RetentionStore {
       query: `ALTER TABLE ${table} DROP PARTITION tuple({p:UInt32}, {m:UInt32})`,
       query_params: { p: projectId, m: partition },
     })
-    return { projectId, table, partition, dropped: true }
+    const result: DropResult = { projectId, table, partition, dropped: true }
+    // `onDrop`'s own contract (RetentionStoreOptions): called for a REAL
+    // drop only, the instant one just happened -- not for the dry-run
+    // branch above, which issued no ALTER to be "immediately after".
+    this.#onDrop(result)
+    return result
   }
 
   /**

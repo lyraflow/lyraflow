@@ -4,6 +4,7 @@ import { RetentionWorker, type RetentionWorkerOptions } from './worker.js'
 
 const targetA: RetentionTarget = { projectId: 1, retentionMonths: 12 }
 const targetB: RetentionTarget = { projectId: 2, retentionMonths: 12 }
+const targetC: RetentionTarget = { projectId: 3, retentionMonths: 12 }
 
 function makeWorker(overrides: Partial<RetentionWorkerOptions> = {}): RetentionWorker {
   return new RetentionWorker({
@@ -188,6 +189,50 @@ describe('RetentionWorker', () => {
     releaseDrop()
     await runOncePromise
     expect(runs).toEqual([targetA.projectId])
+  })
+
+  // Round-2 fix-round test: the mid-run `stop()` case immediately above
+  // uses a single-project `listProjects`, which genuinely proves `stop()`
+  // is non-blocking and does not abandon the in-flight project, but
+  // STRUCTURALLY cannot probe whether a sweep still visits every OTHER
+  // project after `stop()` is called — with only one project, there is no
+  // "next project" to wrongly sweep. This uses three: project A blocks on
+  // a gate this test controls, `stop()` is called while A is still in
+  // flight, and only once A is released does the run proceed — proving
+  // whether it stops there or goes on to sweep B and C regardless.
+  it('stop() called mid-run prevents any project not yet started from being swept', async () => {
+    let releaseFirst: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    const swept: number[] = []
+    const worker = makeWorker({
+      listProjects: async () => [targetA, targetB, targetC],
+      dropExpired: async (t) => {
+        if (t.projectId === targetA.projectId) {
+          await gate
+        }
+        swept.push(t.projectId)
+        return []
+      },
+    })
+
+    const runOncePromise = worker.runOnce()
+    // Let the run actually start and reach project A's gate before stop()
+    // is called — otherwise this would only prove stop() works before any
+    // project has started, which the single-project test above covers.
+    await Promise.resolve()
+    await Promise.resolve()
+
+    worker.stop()
+    releaseFirst()
+    await runOncePromise
+
+    // Without the between-project `#stopped` check in `#runAllProjects`,
+    // this swept [1, 2, 3] -- `stop()` only ever blocked the NEXT timer
+    // tick, never a sweep already in flight, so B and C got processed
+    // exactly as if `stop()` had never been called at all.
+    expect(swept).toEqual([targetA.projectId])
   })
 
   // --- Additional coverage beyond the brief's named tests ---

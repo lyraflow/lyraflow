@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { retentionBoundary, toYYYYMM } from './boundary.js'
 import { type DropResult, RETENTION_TABLES, RetentionStore, type RetentionTarget } from './store.js'
 
@@ -458,6 +458,35 @@ describe('RetentionStore', () => {
     expect(results.map((r) => r.partition)).toContain(yyyymmAgo(14))
     expect(results.every((r) => r.dropped === false)).toBe(true)
     expect(await eventNames(projectA)).toEqual(['old_evt'])
+  })
+
+  // `onDrop` (Guard 5's actual hook — see app.ts/logging.ts) is documented
+  // to fire only for a REAL drop, never for a dry run's `dropped: false`
+  // short-circuit -- there is no ALTER to be "immediately after". Proven
+  // here directly against the store's real contract, not merely asserted
+  // in `RetentionStoreOptions`' own docstring: a dry run must never call it,
+  // even though it has real, genuinely expired partitions to report.
+  it('never calls onDrop during a dry run, even when it has real expired partitions to report', async () => {
+    const onDrop = vi.fn()
+    const dry = new RetentionStore({ pg, ch, dryRun: true, onDrop })
+    await seedEventAt(projectA, monthsAgo(14), 'old_evt')
+    const results = await dry.dropExpired({ projectId: projectA, retentionMonths: 13 }, NOW)
+    expect(results.length).toBeGreaterThan(0)
+    expect(onDrop).not.toHaveBeenCalled()
+    expect(await eventNames(projectA)).toEqual(['old_evt'])
+  })
+
+  it('calls onDrop once per REAL drop, with the exact same DropResult the caller gets back', async () => {
+    const onDrop = vi.fn()
+    const wired = new RetentionStore({ pg, ch, dryRun: false, onDrop })
+    await seedEventAt(projectA, monthsAgo(14), 'old_evt')
+    const results = await wired.dropExpired({ projectId: projectA, retentionMonths: 13 }, NOW)
+    const realDrops = results.filter((r) => r.dropped)
+    expect(realDrops.length).toBeGreaterThan(0)
+    expect(onDrop).toHaveBeenCalledTimes(realDrops.length)
+    for (const r of realDrops) {
+      expect(onDrop).toHaveBeenCalledWith(r)
+    }
   })
 
   it('never touches another project, even with an identical partition month', async () => {

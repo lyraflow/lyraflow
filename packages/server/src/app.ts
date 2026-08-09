@@ -22,7 +22,7 @@ import { registerPrivacyRoutes } from './privacy/routes.js'
 import { SuppressionStore } from './privacy/suppression-store.js'
 import { PurgeWorker } from './privacy/worker.js'
 import { registerProjectRoutes } from './project/routes.js'
-import { wrapWithDropLogging } from './retention/logging.js'
+import { logDroppedPartition } from './retention/logging.js'
 import { RetentionStore } from './retention/store.js'
 import { RetentionWorker } from './retention/worker.js'
 import { registerSchemaRoutes } from './schema/routes.js'
@@ -149,15 +149,24 @@ export function buildApp(input: {
   let retentionLastRunAt: number | null = null
   let retentionPartitionsDropped = 0
 
-  const retentionStore = new RetentionStore({ pg, ch, dryRun: false })
+  // Guard 5 — see logging.ts's own docstring for the full reasoning. `onDrop`
+  // fires from INSIDE the store, per partition, the instant each `ALTER
+  // TABLE ... DROP PARTITION` actually succeeds — not from a wrapper reading
+  // `dropExpired`'s returned array after a whole project's sweep finishes.
+  // That distinction is load-bearing: RETENTION_TABLES has two tables, so a
+  // project can drop several partitions before `dropExpired` would ever
+  // return, and a post-hoc wrapper would only ever log once that whole
+  // project's work was done — losing every already-executed drop's record
+  // if the process were interrupted anywhere inside that window.
+  const retentionStore = new RetentionStore({
+    pg,
+    ch,
+    dryRun: false,
+    onDrop: (result) => logDroppedPartition(app.log, result),
+  })
   const retention = new RetentionWorker({
     listProjects: () => retentionStore.listProjects(),
-    // Guard 5 — see logging.ts's own docstring for the full reasoning,
-    // including why it is a standalone function rather than inlined here.
-    dropExpired: wrapWithDropLogging(
-      (target, now) => retentionStore.dropExpired(target, now),
-      app.log,
-    ),
+    dropExpired: (target, now) => retentionStore.dropExpired(target, now),
     // The live process clock, not an injected fixed value — `dropExpired`
     // refuses any `now` more than 24h from it (see store.ts), and there is
     // no seam here that would ever need to differ from the real clock.

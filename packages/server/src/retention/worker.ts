@@ -72,14 +72,20 @@ export class RetentionWorker {
   }
 
   /**
-   * Synchronous, and does not wait for an in-flight run to finish: `#stopped`
-   * blocks every FUTURE call to `runOnce` (including the next timer tick)
-   * immediately, but a run already past its `#stopped` check keeps going --
-   * it completes (or fails) and resets `#inFlight` in its own `finally`,
-   * unaffected by `stop()`. Mirrors `PurgeWorker.stop()`'s reasoning: a
-   * partition drop already issued to ClickHouse completes server-side
-   * whether or not this process is still watching, so there is nothing to
-   * gain and a shutdown deadline to lose by making `stop()` await it.
+   * Synchronous, and does not await anything: it blocks every FUTURE call
+   * to `runOnce` (including the next timer tick) immediately, and it also
+   * bounds an ALREADY-IN-FLIGHT run's remaining work — `#runAllProjects`
+   * checks `#stopped` between projects (see its own comment), so a run that
+   * has not yet started its next project stops there rather than sweeping
+   * every project `listProjects` returned. What it does NOT do is abort a
+   * project's `dropExpired` call already in progress: that promise is not
+   * cancellable, and there would be nothing to gain from abandoning it —
+   * a partition drop already issued to ClickHouse completes server-side
+   * whether or not this process is still watching, mirroring
+   * `PurgeWorker.stop()`'s identical reasoning. Either way, `stop()` never
+   * awaits: it always returns before the in-flight run does, and the run
+   * itself completes (or fails) and resets `#inFlight` in its own `finally`
+   * on its own time.
    */
   stop(): void {
     this.#stopped = true
@@ -124,6 +130,19 @@ export class RetentionWorker {
 
     let partitionsDropped = 0
     for (const target of targets) {
+      // Checked at the TOP of every iteration, so `stop()` called while a
+      // PRIOR project's `dropExpired` is still in flight is honoured before
+      // the NEXT project ever starts -- this is what makes `stop()` mean
+      // what its name says for a multi-project sweep. It does not, and
+      // cannot, abort a project's `dropExpired` call already in progress
+      // (that promise is not cancellable, and abandoning it mid-ALTER would
+      // not un-issue a command ClickHouse has already accepted) -- see
+      // Guard 5's `onDrop` (store.ts, wired in app.ts) for what actually
+      // bounds the exposure of an in-flight project: each partition it
+      // drops is logged the instant that drop happens, not after the whole
+      // project finishes, so stopping mid-project loses no record even
+      // though it cannot stop the drop itself.
+      if (this.#stopped) break
       try {
         const results = await this.opts.dropExpired(target, now)
         // Only actual drops count -- a dry-run result reported as a drop

@@ -1,60 +1,56 @@
 import { describe, expect, it, vi } from 'vitest'
-import { wrapWithDropLogging } from './logging.js'
-import type { DropResult, RetentionTarget } from './store.js'
+import { logDroppedPartition } from './logging.js'
+import type { DropResult } from './store.js'
 
-const target: RetentionTarget = { projectId: 7, retentionMonths: 13 }
-const now = new Date()
-
-describe('wrapWithDropLogging', () => {
-  // The mutation this guards against: `if (r.dropped)` replaced with
-  // `if (true)`. app.ts's own production store hardcodes `dryRun: false`,
-  // so every result it ever produces has `dropped: true` — a test that only
-  // exercises that store cannot tell the two conditions apart. This
-  // fabricates a mixed result set (as a genuine dry run, or a future
-  // partial-drop shape, could produce) to prove the check is load-bearing.
-  it('logs only the results where dropped is true, never a candidate that was reported but not actually dropped', async () => {
-    const results: DropResult[] = [
-      { projectId: 7, table: 'events', partition: 202401, dropped: true },
-      { projectId: 7, table: 'device_index', partition: 202401, dropped: false },
-      { projectId: 7, table: 'events', partition: 202402, dropped: true },
-    ]
+describe('logDroppedPartition', () => {
+  it('logs a genuinely dropped result at info, naming project, table and partition', () => {
     const info = vi.fn()
-    const dropExpired = vi.fn(async () => results)
+    const result: DropResult = { projectId: 7, table: 'events', partition: 202401, dropped: true }
 
-    const wrapped = wrapWithDropLogging(dropExpired, { info })
-    const returned = await wrapped(target, now)
+    logDroppedPartition({ info }, result)
 
-    expect(returned).toBe(results)
-    expect(dropExpired).toHaveBeenCalledWith(target, now)
-    expect(info).toHaveBeenCalledTimes(2)
-    expect(info).toHaveBeenNthCalledWith(
-      1,
+    expect(info).toHaveBeenCalledTimes(1)
+    expect(info).toHaveBeenCalledWith(
       { projectId: 7, table: 'events', partition: 202401 },
       'retention dropped partition',
     )
-    expect(info).toHaveBeenNthCalledWith(
-      2,
-      { projectId: 7, table: 'events', partition: 202402 },
-      'retention dropped partition',
+  })
+
+  // The mutation this guards against: `if (!result.dropped) return` deleted
+  // (equivalent to always logging). `RetentionStore`'s real, production call
+  // path never invokes `onDrop` with `dropped: false` (dryRun is hardcoded
+  // false in app.ts's wiring), so this fabricates the input a genuine dry
+  // run — or any future caller of this exported function — could produce,
+  // to prove the guard is load-bearing rather than untestable dead code.
+  it('logs nothing for a dropped: false result', () => {
+    const info = vi.fn()
+    const result: DropResult = { projectId: 1, table: 'events', partition: 202401, dropped: false }
+
+    logDroppedPartition({ info }, result)
+
+    expect(info).not.toHaveBeenCalled()
+  })
+
+  it('logs once per call, immediately — proving this is not a batching or count-collapsing shape', () => {
+    const info = vi.fn()
+    const calls: string[] = []
+    const log = {
+      info: (fields: Record<string, unknown>, msg: string) => {
+        calls.push(msg)
+        info(fields, msg)
+      },
+    }
+
+    logDroppedPartition(log, { projectId: 1, table: 'events', partition: 202401, dropped: true })
+    // A caller can observe the FIRST line before the second call ever
+    // happens — nothing here buffers across multiple partitions the way a
+    // wrapper reading a whole `dropExpired` result array would.
+    expect(calls).toEqual(['retention dropped partition'])
+    logDroppedPartition(
+      { info },
+      { projectId: 1, table: 'device_index', partition: 202401, dropped: true },
     )
-  })
 
-  it('logs nothing when every result is dropped: false', async () => {
-    const results: DropResult[] = [
-      { projectId: 1, table: 'events', partition: 202401, dropped: false },
-      { projectId: 1, table: 'device_index', partition: 202401, dropped: false },
-    ]
-    const info = vi.fn()
-
-    await wrapWithDropLogging(async () => results, { info })(target, now)
-
-    expect(info).not.toHaveBeenCalled()
-  })
-
-  it('logs nothing and does not throw when there is nothing to report', async () => {
-    const info = vi.fn()
-    const returned = await wrapWithDropLogging(async () => [], { info })(target, now)
-    expect(returned).toEqual([])
-    expect(info).not.toHaveBeenCalled()
+    expect(info).toHaveBeenCalledTimes(2)
   })
 })
