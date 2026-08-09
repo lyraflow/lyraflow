@@ -17,6 +17,32 @@ export interface ShutdownOptions {
   // The narrowest type that says what shutdown needs — not `PurgeWorker`
   // itself — so a test can pass a stub without a database.
   purge: { stop(): void }
+  // Same narrowing, and stopped for a DIFFERENT reason than `purge` is.
+  //
+  // What `retention.stop()` actually bounds here: `RetentionWorker`
+  // checks `#stopped` BETWEEN projects (worker.ts's `#runAllProjects`), so
+  // calling it here stops a sweep already in flight from starting any
+  // MORE projects once the current one finishes — a SIGTERM landing while
+  // three projects remain no longer means all three get swept regardless.
+  // It does NOT stop the CURRENTLY in-flight project's own drops: that
+  // `dropExpired` call is not cancellable, and there would be nothing to
+  // gain from abandoning it — a drop already issued to ClickHouse
+  // completes server-side whether or not this process is still watching
+  // (see retention/worker.ts's own `stop()` docstring).
+  //
+  // Guard 5's log line is not what this call protects, and does not need
+  // protecting here: `RetentionStore`'s `onDrop` (wired in app.ts, via
+  // logging.ts) writes that line from INSIDE `dropOnePartition`, the
+  // instant each real drop happens — before `dropExpired` even returns for
+  // that project, let alone before this shutdown handler runs. A SIGTERM
+  // arriving mid-project therefore loses at most the record of ONE
+  // partition (the one whose `ALTER` succeeded in the same tick the
+  // process died, before `onDrop`'s synchronous call could run) — the
+  // smallest window this store can offer without wrapping every partition
+  // drop in one cross-statement transaction, not a whole project's worth.
+  // This field's job is bounding future WORK, not bounding an exposure
+  // that per-partition logging already closes almost entirely on its own.
+  retention: { stop(): void }
   drainDeadlineMs: number
   onExit?: (code: number) => void
 }
@@ -27,7 +53,7 @@ export interface ShutdownOptions {
  * is buffered, which would make the upgrade story dishonest.
  */
 export function installShutdownHandlers(opts: ShutdownOptions): () => Promise<void> {
-  const { app, readiness, buffer, counters, purge, drainDeadlineMs } = opts
+  const { app, readiness, buffer, counters, purge, retention, drainDeadlineMs } = opts
   const exit = opts.onExit ?? ((code: number) => process.exit(code))
   let running: Promise<void> | null = null
 
@@ -44,6 +70,11 @@ export function installShutdownHandlers(opts: ShutdownOptions): () => Promise<vo
       // ingest buffer, whose rows are only in this process's memory and are
       // lost if it is missed. A purge is durable in Postgres and is not.
       purge.stop()
+      // Bounds a sweep already in flight to the project it is currently on
+      // — no further project starts once draining begins. See this
+      // option's own docstring above for what this does and does not
+      // protect against.
+      retention.stop()
 
       const result = await buffer.drain(drainDeadlineMs)
       if (result.dropped > 0) {

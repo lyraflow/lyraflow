@@ -1,0 +1,13 @@
+-- Retention was a promise the schema made and nothing kept: retention_months
+-- has existed since 001_core.sql and no code has ever acted on it. Plan 9
+-- makes it real, which means this default stops being decorative.
+--
+-- 24 -> 13. Twelve exactly would mean a month can never be compared with the
+-- same month a year earlier -- the moment you are in January, last January is
+-- being deleted -- so year-over-year is answerable on approximately zero days
+-- of the year. Thirteen costs ~8% more storage and buys that back.
+--
+-- Existing projects are NOT changed. Their stored value is a deliberate
+-- setting once the worker is live, and silently halving it on upgrade would
+-- delete a year of somebody's data on the first run after a `pnpm migrate`.
+ALTER TABLE projects ALTER COLUMN retention_months SET DEFAULT 13;

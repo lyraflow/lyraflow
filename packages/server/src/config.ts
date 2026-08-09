@@ -12,6 +12,8 @@ export interface Config {
   purgeLeaseMs: number
   purgeMaxAttempts: number
   allowedOrigins: string[]
+  retentionIntervalMs: number
+  retentionEnabled: boolean
 }
 
 /**
@@ -29,6 +31,14 @@ function num(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
   return parsed
 }
 
+function bool(env: NodeJS.ProcessEnv, key: string, fallback: boolean): boolean {
+  const raw = env[key]
+  if (raw === undefined || raw === '') return fallback
+  if (raw === 'true') return true
+  if (raw === 'false') return false
+  throw new Error(`${key} must be "true" or "false", got "${raw}"`)
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv): Config {
   const required = [
     'LYRAFLOW_POSTGRES_URL',
@@ -40,6 +50,21 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
   const missing = required.filter((k) => !env[k])
   if (missing.length > 0) {
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`)
+  }
+
+  // `num()` alone would accept `0` and negatives here, and `setInterval`
+  // clamps both to 1ms -- a whole-database retention sweep running
+  // continuously, forever, from a typo. The worker's `#inFlight` flag means
+  // no two sweeps overlap, so no data is at risk, but that is the same
+  // argument `LYRAFLOW_RETENTION_ENABLED` refuses `FALSE` and `0` on: a
+  // retention setting read as something the operator did not write is worse
+  // than a boot that stops and says so. Non-integers are refused with them,
+  // since a millisecond count is not a quantity anyone means fractionally.
+  const retentionIntervalMs = num(env, 'LYRAFLOW_RETENTION_INTERVAL_MS', 3_600_000)
+  if (!Number.isInteger(retentionIntervalMs) || retentionIntervalMs < 1) {
+    throw new Error(
+      `LYRAFLOW_RETENTION_INTERVAL_MS must be a whole number of milliseconds >= 1, got "${retentionIntervalMs}"`,
+    )
   }
 
   const drainDeadlineMs = num(env, 'LYRAFLOW_DRAIN_DEADLINE_MS', 25_000)
@@ -92,5 +117,26 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
       .split(',')
       .map((o) => o.trim())
       .filter((o) => o.length > 0),
+    // How often the retention worker looks for expired partitions to drop.
+    // The work is dropping a whole ClickHouse partition, a metadata
+    // operation, not a per-row scan or mutation — and retention is measured
+    // in months, so a missed hour costs nothing. Hourly is frequent enough
+    // that a project's actual retention never drifts meaningfully past its
+    // configured `retention_months`. Validated above: `0` and negatives are
+    // refused rather than silently clamped by `setInterval` into a
+    // continuous sweep.
+    retentionIntervalMs,
+    // Off is a legitimate choice for an operator managing retention some
+    // other way (their own job, their own tooling) — silently doing nothing
+    // is not. Disabling this logs once at startup (see index.ts) so the
+    // choice is visible rather than merely absent.
+    //
+    // Only the lowercase literals "true"/"false" are accepted — see bool()
+    // above. `LYRAFLOW_RETENTION_ENABLED=FALSE` or `=0` is refused with a
+    // thrown error before any logger exists, not silently coerced to `true`:
+    // silently accepting an unrecognised "off" spelling would keep deleting
+    // data an operator believed they had turned off, which is the worse
+    // failure of the two by a wide margin.
+    retentionEnabled: bool(env, 'LYRAFLOW_RETENTION_ENABLED', true),
   }
 }

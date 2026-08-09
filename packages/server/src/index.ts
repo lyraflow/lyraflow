@@ -27,6 +27,7 @@ installShutdownHandlers({
   buffer: app.deps.buffer,
   counters: app.deps.counters,
   purge: app.deps.purge,
+  retention: app.deps.retention,
   drainDeadlineMs: config.drainDeadlineMs,
 })
 
@@ -91,6 +92,18 @@ setInterval(() => void app.deps.counters.flush(), 10_000).unref()
 // Postgres and does not need them, but a process that failed either boot step
 // exits, and starting a timer that outlives that decision is pointless.
 app.deps.purge.start()
+
+// Same reasoning as purge above, plus one more: off is a legitimate choice
+// for an operator managing retention some other way, but silently doing
+// nothing would not be — so the disabled path logs once, here, at startup,
+// making the choice visible rather than merely absent.
+if (config.retentionEnabled) {
+  app.deps.retention.start()
+} else {
+  app.log.info(
+    "retention disabled (LYRAFLOW_RETENTION_ENABLED=false) — no events will be dropped for age; retention is nobody's job unless something else does it",
+  )
+}
 
 await app.listen({ port: config.port, host: '0.0.0.0' })
 readiness.markReady()

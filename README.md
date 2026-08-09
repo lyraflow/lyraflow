@@ -1206,6 +1206,121 @@ first thing to check: a `503` means it never started, a response missing
 `401` for a missing or invalid server key.
 
 
+## Operations
+
+### Retention
+
+A background worker drops events older than each project's own
+`retention_months` — **13 months by default for a new project**. That default
+lives on the `projects` table and applies only going forward: it changed
+where a fresh install starts, not what an existing project is already
+configured with, so upgrading never quietly shortens anyone's retention.
+There is no API yet for changing a project's `retention_months` after
+creation; today that means updating the column directly (`1`–`120`, enforced
+by a check constraint).
+
+**Retention is month-granular, not day-granular — a floor, not an exact
+promise.** ClickHouse's `events` and `device_index` tables are both
+partitioned `(project_id, month)`, and the worker drops whole partitions, not
+individual rows. A project on 13 months therefore holds *between 13 and 14
+months* of data depending on where in the current month you ask: the oldest
+surviving partition is always at least 13 months old, but it is not dropped
+until its entire month has aged past the boundary.
+
+**What survives, and why.** Two tables are deliberately outside retention's
+reach:
+
+- `person_traits` — the latest known value for each trait a person has ever
+  had (`identify()`'s payload), partitioned by project only, with no time
+  dimension to expire against. A person past retention keeps their traits and
+  their identity links (`identity_bindings`, in Postgres, is untouched by
+  this worker entirely) — but **not retrievably**. `GET /v1/persons/:id` and
+  `GET /v1/persons/:id/export` (see *Privacy: deletion and export* above)
+  both decide whether a person exists at all from the same query, an event
+  count, and answer `404 person_not_found` when it is zero — identically to
+  an id that was never recorded. Once retention has dropped every partition
+  holding this person's events, that count is zero, so **both routes 404**,
+  not a profile with `traits` and no `event` lines. The traits and identity
+  links are still there, physically, in `person_traits` and
+  `identity_bindings`; nothing in this API can read them back out once every
+  event is gone. If you are answering a data-subject access request for
+  someone past retention, the honest answer this API can give is "no record
+  found" — state that plainly rather than reading the 404 as proof the
+  person was never recorded.
+- `event_schema` — the distinct event and property names Lyraflow has ever
+  seen, used for autocomplete (see *Autocomplete: event and property names*
+  under *Segments* above). It is not partitioned by time at all, so an event
+  name can keep showing up as a suggestion long after every event that used
+  it has aged out and been dropped — autocomplete can offer a name that now
+  returns nothing.
+
+**A person past retention also leaves the segment base population.** Every
+segment's base population is built from `device_index` (`base.last_seen`, in
+particular, is derived from it — see *Segments* above), so once a person's
+last remaining `device_index` partition is dropped, they no longer appear in
+any segment count or member list — not because they were deleted, but because
+the aggregate row retention just removed was the only thing that put them
+there.
+
+Two environment variables control the worker, and a third decides whether its
+work leaves any record:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `LYRAFLOW_RETENTION_INTERVAL_MS` | `3600000` (1 hour) | How often the worker looks for expired partitions to drop. Dropping a partition is a metadata operation, and retention is measured in months, so a missed hour costs nothing. Must be a whole number of milliseconds of at least `1`: `0` and negative values fail to boot rather than being silently clamped by `setInterval` into a sweep that runs continuously. |
+| `LYRAFLOW_RETENTION_ENABLED` | `true` | Set to `false` to turn the worker off entirely. Only the lowercase literals `true`/`false` are accepted — `FALSE`, `0`, or any other spelling fails to boot with an error rather than being silently read as `true`, since silently coercing an unrecognised "off" spelling back to "on" would keep deleting data an operator believed they had disabled. |
+| `LYRAFLOW_LOG_LEVEL` | `info` | Not a retention setting, but it governs retention's only audit trail. Every partition dropped is written as one `info` line — `retention dropped partition`, naming the project, table and partition month — and once a partition is gone that line is the only record it ever existed. Run the server at `warn` or above and the drops still happen, with nothing but the counter below to say that anything did. |
+
+Both retention variables, like every other setting the server reads, must go
+in the `environment:` block of the `lyraflow` service in
+`docker-compose.yml` — Compose passes only what that block lists, and a
+variable added to `.env` alone is used for substitution inside the compose
+file and never reaches the server.
+
+**Disabling it means retention is nobody's job unless you make it
+somebody's.** `LYRAFLOW_RETENTION_ENABLED=false` is a legitimate choice for an
+operator who prunes ClickHouse some other way, but Lyraflow will not do it for
+you, silently or otherwise, once it is off — the server logs a line at
+startup saying so, precisely so that choice is visible in the boot log rather
+than merely absent. **A disabled worker also reports `0` on both metrics
+below, forever** — it never runs, so `lyraflow_retention_last_run_timestamp_seconds`
+never leaves `0` and `lyraflow_retention_partitions_dropped_total` never
+leaves `0` either. If you disable retention deliberately, disable or exclude
+the alert on the first metric too, or it will fire permanently for a state
+you chose on purpose.
+
+Two `/metrics` series exist to alert on:
+
+- `lyraflow_retention_last_run_timestamp_seconds` — the Unix timestamp of the
+  worker's last completed run; `0` before the first one. **This is the metric
+  to alert on, and the thing to watch is it going stale, not its value.** A
+  worker that has silently stopped — crashed, wedged, never started — looks
+  exactly like one that is healthy and simply has nothing left to expire:
+  neither shows up as an error anywhere else. A timestamp that stops moving
+  is the only signal that tells the two apart, and by the time it is noticed
+  the wrong way, the failure it exists to prevent (partitions never dropped,
+  disk quietly filling) has already been arriving, unannounced, since the
+  worker stopped. **This timestamp still advances even on a run where every
+  single project's drop failed** — the worker moves on to the next project
+  and reports each failure through its own error log rather than aborting
+  the run, so a completed run (this metric's whole definition) is not the
+  same claim as "something was actually dropped". If you need to know that
+  drops are succeeding, not merely that the worker is alive, watch the error
+  log and the counter below together with this timestamp, not this
+  timestamp alone.
+- `lyraflow_retention_partitions_dropped_total` — a counter of partitions
+  actually dropped since process start. A dry run or a run that found
+  nothing expired does not advance it.
+
+**A project deleted from Postgres is never pruned again.** The worker builds
+its list of projects to sweep from the Postgres `projects` table, so a
+project row that no longer exists takes its ClickHouse data out of
+retention's reach entirely: those `events` and `device_index` partitions stay
+on disk indefinitely, and neither metric above can report it — the counter
+cannot move for a project the worker cannot see. There is no API for deleting
+a project today; if you remove a row by hand, drop that project's partitions
+in ClickHouse yourself at the same time.
+
 ## Upgrading
 
 ```sh
@@ -1218,10 +1333,41 @@ The `|| docker compose build` covers the period before the first image is
 published; once it is, the pull succeeds and the build never runs.
 
 Migrations run automatically on boot, and accepted events are flushed before
-shutdown, so no events are lost across an upgrade. Identity bindings and
+shutdown, so the restart itself loses no events. Identity bindings and
 aliases live in Postgres and survive the same way; the ClickHouse identity
 dictionaries are rebuilt from that data on every boot, not migrated, so a
 restart never leaves them stale or missing.
+
+**This release is the first one that enforces `retention_months`.** The
+column has existed since the first migration, but nothing ever acted on it:
+until now every project has carried a retention setting that was recorded and
+never applied. From this version a background worker prunes each project
+against the value its own row already holds — starting within an hour of the
+first boot, and irreversibly, since it drops whole ClickHouse partitions (see
+*Operations → Retention* above). Check what your projects are set to before
+you upgrade:
+
+```sh
+docker compose exec postgres psql -U lyraflow -d lyraflow \
+  -c 'SELECT id, slug, retention_months FROM projects ORDER BY id'
+```
+
+The upgrade changes none of those values — the 13-month default applies to
+projects created afterwards, not to existing rows — so what is dropped on
+that first run is whatever each project was already configured with, however
+long ago that was decided. If that is not what you want to happen yet, turn
+the worker off before starting the new version by adding
+
+```yaml
+      LYRAFLOW_RETENTION_ENABLED: "false"
+```
+
+to the `environment:` block of the `lyraflow` service in
+`docker-compose.yml`. It has to go there rather than in `.env`: Compose uses
+`.env` for substitution inside the compose file and passes only the variables
+that block lists, so a `LYRAFLOW_RETENTION_ENABLED` added to `.env` alone
+never reaches the server and retention would run anyway. Nothing is dropped
+for age until you turn it back on.
 
 ## Contributing
 
