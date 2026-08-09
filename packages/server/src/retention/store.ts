@@ -54,9 +54,11 @@ export const RETENTION_TABLES: readonly string[] = ['events', 'device_index']
  * spaces, decimal integers only (confirmed against a live server; both
  * columns behind this key are unsigned integer types, so no sign to worry
  * about). Anything that does not match this shape is a parse gone wrong, not
- * a partition to silently skip -- skipping it would let `listPartitions`
- * under-report a project's true partition set, which is exactly the input
- * the "never drop everything" guard depends on being complete.
+ * a partition to silently skip: `listPartitions` is a public method other
+ * tasks call directly, and silently under-reporting a project's true
+ * partition set is a wrong answer regardless of who consumes it -- it is not
+ * merely "one input among several" the way it would be if some downstream
+ * guard could be trusted to catch the shortfall.
  */
 const PARTITION_PATTERN = /^\((\d+),(\d+)\)$/
 
@@ -86,12 +88,14 @@ export class RetentionStore {
    * Every `YYYYMM` partition month `table` currently holds for `projectId`,
    * read from `system.parts` rather than tracked separately -- the parts
    * table is ClickHouse's own ground truth for what partitions physically
-   * exist, which is what both the drop and the "never drop everything" guard
-   * need to agree with.
+   * exist, which is what the drop itself needs to agree with.
    *
    * Scoped to the current database explicitly: `system.parts` is
    * server-wide, not scoped to the client's own database, and this table
-   * name is shared across every database on the server.
+   * name is shared across every database on the server -- including a
+   * second database on the same server that happens to define its own
+   * same-named table with the same partition shape, which would otherwise
+   * inflate this project's partition list with a foreign database's rows.
    */
   async listPartitions(projectId: number, table: string): Promise<number[]> {
     const rs = await this.#ch.query({
@@ -163,41 +167,78 @@ export class RetentionStore {
    * `new Date()` here -- a boundary recomputed per partition or per table
    * could move mid-run.
    *
-   * Guard 3, per table, before any drop for that table runs: if the expired
-   * set equals the table's entire current partition list for this project,
-   * AND that list is non-empty, this throws instead of proceeding. That
-   * shape -- everything expired, including whatever the current month would
-   * be -- is what a boundary derived from a zero, a NaN, or an epoch date
-   * produces, and it is never a legitimate retention outcome (a real
-   * boundary always keeps at least the current month, so at least one
-   * partition should survive for any project old enough to have one at
-   * all). This is the only guard that catches that failure mode:
-   * `assertDroppable` checks one partition against the boundary in
-   * isolation and cannot tell a well-formed-but-wrong boundary from a
-   * correct one (see `retentionBoundary`'s docstring in `boundary.ts`).
-   * Throwing here means a table that has already thrown leaves every later
-   * table in `RETENTION_TABLES` untouched too -- an all-or-nothing run,
-   * not a partial one.
+   * NOT all-or-nothing across `RETENTION_TABLES`. The two checks below run
+   * once, before any table is touched, so a *rejected* run never drops
+   * anything. But once the per-table loop starts issuing real
+   * `ALTER TABLE ... DROP PARTITION` calls, there is no transaction across
+   * them: a later table's own failure (a ClickHouse error, a network drop)
+   * leaves whatever an earlier table already, irreversibly, dropped. A
+   * caller that sees this reject must not assume zero partitions were
+   * removed -- inspect how far the per-table loop got, or re-derive it from
+   * `listPartitions`, before deciding a retry is safe.
    */
   async dropExpired(target: RetentionTarget, now: Date): Promise<DropResult[]> {
     const boundary = retentionBoundary(now, target.retentionMonths)
     const boundaryMonth = toYYYYMM(boundary)
+    const nowMonth = toYYYYMM(now)
+
+    // The boundary can never be in the future. This is the guard that
+    // replaced an earlier "never drop every partition a project has" rule --
+    // see boundary.ts and this project's own history for why that rule was
+    // wrong in both directions: it refused a dormant project's *legitimate*
+    // full expiry forever, while failing to catch two of the three causes it
+    // named (months=0 lands on the current month, not expired; NaN expires
+    // nothing -- see the check below for that one). A negative
+    // `retentionMonths` is the one input that actually produces "everything
+    // expired," and it does so by pushing the boundary into the future,
+    // which is exactly what this checks.
+    if (boundaryMonth > nowMonth) {
+      throw new Error(
+        `refusing to evaluate retention for project ${target.projectId}: boundary month ${boundaryMonth} is in the future relative to now (${nowMonth})`,
+      )
+    }
+
+    // `retentionMonths` did not necessarily come through the Postgres
+    // column's `CHECK (retention_months BETWEEN 1 AND 120)` -- this method
+    // takes an arbitrary `RetentionTarget`, and boundary.ts says explicitly
+    // that a caller not coming through that column must validate before
+    // calling `retentionBoundary`. This is that validation. It must run
+    // AFTER the future-boundary check above, not before: a negative value
+    // needs to reach the future-boundary error (the message a caller should
+    // see for that specific, real failure), and only a value that does NOT
+    // produce a future boundary -- zero, NaN, or an out-of-range positive --
+    // falls through to be caught here instead. NaN in particular clears the
+    // check above silently (`NaN > nowMonth` is `false`, the same shape of
+    // hazard `assertDroppable` guards against in boundary.ts) and, left
+    // unchecked, makes `expiredPartitions` return an empty list every time
+    // -- a clean, silent, zero-drop "success" indistinguishable in a log
+    // from a project with nothing left to expire.
+    if (
+      !Number.isInteger(target.retentionMonths) ||
+      target.retentionMonths < 1 ||
+      target.retentionMonths > 120
+    ) {
+      throw new Error(
+        `refusing to evaluate retention for project ${target.projectId}: retentionMonths ${target.retentionMonths} is not an integer in [1, 120]`,
+      )
+    }
+
     const results: DropResult[] = []
 
     for (const table of RETENTION_TABLES) {
-      const allPartitions = await this.listPartitions(target.projectId, table)
-      const expired = expiredPartitions(allPartitions, boundary)
-
-      if (expired.length > 0 && expired.length === allPartitions.length) {
-        throw new Error(
-          `refusing to drop every partition project ${target.projectId} has in ${table}: all ${allPartitions.length} partition(s) compare as older than retention boundary month ${boundaryMonth} -- this is the symptom of a boundary computed from a zero, a NaN or an epoch date, and never a legitimate retention outcome`,
-        )
-      }
+      const expired = expiredPartitions(
+        await this.listPartitions(target.projectId, table),
+        boundary,
+      )
 
       for (const partition of expired) {
         // Guard 5: the returned result names every dropped (or, in dry-run,
         // would-be-dropped) partition -- once a partition is truly gone,
-        // this return value is the only record it ever existed.
+        // this return value is the only record it ever existed. A run that
+        // legitimately drops every partition a dormant project has (see
+        // above) still names every one of them here; it is worth logging
+        // that a project's disk footprint just went to zero, never worth
+        // refusing to do it.
         results.push(await this.dropOnePartition(target.projectId, table, partition, boundaryMonth))
       }
     }
