@@ -1,11 +1,12 @@
 import type { Pool } from '@lyraflow/db'
 
-type Kind = 'accepted' | 'rejected' | 'throttled'
+type Kind = 'accepted' | 'rejected' | 'throttled' | 'over_quota'
 
 interface Tally {
   accepted: number
   rejected: number
   throttled: number
+  over_quota: number
 }
 
 /** The project-month whose write failed, and the counts that were re-buffered for retry. */
@@ -29,7 +30,7 @@ export class IngestCounters {
   // serve as a Prometheus counter — a metric built on it would reset every
   // ~10s instead of only on process restart, which is not what a `_total`
   // counter means. This field is that separate, monotonic record.
-  #totals: Tally = { accepted: 0, rejected: 0, throttled: 0 }
+  #totals: Tally = { accepted: 0, rejected: 0, throttled: 0, over_quota: 0 }
 
   constructor(
     private readonly pool: Pool,
@@ -45,6 +46,41 @@ export class IngestCounters {
   /** Cumulative event outcomes since process start, for the `/metrics` endpoint. */
   totals(): Readonly<Tally> {
     return { ...this.#totals }
+  }
+
+  /**
+   * events_accepted already in Postgres for this project's current month.
+   * Zero for a project with no counter row yet -- the ordinary state for
+   * every project's first event of a month -- never NaN. A quota check
+   * feeds this straight into isOverQuota(), which throws on anything that
+   * isn't a finite, non-negative number; `Number(row?.events_accepted)` on a
+   * missing row would be exactly NaN, and `pg` returns bigint columns as
+   * strings, so both traps are guarded against explicitly here rather than
+   * left to the caller.
+   */
+  async persistedAccepted(projectId: number): Promise<number> {
+    const month = `${new Date().toISOString().slice(0, 7)}-01`
+    const result = await this.pool.query<{ events_accepted: string }>(
+      'SELECT events_accepted FROM ingest_counters WHERE project_id = $1 AND month = $2',
+      [projectId, month],
+    )
+    const raw = result.rows[0]?.events_accepted
+    return raw === undefined ? 0 : Number(raw)
+  }
+
+  /**
+   * This process's unflushed accepted tally for this project's current
+   * month -- reads #tallies (the pending-write buffer), never #totals (the
+   * monotonic since-process-start record). #totals already includes events
+   * that flush() has persisted, so adding it to the persisted figure would
+   * double-count every already-flushed event. Only 'accepted' counts:
+   * rejected and throttled events must never move a project toward its
+   * quota (see quota.ts), or a flood of malformed payloads exhausts it
+   * without storing anything.
+   */
+  pendingAccepted(projectId: number): number {
+    const month = `${new Date().toISOString().slice(0, 7)}-01`
+    return this.#tallies.get(`${projectId}:${month}`)?.tally.accepted ?? 0
   }
 
   /**
@@ -72,19 +108,21 @@ export class IngestCounters {
       try {
         await this.pool.query(
           `INSERT INTO ingest_counters
-             (project_id, month, events_accepted, events_rejected, events_throttled)
-           VALUES ($1, $2, $3, $4, $5)
+             (project_id, month, events_accepted, events_rejected, events_throttled, events_over_quota)
+           VALUES ($1, $2, $3, $4, $5, $6)
            ON CONFLICT (project_id, month) DO UPDATE SET
-             events_accepted  = ingest_counters.events_accepted  + EXCLUDED.events_accepted,
-             events_rejected  = ingest_counters.events_rejected  + EXCLUDED.events_rejected,
-             events_throttled = ingest_counters.events_throttled + EXCLUDED.events_throttled`,
-          [projectId, month, tally.accepted, tally.rejected, tally.throttled],
+             events_accepted   = ingest_counters.events_accepted   + EXCLUDED.events_accepted,
+             events_rejected   = ingest_counters.events_rejected   + EXCLUDED.events_rejected,
+             events_throttled  = ingest_counters.events_throttled  + EXCLUDED.events_throttled,
+             events_over_quota = ingest_counters.events_over_quota + EXCLUDED.events_over_quota`,
+          [projectId, month, tally.accepted, tally.rejected, tally.throttled, tally.over_quota],
         )
       } catch (err) {
         const target = this.#getOrCreate(projectId, month)
         target.accepted += tally.accepted
         target.rejected += tally.rejected
         target.throttled += tally.throttled
+        target.over_quota += tally.over_quota
         try {
           // A throwing onError must not crash the process via an unhandled
           // rejection from a fire-and-forget flush — that's a bug in the
@@ -102,7 +140,7 @@ export class IngestCounters {
     const key = `${projectId}:${month}`
     let entry = this.#tallies.get(key)
     if (!entry) {
-      entry = { projectId, month, tally: { accepted: 0, rejected: 0, throttled: 0 } }
+      entry = { projectId, month, tally: { accepted: 0, rejected: 0, throttled: 0, over_quota: 0 } }
       this.#tallies.set(key, entry)
     }
     return entry.tally
