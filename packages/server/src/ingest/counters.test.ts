@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 import { type Pool, createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { IngestCounters } from './counters.js'
 
 const pg = createPgPool('postgres://lyraflow:lyraflow@localhost:5433/lyraflow_test')
@@ -284,5 +284,41 @@ describe('IngestCounters persisted/pending reads', () => {
     await counters.flush() // retries against the real pool
     const row = await readCounterRow(projectId)
     expect(row.events_over_quota).toBe('3')
+  })
+
+  // Not in the brief. `over_quota`'s accumulate-on-conflict clause in
+  // flush()'s INSERT ... ON CONFLICT DO UPDATE SET had no test: every test
+  // above starts from a beforeEach-cleared row, so every successful flush()
+  // in this file takes the plain-INSERT path for over_quota, never the
+  // conflict path. Mirrors 'adds to the existing row on a later flush rather
+  // than replacing it' above, which covers exactly this for `accepted`.
+  it('adds over_quota to the existing row on a later flush rather than replacing it', async () => {
+    const counters = new IngestCounters(pg)
+    counters.record(projectId, 'over_quota', 4)
+    await counters.flush()
+    counters.record(projectId, 'over_quota', 3)
+    await counters.flush()
+    const row = await readCounterRow(projectId)
+    expect(row.events_over_quota).toBe('7')
+  })
+
+  // Not in the brief. persistedAccepted has an explicit current-month-only
+  // test; pendingAccepted had no equivalent -- nothing proved it keys the
+  // #tallies lookup by month rather than summing every buffered month for
+  // the project. Fake time to buffer one month's tally, advance past a
+  // month boundary without flushing, and buffer a second month's tally:
+  // pendingAccepted must report only the second.
+  it('pendingAccepted counts only the current month, not a carried-over one', () => {
+    const counters = new IngestCounters(pg)
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date(Date.UTC(2020, 0, 15)))
+      counters.record(projectId, 'accepted', 7) // buffered under Jan 2020, never flushed
+      vi.setSystemTime(new Date(Date.UTC(2020, 1, 15))) // now Feb 2020
+      counters.record(projectId, 'accepted', 2)
+      expect(counters.pendingAccepted(projectId)).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
