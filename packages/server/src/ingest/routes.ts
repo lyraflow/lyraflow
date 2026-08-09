@@ -31,6 +31,17 @@ export interface IngestDeps {
    * docstring.
    */
   allowedOrigins?: string[]
+  /**
+   * Overridable so a test can cross a refresh boundary without sleeping for
+   * the production value — the same seam, for the same reason, that
+   * ProjectCache's `negativeTtlMs` parameter provides. Production uses the
+   * default. Without it, every quota test completes inside one TTL and the
+   * entire refresh half of the usage cache is unreachable: expiry, the
+   * month check, and the in-flight cleanup can all be deleted with the suite
+   * still green, and one of those three freezes a project's persisted figure
+   * for the life of the process.
+   */
+  quotaUsageTtlMs?: number
 }
 
 export const WRITE_KEY_HEADER = 'x-lyraflow-write-key'
@@ -114,6 +125,14 @@ export function makeAuthenticator(
  * event that crosses it. A second server process has its own pending tally
  * and its own cache, which widens the same window rather than introducing a
  * different kind of error.
+ *
+ * The same TTL bounds the FAILURE path: a read that throws records a
+ * negative entry honoured for this long, so an unreachable Postgres costs
+ * one attempt per project per TTL rather than one per event. See
+ * `usageFailedAt` in registerIngestRoutes.
+ *
+ * This is the default; IngestDeps.quotaUsageTtlMs overrides it, and only a
+ * test does.
  */
 export const QUOTA_USAGE_TTL_MS = 5_000
 
@@ -191,6 +210,7 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
     bindings,
     aliases,
     allowedOrigins = [],
+    quotaUsageTtlMs = QUOTA_USAGE_TTL_MS,
   } = deps
 
   const onDeadLetterError = (err: unknown, rows: DeadLetterRow[]) =>
@@ -237,17 +257,49 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
   // Postgres read — reinstating the per-event round trip precisely under the
   // load that makes it expensive.
   const usageInflight = new Map<number, Promise<number>>()
+  /**
+   * When each project's last usage read FAILED, and the reason failing open
+   * is not enough on its own.
+   *
+   * Single-flight only coalesces requests that overlap a read's latency, and
+   * the classic outage — ECONNREFUSED against a Postgres that is down —
+   * fails in microseconds with nothing to overlap. Without a negative entry
+   * the failure path caches nothing at all (`usage.set` never runs, and
+   * `.finally` has already cleared the in-flight promise), so every
+   * subsequent event starts its own doomed query: measured at 200 attempts
+   * for 200 concurrent events, and 200 again for the next wave. The one
+   * mechanism this cache exists to provide would invert to 1:1 exactly when
+   * queries are most expensive, driven by a public browser-shipped write key
+   * against a `max: 10` pool — a positive feedback loop during an outage.
+   *
+   * Honoured for the same TTL as a successful read, and cleared by the next
+   * success. This is the bound ProjectCache gets from its separate negative
+   * map and NEGATIVE_TTL_MS; the shape differs (nothing here is
+   * attacker-keyed — an unknown write key is answered 401 long before this
+   * code runs) but the obligation is the same.
+   */
+  const usageFailedAt = new Map<number, number>()
 
   async function persistedAcceptedCached(projectId: number): Promise<number> {
     const month = currentMonth()
+    const now = Date.now()
     const entry = usage.get(projectId)
+    // The fallback for every path that cannot produce a fresh figure: the
+    // last known one if it belongs to this month, otherwise zero. Zero
+    // leaves this process's own pending tally enforcing the quota on its
+    // own, which is the correct floor for a project nothing is known about.
+    const fallback = entry?.month === month ? entry.persisted : 0
+
     // The month test is not decoration: at a month boundary the persisted
     // total resets to zero for the new month, and a figure cached under the
     // old one would keep a project refused into a month it has spent nothing
     // of.
-    if (entry && entry.month === month && Date.now() - entry.fetchedAt < QUOTA_USAGE_TTL_MS) {
+    if (entry && entry.month === month && now - entry.fetchedAt < quotaUsageTtlMs) {
       return entry.persisted
     }
+
+    const failedAt = usageFailedAt.get(projectId)
+    if (failedAt !== undefined && now - failedAt < quotaUsageTtlMs) return fallback
 
     let inflight = usageInflight.get(projectId)
     if (!inflight) {
@@ -255,7 +307,18 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
         .persistedAccepted(projectId)
         .then((persisted) => {
           usage.set(projectId, { month, persisted, fetchedAt: Date.now() })
+          usageFailedAt.delete(projectId)
           return persisted
+        })
+        .catch((err: unknown) => {
+          usageFailedAt.set(projectId, Date.now())
+          // Logged here rather than per awaiting request: one failed query
+          // should produce one line, not one per event that was waiting on
+          // it. A read that keeps failing still reports itself once per TTL,
+          // which is what an operator needs — the quota is no longer being
+          // enforced from persisted state at all, and only this line says so.
+          app.log.error({ err, projectId }, 'quota usage read failed')
+          throw err
         })
         .finally(() => {
           usageInflight.delete(projectId)
@@ -265,15 +328,14 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
 
     try {
       return await inflight
-    } catch (err) {
-      // Stale beats unavailable, and unknown beats refusing — the same rule
-      // ProjectCache follows for the same reason. A Postgres blip must not
-      // turn into a project-wide refusal of events that would otherwise have
-      // been well inside its quota; the failure is loud in the log, and the
-      // pending tally still counts this process's own accepted events
-      // against the limit in the meantime.
-      app.log.error({ err, projectId }, 'quota usage read failed')
-      return entry?.month === month ? entry.persisted : 0
+    } catch {
+      // Stale beats unavailable, and unknown beats refusing. A Postgres blip
+      // must not turn into a project-wide refusal of events that would
+      // otherwise have been well inside their quota; the pending tally keeps
+      // counting this process's own accepted events against the limit in the
+      // meantime, and the negative entry set above keeps the retry rate at
+      // one query per project per TTL rather than one per event.
+      return fallback
     }
   }
 

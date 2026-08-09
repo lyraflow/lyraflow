@@ -9,7 +9,7 @@ import {
   migrate,
 } from '@lyraflow/db'
 import Fastify, { type FastifyInstance } from 'fastify'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { buildApp } from '../app.js'
 import { type Project, ProjectCache } from '../auth/project-cache.js'
 import { type Config, loadConfig } from '../config.js'
@@ -593,8 +593,13 @@ describe('ingest routes (mocked deps)', () => {
 describe('ingest quota enforcement', () => {
   const SLUG = 'routes-quota-test'
   const WRITE_KEY = 'wk_routes_quota'
+  // A second project, used only by the cross-project test. Every other test
+  // here drives one project, which is exactly why that test is needed.
+  const SLUG_B = 'routes-quota-test-b'
+  const WRITE_KEY_B = 'wk_routes_quota_b'
 
   let projectId: number
+  let projectIdB: number
   let quotaApp: FastifyInstance
   let counters: IngestCounters
   let buffer: IngestBuffer<EventRow>
@@ -621,53 +626,32 @@ describe('ingest quota enforcement', () => {
     return { message_id: randomUUID(), anonymous_id: 'a-quota', event: 'quota' }
   }
 
-  function post(url: string, payload: unknown) {
+  function post(url: string, payload: unknown, key = WRITE_KEY) {
     return quotaApp.inject({
       method: 'POST',
       url,
-      headers: { 'x-lyraflow-write-key': WRITE_KEY, 'user-agent': UA },
+      headers: { 'x-lyraflow-write-key': key, 'user-agent': UA },
       payload: payload as Record<string, unknown>,
     })
   }
 
-  async function setQuota(quota: number | null): Promise<void> {
-    await pg.query('UPDATE projects SET monthly_event_quota = $2 WHERE id = $1', [projectId, quota])
+  async function setQuota(quota: number | null, id = projectId): Promise<void> {
+    await pg.query('UPDATE projects SET monthly_event_quota = $2 WHERE id = $1', [id, quota])
   }
 
-  beforeAll(async () => {
-    await pg.query('DELETE FROM projects WHERE slug = $1', [SLUG])
-    const r = await pg.query<{ id: string }>(
-      `INSERT INTO projects (name, slug, write_key, server_key_hash)
-       VALUES ('Routes Quota', $1, $2, 'h') RETURNING id`,
-      [SLUG, WRITE_KEY],
-    )
-    projectId = Number(r.rows[0]?.id)
-  })
-
-  afterAll(async () => {
-    await pg.query('DELETE FROM ingest_counters WHERE project_id = $1', [projectId])
-    await pg.query('DELETE FROM projects WHERE slug = $1', [SLUG])
-  })
-
-  beforeEach(async () => {
-    await pg.query('DELETE FROM ingest_counters WHERE project_id = $1', [projectId])
-    await setQuota(null)
-    usageReads = 0
-    deadLetterInserts = 0
-    stored = []
-    counters = new IngestCounters(countingPg)
-    buffer = new IngestBuffer<EventRow>({
-      flushRows: 1000,
-      flushIntervalMs: 60_000,
-      maxRows: 1000,
-      insert: async (rows) => {
-        stored.push(...rows)
-      },
-    })
+  /**
+   * The wiring every test in this block shares: real Postgres behind a real
+   * ProjectCache with a zero TTL (see this describe's own docstring), real
+   * counters, a capturing buffer, and a counting ClickHouse fake. A test that
+   * needs a different pool, a shorter usage TTL or a real logger passes
+   * overrides rather than hand-rolling the whole registration, so no variant
+   * can quietly differ from the default in some second respect.
+   */
+  function buildQuotaApp(overrides: Partial<IngestDeps> = {}, app?: FastifyInstance) {
     const readiness = new Readiness()
     readiness.markReady()
-    quotaApp = Fastify({ logger: false })
-    registerIngestRoutes(quotaApp, {
+    const instance = app ?? Fastify({ logger: false })
+    registerIngestRoutes(instance, {
       buffer,
       projects: new ProjectCache(pg, 0),
       counters,
@@ -681,7 +665,53 @@ describe('ingest quota enforcement', () => {
       } as unknown as ClickHouseClient,
       bindings,
       aliases,
+      ...overrides,
     })
+    return instance
+  }
+
+  beforeAll(async () => {
+    await pg.query('DELETE FROM projects WHERE slug = ANY($1)', [[SLUG, SLUG_B]])
+    const r = await pg.query<{ id: string }>(
+      `INSERT INTO projects (name, slug, write_key, server_key_hash)
+       VALUES ('Routes Quota', $1, $2, 'h') RETURNING id`,
+      [SLUG, WRITE_KEY],
+    )
+    projectId = Number(r.rows[0]?.id)
+    const b = await pg.query<{ id: string }>(
+      `INSERT INTO projects (name, slug, write_key, server_key_hash)
+       VALUES ('Routes Quota B', $1, $2, 'h') RETURNING id`,
+      [SLUG_B, WRITE_KEY_B],
+    )
+    projectIdB = Number(b.rows[0]?.id)
+  })
+
+  afterAll(async () => {
+    await pg.query('DELETE FROM ingest_counters WHERE project_id = ANY($1)', [
+      [projectId, projectIdB],
+    ])
+    await pg.query('DELETE FROM projects WHERE slug = ANY($1)', [[SLUG, SLUG_B]])
+  })
+
+  beforeEach(async () => {
+    await pg.query('DELETE FROM ingest_counters WHERE project_id = ANY($1)', [
+      [projectId, projectIdB],
+    ])
+    await setQuota(null)
+    await setQuota(null, projectIdB)
+    usageReads = 0
+    deadLetterInserts = 0
+    stored = []
+    counters = new IngestCounters(countingPg)
+    buffer = new IngestBuffer<EventRow>({
+      flushRows: 1000,
+      flushIntervalMs: 60_000,
+      maxRows: 1000,
+      insert: async (rows) => {
+        stored.push(...rows)
+      },
+    })
+    quotaApp = buildQuotaApp()
     await quotaApp.ready()
   })
 
@@ -866,36 +896,174 @@ describe('ingest quota enforcement', () => {
         },
       },
     })
-    const readiness = new Readiness()
-    readiness.markReady()
-    registerIngestRoutes(app, {
-      buffer: new IngestBuffer<EventRow>({
-        flushRows: 1000,
-        flushIntervalMs: 60_000,
-        maxRows: 1000,
-        insert: async () => {},
-      }),
-      projects: new ProjectCache(pg, 0),
-      counters: new IngestCounters(failingPg),
-      cardinality: new CardinalityTracker(),
-      geo: new NullGeoResolver(),
-      readiness,
-      ch: { insert: async () => {} } as unknown as ClickHouseClient,
-      bindings,
-      aliases,
-    })
-    await app.ready()
+    await quotaApp.close() // the beforeEach app; this test needs its own wiring
+    quotaApp = buildQuotaApp({ counters: new IngestCounters(failingPg) }, app)
+    await quotaApp.ready()
     await setQuota(5)
 
-    const res = await app.inject({
-      method: 'POST',
-      url: '/v1/track',
-      headers: { 'x-lyraflow-write-key': WRITE_KEY, 'user-agent': UA },
-      payload: validEvent(),
-    })
+    const res = await post('/v1/track', validEvent())
     expect(res.statusCode).toBe(202)
     expect(lines.join('')).toContain('quota usage read failed')
-    await app.close()
+  })
+
+  it('a FAILING usage read costs one Postgres attempt per TTL, not one per event', async () => {
+    // The fail-open path is right; caching nothing on the way out was not.
+    // Single-flight only coalesces requests that overlap a read's latency,
+    // and the classic outage -- ECONNREFUSED against a Postgres that is
+    // down -- fails in microseconds with nothing to overlap. Without a
+    // negative entry, every subsequent event starts its own doomed query:
+    // measured at 10 attempts for 10 sequential events and 200 for 200
+    // concurrent ones. That inverts the one mechanism this task exists to
+    // install into 1:1 with traffic, under exactly the condition that makes
+    // queries expensive, driven by a public browser-shipped write key
+    // against a `max: 10` pool.
+    let attempts = 0
+    const failingPg = {
+      query: (text: string, values?: unknown[]) => {
+        if (text.includes('FROM ingest_counters')) {
+          attempts++
+          return Promise.reject(new Error('ECONNREFUSED'))
+        }
+        return pg.query(text, values)
+      },
+    } as unknown as Pool
+
+    await quotaApp.close() // the beforeEach app; this test needs its own wiring
+    quotaApp = buildQuotaApp({
+      counters: new IngestCounters(failingPg),
+      // Long enough that the whole test runs inside one window, so the count
+      // below is "attempts per outage", not "attempts per elapsed second".
+      quotaUsageTtlMs: 60_000,
+    })
+    await quotaApp.ready()
+    // Comfortably above the 410 events below: with the read failing, the
+    // pending tally is the only thing enforcing the quota, and a small
+    // quota would refuse events for that reason instead of exercising the
+    // query count this test is about.
+    await setQuota(100_000)
+
+    for (let i = 0; i < 10; i++) {
+      expect((await post('/v1/track', validEvent())).statusCode).toBe(202)
+    }
+    const wave = await Promise.all(
+      Array.from({ length: 200 }, () => post('/v1/track', validEvent())),
+    )
+    expect(wave.every((r) => r.statusCode === 202)).toBe(true)
+    const second = await Promise.all(
+      Array.from({ length: 200 }, () => post('/v1/track', validEvent())),
+    )
+    expect(second.every((r) => r.statusCode === 202)).toBe(true)
+
+    // 410 events, one query. Before the negative entry: 410.
+    expect(attempts).toBe(1)
+  })
+
+  it('retries a failing usage read once the negative entry expires', async () => {
+    // The other half of the bound: a failure must not disable the read for
+    // the life of the process either, or a quota stops being enforced from
+    // persisted state after the first blip and nothing ever reconsiders.
+    let attempts = 0
+    const failingPg = {
+      query: (text: string, values?: unknown[]) => {
+        if (text.includes('FROM ingest_counters')) {
+          attempts++
+          return Promise.reject(new Error('ECONNREFUSED'))
+        }
+        return pg.query(text, values)
+      },
+    } as unknown as Pool
+
+    await quotaApp.close() // the beforeEach app; this test needs its own wiring
+    quotaApp = buildQuotaApp({
+      counters: new IngestCounters(failingPg),
+      quotaUsageTtlMs: 20,
+    })
+    await quotaApp.ready()
+    await setQuota(5)
+
+    expect((await post('/v1/track', validEvent())).statusCode).toBe(202)
+    expect(attempts).toBe(1)
+    await new Promise((r) => setTimeout(r, 40))
+    expect((await post('/v1/track', validEvent())).statusCode).toBe(202)
+    expect(attempts).toBe(2)
+  })
+
+  it('re-reads the persisted figure once the TTL expires, rather than freezing it', async () => {
+    // The entire refresh half of the cache was unreachable: every other test
+    // here finishes in milliseconds, far inside the production 5s TTL, so
+    // three independent mutations left the suite green -- deleting the TTL
+    // comparison (an entry that never expires), deleting the month test, and
+    // deleting `.finally(() => usageInflight.delete(...))`.
+    //
+    // That last one is the severe member of the class: the settled promise
+    // stays in the in-flight map forever, every later call falls through to
+    // it, and its `.then` never runs again -- so the persisted figure
+    // FREEZES at its first value for the life of the process. That is a
+    // quota that resets on restart, which is the exact failure the
+    // persisted-total test above exists to prevent, reached by another
+    // route. Asserting on the decision rather than only on the query count
+    // catches all three: a frozen or never-expiring figure still reads 0
+    // here, and still answers 202.
+    quotaApp = buildQuotaApp({ quotaUsageTtlMs: 20 })
+    await quotaApp.ready()
+    await setQuota(5)
+
+    expect((await post('/v1/track', validEvent())).statusCode).toBe(202)
+    expect(usageReads).toBe(1)
+
+    // Someone else -- another process, or the counter flush -- moves the
+    // project to its limit while this process holds a cached zero.
+    await seedCounterRow(pg, projectId, monthStart(0), { accepted: 5 })
+    await new Promise((r) => setTimeout(r, 40))
+
+    expect((await post('/v1/track', validEvent())).statusCode).toBe(429)
+    expect(usageReads).toBe(2)
+  })
+
+  it('discards a cached figure belonging to the previous month, inside the TTL', async () => {
+    // The month test in the cache, which the TTL seam alone cannot reach:
+    // this needs the clock to cross a month boundary while the entry is
+    // still FRESH, or the TTL expiry would refetch anyway and prove nothing.
+    //
+    // Only Date is faked -- not setTimeout/setInterval -- so the live pool's
+    // own timers and socket I/O are untouched and the queries below are
+    // real. Faking all timers here would stall the pool instead.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(new Date(Date.UTC(2026, 0, 31, 23, 59, 59, 900)))
+      await seedCounterRow(pg, projectId, monthStart(0), { accepted: 5 })
+      await setQuota(5)
+
+      // January is spent, so the project is refused.
+      expect((await post('/v1/track', validEvent())).statusCode).toBe(429)
+      expect(usageReads).toBe(1)
+
+      // 200ms later -- far inside the 5s TTL -- but a different month, in
+      // which the project has spent nothing.
+      vi.setSystemTime(new Date(Date.UTC(2026, 1, 1, 0, 0, 0, 100)))
+      expect((await post('/v1/track', validEvent())).statusCode).toBe(202)
+      expect(usageReads).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("never lets one project's usage decide another project's quota", async () => {
+    // Every other test in this block drives a single project, so keying the
+    // usage map (and the in-flight map) by a constant leaves all of them
+    // green. A cross-tenant quota leak is the highest-consequence thing this
+    // cache can do -- one busy project silently refusing every other
+    // project's events -- and nothing else here would notice it.
+    await seedCounterRow(pg, projectId, monthStart(0), { accepted: 50 })
+    await setQuota(5)
+    await setQuota(5, projectIdB)
+
+    // A is far past its limit and must be refused; B has spent nothing and
+    // must not be, even though A's figure is now cached.
+    expect((await post('/v1/track', validEvent())).statusCode).toBe(429)
+    expect((await post('/v1/track', validEvent(), WRITE_KEY_B)).statusCode).toBe(202)
+    // Two projects, two reads: B must not be answered from A's entry.
+    expect(usageReads).toBe(2)
   })
 
   it('accepts exactly the quota and refuses the event after it', async () => {
