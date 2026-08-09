@@ -1206,6 +1206,84 @@ first thing to check: a `503` means it never started, a response missing
 `401` for a missing or invalid server key.
 
 
+## Operations
+
+### Retention
+
+A background worker drops events older than each project's own
+`retention_months` — **13 months by default for a new project**. That default
+lives on the `projects` table and applies only going forward: it changed
+where a fresh install starts, not what an existing project is already
+configured with, so upgrading never quietly shortens anyone's retention.
+There is no API yet for changing a project's `retention_months` after
+creation; today that means updating the column directly (`1`–`120`, enforced
+by a check constraint).
+
+**Retention is month-granular, not day-granular — a floor, not an exact
+promise.** ClickHouse's `events` and `device_index` tables are both
+partitioned `(project_id, month)`, and the worker drops whole partitions, not
+individual rows. A project on 13 months therefore holds *between 13 and 14
+months* of data depending on where in the current month you ask: the oldest
+surviving partition is always at least 13 months old, but it is not dropped
+until its entire month has aged past the boundary.
+
+**What survives, and why.** Two tables are deliberately outside retention's
+reach:
+
+- `person_traits` — the latest known value for each trait a person has ever
+  had (`identify()`'s payload), partitioned by project only, with no time
+  dimension to expire against. A person past retention keeps their traits and
+  their identity links (`identity_bindings`, in Postgres, is untouched by
+  this worker entirely) but has no event history left — so a subject-access
+  request for that person, run through `GET /v1/persons/:id/export` (see
+  *Privacy: deletion and export* above), returns a profile with `traits` and
+  no `event` lines. That is retention working as intended, not a bug in the
+  export.
+- `event_schema` — the distinct event and property names Lyraflow has ever
+  seen, used for autocomplete (see *Autocomplete: event and property names*
+  under *Segments* above). It is not partitioned by time at all, so an event
+  name can keep showing up as a suggestion long after every event that used
+  it has aged out and been dropped — autocomplete can offer a name that now
+  returns nothing.
+
+**A person past retention also leaves the segment base population.** Every
+segment's base population is built from `device_index` (`base.last_seen`, in
+particular, is derived from it — see *Segments* above), so once a person's
+last remaining `device_index` partition is dropped, they no longer appear in
+any segment count or member list — not because they were deleted, but because
+the aggregate row retention just removed was the only thing that put them
+there.
+
+Two environment variables control the worker:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `LYRAFLOW_RETENTION_INTERVAL_MS` | `3600000` (1 hour) | How often the worker looks for expired partitions to drop. Dropping a partition is a metadata operation, and retention is measured in months, so a missed hour costs nothing. |
+| `LYRAFLOW_RETENTION_ENABLED` | `true` | Set to `false` to turn the worker off entirely. |
+
+**Disabling it means retention is nobody's job unless you make it
+somebody's.** `LYRAFLOW_RETENTION_ENABLED=false` is a legitimate choice for an
+operator who prunes ClickHouse some other way, but Lyraflow will not do it for
+you, silently or otherwise, once it is off — the server logs a line at
+startup saying so, precisely so that choice is visible in the boot log rather
+than merely absent.
+
+Two `/metrics` series exist to alert on:
+
+- `lyraflow_retention_last_run_timestamp_seconds` — the Unix timestamp of the
+  worker's last completed run; `0` before the first one. **This is the metric
+  to alert on, and the thing to watch is it going stale, not its value.** A
+  worker that has silently stopped — crashed, wedged, never started — looks
+  exactly like one that is healthy and simply has nothing left to expire:
+  neither shows up as an error anywhere else. A timestamp that stops moving
+  is the only signal that tells the two apart, and by the time it is noticed
+  the wrong way, the failure it exists to prevent (partitions never dropped,
+  disk quietly filling) has already been arriving, unannounced, since the
+  worker stopped.
+- `lyraflow_retention_partitions_dropped_total` — a counter of partitions
+  actually dropped since process start. A dry run or a run that found
+  nothing expired does not advance it.
+
 ## Upgrading
 
 ```sh

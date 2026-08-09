@@ -12,6 +12,8 @@ export interface Config {
   purgeLeaseMs: number
   purgeMaxAttempts: number
   allowedOrigins: string[]
+  retentionIntervalMs: number
+  retentionEnabled: boolean
 }
 
 /**
@@ -27,6 +29,14 @@ function num(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
   const parsed = Number(raw)
   if (!Number.isFinite(parsed)) throw new Error(`${key} must be a number, got "${raw}"`)
   return parsed
+}
+
+function bool(env: NodeJS.ProcessEnv, key: string, fallback: boolean): boolean {
+  const raw = env[key]
+  if (raw === undefined || raw === '') return fallback
+  if (raw === 'true') return true
+  if (raw === 'false') return false
+  throw new Error(`${key} must be "true" or "false", got "${raw}"`)
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv): Config {
@@ -92,5 +102,17 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
       .split(',')
       .map((o) => o.trim())
       .filter((o) => o.length > 0),
+    // How often the retention worker looks for expired partitions to drop.
+    // The work is dropping a whole ClickHouse partition, a metadata
+    // operation, not a per-row scan or mutation — and retention is measured
+    // in months, so a missed hour costs nothing. Hourly is frequent enough
+    // that a project's actual retention never drifts meaningfully past its
+    // configured `retention_months`.
+    retentionIntervalMs: num(env, 'LYRAFLOW_RETENTION_INTERVAL_MS', 3_600_000),
+    // Off is a legitimate choice for an operator managing retention some
+    // other way (their own job, their own tooling) — silently doing nothing
+    // is not. Disabling this logs once at startup (see app.ts/index.ts) so
+    // the choice is visible rather than merely absent.
+    retentionEnabled: bool(env, 'LYRAFLOW_RETENTION_ENABLED', true),
   }
 }

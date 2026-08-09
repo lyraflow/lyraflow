@@ -22,6 +22,8 @@ import { registerPrivacyRoutes } from './privacy/routes.js'
 import { SuppressionStore } from './privacy/suppression-store.js'
 import { PurgeWorker } from './privacy/worker.js'
 import { registerProjectRoutes } from './project/routes.js'
+import { RetentionStore } from './retention/store.js'
+import { RetentionWorker } from './retention/worker.js'
 import { registerSchemaRoutes } from './schema/routes.js'
 import { registerSdkRoutes } from './sdk/routes.js'
 import { SegmentCache } from './segments/cache.js'
@@ -35,6 +37,14 @@ export interface AppDeps {
   buffer: IngestBuffer<EventRow>
   counters: IngestCounters
   purge: PurgeWorker
+  /**
+   * Exposed for the same reason `purge` is (see index.ts and
+   * shutdown.ts): a live timer belongs to boot succeeding, not to
+   * construction, and tests that want to drive a real run do it through
+   * `runOnce()` on this exact instance rather than waiting on its own
+   * interval — see retention/wiring.test.ts.
+   */
+  retention: RetentionWorker
   /**
    * Exposed for the same reason `buffer`/`counters`/`purge` already are:
    * tests need to reach the EXACT instance the routes share, not a
@@ -130,6 +140,47 @@ export function buildApp(input: {
     onError: (err, ctx) => app.log.error({ err, ...ctx }, 'purge failed'),
   })
 
+  // Mutated only from `onRun` below, on the single-threaded event loop —
+  // no lock needed. `null` until the first successful run completes;
+  // registerMetrics renders that as `0`, matching this worker's `onRun`
+  // contract (fires once per RUN, never per project) rather than per-project
+  // bookkeeping of its own.
+  let retentionLastRunAt: number | null = null
+  let retentionPartitionsDropped = 0
+
+  const retentionStore = new RetentionStore({ pg, ch, dryRun: false })
+  const retention = new RetentionWorker({
+    listProjects: () => retentionStore.listProjects(),
+    // Guard 5: `RetentionStore#dropExpired` returns every partition it
+    // touched but writes nothing down itself — this wrapper is the one
+    // place that does. Once a partition is dropped it is gone for good, and
+    // this line is the only record it ever existed, so every actual drop is
+    // logged at `info` (never behind a debug level, never collapsed into a
+    // count) naming the project, table and partition.
+    dropExpired: async (target, now) => {
+      const results = await retentionStore.dropExpired(target, now)
+      for (const r of results) {
+        if (r.dropped) {
+          app.log.info(
+            { projectId: r.projectId, table: r.table, partition: r.partition },
+            'retention dropped partition',
+          )
+        }
+      }
+      return results
+    },
+    // The live process clock, not an injected fixed value — `dropExpired`
+    // refuses any `now` more than 24h from it (see store.ts), and there is
+    // no seam here that would ever need to differ from the real clock.
+    now: () => new Date(),
+    intervalMs: config.retentionIntervalMs,
+    onError: (err, ctx) => app.log.error({ err, ...ctx }, 'retention failed'),
+    onRun: (summary) => {
+      retentionLastRunAt = summary.at.getTime()
+      retentionPartitionsDropped += summary.partitionsDropped
+    },
+  })
+
   app.decorate('deps', {
     config,
     pg,
@@ -138,6 +189,7 @@ export function buildApp(input: {
     buffer,
     counters,
     purge,
+    retention,
     segmentCache,
   } satisfies AppDeps)
   registerHealth(app, readiness)
@@ -153,6 +205,10 @@ export function buildApp(input: {
   registerMetrics(app, {
     bufferDepth: () => buffer.depth,
     totals: () => counters.totals(),
+    retention: () => ({
+      lastRunAt: retentionLastRunAt,
+      partitionsDropped: retentionPartitionsDropped,
+    }),
   })
 
   registerIngestRoutes(app, {
@@ -221,7 +277,11 @@ export function buildApp(input: {
   // unrelated tests is exactly the cross-file interference the
   // shared-database rule exists to prevent (see purge/worker.test.ts and
   // this file's own callers). index.ts starts it, once boot has actually
-  // succeeded.
+  // succeeded. `retention` follows the identical rule for the identical
+  // reason — a live timer issuing real `ALTER TABLE ... DROP PARTITION`
+  // calls against the shared test database on every unrelated test file's
+  // boot would be its own cross-file interference. index.ts starts it too,
+  // conditionally on `config.retentionEnabled`.
   return app
 }
 

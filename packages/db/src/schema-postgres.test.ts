@@ -48,9 +48,14 @@ describe('postgres schema', () => {
     ).rejects.toThrow(/duplicate key/i)
   })
 
-  it('defaults retention to 24 months and sets a monthly quota', async () => {
+  // 010_retention_default.sql lowered this from 24 to 13 — see that
+  // migration for why (13, not 12, so year-over-year comparisons stay
+  // answerable) and packages/db/src/migrations/010.test.ts for the guarantee
+  // that this only ever changed the default for a NEW project, never an
+  // existing row's stored value.
+  it('defaults retention to 13 months and sets a monthly quota', async () => {
     const r = await pg.query('SELECT retention_months, monthly_event_quota FROM projects LIMIT 1')
-    expect(r.rows[0].retention_months).toBe(24)
+    expect(r.rows[0].retention_months).toBe(13)
     expect(Number(r.rows[0].monthly_event_quota)).toBeGreaterThan(0)
   })
 

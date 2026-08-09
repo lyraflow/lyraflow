@@ -19,6 +19,8 @@ describe('loadConfig', () => {
     expect(c.purgeIntervalMs).toBe(15_000)
     expect(c.purgeLeaseMs).toBe(600_000)
     expect(c.purgeMaxAttempts).toBe(5)
+    expect(c.retentionIntervalMs).toBe(3_600_000)
+    expect(c.retentionEnabled).toBe(true)
   })
 
   it('throws a named error listing every missing variable at once', () => {
@@ -81,5 +83,38 @@ describe('loadConfig', () => {
       LYRAFLOW_ALLOWED_ORIGINS: 'https://app.example.com,',
     } as NodeJS.ProcessEnv)
     expect(c.allowedOrigins).toEqual(['https://app.example.com'])
+  })
+
+  it('overrides the retention interval from the environment', () => {
+    const c = loadConfig({
+      ...required,
+      LYRAFLOW_RETENTION_INTERVAL_MS: '60000',
+    } as NodeJS.ProcessEnv)
+    expect(c.retentionIntervalMs).toBe(60_000)
+  })
+
+  it('disables retention when the env var is "false"', () => {
+    const c = loadConfig({
+      ...required,
+      LYRAFLOW_RETENTION_ENABLED: 'false',
+    } as NodeJS.ProcessEnv)
+    expect(c.retentionEnabled).toBe(false)
+  })
+
+  it('keeps retention enabled when the env var is explicitly "true"', () => {
+    const c = loadConfig({
+      ...required,
+      LYRAFLOW_RETENTION_ENABLED: 'true',
+    } as NodeJS.ProcessEnv)
+    expect(c.retentionEnabled).toBe(true)
+  })
+
+  it('rejects a LYRAFLOW_RETENTION_ENABLED value that is neither "true" nor "false"', () => {
+    expect(() =>
+      loadConfig({
+        ...required,
+        LYRAFLOW_RETENTION_ENABLED: 'yes',
+      } as NodeJS.ProcessEnv),
+    ).toThrow(/LYRAFLOW_RETENTION_ENABLED must be "true" or "false", got "yes"/)
   })
 })
