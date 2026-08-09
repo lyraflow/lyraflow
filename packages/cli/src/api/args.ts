@@ -1,0 +1,404 @@
+/**
+ * Argument, duration and instant parsing for the CLI.
+ *
+ * This is the layer that decides what a user meant by `--since 15m` or
+ * `--since 2026-08-01T00:00:00Z` — and refuses to guess when it cannot tell.
+ * Nothing here talks to the network; `ApiError` (client.ts) and `UsageError`
+ * (this file) are deliberately separate classes because they map to
+ * different exit codes downstream: a usage error means the command was
+ * never sent (exit 2), an `ApiError` means it was sent and rejected or
+ * failed (exit 1).
+ */
+
+import { parseArgs } from 'node:util'
+
+/**
+ * Raised for anything wrong with what the user typed — a malformed
+ * `--since`, an unrecognised flag, an ambiguous option value. Never raised
+ * for anything that happened on the wire; see the module docstring.
+ */
+export class UsageError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'UsageError'
+  }
+}
+
+const DURATION_RE = /^(\d+)(m|h|d)$/
+
+function unitMs(unit: string): number {
+  switch (unit) {
+    case 'm':
+      return 60_000
+    case 'h':
+      return 60 * 60_000
+    case 'd':
+      return 24 * 60 * 60_000
+    default:
+      // Unreachable: `unit` only ever comes from DURATION_RE's own capture
+      // group, which can only be 'm', 'h' or 'd'.
+      throw new UsageError(`not a duration unit: "${unit}"`)
+  }
+}
+
+/**
+ * `^(\d+)(m|h|d)$` only — no weeks, no fractional amounts, no whitespace.
+ * A looser grammar (`1.5h`, `2w`, a trailing space) would need to decide
+ * what to do with values this CLI cannot round-trip cleanly; rejecting them
+ * is cheaper than guessing, and cheap to loosen later if a real caller
+ * needs it.
+ *
+ * Deliberately no cap on digit count. A cap here would only produce a
+ * friendlier message for one specific way to go out of range; the actual
+ * guarantee — that an absurd amount never reaches a caller as anything
+ * other than `UsageError` — is enforced once, downstream in
+ * `resolveInstant`, by validating the resulting `Date` rather than the
+ * input digits. See `assertValidInstant`.
+ *
+ * NEVER ECHOES `input`. See `resolveInstant`'s docstring for the rule and
+ * why "the shape is narrow" stopped being an acceptable argument for it.
+ */
+export function parseDuration(input: string): number {
+  const match = DURATION_RE.exec(input)
+  if (!match) {
+    throw new UsageError('not a duration (expected e.g. "15m", "24h", "7d")')
+  }
+  const [, amount, unit] = match
+  return Number(amount) * unitMs(unit as string)
+}
+
+/**
+ * Deliberately narrower than `Date.parse`, which is far looser than "ISO
+ * 8601" — V8 accepts bare years (`"2026"`), month-only strings and
+ * non-ISO forms like `"Aug 1 2026"` as real instants, and SILENTLY ROLLS
+ * OVER a near-miss calendar value into a different real date instead of
+ * rejecting it: `"2026-02-30"` becomes `2026-03-02T00:00:00.000Z`,
+ * `"2025-02-29"` (2025 is not a leap year) becomes `2025-03-01T00:00:00.000Z`.
+ * Left unguarded, either failure mode returns a plausible-looking wrong
+ * answer instead of an error — exactly the thing this module exists to
+ * prevent.
+ *
+ * Two checks close both gaps, and neither is sufficient alone: this regex
+ * requires the ISO shape before `Date.parse` ever runs (closes the
+ * bare-year / non-ISO-string gap), and `isRealCalendarDate` (below)
+ * round-trips the typed digits through `Date.UTC` and rejects anything
+ * that does not come back unchanged (closes the near-miss-rollover gap —
+ * a shape match alone does not catch "the 30th of February").
+ *
+ * Accepts a bare date (`YYYY-MM-DD`, midnight UTC per the ISO 8601 / `Date`
+ * spec) and a full timestamp with optional milliseconds and a required
+ * `Z` or `±HH:MM` offset — i.e. exactly what `Date.prototype.toISOString()`
+ * produces, which is what an agent-generated `--since` looks like.
+ */
+const ISO_INSTANT_RE =
+  /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2}))?$/
+
+/**
+ * Confirms `year`-`month`-`day` `hour`:`minute`:`second` is a real point on
+ * the calendar, not just a string that satisfies `ISO_INSTANT_RE`'s digit
+ * shape. `Date.UTC` (like `Date.parse`) does not reject an out-of-range
+ * component — it rolls it forward into the next one, silently turning a
+ * typo into a DIFFERENT real date. Reconstructing the date from the typed
+ * components and checking every one survives the round trip is what
+ * actually catches that.
+ *
+ * Deliberately checks the components as literal digits, ignoring whatever
+ * offset the input carried (`Z` or `±HH:MM`) — an offset legitimately
+ * shifts the final UTC instant onto a different calendar day
+ * (`"2026-08-01T01:00:00+05:30"` is `2026-07-31T19:30:00.000Z`), and that
+ * is correct, not a typo. This function only answers "are these digits a
+ * real calendar date/time", independent of what timezone they're in.
+ */
+function isRealCalendarDate(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  second: number,
+): boolean {
+  const d = new Date(Date.UTC(year, month - 1, day, hour, minute, second))
+  // Date.UTC applies the legacy two-digit-year rule to its NUMERIC year
+  // argument: Date.UTC(50, …) means 1950, not year 50. The regex requires
+  // four digits, so `"0050-01-01"` arrives here as year 50 and would fail
+  // the round-trip below against 1950 — rejecting a well-formed ISO date.
+  // setUTCFullYear has no such rule, so it puts the typed year back.
+  d.setUTCFullYear(year)
+  return (
+    d.getUTCFullYear() === year &&
+    d.getUTCMonth() === month - 1 &&
+    d.getUTCDate() === day &&
+    d.getUTCHours() === hour &&
+    d.getUTCMinutes() === minute &&
+    d.getUTCSeconds() === second
+  )
+}
+
+/**
+ * Both branches of `resolveInstant` funnel their result through here, so
+ * the function's guarantee — return a valid `Date` or throw `UsageError`,
+ * never an Invalid Date — holds by construction rather than per-branch.
+ *
+ * Without this, a shape-valid but absurd duration (`DURATION_RE` has no
+ * cap on digit count — see `parseDuration`'s docstring) such as
+ * `"999999999d"` computes an offset outside `Date`'s representable range
+ * (±8,640,000,000,000,000 ms from the epoch). `new Date(...)` on an
+ * out-of-range value does not throw — it silently returns an Invalid Date
+ * whose `.getTime()` is `NaN` — so the `RangeError` only surfaces later, in
+ * whichever caller first calls `.toISOString()` on it, which in this CLI
+ * is every caller (building a query parameter means exactly that). That
+ * would break the exit-code contract described in the module docstring: a
+ * usage error must exit 2, never crash the process with an unhandled
+ * `RangeError`.
+ */
+function assertValidInstant(date: Date, flag: string | undefined): Date {
+  if (Number.isNaN(date.getTime())) {
+    throw new UsageError(
+      `${describeFlag(flag)} resolves to an instant outside the range JavaScript's Date can represent`,
+    )
+  }
+  return date
+}
+
+/** Names the flag a bad value came from, for a message that must not
+ * contain the value itself. `undefined` for a direct caller that did not
+ * say (only this module's own tests today). */
+function describeFlag(flag: string | undefined): string {
+  return flag === undefined ? 'the value given' : `the value given for ${flag}`
+}
+
+/**
+ * `input` as a relative duration (offset before `now`) or an absolute ISO
+ * instant — never a default. See the module docstring for why a silent
+ * fallback is worse than throwing: a bad `--since` that quietly became
+ * "15 minutes ago" would answer a question nobody asked, and look like
+ * real data.
+ *
+ * `flag` names which flag the value came from (`"--since"`, `"--until"`).
+ * It exists because NO MESSAGE HERE MAY CONTAIN `input`. These messages
+ * echoed it until the final Plan 7 review, which is the fourth time this
+ * class shipped on this branch — each time defended as "the shape is
+ * narrow", the same sentence that had been deleted for `--limit` one commit
+ * earlier. The shape is not the point: a flag value is whatever the caller
+ * typed or an agent templated, `lyraflow events --since $LYRAFLOW_SERVER_KEY`
+ * is one keystroke from a real command, and CLI output lands in shell
+ * history, CI logs and agent transcripts. Naming the flag and stating what
+ * was expected keeps the whole diagnostic; repeating the value adds nothing
+ * the caller does not already have.
+ */
+export function resolveInstant(input: string, now: Date, flag?: string): Date {
+  if (DURATION_RE.test(input)) {
+    return assertValidInstant(new Date(now.getTime() - parseDuration(input)), flag)
+  }
+
+  const isoMatch = ISO_INSTANT_RE.exec(input)
+  if (isoMatch) {
+    const [, year, month, day, hour, minute, second] = isoMatch
+    const isReal = isRealCalendarDate(
+      Number(year),
+      Number(month),
+      Number(day),
+      Number(hour ?? '0'),
+      Number(minute ?? '0'),
+      Number(second ?? '0'),
+    )
+    if (isReal) {
+      const ms = Date.parse(input)
+      if (!Number.isNaN(ms)) return assertValidInstant(new Date(ms), flag)
+    }
+  }
+
+  throw new UsageError(
+    `${describeFlag(flag)} is not a valid instant (expected a duration like "15m", "24h", "7d", or an ISO 8601 instant like "2026-08-01T00:00:00.000Z")`,
+  )
+}
+
+/**
+ * What a command declares about its own flags. Long names only, no short
+ * aliases — this CLI's argv is machine-generated as often as typed, and
+ * keeping the surface small keeps `parseCommandArgs` a thin wrapper over
+ * `node:util`'s `parseArgs` rather than a small argument-parsing framework.
+ *
+ * A flag passed more than once (`--since 15m --since 1h`) keeps only the
+ * last value — `parseArgs`'s own default, and standard CLI convention. If a
+ * later command needs to tell "given twice" apart from "given once", that
+ * is new surface on `ArgSpec` (e.g. a `multiple: true` per-flag option),
+ * not something already here to discover.
+ */
+export interface ArgSpec {
+  /** Flags that take a string value, e.g. `--since 15m`. */
+  strings?: readonly string[]
+  /** Flags that are on/off switches, e.g. `--follow`, `--json`. */
+  booleans?: readonly string[]
+}
+
+/**
+ * The result of parsing one command's argv. `flags` holds only the flags
+ * that were actually present — a boolean not passed is an absent key, not
+ * a `false` default, so a caller can tell "not set" from "explicitly off"
+ * if it ever needs to. `positionals` is everything else, in argv order:
+ * subcommand words (`get`, `delete`) and their ids, exactly as typed.
+ *
+ * `positionalIndexes` is `positionals`' parallel array of each entry's
+ * original index in `argv` — a plain number, never a value.
+ *
+ * `positionalContext` is `positionals`' parallel array of the canonical
+ * FLAG NAME (e.g. `"server-key"`, never `"--server-key"` and never
+ * anything with `=value` attached) of whichever option token immediately
+ * precedes it in argv's own token stream — or `undefined` when nothing
+ * does (the positional is first, or the token before it is itself a
+ * positional, or it's the `--` terminator).
+ *
+ * Both exist for exactly one reason, twice-learned the hard way: a caller
+ * rejecting unexpected positionals (a real regression this shipped
+ * TWICE — first by echoing the positional's own value, then by echoing
+ * the argv token immediately before it, which for `--flag=value` syntax
+ * IS the value) needs to report roughly WHERE a positional appeared
+ * without ever being able to reach WHAT it, or its neighbour, was. A
+ * positional can be anything the user mistyped where a flag value
+ * belonged — including a secret passed as `lyraflow events
+ * $LYRAFLOW_SERVER_KEY`, or `--server-key=$LYRAFLOW_SERVER_KEY foo`. Both
+ * fields are numbers or option NAMES only — never a raw argv string,
+ * never anything sourced from a token's own `value` — so nothing that
+ * reaches a caller through `ParsedArgs` can ever be a secret, regardless
+ * of what a future caller does with them. See
+ * `commands/command-support.ts`'s `positionalsUsageMessage`, the one place
+ * in this CLI allowed to build the actual message from these two fields.
+ */
+export interface ParsedArgs {
+  flags: Record<string, string | boolean>
+  positionals: string[]
+  positionalIndexes: number[]
+  positionalContext: (string | undefined)[]
+}
+
+/**
+ * Wraps `node:util`'s `parseArgs` (Node 22 built-in, no dependency — see
+ * packages/cli/package.json). `parseArgs` already runs in `strict` mode,
+ * which rejects an unrecognised flag and an ambiguous option value on its
+ * own; this only narrows that rejection to `UsageError`; so every caller
+ * catches one error type regardless of what, specifically, was wrong with
+ * the input.
+ *
+ * `tokens: true` costs nothing extra here (Node still does the same parse
+ * either way) and is the only way to get each positional's real `argv`
+ * index without re-deriving it by searching for the value — which would
+ * mean comparing against the value at all, the exact thing this module
+ * exists to avoid doing carelessly with something that might be a secret.
+ */
+function runParseArgs(argv: string[], options: Record<string, { type: 'string' | 'boolean' }>) {
+  return parseArgs({ args: argv, options, strict: true, allowPositionals: true, tokens: true })
+}
+
+/**
+ * `node:util`'s own `ERR_PARSE_ARGS_UNKNOWN_OPTION` bakes the offending
+ * token's RAW TEXT into `err.message`, twice ("Unknown option '--xyz'. To
+ * specify a positional argument starting with a '-', place it at the end
+ * of the command after '--', as in '-- "--xyz"'") — and unlike every other
+ * `parseArgs` error this module has checked (an unrecognised option value
+ * on a boolean, a missing string value: both name only a KNOWN flag from
+ * this command's own `spec`, never anything user-supplied), this is the one
+ * shape where the echoed text is arbitrary argv content. An agent
+ * templating a flag name from untrusted input (`--${maybeSecret}`, a typo
+ * that drops the leading `--` off a value) makes this the exact same class
+ * of leak `positionalsUsageMessage` (command-support.ts) exists to close
+ * for a misplaced positional — found here, for the flag-shaped case,
+ * during Task 8's review.
+ *
+ * `parseArgs` throws before returning anything, so there is no `tokens`
+ * array to read the real culprit's index off of the way
+ * `parseCommandArgs`'s own success path does below — this re-derives it by
+ * walking `argv` a second time, independently, using ONLY each token's
+ * shape (does it start with `--`? is its name — never its value — in the
+ * known option set?) and never its content. Approximates `parseArgs`' own
+ * long-option recognition closely enough for this purpose: stops at a bare
+ * `--` terminator, and a known `strings`-type option with no `=` consumes
+ * the following token as its value rather than being treated as itself an
+ * unknown option's location. Getting the exact index wrong (a case this
+ * function is not proven exhaustive against) only ever costs precision —
+ * the result is always a bare number or `undefined`, so there is no way
+ * for a wrong guess to leak anything either.
+ */
+function findUnknownOptionIndex(argv: string[], spec: ArgSpec): number | undefined {
+  const known = new Set<string>([...(spec.strings ?? []), ...(spec.booleans ?? [])])
+  const stringNames = new Set(spec.strings ?? [])
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i]
+    if (token === '--') break
+    if (token === undefined || !token.startsWith('--')) continue
+    const eqAt = token.indexOf('=')
+    const name = eqAt === -1 ? token.slice(2) : token.slice(2, eqAt)
+    if (!known.has(name)) return i
+    if (eqAt === -1 && stringNames.has(name)) i++ // consumes the next token as its value
+  }
+  return undefined
+}
+
+export function parseCommandArgs(argv: string[], spec: ArgSpec): ParsedArgs {
+  const options: Record<string, { type: 'string' | 'boolean' }> = {}
+  for (const name of spec.strings ?? []) options[name] = { type: 'string' }
+  for (const name of spec.booleans ?? []) options[name] = { type: 'boolean' }
+
+  let parsed: ReturnType<typeof runParseArgs>
+  try {
+    parsed = runParseArgs(argv, options)
+  } catch (err) {
+    if (
+      err instanceof Error &&
+      (err as NodeJS.ErrnoException).code === 'ERR_PARSE_ARGS_UNKNOWN_OPTION'
+    ) {
+      // Deliberately does NOT touch `err.message` — see
+      // `findUnknownOptionIndex`'s own docstring for why that string can
+      // never be trusted here.
+      const index = findUnknownOptionIndex(argv, spec)
+      throw new UsageError(
+        index !== undefined
+          ? `unrecognised option at argument ${index + 1} (if it was meant to be a value, place it after "--")`
+          : 'unrecognised option',
+      )
+    }
+    throw new UsageError(err instanceof Error ? err.message : 'invalid arguments')
+  }
+
+  const positionalIndexes: number[] = []
+  const positionalContext: (string | undefined)[] = []
+  for (let i = 0; i < parsed.tokens.length; i++) {
+    const token = parsed.tokens[i]
+    if (token?.kind !== 'positional') continue
+    positionalIndexes.push(token.index)
+    // Only `kind`/`name` are ever read here — never `value`, on either
+    // this token or the preceding one. That is the entire guarantee this
+    // field exists to make: it is structurally impossible for
+    // `positionalContext` to carry anything a token's own `value` field
+    // held, because that field is never touched.
+    const prev = parsed.tokens[i - 1]
+    positionalContext.push(prev?.kind === 'option' ? prev.name : undefined)
+  }
+
+  return {
+    flags: parsed.values as Record<string, string | boolean>,
+    positionals: parsed.positionals,
+    positionalIndexes,
+    positionalContext,
+  }
+}
+
+/**
+ * A deliberately dumb pre-scan for one boolean flag's presence, usable even
+ * when `parseCommandArgs` itself has thrown (e.g. an unrelated unknown
+ * flag) and so has no `ParsedArgs` to offer. A command's `catch` block for
+ * that failure still needs to decide human vs. json rendering for the
+ * *error* it is about to print — this is how it can honour a `--json` that
+ * DID appear in argv even though the parse as a whole failed. Stops at a
+ * bare `--` (the same "everything after this is positional" convention
+ * `node:util`'s `parseArgs` itself honours), so a positional that happens
+ * to spell `--json` after the terminator is never mistaken for the flag.
+ */
+export function hasRawFlag(argv: string[], name: string): boolean {
+  const flag = `--${name}`
+  for (const arg of argv) {
+    if (arg === '--') break
+    if (arg === flag) return true
+  }
+  return false
+}

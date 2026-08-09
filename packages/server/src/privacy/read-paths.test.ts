@@ -10,16 +10,56 @@ import { Readiness } from '../health.js'
 import { type PgDictionarySource, ensureIdentityDictionaries } from '../identity/dictionaries.js'
 
 /**
- * One suppression rule, four read paths that each derive it independently
- * (see compile.ts, behaviour.ts, person.ts, export.ts — each carries its own
- * copy of "hide at or before the boundary, show after it"). Plan 4's final
- * review found a guardrail that held on one route and not its neighbour, a
- * defect no per-task review could see because each diff was correct against
- * its own brief. This file is the guard against that shape recurring: one
- * fixture, one assertion body, run against all four routes through their
- * real HTTP surface (never compileSegment/runSegment directly — an earlier
- * task routed around the segment route specifically to dodge its 30s result
- * cache, and exercising that cache for real is the point of this file).
+ * One suppression rule, five read paths that must agree on it — but only
+ * three `notSuppressedExpr` (@lyraflow/core/privacy/suppression.ts) call
+ * sites between them, not five, and one Postgres derivation independent of
+ * all three.
+ *
+ * A fourth call site exists outside this matrix: `GET /v1/events/stats`
+ * (events/routes.ts), per-event against each row's own `timestamp`, the
+ * same shape as the feed. It is absent here because it returns counts
+ * rather than people, so it has no `personIds` to assert on — it carries
+ * its own targeted erased-person test instead. Any sixth read path that
+ * DOES return people belongs in the matrix below.
+ *
+ * The three ClickHouse, dictionary-side call sites the five paths reach:
+ *   - the base population (compile.ts), compared against a PERSON-LEVEL
+ *     `last_seen` — derived from device_index, pre-aggregated per (device,
+ *     month), so exact only once the purge has run (compile.ts's own
+ *     comment documents the "typically minutes" window that follows).
+ *     Segment count and segment members BOTH compile through this CTE —
+ *     `compileSegment`'s `select` argument (compile.ts) gates only the
+ *     cursor clause, the projection, and the tail, never which CTEs get
+ *     built.
+ *   - the behavioural pass (behaviour.ts), compared per-event against each
+ *     row's own `timestamp` — exact throughout. Segment count and segment
+ *     members BOTH compile this CTE too, whenever the filter carries a
+ *     behavioural node — which is why this file's own `countFor`/
+ *     `membersFor` each issue both shapes below: `presenceFilter` hits the
+ *     base population, `windowProbeFilter` hits the behavioural pass.
+ *     compile.ts and behaviour.ts are two LAYERS of one path, not two
+ *     separate paths.
+ *   - the events feed (events/routes.ts), also compared per-event against
+ *     each row's own `timestamp` — exact throughout, the identical shape
+ *     the behavioural pass uses.
+ *
+ * The one Postgres derivation, `SuppressionStore.boundaryFor`
+ * (privacy/suppression-store.ts) — checked directly against Postgres, at
+ * zero replication lag, exact throughout — is used independently by the
+ * person read (identity/person.ts) and the export (privacy/export.ts).
+ *
+ * Plan 4's final review found a guardrail that held on one route and not
+ * its neighbour, a defect no per-task review could see because each diff
+ * was correct against its own brief. This file is the guard against that
+ * shape recurring, and what it actually proves is narrower than "five
+ * independent copies agree": that the dictionary-side and Postgres-side
+ * derivations agree with each other, and that the two ClickHouse `instant`
+ * shapes — per-event and person-level `last_seen` — agree with each other
+ * wherever both are exact. One fixture, one assertion body, run against all
+ * five routes through their real HTTP surface (never compileSegment/
+ * runSegment directly — an earlier task routed around the segment route
+ * specifically to dodge its 30s result cache, and exercising that cache for
+ * real is the point of this file).
  */
 
 const CH_DB = 'lyraflow_test'
@@ -133,7 +173,7 @@ const T_SUB_GAP = SUBSECOND_BOUNDARY_MS - 300 // rp_event — inside the truncat
 // coincidentally land on the correct side by construction.
 const CUTOFF_MS = hoursAgo(4)
 
-// The exact set of instants any of the four paths may legitimately reveal.
+// The exact set of instants any of the five paths may legitimately reveal.
 // Real timestamps, not counts — a path returning the right NUMBER of events
 // from the wrong side of the boundary fails this exact-set comparison the
 // same way a path returning the wrong timestamps outright would. Deliberately
@@ -330,6 +370,25 @@ function parseLines(body: string): Array<Record<string, unknown>> {
     .map((l) => JSON.parse(l))
 }
 
+/**
+ * GET /v1/events over the whole fixture window. `since` is passed explicitly
+ * — the route's own default is 24h before the REQUEST's `now`, not this
+ * file's `NOW`, and every fixture event sits within 10 hours of `NOW`
+ * (T_F1, the oldest, is `hoursAgo(10)`), so a naive omission would happen to
+ * pass today but silently stop asserting anything the moment this suite's
+ * own fixture offsets grew past 24h. `hoursAgo(24)` leaves 14 hours of
+ * margin under the oldest fixture event, and `limit` covers every one of the
+ * eleven events `beforeAll` inserts with room to spare.
+ */
+function eventsFeed(query: Record<string, string>) {
+  const qs = new URLSearchParams(query).toString()
+  return app.inject({
+    method: 'GET',
+    url: `/v1/events?${qs}`,
+    headers: { 'x-lyraflow-server-key': SERVER_KEY },
+  })
+}
+
 /** The normalised shape every path's helper returns — see the file's own docstring. */
 interface Snapshot {
   personIds: Set<string>
@@ -467,11 +526,66 @@ const exportFor = async (): Promise<Snapshot> => {
   return { personIds, eventTimestamps }
 }
 
+/**
+ * The feed normalises differently from the other four paths: it has no
+ * per-id lookup, so this makes one project-wide call over the fixture
+ * window and derives both sets from whichever rows come back, rather than
+ * probing ALL_IDS/PROBES one at a time. `personIds` is each row's `user_id`
+ * (falling back to `anonymous_id`) — every fixture event carries its own
+ * `user_id` and an empty `anonymous_id` (`insertEvent`'s hard-coded ''), so
+ * this fixture never exercises the fallback for real, and never exercises
+ * identity resolution either: the feed returns each row's raw `user_id`
+ * unresolved, where the other four paths report a *resolved* person id.
+ * They agree here only because this fixture's ids never merge (see
+ * `beforeAll`'s own "identity resolution short-circuits on stage 1"
+ * comment) — a fixture with a merged device would be able to tell those
+ * apart, and this one cannot.
+ */
+const eventsFeedFor = async (): Promise<Snapshot> => {
+  const res = await eventsFeed({ since: isoStamp(hoursAgo(24)), limit: '100' })
+  expect(res.statusCode).toBe(200)
+  const body = res.json() as {
+    events: Array<{ user_id: string; anonymous_id: string; timestamp: string }>
+  }
+  const personIds = new Set<string>()
+  const eventTimestamps = new Set<number>()
+  for (const e of body.events) {
+    // Loud, not silent: this fixture's own beforeAll only ever inserts
+    // events carrying a real user_id (no anonymous_id/device involved — see
+    // that comment), so every row this project can legitimately return
+    // should have one too. If that ever stops being true — an anonymous or
+    // merged fixture person added to ALL_IDS — this row's personIds would
+    // silently start reporting raw device/anonymous ids instead of the
+    // resolved person id the other four paths report (this function's own
+    // docstring above), and a suppressed person's leaked history could hide
+    // behind a device id the "hides a person" assertion never checks for.
+    // Failing here, immediately, turns that into an error that names its
+    // own cause instead of a matrix row that quietly asserts nothing. Leak-
+    // triggered, not fixture-triggered: an anonymous person whose whole
+    // history stays suppressed never reaches this loop at all (the route's
+    // own suppression check hides them before this test ever sees a row for
+    // them), so this only fires for an anonymous person with a SURVIVING
+    // event — either a new fixture person added without a real user_id, or
+    // suppression failing to hide one that should have stayed hidden. The
+    // message names both, since either reading is honest without more
+    // context, and carries the anonymous_id so the offending row is findable.
+    expect(
+      e.user_id,
+      `feed row has an empty user_id (anonymous_id=${e.anonymous_id}) — either this fixture gained an anonymous/merged person, or suppression let an anonymous person's history leak through`,
+    ).not.toBe('')
+    const id = e.user_id || e.anonymous_id
+    if (id) personIds.add(id)
+    eventTimestamps.add(new Date(e.timestamp).getTime())
+  }
+  return { personIds, eventTimestamps }
+}
+
 describe.each([
   ['segment count', countFor],
   ['segment members', membersFor],
   ['person read', personFor],
   ['export', exportFor],
+  ['events feed', eventsFeedFor],
 ] as const)('%s', (_name, run) => {
   it('hides a person whose whole history predates the boundary', async () => {
     const snap = await run()
@@ -527,7 +641,7 @@ describe.each([
   // later of their two) compared as AFTER the truncated boundary on the
   // ClickHouse side — visible via segment count/members — while the exact
   // Postgres-side boundary correctly kept it hidden on person read/export.
-  // All four must agree the person is gone.
+  // All five must agree the person is gone.
   it('hides a person whose only recent event sits in a truncated boundary sub-second gap', async () => {
     const snap = await run()
     expect(snap.personIds.has(SUBSECOND)).toBe(false)

@@ -9,5 +9,8 @@
   "dependencies": {
     "@lyraflow/core": "workspace:*",
     "@lyraflow/db": "workspace:*"
+  },
+  "devDependencies": {
+    "@lyraflow/server": "workspace:*"
   }
 }

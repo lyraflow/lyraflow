@@ -70,8 +70,10 @@ and no journey/funnel analysis — v0.1 adds identity resolution
 (`/v1/identify` binds a device to a person, `/v1/alias` merges two known
 people, `GET /v1/persons/:id` reads one person's stitched profile back out —
 see *Identity resolution* below), a segment query API for counting and
-listing people matching a filter tree (see *Segments* below), and per-person
-deletion and export (see *Privacy: deletion and export* below).
+listing people matching a filter tree (see *Segments* below), a raw event feed
+and time-bucketed counts (see *Reading events* below), per-person deletion and
+export (see *Privacy: deletion and export* below), and a CLI that wraps all of
+the read endpoints for scripts and agents (see [`packages/cli/README.md`](packages/cli/README.md)).
 
 Ingest listens on port 3000. Every ingest request — `/v1/track`, `/v1/page`,
 `/v1/identify`, `/v1/batch` — authenticates with the project's **write key**
@@ -817,6 +819,120 @@ Membership is also not recomputed automatically on any schedule; a saved
 segment's snapshot only updates when you explicitly run it. Those are
 planned; none of them exist today.
 
+## Reading events
+
+Two read endpoints answer "what happened" and "how much, over time" directly
+against the event store, with no filter tree to write first — the first thing
+anyone reaches for after instrumenting a site. Both are **server-key only**,
+like every other read below, and both **exclude events belonging to a person
+who has been deleted** — the same suppression boundary every other read path
+enforces (see *Privacy: deletion and export* below) applies here too, from the
+moment a deletion is accepted, not only once the purge finishes.
+
+### `GET /v1/events`
+
+The event feed, always ordered oldest-first:
+
+```sh
+curl -s "http://localhost:3000/v1/events?since=2026-08-09T03:16:00.000Z&limit=2" \
+  -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY"
+```
+
+```json
+{
+  "events": [
+    { "event_id": "22222222-2222-2222-2222-222222222223", "timestamp": "2026-08-09T03:17:34.357Z", "event_name": "signup", "anonymous_id": "visitor-3", "user_id": "", "properties": {"plan":"trial"}, "properties_num": {}, "url": "", "path": "", "referrer": "", "utm_source": "", "utm_medium": "", "utm_campaign": "", "utm_term": "", "utm_content": "", "device_type": "desktop", "os": "macos", "browser": "chrome", "country": "", "region": "", "city": "" },
+    { "event_id": "22222222-2222-2222-2222-222222222224", "timestamp": "2026-08-09T03:17:34.364Z", "event_name": "signup", "anonymous_id": "visitor-4", "user_id": "", "properties": {"plan":"trial"}, "properties_num": {}, "url": "", "path": "", "referrer": "", "utm_source": "", "utm_medium": "", "utm_campaign": "", "utm_term": "", "utm_content": "", "device_type": "desktop", "os": "macos", "browser": "chrome", "country": "", "region": "", "city": "" }
+  ],
+  "next_cursor": "WyIyMDI2LTA4LTA5IDAzOjE3OjM0LjM2NCIsIjIyMjIyMjIyLTIyMjItMjIyMi0yMjIyLTIyMjIyMjIyMjIyNCJd"
+}
+```
+
+| Parameter | Meaning |
+| --- | --- |
+| `since` | ISO 8601 datetime — only events at or after this instant |
+| `until` | ISO 8601 datetime — only events at or before this instant |
+| `event` | exact event name |
+| `person` | a person id, resolved exactly the way `GET /v1/persons/:id` resolves one (alias and device-id lookup — see *Identity resolution* above) |
+| `limit` | events per page, default 50, capped at 500 |
+| `after` | an opaque cursor from a previous response's `next_cursor`, to continue from there |
+
+**When `since` is omitted and no cursor (`after`) is given either, the server
+defaults to the last 24 hours.** That default deliberately does not apply once
+a cursor is present: a cursor already carries its own lower bound, and
+stacking the 24-hour default on top of an older cursor would silently drop
+every event between the cursor's real position and the default's edge — a gap
+that, once `next_cursor` has advanced past it, is never reachable again. An
+explicit `since` alongside a cursor still applies normally; it is only the
+*default* that backs off in a cursor's presence.
+
+`next_cursor` is a **keyset position over `(timestamp, event_id)`, and
+opaque** — treat it as an opaque token, never decoded or constructed by hand.
+Unlike the segment cursor above, it is not signed: forging one only lets a
+caller holding the server key read their own project's events in a different
+order, which they could already do by choosing their own `since`/`until`, so
+there is nothing here for a signature to protect. `next_cursor` is `null` on
+an empty page. `limit` above 500 is rejected with `400 {"error":"invalid_query"}`,
+never silently clamped. A malformed, truncated, or hand-built `after` is a
+`400`:
+
+```json
+{ "error": "invalid_cursor" }
+```
+
+`person` follows the same device-window ceiling `GET /v1/persons/:id` does
+(see *Identity resolution* above): a person spanning more than 200 device
+windows is `400 person_history_too_fragmented` rather than an unbounded
+query, with the same shape that read already documents.
+
+### `GET /v1/events/stats`
+
+Time-bucketed counts — "how much, over time" rather than "what happened":
+
+```sh
+curl -s "http://localhost:3000/v1/events/stats?since=2026-08-09T03:00:00.000Z&interval=1h" \
+  -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY"
+```
+
+```json
+{ "buckets": [ { "bucket": "2026-08-09T03:00:00.000Z", "events": 8 } ] }
+```
+
+Add `group_by=event_name` to split each bucket by event name — `event_name`
+is present on a bucket **only** when grouping was requested:
+
+```json
+{ "buckets": [ { "bucket": "2026-08-09T03:00:00.000Z", "event_name": "signup", "events": 8 } ] }
+```
+
+| Parameter | Meaning |
+| --- | --- |
+| `since` | ISO 8601 datetime |
+| `until` | ISO 8601 datetime, defaults to now |
+| `interval` | `1m`, `1h`, or `1d`; default `1h` |
+| `group_by` | only `event_name` is accepted |
+
+**There is a hard cap of 1,000 buckets per request.** This route sums groups
+server-side rather than paging rows, so unlike the feed it has no `limit` to
+hide an oversized window behind — a window whose bucket count at the
+requested resolution would exceed 1,000 is rejected before any query runs:
+
+```json
+{ "error": "window_too_large", "detail": "this window at 1h resolution would produce 57892 buckets, above the limit of 1000" }
+```
+
+**The default window, when `since` is omitted, scales with `interval`** rather
+than a single fixed span — a flat 24-hour default collides with the
+1,000-bucket cap at fine resolutions, so a bare `?interval=1m` with nothing
+else would otherwise be an unconditional `400`:
+
+| `interval` | Default window when `since` is omitted |
+| --- | --- |
+| `1m` | 1 hour |
+| `1h` | 24 hours |
+| `1d` | 7 days |
+
+`401` for a missing or invalid server key, on both endpoints.
 
 ## Privacy: deletion and export
 
