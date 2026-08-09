@@ -59,7 +59,14 @@ import { type Server, createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { type ClickHouseClient, type Pool, createChClient, createPgPool } from '@lyraflow/db'
+import {
+  type ClickHouseClient,
+  type Pool,
+  createChClient,
+  createPgPool,
+  loadMigrations,
+  migrate,
+} from '@lyraflow/db'
 import { buildApp } from '@lyraflow/server/dist/app.js'
 import { loadConfig } from '@lyraflow/server/dist/config.js'
 import { Readiness } from '@lyraflow/server/dist/health.js'
@@ -204,6 +211,19 @@ beforeAll(async () => {
     existsSync(CLI_ENTRY),
     `${CLI_ENTRY} is missing — run pnpm build first (packages/cli)`,
   ).toBe(true)
+
+  // Every other live-database suite migrates in its own beforeAll, and this
+  // one must too — not as belt and braces, but because nothing orders the
+  // suites. A developer's database is always already migrated by an earlier
+  // run, so a missing migration here is invisible locally and fails only on
+  // a fresh database: exactly what CI has. `cleanupProject` below is the
+  // first statement to touch `projects`, so it is the one that reports it.
+  await migrate({
+    pg,
+    ch,
+    migrations: loadMigrations(join(HERE, '..', '..', 'db', 'migrations')),
+    appSchemaVersion: 999,
+  })
 
   await cleanupProject()
 
