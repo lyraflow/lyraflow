@@ -118,6 +118,21 @@ not contain `bot`, `crawler`, `curl/`, `python-requests`, and similar tokens
 `/health` (liveness), `/ready` (readiness), and `/metrics` (Prometheus text
 format) are also served, and are not authenticated.
 
+### `GET /v1/project`
+
+Server-key authenticated (`x-lyraflow-server-key`), unlike every endpoint
+above. Returns `{"name", "slug", "write_key"}` — the project's own identity,
+including the write key, which `create-project` otherwise prints only once
+and nothing else serves. This is **not** a widening of what the server key
+can already do: it is a secret, hashed at rest and unrecoverable, that
+authenticates every read path in this API — a caller holding it can already
+read every person, event and segment in the project, so handing back a value
+that ships unhidden in the browser bundle of every instrumented page changes
+nothing about what that caller can reach. `lyraflow snippet` (see
+[`packages/cli/README.md`](packages/cli/README.md)) is the intended way to
+use this endpoint: it prints a paste-ready install snippet with the write key
+already filled in, rather than a caller reading this response by hand.
+
 Sent directly from browser JavaScript (as opposed to a server-side SDK),
 `/v1/track`, `/v1/page`, `/v1/identify` and `/v1/batch` are CORS-preflighted
 requests. By default Lyraflow answers that preflight for any origin — set
@@ -222,7 +237,7 @@ Paste this before `</head>`:
 </script>
 <script async src="https://analytics.example.com/lyraflow.js"></script>
 <script>
-  lyraflow.init({ host: 'https://analytics.example.com', writeKey: 'wk_live_…' })
+  lyraflow.init({ host: "https://analytics.example.com", writeKey: "wk_live_…" })
 </script>
 ```
 
@@ -238,7 +253,10 @@ the third block; the queue is then held until that `init` arrives, and drained
 by it. Either way nothing queued is lost. Replace both
 occurrences of `https://analytics.example.com` with your own Lyraflow host,
 and `writeKey` with the `wk_…` key from *Running Lyraflow* above — the same
-one your server-side calls already use.
+one your server-side calls already use. Or skip the substitution entirely:
+`lyraflow snippet` (see [`packages/cli/README.md`](packages/cli/README.md))
+prints this exact block with your project's own host and write key already
+filled in, plus which of the methods above have actually fired anything yet.
 
 The bundle is served by the app itself at two paths, unauthenticated (a
 `<script>` tag has no way to send a header):

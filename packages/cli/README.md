@@ -6,10 +6,10 @@ property schema — built for scripts and for agents driving Lyraflow directly
 from a terminal, not for browsing. It wraps `GET /v1/events`,
 `GET /v1/events/stats`, `GET /v1/persons/:id`, `GET /v1/persons/:id/export`,
 `DELETE /v1/persons/:id`, `GET /v1/deletions/:id`, `GET /v1/segments`,
-`POST /v1/segments/:id/preview`, `GET /v1/schema/events` and
-`GET /v1/schema/properties` — see the main [README](../../README.md) for what
-each of those endpoints actually does; this document is about the CLI's own
-surface on top of them.
+`POST /v1/segments/:id/preview`, `GET /v1/schema/events`,
+`GET /v1/schema/properties` and `GET /v1/project` — see the main
+[README](../../README.md) for what each of those endpoints actually does;
+this document is about the CLI's own surface on top of them.
 
 `create-project`, `migrate`, and `healthcheck` are separate, operational
 commands this binary also ships (used once per install, not per query) — see
@@ -511,6 +511,93 @@ Only events carrying at least one property are discoverable this way — see
 `--event` only applies to `properties`; passing it to `schema events` is
 rejected as an unexpected flag for that subcommand rather than silently
 ignored.
+
+## `lyraflow snippet`
+
+```
+lyraflow snippet [--since <duration>] [--json|--human]
+```
+
+Prints a paste-ready browser install snippet — this project's own host and
+write key already substituted into the exact block documented under *Sending
+events from a browser* in the main README — plus the SDK's full callable
+surface, and which event names have actually arrived, so you can tell
+"installed but nothing has called `track()` yet" from "instrumented and
+firing." **The only command in this CLI whose job is to print a key.** The
+write key is printed on purpose: it is public by construction (it ships
+inside the browser bundle — see *Sending events from a browser* in the main
+README). The **server key** this CLI authenticates with is never printed,
+here or anywhere else in this CLI's output.
+
+Three requests happen, in order: `GET /v1/project` (the write key — this one
+must succeed, or there is nothing to print), `GET /v1/schema/events` (every
+event name ever recorded for this project, all-time), and
+`GET /v1/events/stats` (those SAME names' counts, windowed by `--since`,
+default `7d`). The last two are informational: a failure in either still
+prints the snippet, with the events section degraded instead — the snippet
+itself needs neither of them.
+
+Captured against a live server (host and write key substituted for a
+worked example; the wording, structure, and the zero-count row below are
+exactly what the command printed):
+
+```sh
+lyraflow snippet --human
+```
+```
+<script>
+  !function(){var l=window.lyraflow=window.lyraflow||{};l.q=l.q||[];
+  ["init","track","page","identify","consent","reset","flush"].forEach(function(m){
+    l[m]=l[m]||function(){l.q.push([m].concat([].slice.call(arguments)))}});
+  }();
+</script>
+<script async src="https://analytics.example.com/lyraflow.js"></script>
+<script>
+  lyraflow.init({ host: "https://analytics.example.com", writeKey: "wk_6a44836f950bf95a96d905884ea605b3" })
+</script>
+
+Event counts since 7d ago (2026-08-02T10:47:09.755Z to 2026-08-09T10:47:09.782Z), every event name ever recorded for this project. A zero count means it fired before this window, not that it is broken:
+  legacy_import  0
+  page_view      1
+  signup         2
+```
+
+```sh
+lyraflow snippet --since 1h --json
+```
+```json
+{"host":"https://analytics.example.com","write_key":"wk_6a44836f950bf95a96d905884ea605b3","methods":["init","track","page","identify","consent","reset","flush"],"events":{"since":"2026-08-09T09:47:09.947Z","until":"2026-08-09T10:47:09.970Z","counts":[{"event_name":"legacy_import","count":0},{"event_name":"page_view","count":1},{"event_name":"signup","count":2}],"truncated":false},"sdk_version":"0.1.0","snippet":"<script>\n  !function(){var l=window.lyraflow=window.lyraflow||{};l.q=l.q||[];\n  [\"init\",\"track\",\"page\",\"identify\",\"consent\",\"reset\",\"flush\"].forEach(function(m){\n    l[m]=l[m]||function(){l.q.push([m].concat([].slice.call(arguments)))}});\n  }();\n</script>\n<script async src=\"https://analytics.example.com/lyraflow.js\"></script>\n<script>\n  lyraflow.init({ host: \"https://analytics.example.com\", writeKey: \"wk_6a44836f950bf95a96d905884ea605b3\" })\n</script>"}
+```
+
+**`schema/events` is all-time; the counts are windowed by `--since`.** An
+event present in the schema list with a `0` count (`legacy_import` above,
+seeded ten days before this ran) fired historically and has since stopped —
+that is the single most useful thing this output can say about
+instrumentation that used to work, so it is shown rather than dropped. This
+holds regardless of `--since`: shortening the window to `1h` above did not
+remove it, and did not change which names appear, only their counts.
+
+**`events` is a union, not always the shape above** — exact-set equality
+only holds within each arm:
+
+- On success: `{"since", "until", "counts", "truncated"}`, as printed above.
+  `truncated: true` means `schema/events` came back at exactly the server's
+  own page-size ceiling (100 rows) — the only available signal that there
+  may be more event names than shown, since that endpoint returns no total
+  count to check against.
+- On failure (`schema/events` or `events/stats` returned an error): `{"error":
+  {"code", "message"}}` instead — with **no `counts` field at all**. The
+  command still exits `0`: see *Exit codes* above for why — the snippet
+  itself (host, write key, methods) needs neither request, so losing it over
+  an events list that merely could not be fetched would be the wrong trade.
+  A consumer that reads `.events.counts` unconditionally gets `undefined` on
+  this successful exit, with nothing on stderr to explain it — check for
+  `.events.error` first.
+
+`methods` is always `["init","track","page","identify","consent","reset","flush"]`
+— the exact list the printed stub's own method array is built from, not a
+second, hand-maintained copy, so it cannot silently drop a method the SDK
+actually exports.
 
 ## `lyraflow --version`
 

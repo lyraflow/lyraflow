@@ -120,6 +120,7 @@ const EXPORT_USER = 'cb-export-user'
 let app: ReturnType<typeof buildApp>
 let HOST: string
 let SERVER_KEY: string
+let WRITE_KEY: string
 let PROJECT_ID: number
 
 interface RunResult {
@@ -250,6 +251,16 @@ beforeAll(async () => {
     throw new Error(`could not find a server key in create-project output:\n${created.stdout}`)
   }
   SERVER_KEY = serverKeyMatch[1]
+
+  // The same output carries the write key `snippet` is meant to print — read
+  // from the CLI's own printed output (create-project.ts), not re-derived
+  // from Postgres, so the `snippet` test below is checking against the
+  // value an operator would actually have seen.
+  const writeKeyMatch = /\b(wk_[0-9a-f]+)\b/.exec(created.stdout)
+  if (!writeKeyMatch?.[1]) {
+    throw new Error(`could not find a write key in create-project output:\n${created.stdout}`)
+  }
+  WRITE_KEY = writeKeyMatch[1]
 
   const projectRow = await pg.query<{ id: string }>('SELECT id FROM projects WHERE slug = $1', [
     PROJECT_NAME,
@@ -461,7 +472,7 @@ describe('the built CLI against a real, in-process server', () => {
     expect(stdout).not.toContain(SERVER_KEY)
   })
 
-  it('never prints a --host taken from argv, in any of the six command groups, on either client failure path', async () => {
+  it('never prints a --host taken from argv, in any of the seven command groups, on either client failure path', async () => {
     // THE COMPOSITION NO TEST ON THIS BRANCH HAD: a sentinel in ARGV *and*
     // a real `Client`. Five separate sentinel sweeps (events.test.ts,
     // stats.test.ts, persons.test.ts, catalog.test.ts ×3) put a sentinel in
@@ -470,7 +481,8 @@ describe('the built CLI against a real, in-process server', () => {
     // that interpolated `#host`, never ran at all. The one suite that drives
     // the real client (this file) only ever put the sentinel in the
     // ENVIRONMENT, where `--host`'s own value never appears. Both halves
-    // passed; the leak sat in the middle, in all six groups:
+    // passed; the leak sat in the middle, in all six groups that existed at
+    // the time:
     //
     //   $ lyraflow stats --host=sk_live_SENTINEL_never_here
     //   {"error":"could not build a request URL from host
@@ -479,6 +491,17 @@ describe('the built CLI against a real, in-process server', () => {
     // `--host` is a raw argv value (`extractOverride`, index.ts): a secret
     // typed one slot off, or an agent templating the wrong variable, lands
     // there as easily as a URL does.
+    //
+    // `snippet` (the seventh group, added with that command) is a
+    // deliberate exception to this sweep's own premise: on its SUCCESS path
+    // it prints `ctx.host` on purpose — that is half of the command's job
+    // (see snippet.ts's own module docstring). It is still safe to enumerate
+    // here because BOTH failure paths below fail before `runSnippet` ever
+    // renders anything at all: `invalid_url` fails building its very first
+    // request (`GET /v1/project`), inside `Client#buildUrl`, and
+    // `no_response` fails sending that same request, inside `Client#request`
+    // — in neither case does execution ever reach the point where a
+    // successful `host` would be printed.
     const secret = 'sk_live_SENTINEL_never_here'
     const groups: string[][] = [
       ['events', '--since', '1h'],
@@ -487,6 +510,7 @@ describe('the built CLI against a real, in-process server', () => {
       ['segments', 'list'],
       ['schema', 'events'],
       ['deletions', 'get', '1'],
+      ['snippet'],
     ]
 
     for (const argv of groups) {
@@ -506,6 +530,30 @@ describe('the built CLI against a real, in-process server', () => {
       expect(JSON.parse(unreachable.stderr.trim()).code).toBe('no_response')
     }
   }, 60_000)
+
+  it('snippet prints the write key, never the server key, with the documented --json field set, against a real server', async () => {
+    // The rule this command exists around, checked at the one layer that
+    // proves it against a REAL project row rather than a fixture this file
+    // invented: the WRITE key (`WRITE_KEY`, read out of `create-project`'s
+    // own output in `beforeAll`) is public by construction and printing it
+    // is this command's entire job, so it must be present; the SERVER key
+    // this CLI authenticates every request with must never appear, on the
+    // one path in this whole CLI that is allowed to print A key at all.
+    const { stdout, code } = await run(['snippet', '--json'])
+    expect(code).toBe(0)
+    const parsed = JSON.parse(stdout.trim())
+
+    // Exact-set equality, not a subset: an accidentally-added field is as
+    // much a contract change here as a removed one, the same standard
+    // snippet.test.ts's own --json tests hold this command to.
+    expect(Object.keys(parsed).sort()).toEqual(
+      ['events', 'host', 'methods', 'sdk_version', 'snippet', 'write_key'].sort(),
+    )
+
+    expect(parsed.write_key).toBe(WRITE_KEY)
+    expect(parsed.snippet).toContain(WRITE_KEY)
+    expect(stdout).not.toContain(SERVER_KEY)
+  })
 
   it('still says which setting to fix when --host is unusable, without repeating what was passed', async () => {
     // Redacting must not cost the diagnostic — the same standard the
