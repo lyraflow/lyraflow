@@ -58,6 +58,21 @@ export interface RetentionStoreOptions {
    * bound this produces together with `RetentionWorker`'s between-project
    * stop check.
    *
+   * A THROW FROM HERE IS NOT SWALLOWED, which is deliberately the opposite
+   * of how `RetentionWorker` treats its own `onError`/`onRun` handlers
+   * (`#invokeHandler` absorbs both a synchronous throw and an async
+   * rejection). This handler runs INSIDE the irreversible loop, so its throw
+   * propagates out of `dropOnePartition` and out of `dropExpired`: every
+   * partition after this one -- including every table after this one -- is
+   * never reached, while the partition just dropped stays dropped. That
+   * asymmetry is the point. The worker's handlers are notifications about
+   * work that has already finished, so silencing them costs nothing; this
+   * one is the only record each drop leaves, so a handler that cannot write
+   * is a reason to stop dropping, not a reason to keep dropping unrecorded.
+   * Proven in store.test.ts against a live database rather than asserted
+   * here. Note the blast radius: a handler that throws on EVERY call halts
+   * that project's sweep after its first partition, on every run.
+   *
    * Optional so every existing construction site and test that does not
    * care about logging keeps compiling unchanged.
    */
@@ -187,11 +202,16 @@ export class RetentionStore {
       return { projectId, table, partition, dropped: false }
     }
 
-    // Compound partition key needs the tuple form -- confirmed against a
-    // live server: `ALTER TABLE t DROP PARTITION 202401` (bare) either
-    // errors or, worse, matches nothing silently for a `(project_id, month)`
-    // key. `query_params` (not string interpolation) keeps both values typed
-    // and keeps a garbage-parsed value from ever becoming raw SQL text.
+    // Compound partition key needs the tuple form. Confirmed against a live
+    // server (24.8): a bare `ALTER TABLE t DROP PARTITION 202401` against a
+    // `(project_id, month)` key ALWAYS errors -- `Code: 248 ... Wrong number
+    // of fields in the partition expression: 1, must be: 2` -- it never
+    // silently matches nothing, so wrong arity is the loud failure of the
+    // two. The SILENT one is right arity with a wrong value:
+    // `tuple(41, 202401)` where the project is 42 returns success and drops
+    // nothing at all. That is why `p` and `m` go through `query_params`
+    // rather than string interpolation -- typed, and never raw SQL text a
+    // garbage-parsed value could reshape.
     await this.#ch.command({
       query: `ALTER TABLE ${table} DROP PARTITION tuple({p:UInt32}, {m:UInt32})`,
       query_params: { p: projectId, m: partition },

@@ -489,6 +489,39 @@ describe('RetentionStore', () => {
     }
   })
 
+  // `onDrop`'s contract said nothing about a throwing handler, and the
+  // answer is the OPPOSITE of `RetentionWorker`'s for its own handlers
+  // (`#invokeHandler` swallows a throw and an async rejection alike). This
+  // pins the difference live rather than leaving it to the new docstring:
+  // the throw propagates, so the sweep stops where it threw and never
+  // reaches `device_index` at all, while the partition already dropped
+  // stays dropped.
+  it('lets a throwing onDrop abort the rest of the project sweep, unlike the worker, which swallows its handlers', async () => {
+    const seen: DropResult[] = []
+    const wired = new RetentionStore({
+      pg,
+      ch,
+      dryRun: false,
+      onDrop: (r) => {
+        seen.push(r)
+        throw new Error('drop logger exploded')
+      },
+    })
+    await seedEventAt(projectA, monthsAgo(14), 'old_evt')
+    expect(await deviceIndexMonths(projectA)).toContain(monthStartAgo(14))
+
+    await expect(
+      wired.dropExpired({ projectId: projectA, retentionMonths: 13 }, NOW),
+    ).rejects.toThrow(/drop logger exploded/)
+
+    // One call, on `events` — RETENTION_TABLES' first table. `device_index`
+    // was never evaluated, which is the cost the docstring now names.
+    expect(seen).toHaveLength(1)
+    expect(seen[0]?.table).toBe('events')
+    expect(await eventNames(projectA)).toEqual([])
+    expect(await deviceIndexMonths(projectA)).toContain(monthStartAgo(14))
+  })
+
   it('never touches another project, even with an identical partition month', async () => {
     await seedEventAt(projectA, monthsAgo(14), 'a_evt')
     await seedEventAt(projectB, monthsAgo(14), 'b_evt')

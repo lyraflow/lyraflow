@@ -1262,12 +1262,20 @@ any segment count or member list — not because they were deleted, but because
 the aggregate row retention just removed was the only thing that put them
 there.
 
-Two environment variables control the worker:
+Two environment variables control the worker, and a third decides whether its
+work leaves any record:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `LYRAFLOW_RETENTION_INTERVAL_MS` | `3600000` (1 hour) | How often the worker looks for expired partitions to drop. Dropping a partition is a metadata operation, and retention is measured in months, so a missed hour costs nothing. |
+| `LYRAFLOW_RETENTION_INTERVAL_MS` | `3600000` (1 hour) | How often the worker looks for expired partitions to drop. Dropping a partition is a metadata operation, and retention is measured in months, so a missed hour costs nothing. Must be a whole number of milliseconds of at least `1`: `0` and negative values fail to boot rather than being silently clamped by `setInterval` into a sweep that runs continuously. |
 | `LYRAFLOW_RETENTION_ENABLED` | `true` | Set to `false` to turn the worker off entirely. Only the lowercase literals `true`/`false` are accepted — `FALSE`, `0`, or any other spelling fails to boot with an error rather than being silently read as `true`, since silently coercing an unrecognised "off" spelling back to "on" would keep deleting data an operator believed they had disabled. |
+| `LYRAFLOW_LOG_LEVEL` | `info` | Not a retention setting, but it governs retention's only audit trail. Every partition dropped is written as one `info` line — `retention dropped partition`, naming the project, table and partition month — and once a partition is gone that line is the only record it ever existed. Run the server at `warn` or above and the drops still happen, with nothing but the counter below to say that anything did. |
+
+Both retention variables, like every other setting the server reads, must go
+in the `environment:` block of the `lyraflow` service in
+`docker-compose.yml` — Compose passes only what that block lists, and a
+variable added to `.env` alone is used for substitution inside the compose
+file and never reaches the server.
 
 **Disabling it means retention is nobody's job unless you make it
 somebody's.** `LYRAFLOW_RETENTION_ENABLED=false` is a legitimate choice for an
@@ -1304,6 +1312,15 @@ Two `/metrics` series exist to alert on:
   actually dropped since process start. A dry run or a run that found
   nothing expired does not advance it.
 
+**A project deleted from Postgres is never pruned again.** The worker builds
+its list of projects to sweep from the Postgres `projects` table, so a
+project row that no longer exists takes its ClickHouse data out of
+retention's reach entirely: those `events` and `device_index` partitions stay
+on disk indefinitely, and neither metric above can report it — the counter
+cannot move for a project the worker cannot see. There is no API for deleting
+a project today; if you remove a row by hand, drop that project's partitions
+in ClickHouse yourself at the same time.
+
 ## Upgrading
 
 ```sh
@@ -1316,10 +1333,41 @@ The `|| docker compose build` covers the period before the first image is
 published; once it is, the pull succeeds and the build never runs.
 
 Migrations run automatically on boot, and accepted events are flushed before
-shutdown, so no events are lost across an upgrade. Identity bindings and
+shutdown, so the restart itself loses no events. Identity bindings and
 aliases live in Postgres and survive the same way; the ClickHouse identity
 dictionaries are rebuilt from that data on every boot, not migrated, so a
 restart never leaves them stale or missing.
+
+**This release is the first one that enforces `retention_months`.** The
+column has existed since the first migration, but nothing ever acted on it:
+until now every project has carried a retention setting that was recorded and
+never applied. From this version a background worker prunes each project
+against the value its own row already holds — starting within an hour of the
+first boot, and irreversibly, since it drops whole ClickHouse partitions (see
+*Operations → Retention* above). Check what your projects are set to before
+you upgrade:
+
+```sh
+docker compose exec postgres psql -U lyraflow -d lyraflow \
+  -c 'SELECT id, slug, retention_months FROM projects ORDER BY id'
+```
+
+The upgrade changes none of those values — the 13-month default applies to
+projects created afterwards, not to existing rows — so what is dropped on
+that first run is whatever each project was already configured with, however
+long ago that was decided. If that is not what you want to happen yet, turn
+the worker off before starting the new version by adding
+
+```yaml
+      LYRAFLOW_RETENTION_ENABLED: "false"
+```
+
+to the `environment:` block of the `lyraflow` service in
+`docker-compose.yml`. It has to go there rather than in `.env`: Compose uses
+`.env` for substitution inside the compose file and passes only the variables
+that block lists, so a `LYRAFLOW_RETENTION_ENABLED` added to `.env` alone
+never reaches the server and retention would run anyway. Nothing is dropped
+for age until you turn it back on.
 
 ## Contributing
 

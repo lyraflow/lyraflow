@@ -93,6 +93,29 @@ describe('loadConfig', () => {
     expect(c.retentionIntervalMs).toBe(60_000)
   })
 
+  // `setInterval` clamps 0 and negatives to 1ms, so either would silently
+  // turn the hourly sweep into a continuous one -- a whole-database
+  // list-and-drop pass with no pause between runs. Refused for the same
+  // reason LYRAFLOW_RETENTION_ENABLED refuses "FALSE": a retention setting
+  // read as something nobody wrote is worse than a boot that stops.
+  it('rejects a retention interval of 0, which setInterval would clamp into a continuous sweep', () => {
+    expect(() =>
+      loadConfig({ ...required, LYRAFLOW_RETENTION_INTERVAL_MS: '0' } as NodeJS.ProcessEnv),
+    ).toThrow(/LYRAFLOW_RETENTION_INTERVAL_MS must be a whole number of milliseconds >= 1/)
+  })
+
+  it('rejects a negative retention interval', () => {
+    expect(() =>
+      loadConfig({ ...required, LYRAFLOW_RETENTION_INTERVAL_MS: '-1000' } as NodeJS.ProcessEnv),
+    ).toThrow(/LYRAFLOW_RETENTION_INTERVAL_MS must be a whole number of milliseconds >= 1/)
+  })
+
+  it('rejects a fractional retention interval', () => {
+    expect(() =>
+      loadConfig({ ...required, LYRAFLOW_RETENTION_INTERVAL_MS: '1500.5' } as NodeJS.ProcessEnv),
+    ).toThrow(/LYRAFLOW_RETENTION_INTERVAL_MS must be a whole number of milliseconds >= 1/)
+  })
+
   it('disables retention when the env var is "false"', () => {
     const c = loadConfig({
       ...required,

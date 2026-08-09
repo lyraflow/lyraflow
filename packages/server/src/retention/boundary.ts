@@ -14,28 +14,39 @@
 /**
  * The first month that must be KEPT. Anything strictly older is a candidate.
  *
- * `months` is assumed to be a positive integer -- the column that supplies it
- * is `CHECK (retention_months BETWEEN 1 AND 120)`, so this function does not
+ * `months` is assumed to be a positive integer, and this function does not
  * re-validate it. A negative value would silently produce a boundary in the
  * *future* -- e.g. `-1` from a `now` of 2026-08-09 yields `2026-09-01`, a
  * perfectly well-formed `202609`. That is the direction that deletes data
  * the policy promised to keep: every existing partition, including the
- * current month, would then compare as older than that boundary. Note that
- * `assertDroppable` does *not* catch this -- it checks that a partition and
- * a boundary are well-formed and correctly ordered relative to each other,
- * not that the boundary was derived correctly in the first place, and a
- * future boundary is exactly as internally consistent as a correct one.
- * What actually catches this failure mode is Task 2's "never drop every
- * partition a project has" guard, which looks at the shape of the result
- * rather than any one pair.
+ * current month, would then compare as older than that boundary. Nothing
+ * downstream of here can catch it: `assertDroppable` checks that a partition
+ * and a boundary are well-formed and correctly ordered relative to each
+ * other, not that the boundary was derived correctly in the first place, and
+ * a future boundary is exactly as internally consistent as a correct one.
  *
- * This function deliberately does not throw on a negative `months` itself:
- * there is no reachable caller today -- the CHECK constraint is the only
- * write path to this value -- and the shape guard covers the catastrophic
- * outcome if that were ever wrong. That stops being true the moment any
- * caller passes a `months` that did not come through the column -- an admin
- * preview, a CLI override -- which must validate before calling this
- * function, or this guard needs to move here.
+ * What keeps a negative `months` out is UPSTREAM, in
+ * `RetentionStore#dropExpired` (store.ts), and it is the only thing that
+ * does. Before it computes a boundary, that method refuses any
+ * `retentionMonths` that is not an integer in `[1, 120]` -- for every value
+ * it accepts, this function subtracts at least one whole month, so a
+ * boundary later than `now` is impossible by construction -- and it refuses
+ * a `now` more than `MAX_CLOCK_SKEW_MS` from the real process clock, which
+ * is the other input that can move this boundary and the one no comparison
+ * against the boundary itself could ever detect.
+ *
+ * There is NO "never drop every partition a project has" shape guard
+ * anywhere in this feature. One existed briefly, was replaced by a
+ * future-boundary assertion, and that in turn was removed in favour of the
+ * clock-skew check (see this file's and store.ts's history). A comment
+ * claiming a safety net that does not exist is worse than no comment at
+ * all: it invites the next author to weaken the check that does exist, on
+ * the belief that something else is still watching.
+ *
+ * So the validation lives with the caller that issues the irreversible act,
+ * and today there is exactly one. Any NEW caller that reaches this function
+ * without going through `dropExpired` -- an admin preview, a CLI override --
+ * must repeat that validation itself, or move it in here.
  */
 export function retentionBoundary(now: Date, months: number): Date {
   // Built from components rather than setMonth on a copy: setMonth on the
@@ -79,6 +90,21 @@ const MAX_PLAUSIBLE_YYYYMM = 210_012 // December 2100
  * and correctly ordered. It cannot detect a boundary that was *derived*
  * incorrectly (see `retentionBoundary`'s docstring for that failure mode and
  * what actually catches it).
+ *
+ * THROWING HERE COSTS MORE THAN THE ONE PARTITION, and that is worth knowing
+ * before reading a log line from it. `dropExpired` walks `RETENTION_TABLES`
+ * in order and `expiredPartitions` returns each table's candidates
+ * oldest-first, so a single out-of-range partition month stops everything
+ * after it: the rest of that table, and -- since `events` is walked before
+ * `device_index` -- the whole of `device_index` too. That project's
+ * retention is then stuck, on this run and on every run after, because the
+ * same partition is listed again every time; the only exit is removing it by
+ * hand. Refusing is still the right call (the alternative is issuing an
+ * irreversible drop on a value nothing here understands), but the blast
+ * radius is a project's entire retention rather than one partition. Not
+ * reachable through ingest -- `clampTimestamp` pins an event's timestamp to
+ * within a day of receipt, so no ingested event can land outside the window
+ * below -- only a direct backfill into ClickHouse can produce one.
  */
 export function assertDroppable(partition: number, boundaryMonth: number, projectId: number): void {
   // `Number.isInteger` rejects NaN, +/-Infinity, and non-whole numbers in one

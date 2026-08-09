@@ -15,17 +15,25 @@
 // drops against whatever ANY project in the shared test database currently
 // has expired. That is only safe because of two facts that are NOT local to
 // this file and must keep holding for every file in the suite: (1) the root
-// vitest config runs with `fileParallelism: false`, so no other test's
-// `beforeAll`/`it` can be mutating ClickHouse concurrently while a sweep
-// here is in flight, and (2) no other test file in the suite seeds an event
-// with a month-shifted (backdated) timestamp the way store.test.ts's and
-// this file's own fixtures do — every other file's fixtures land in the
-// current month, which no `retentionMonths` this codebase accepts (1-120)
-// can ever call expired. If either fact stops holding, a sweep here could
-// silently start dropping another test file's fixture data.
+// vitest config runs with `fileParallelism: false`, so no other test file is
+// executing — and no other file's `beforeAll`/`it` can be mutating
+// ClickHouse — while a sweep here is in flight, and (2) every file that
+// seeds a month-shifted (backdated) event creates those rows in its own
+// `beforeAll` and removes them in its own `afterAll`, so none of them are
+// alive in ClickHouse while this file runs. Three files do that today:
+// store.test.ts, consequences.test.ts and this one. (An earlier version of
+// this comment claimed no OTHER file seeded backdated events at all; that
+// stopped being true when consequences.test.ts landed, and the argument had
+// to be restated on the guarantee that actually holds.) Every other file's
+// fixtures land in the current month, which no `retentionMonths` this
+// codebase accepts (1-120) can ever call expired. If either fact stops
+// holding — a file that leaves backdated rows behind past its own teardown,
+// or parallel files — a sweep here could silently start dropping another
+// test file's fixture data.
 import { join } from 'node:path'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
+import pino from 'pino'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { buildApp } from '../app.js'
 import { hashServerKey } from '../auth/project-cache.js'
@@ -302,6 +310,19 @@ describe('retention wiring (app.ts)', () => {
     const tables = dropLines.map(([fields]) => fields.table)
     expect(tables).toContain('events')
     expect(tables).toContain('device_index')
+
+    // The spy proves the CALL happened, not that the line was EMITTED:
+    // pino's disabled levels are no-op functions, and `vi.spyOn` records a
+    // call against one exactly the same — every assertion above still
+    // passes at `silent`. Since this line is the only record a dropped
+    // partition ever leaves, what matters is the level the app really boots
+    // at (app.ts reads LYRAFLOW_LOG_LEVEL, default `info`) being one that
+    // lets an `info` line through. See the README's *Retention* section:
+    // at `warn` the drops still happen and this line does not.
+    expect(pino.levels.values.info).toBe(30)
+    const configuredLevel = pino.levels.values[app.log.level]
+    expect(configuredLevel).toBeDefined()
+    expect(configuredLevel ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(30)
 
     // ONE partition month, and it is the expired one — not merely "some
     // partition was dropped". A wiring that ignored the project's
