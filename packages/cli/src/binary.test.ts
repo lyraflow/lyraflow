@@ -44,9 +44,19 @@
  * nothing shipped in `bin/lyraflow` touches it.
  */
 
-import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { execFileSync, spawn } from 'node:child_process'
+import {
+  closeSync,
+  existsSync,
+  constants as fsConstants,
+  mkdtempSync,
+  openSync,
+  readSync,
+  rmSync,
+  writeSync,
+} from 'node:fs'
 import { type Server, createServer } from 'node:http'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { type ClickHouseClient, type Pool, createChClient, createPgPool } from '@lyraflow/db'
@@ -1021,6 +1031,160 @@ describe('the built CLI against a real, in-process server', () => {
       expect(warningAt).toBeGreaterThanOrEqual(0)
       expect(cursorAt).toBeGreaterThan(warningAt)
       expect(() => JSON.parse(lines[warningAt] as string)).not.toThrow()
+    } finally {
+      child.kill('SIGKILL')
+      await host.close()
+    }
+  }, 30_000)
+
+  /**
+   * Runs an interrupted `--follow` with stdout AND stderr on the SAME pipe
+   * (`2>&1`), pre-filled by this test so that exactly `tailRoom` bytes are
+   * free in its tail page when the interrupt writes its trailing lines.
+   *
+   * Controlling that number is the whole point, and it cannot be done by
+   * letting the CLI fill the pipe itself: once the record stream has a
+   * backlog Node coalesces it with `writev`, whose partial writes fill the
+   * pipe to exactly full every time, so the interesting remainders never
+   * occur by chance. Pre-filling makes the one variable that decides the
+   * outcome an input.
+   */
+  async function interruptWithTailRoom(tailRoom: number): Promise<string> {
+    const dir = mkdtempSync(join(tmpdir(), 'lyraflow-fifo-'))
+    const fifo = join(dir, 'merged')
+    execFileSync('mkfifo', [fifo])
+    // O_RDWR so opening does not block waiting for the other end.
+    const fd = openSync(fifo, fsConstants.O_RDWR | fsConstants.O_NONBLOCK)
+    try {
+      const page = Buffer.alloc(4096, 0x2e)
+      page[4095] = 0x0a // newline-terminated filler, so lines stay separable
+      for (let i = 0; i < 15; i++) writeSync(fd, page, 0, 4096)
+      writeSync(fd, page, 0, 4096 - tailRoom)
+
+      const host = await hangingAfterFirstPoll(1)
+      const child = spawn(
+        '/bin/sh',
+        [
+          '-c',
+          `exec "$0" "$@" > ${fifo} 2>&1`,
+          process.execPath,
+          CLI_ENTRY,
+          'events',
+          '--follow',
+          '--since',
+          '15m',
+          '--json',
+        ],
+        {
+          env: { ...process.env, LYRAFLOW_HOST: host.url, LYRAFLOW_SERVER_KEY: 'sk_stub' },
+          stdio: ['ignore', 'ignore', 'ignore'],
+        },
+      )
+      const exited = new Promise<void>((resolve) => child.on('exit', () => resolve()))
+      try {
+        await host.pollInFlight
+        child.kill('SIGINT')
+        await exited
+      } finally {
+        child.kill('SIGKILL')
+        await host.close()
+      }
+
+      let drained = ''
+      for (;;) {
+        const buf = Buffer.alloc(65536)
+        let read = 0
+        try {
+          read = readSync(fd, buf, 0, 65536, null)
+        } catch {
+          break // EAGAIN — nothing left
+        }
+        if (read === 0) break
+        drained += buf.subarray(0, read).toString()
+        if (drained.length > 400_000) break
+      }
+      return drained
+    } finally {
+      closeSync(fd)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('never writes the resume cursor without its truncation warning, even on one shared pipe', async () => {
+    // `2>&1` — a documented run shape, what agent harnesses routinely do,
+    // and what the README's own worked example shows. The two lines used to
+    // be two separate `writeSync` calls, which on a congested pipe have
+    // INDEPENDENT fates: POSIX makes a write of at most PIPE_BUF (4096)
+    // bytes to a pipe atomic, so with R bytes of room the 149-byte warning
+    // fails EAGAIN entirely while the 21-byte cursor still fits — and the
+    // survivor is the one that is dangerous alone. A cursor with no warning
+    // says "resume from here" about records that never arrived; `--after`
+    // then skips them permanently, which is the exact failure the flush was
+    // added to prevent.
+    //
+    // Measured with two writes, before the fix, at 40/100/148 bytes of tail
+    // room: BARE CURSOR every time. One write of the two lines together
+    // (170 bytes, still under PIPE_BUF) can only land or fail as a unit.
+    const CURSOR = '{"next_cursor"'
+    const WARNING = 'may not have reached the reader'
+
+    // Room for the cursor alone (21B) but not for both lines (170B) — the
+    // window in which the old code emitted the dangerous half.
+    const tight = await interruptWithTailRoom(100)
+    expect(tight).not.toContain(CURSOR)
+    expect(tight.includes(CURSOR) && !tight.includes(WARNING)).toBe(false)
+
+    // Control: with room for both, both are there — so the assertion above
+    // is about fate-sharing, not about the CLI having stopped reporting.
+    const roomy = await interruptWithTailRoom(400)
+    expect(roomy).toContain(WARNING)
+    expect(roomy).toContain(CURSOR)
+    expect(roomy.indexOf(WARNING)).toBeLessThan(roomy.indexOf(CURSOR))
+  }, 30_000)
+
+  it('writes the resume cursor exactly once when the signal lands during the sleep with a backlog', async () => {
+    // The follow loop's own cancelled-sleep catch writes the cursor, and so
+    // does the interrupt handler — so both fired and stderr carried
+    // `next_cursor` twice, against a documented "one JSON object per line"
+    // contract where a consumer reading "the" cursor now finds two. It is
+    // invisible without a backlog, because with nothing pending the process
+    // exits synchronously inside the signal handler before the loop's catch
+    // ever runs; a slow reader opens exactly that window. `ctx.writeErr` is
+    // now inert from the instant of the signal, so the interrupt's snapshot
+    // is the single authority.
+    const host = await hangingAfterFirstPoll(500)
+    const child = spawn(
+      process.execPath,
+      [CLI_ENTRY, 'events', '--follow', '--since', '15m', '--limit', '500', '--json'],
+      {
+        env: { ...process.env, LYRAFLOW_HOST: host.url, LYRAFLOW_SERVER_KEY: 'sk_stub' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    )
+    let stderr = ''
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString()
+    })
+    const exited = new Promise<{ code: number | null }>((resolve) => {
+      child.on('exit', (code) => resolve({ code }))
+    })
+
+    try {
+      // Deliberately NOT `pollInFlight`: this needs the signal to land while
+      // the loop is in its 2s sleep between polls, which is the only state
+      // in which the loop's own catch can run and duplicate the line.
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      child.kill('SIGINT')
+      const { code } = await exited
+      expect(code).toBe(0)
+
+      const cursorLines = stderr
+        .split('\n')
+        .filter((line) => line.trimStart().startsWith('{"next_cursor"'))
+      expect(cursorLines).toHaveLength(1)
+      expect(JSON.parse(cursorLines[0] as string)).toEqual({
+        next_cursor: 'CURSOR-FROM-FIRST-POLL',
+      })
     } finally {
       child.kill('SIGKILL')
       await host.close()

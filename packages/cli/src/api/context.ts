@@ -64,14 +64,21 @@ export interface CommandContext {
    * (SIGINT/SIGTERM), immediately before it exits — `events --follow`'s
    * only way to write its resume cursor on a `Ctrl-C` or a `docker stop`.
    *
-   * THE HANDLER RUNS SYNCHRONOUSLY, AT EXIT TIME, and the process ends the
-   * moment it returns: it may not await anything, and nothing it schedules
-   * will run. (Exit time is usually the signal handler itself; when stdout
-   * still has records buffered it is instead the moment that backlog
-   * finishes flushing, or a bounded grace expires — see
-   * `wireFollowInterrupt`. Either way the handler's own contract is
-   * unchanged: run, write what you know, return.) That is the whole point.
-   * The previous
+   * THE HANDLER RUNS SYNCHRONOUSLY, THE INSTANT THE SIGNAL ARRIVES, and
+   * whatever it passes to `writeErrNow` is HELD and written as the process
+   * exits — which may be immediately, or after stdout's own backlog has
+   * finished flushing (see `wireFollowInterrupt`). It may not await
+   * anything, and nothing it schedules will run.
+   *
+   * Snapshot-then-write, rather than write-at-exit, for two reasons that
+   * are both correctness rather than style. The loop keeps running during
+   * that flush window, so reading its state at exit time could report a
+   * cursor that has since advanced PAST records this process is about to
+   * stop waiting to deliver; and everything a handler emits is written in a
+   * SINGLE `writeSync` together with any warning that qualifies it, because
+   * separate writes to a congested pipe have independent fates and the
+   * shorter, more dangerous line is the one that wins. That is the whole
+   * point. The previous
    * design cancelled `sleep` instead and let the follow loop unwind through
    * its own catch — which works only when the signal lands during the sleep
    * between polls. A `--follow` session spends the rest of its life inside
@@ -83,10 +90,13 @@ export interface CommandContext {
    * stop` then SIGKILLed the process past its grace period — losing the
    * resume cursor that was the entire point.
    *
-   * `writeErrNow` is a SYNCHRONOUS stderr writer, not `writeErr`: on POSIX
-   * `process.stderr` is asynchronous when it is a pipe, and a queued write
-   * is simply dropped when the process exits underneath it — which is
-   * exactly how this CLI is run by an agent harness.
+   * `writeErrNow` collects into that single synchronous write rather than
+   * being `writeErr`: on POSIX `process.stderr` is asynchronous when it is
+   * a pipe, and a queued write is simply dropped when the process exits
+   * underneath it — which is exactly how this CLI is run by an agent
+   * harness. `ctx.writeErr` also stops working the moment a signal arrives,
+   * deliberately, so a command cannot emit a second, competing copy of what
+   * its handler has already reported.
    *
    * Optional: a caller that cannot be interrupted (a test, `--version`'s
    * placeholder context) supplies nothing, and a command that registers a

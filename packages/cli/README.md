@@ -123,7 +123,13 @@ which includes:
   the command asked for. `code` is `invalid_response_body` or
   `invalid_response_shape`. Usually it means `--host`/`LYRAFLOW_HOST` is
   pointed at something that is not a Lyraflow server: an auth proxy's login
-  page, a load balancer's error JSON, one host off;
+  page, a load balancer's error JSON, one host off. Note the deliberate
+  limit: a command that returns a *list* fails this way when the list is
+  missing, but a command that returns a *single record* (`persons get`,
+  `deletions get`) does not check which fields that record has — an empty
+  `{}` is printed as `{}` and exits `0`. The CLI guarantees that a
+  wrong-shaped body never crashes and never silently becomes an empty
+  result; it does not validate the server's fields for you;
 - for `persons export` specifically, a stream that ended without its
   terminating `{"type":"end",…}` line — the data received is real but
   incomplete, `code` is `export_incomplete`;

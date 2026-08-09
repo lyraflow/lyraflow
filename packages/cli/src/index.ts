@@ -210,15 +210,31 @@ export function abortableSleep(signal: AbortSignal): (ms: number) => Promise<voi
  * is asynchronous on POSIX whenever it is a pipe — which is how an agent
  * harness, `docker compose exec … | tee`, and this repo's own subprocess
  * tests all run this CLI — so a `process.stderr.write` issued immediately
- * before `process.exit` is queued and then dropped. The one line that must
- * survive an interrupt is `--follow`'s resume cursor, so that line goes
- * through here instead.
+ * before `process.exit` is queued and then dropped. The lines that must
+ * survive an interrupt go through here instead.
  *
- * Falls back to the ordinary async write if `writeSync` itself fails (a
- * non-blocking fd can answer `EAGAIN`); a best-effort line beats none, and
- * a stderr that cannot be written at all changes nothing about the exit.
+ * CALL THIS ONCE, WITH EVERYTHING THAT MUST SHARE FATE IN ONE STRING, most
+ * important line FIRST. Two calls are two independent outcomes, and on a
+ * congested pipe the shorter one wins — which is how a review found a
+ * `--follow` interrupt writing its resume cursor while the truncation
+ * warning that invalidates it was lost, under nothing more exotic than
+ * `2>&1`. POSIX makes a write of at most PIPE_BUF (4096) bytes to a pipe
+ * ATOMIC: all of it, or `EAGAIN` on a non-blocking fd — it never writes
+ * part. Measured directly, with 100 bytes of room left in the pipe's tail
+ * page: the 149-byte warning failed `EAGAIN` and the 21-byte cursor
+ * succeeded, alone. One 170-byte write in its place can only succeed or
+ * fail as a unit. Above PIPE_BUF a partial write becomes possible again,
+ * but a partial write is a PREFIX — so "most important first" keeps the
+ * guarantee at any size: a later line can never appear without the earlier
+ * one complete.
+ *
+ * Falls back to the ordinary async write if `writeSync` fails; a
+ * best-effort line beats none, and a stderr that cannot be written at all
+ * changes nothing about the exit. (The fallback is queued, so it is usually
+ * dropped by the exit that follows — it is the last resort, not the plan.)
  */
 function writeErrSync(s: string): void {
+  if (s.length === 0) return
   try {
     writeSync(2, s)
   } catch {
@@ -243,10 +259,10 @@ function writeErrSync(s: string): void {
  */
 const STDOUT_FLUSH_GRACE_MS = 2000
 
-/** Written to stderr, before the resume cursor, when the grace above runs
- * out — so a truncated record stream is never silently reported as a clean
- * exit 0, and a caller knows the cursor on the next line may skip records
- * that never arrived. */
+/** Written to stderr, before the resume cursor and in the SAME write (see
+ * `writeErrSync`), when the grace above runs out — so a truncated record
+ * stream is never silently reported as a clean exit 0, and a caller can
+ * never receive the cursor without the warning that says not to trust it. */
 const STDOUT_TRUNCATED_LINE =
   '{"warning":"interrupted while output was still being written; some records may not have reached the reader, so the next_cursor below may skip them"}'
 
@@ -255,6 +271,12 @@ const STDOUT_TRUNCATED_LINE =
 interface FollowInterrupt {
   signal: AbortSignal
   onInterrupt: (handler: (writeErrNow: (s: string) => void) => void) => void
+  /** True from the instant a signal is received. `main` routes the ordinary
+   * `write`/`writeErr` through this so a command cannot keep writing after
+   * the interrupt has already decided what was delivered — see
+   * `wireFollowInterrupt`'s docstring on why that is a correctness
+   * requirement and not just tidiness. */
+  interrupted: () => boolean
 }
 
 /**
@@ -308,19 +330,60 @@ interface FollowInterrupt {
  * caller knows not to trust the cursor that follows it. This waits on the
  * caller's own reader, never on the server: an in-flight request is still
  * abandoned instantly, which is the whole point of the fix.
+ *
+ * THAT REPORT AND THE CURSOR SHARE ONE WRITE. Issued separately they have
+ * independent fates, and on a congested pipe the shorter one wins: measured
+ * under `2>&1` with a reader 2s behind, the cursor arrived and the warning
+ * did not — reinstating exactly the failure the flush exists to prevent,
+ * because a cursor with no warning is worse than no cursor at all. See
+ * `writeErrSync` for the PIPE_BUF atomicity this rests on.
+ *
+ * HANDLERS ARE RUN AT SIGNAL TIME, AND THEIR OUTPUT IS HELD UNTIL THE EXIT.
+ * Not for tidiness — two reasons, both correctness. (1) The follow loop can
+ * still be running during the grace, and its own cancelled-sleep catch
+ * writes the same cursor, so a caller reading stderr saw `next_cursor`
+ * twice; snapshotting here plus suppressing command-level writes (see
+ * `interrupted`) leaves exactly one authoritative line. (2) If the loop's
+ * in-flight request happens to land during the grace, it would emit new
+ * records and advance `cursor` — and a cursor read at exit time would then
+ * point PAST records this process is about to stop waiting to deliver.
+ * Reading it at signal time pins it to what was actually emitted, and makes
+ * the backlog and no-backlog paths behave identically.
  */
 function wireFollowInterrupt(argv: string[]): FollowInterrupt {
   const controller = new AbortController()
   const handlers: ((writeErrNow: (s: string) => void) => void)[] = []
+  let interrupting = false
 
   if (hasRawFlag(argv, 'follow')) {
     const onSignal = () => {
-      // Belt and braces, and deliberately first: `process.exit` below is
+      // First, and before anything can write again: from here on the
+      // interrupt owns the output. `main`'s `write`/`writeErr` become
+      // no-ops, so the follow loop cannot duplicate the cursor this handler
+      // is about to snapshot, nor append records to a backlog whose size we
+      // have already decided to stop waiting on.
+      interrupting = true
+      // Stops the loop starting any further work. `process.exit` below is
       // what actually ends this process, but if this handler is ever
       // changed to return instead, an aborted signal still makes the follow
       // loop unwind through its own cancelled-sleep catch rather than poll
       // on forever with nobody listening.
       controller.abort()
+
+      // Snapshotted NOW, at the instant of the signal — see the docstring
+      // for the two things that go wrong if this is read at exit time
+      // instead.
+      const pending: string[] = []
+      for (const handler of handlers) {
+        try {
+          handler((s) => {
+            pending.push(s)
+          })
+        } catch {
+          // A handler that throws must not cost the exit, nor the other
+          // handlers' chance to say what they know.
+        }
+      }
 
       let settled = false
       // A holder, not a bare `let`: `finish` is declared before the timer
@@ -331,15 +394,9 @@ function wireFollowInterrupt(argv: string[]): FollowInterrupt {
         if (settled) return
         settled = true
         if (grace.timer !== undefined) clearTimeout(grace.timer)
-        if (!flushed) writeErrSync(`${STDOUT_TRUNCATED_LINE}\n`)
-        for (const handler of handlers) {
-          try {
-            handler(writeErrSync)
-          } catch {
-            // A handler that throws must not cost the exit, nor the other
-            // handlers' chance to write what they know.
-          }
-        }
+        // ONE write, warning first — the two must share fate. See
+        // `writeErrSync`.
+        writeErrSync(`${flushed ? '' : `${STDOUT_TRUNCATED_LINE}\n`}${pending.join('')}`)
         process.exit(0)
       }
 
@@ -372,6 +429,7 @@ function wireFollowInterrupt(argv: string[]): FollowInterrupt {
 
   return {
     signal: controller.signal,
+    interrupted: () => interrupting,
     onInterrupt: (handler) => {
       handlers.push(handler)
     },
@@ -499,10 +557,29 @@ async function main(): Promise<void> {
     case 'schema': {
       const isTty = process.stdout.isTTY ?? false
       const stdinIsTty = process.stdin.isTTY ?? false
+
+      // A holder, because the interrupt is deliberately not wired until
+      // after the host/key check below (wiring it earlier would suppress
+      // Node's default kill for a command that is about to fail anyway),
+      // while these two writers are needed by that very check. Both are
+      // closures called long afterwards, so reading it lazily is enough.
+      const interruptRef: { current?: FollowInterrupt } = {}
+      // Once an interrupt is under way it owns the output: the follow
+      // loop's own cancelled-sleep catch would otherwise write a SECOND
+      // next_cursor line (stderr is documented as one JSON object per line,
+      // and a consumer taking "the" cursor would see two), and an in-flight
+      // poll landing during the flush grace would emit records that are not
+      // going to be waited for. Suppressing both here makes the
+      // backlog and no-backlog paths behave identically — with no backlog
+      // the process has already exited by this point, which is exactly why
+      // the duplicate was invisible until a slow reader created a window.
+      const suppressed = () => interruptRef.current?.interrupted() === true
       const write = (s: string) => {
+        if (suppressed()) return
         process.stdout.write(s)
       }
       const writeErr = (s: string) => {
+        if (suppressed()) return
         process.stderr.write(s)
       }
 
@@ -540,6 +617,7 @@ async function main(): Promise<void> {
       // with no --follow. Passing an empty argv for the other five is how
       // that no-op is reached without a second code path to keep in step.
       const interrupt = wireFollowInterrupt(command === 'events' ? args : [])
+      interruptRef.current = interrupt
 
       const ctx: CommandContext = {
         client: new Client({ host, serverKey }),
