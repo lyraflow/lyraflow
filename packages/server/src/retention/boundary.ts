@@ -96,7 +96,15 @@ const MAX_PLAUSIBLE_YYYYMM = 210_012 // December 2100
  * in order and `expiredPartitions` returns each table's candidates
  * oldest-first, so a single out-of-range partition month stops everything
  * after it: the rest of that table, and -- since `events` is walked before
- * `device_index` -- the whole of `device_index` too. That project's
+ * `device_index` -- the whole of `device_index` too.
+ *
+ * Only the TOO-SMALL direction can do that. A too-large month (say 210101)
+ * is never a candidate in the first place: `expiredPartitions` keeps only
+ * months strictly older than the boundary, so a future-dated partition is
+ * filtered out before this function ever sees it and cannot wedge a sweep.
+ * The window below is two-sided because this guard is also handed the
+ * boundary month, which a caller could get wrong in either direction -- not
+ * because a far-future partition is a jam risk. That project's
  * retention is then stuck, on this run and on every run after, because the
  * same partition is listed again every time; the only exit is removing it by
  * hand. Refusing is still the right call (the alternative is issuing an
