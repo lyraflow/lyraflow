@@ -214,6 +214,17 @@ function snippetParts(
   src: string,
   inline: string[],
 ): { bundle: string; stub: string; initCall: string } {
+  // Ahead of `resolveBundlePath`'s own `new URL(src)`, deliberately: an
+  // empty `src` (the shape a deleted or mis-templated `<script async src=…>`
+  // line produces — `parseSnippet` returns `''` when no such tag matched)
+  // would otherwise reach `new URL('')` and fail with a bare, unhelpful
+  // `TypeError: Invalid URL` — exactly the opaque-throw shape Step 2 of this
+  // command's own task exists to rule out, just one layer up from the
+  // missing-build case `existsSync` below already names.
+  expect(
+    src,
+    'the emitted snippet has no <script src=…> — the bundle-loading tag is missing, so no bundle was ever going to be loaded',
+  ).not.toBe('')
   const bundlePath = resolveBundlePath(src)
   expect(existsSync(bundlePath), `${bundlePath} is missing — run pnpm build first`).toBe(true)
   expect(inline.length, 'the emitted snippet should have two inline scripts').toBe(2)

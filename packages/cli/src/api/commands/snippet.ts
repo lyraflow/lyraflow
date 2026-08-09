@@ -64,7 +64,9 @@
  * dropped. Neither source alone is complete even after the union: an event
  * that has NEVER carried a property AND did not fire within `--since` is
  * invisible to both requests, structurally, and this command has no way to
- * surface it — narrowing `--since` is the only way a caller can find it.
+ * surface it — WIDENING `--since` (never narrowing it) is the only way a
+ * caller can find it: shrinking the window only ever removes names from the
+ * (3) half of the union, it never adds one.
  *
  * (2) and (3) are INFORMATIONAL — the snippet itself (host, write key,
  * methods) needs neither — so a failure in either degrades gracefully

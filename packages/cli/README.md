@@ -558,8 +558,10 @@ inside the window — is shown with its real count, where reporting from
 carry no properties at all, printed "No events recorded yet" about a
 genuinely working install. Neither source is complete even after the union:
 an event that has **never** carried a property and did not fire within
-`--since` is invisible to both requests — narrow `--since` further to find
-it. Both requests are informational: a failure in either still prints the
+`--since` is invisible to both requests — **widen** the window (e.g.
+`--since 30d`) to find it. Narrowing cannot: shrinking `--since` only ever
+removes names from the `events/stats` half of the union, it never adds one.
+Both requests are informational: a failure in either still prints the
 snippet, with the events section degraded instead — the snippet itself needs
 neither of them.
 
@@ -618,7 +620,13 @@ only holds within each arm:
   exactly the server's own page-size ceiling (100 rows). That is the only
   available signal that there may be more all-time, property-bearing names,
   since that endpoint returns no total count to check against. It says
-  nothing about names `events/stats` alone contributed to `counts`.
+  nothing about names `events/stats` alone contributed to `counts`, and
+  **`counts.length` can exceed 100 even when `truncated` is `true`**: the
+  window half of the union adds names the 100-row ceiling never applied to
+  in the first place, so 100 property-bearing names plus any number of
+  property-less, in-window names can both be true at once (verified live: a
+  fixture with 130 property-bearing names and one property-less in-window
+  name produced `truncated: true` alongside `counts.length === 131`).
 - On failure (`schema/events` or `events/stats` returned an error): `{"error":
   {"code", "message"}}` instead — with **no `counts` field at all**. The
   command still exits `0`: see *Exit codes* above for why — the snippet

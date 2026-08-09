@@ -555,6 +555,37 @@ describe('the built CLI against a real, in-process server', () => {
     expect(stdout).not.toContain(SERVER_KEY)
   })
 
+  it('surfaces a property-less event via events/stats when schema/events cannot see it, against real ClickHouse materialized views', async () => {
+    // Ties the union fix to the DATABASE BEHAVIOUR that caused the bug it
+    // fixes, not to a fake `Client`'s promise about that behaviour.
+    // `event_schema` (schema/events' source) is fed by materialized views
+    // keyed on `mapKeys(properties)`/`mapKeys(properties_num)`
+    // (002_events.sql) — an event whose rows carry EMPTY property maps
+    // produces zero rows there, structurally, no matter how many times it
+    // fired. `evRow` (this file's own fixture builder, above) always sets
+    // `properties: {}` and `properties_num: {}` — every fixture in this
+    // suite, including `cb-baseline` (three rows, inserted in `beforeAll`),
+    // is exactly this shape. `snippet.test.ts`'s own union tests assert the
+    // identical claim, but only against a hand-written fake that already
+    // agrees with `mergeEventCounts`' assumptions by construction; nothing
+    // in this repo before this test exercised the real materialized view
+    // that made the claim true in the first place. A future migration that
+    // re-keyed `event_schema_str_mv`/`event_schema_num_mv` — reintroducing
+    // this exact bug, or silently widening what they capture — would pass
+    // every other committed test of this command and fail only here.
+    const { stdout, code } = await run(['snippet', '--json'])
+    expect(code).toBe(0)
+    const parsed = JSON.parse(stdout.trim())
+    const baseline = (parsed.events.counts as { event_name: string; count: number }[]).find(
+      (c) => c.event_name === 'cb-baseline',
+    )
+    expect(
+      baseline,
+      'cb-baseline (property-less in every fixture row) should surface via events/stats even though schema/events has never seen it',
+    ).toBeDefined()
+    expect(baseline?.count).toBe(3)
+  })
+
   it('still says which setting to fix when --host is unusable, without repeating what was passed', async () => {
     // Redacting must not cost the diagnostic — the same standard the
     // `--limit` redaction was held to. The flag and the environment
