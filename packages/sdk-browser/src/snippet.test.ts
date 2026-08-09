@@ -65,10 +65,26 @@ afterEach(async () => {
   while (open.length > 0) await open.pop()?.happyDOM.close()
 })
 
-function newPage(): {
+/** What the fake `fetch` hands back — Response-shaped only as far as the SDK reads it. */
+interface FakeResponse {
+  status: number
+  headers: { get: () => null }
+  json: () => Promise<unknown>
+}
+
+/** The ordinary answer: everything in the batch stored. */
+const allAccepted = (count: number): FakeResponse => ({
+  status: 202,
+  headers: { get: () => null },
+  json: async () => ({ accepted: count, rejected: 0, throttled: 0, over_quota: 0 }),
+})
+
+function newPage(respond: (count: number) => FakeResponse = allAccepted): {
   run: (code: string) => void
   sent: string[]
   api: () => SnippetApi
+  warnings: string[]
+  queued: () => unknown[]
 } {
   const win = new Window({ url: 'https://shop.example.com/checkout' })
   open.push(win)
@@ -79,13 +95,14 @@ function newPage(): {
   const sent: string[] = []
   ;(win as unknown as { fetch: unknown }).fetch = async (_url: string, init: { body: string }) => {
     sent.push(init.body)
-    const count = (JSON.parse(init.body) as { batch: unknown[] }).batch.length
-    return {
-      status: 202,
-      headers: { get: () => null },
-      json: async () => ({ accepted: count, rejected: 0, throttled: 0 }),
-    }
+    return respond((JSON.parse(init.body) as { batch: unknown[] }).batch.length)
   }
+
+  // The SDK's own `warn` writes to `console.warn` and nowhere else, so this is
+  // the only place a developer's feedback about a refused batch can be
+  // observed from outside the bundle — which is exactly the claim under test.
+  const warnings: string[] = []
+  win.console.warn = (...args: unknown[]) => void warnings.push(args.map(String).join(' '))
 
   const run = (code: string) => {
     const el = win.document.createElement('script')
@@ -93,7 +110,23 @@ function newPage(): {
     win.document.head.appendChild(el)
   }
   const api = () => (win as unknown as { lyraflow: SnippetApi }).lyraflow
-  return { run, sent, api }
+  // Read through the storage key, not through an imported EventQueue: the
+  // point of this file is that nothing here shares code with the bundle.
+  const queued = (): unknown[] => {
+    const raw = win.localStorage.getItem('lyraflow_queue')
+    return raw === null ? [] : (JSON.parse(raw) as unknown[])
+  }
+  return { run, sent, api, warnings, queued }
+}
+
+/** Loads the bundle into a fresh page, initialised exactly as the README says. */
+function bootedPage(respond?: (count: number) => FakeResponse) {
+  const { bundle, stub, initCall } = snippetParts()
+  const page = newPage(respond)
+  page.run(stub)
+  page.run(initCall)
+  page.run(bundle)
+  return page
 }
 
 /** The built bundle and the README's two inline blocks, in document order. */
@@ -182,5 +215,68 @@ describe('the README snippet, against the built bundle', () => {
     await api().flush()
 
     expect(delivered(sent)).toEqual(['early_signup', 'after_load'])
+  })
+})
+
+/**
+ * Quota refusals, driven through the built bundle rather than the module.
+ *
+ * transport.test.ts covers both paths against `Transport` directly, which is
+ * the right place for the branch matrix — but it is not what ships. A
+ * refusal handled correctly in `transport.ts` and lost somewhere between
+ * there and `dist/lyraflow.js` (a dead-code elimination that drops a warn, a
+ * `console` the bundle never reaches, a queue write that outlives the drop)
+ * looks identical to a working one from inside the module suite. Plan 6
+ * shipped a snippet that could not initialise the SDK at all through twelve
+ * reviews for exactly this reason.
+ *
+ * The `202` + `over_quota` case comes first because it is the one the server
+ * actually produces: `/v1/batch` never answers `429`.
+ */
+describe('a quota refusal, against the built bundle', () => {
+  it('reports an over-quota 202 to the console and does not keep the events queued', async () => {
+    const { sent, api, warnings, queued } = bootedPage((count) => ({
+      status: 202,
+      headers: { get: () => null },
+      json: async () => ({ accepted: 0, rejected: 0, throttled: 0, over_quota: count }),
+    }))
+
+    api().track('checkout_completed')
+    expect(queued()).toHaveLength(1)
+    await api().flush()
+
+    expect(sent).toHaveLength(1)
+    // The developer is TOLD. Reading only `rejected` left this silent: a 202
+    // whose body says nothing was stored is indistinguishable from a
+    // successful delivery from the page's point of view.
+    expect(warnings.join(' ')).toMatch(/quota/i)
+    // And the queue drains rather than growing for the life of the tab.
+    expect(queued()).toEqual([])
+  })
+
+  it('drops a 429 from something in front of the ingest instead of retrying it forever', async () => {
+    // No `retry-after`, matching what the ingest's single-event routes send.
+    const { api, sent, warnings, queued } = bootedPage(() => ({
+      status: 429,
+      headers: { get: () => null },
+      json: async () => ({ error: 'quota_exceeded' }),
+    }))
+
+    api().track('checkout_completed')
+    await api().flush()
+
+    expect(sent).toHaveLength(1)
+    expect(warnings.join(' ')).toMatch(/quota/i)
+    expect(queued()).toEqual([])
+
+    // No backoff was armed: the very next flush reaches the network. A 429
+    // that fell through to the transport's retry path would instead sit out
+    // an exponential backoff here, having kept the batch — the queue never
+    // draining, every instrumented browser retrying for the rest of the
+    // month.
+    api().track('second_event')
+    await api().flush()
+    expect(sent).toHaveLength(2)
+    expect(queued()).toEqual([])
   })
 })

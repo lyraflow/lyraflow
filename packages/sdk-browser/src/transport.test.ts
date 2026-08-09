@@ -159,6 +159,163 @@ describe('Transport', () => {
     expect(queue.size()).toBe(0)
   })
 
+  // --- Quota refusals ---------------------------------------------------
+  // Two shapes, and only one of them is what the real server sends.
+  //
+  // `/v1/batch` — the only URL this transport ever posts to — never answers
+  // 429. Its contract is a 202 carrying a tally, and a batch entirely over
+  // quota comes back {accepted:0, rejected:0, throttled:0, over_quota:n}.
+  // That is the path covered under "202 body" below.
+  //
+  // The 429 handling is for whatever sits in FRONT of the ingest: a reverse
+  // proxy, a CDN, a gateway with its own rate limiting. It is still worth
+  // having, because an unhandled 429 falls through to #backoff + 'retry' and
+  // then retries the same batch forever, whatever emitted it.
+
+  it('drops a 429 rather than retrying it, and says why', async () => {
+    // A quota refusal is not transient: it holds until the month rolls over,
+    // so a retry cannot succeed. The events are lost either way — the only
+    // question is whether the client also burns the user's battery and the
+    // operator's bandwidth discovering that.
+    const { queue, transport, warn } = make(
+      vi.fn(async () => reply(429)) as unknown as typeof fetch,
+    )
+    queue.add(event('m1'))
+    queue.add(event('m2'))
+    expect(await transport.flush()).toBe('dropped')
+    expect(queue.size()).toBe(0)
+    // Names the condition, not the status code: "rejected with 429" is not
+    // something a developer can act on; "over its monthly event quota" is.
+    expect(warn.mock.calls.join(' ')).toMatch(/quota/i)
+    expect(warn.mock.calls.join(' ')).not.toMatch(/429/)
+  })
+
+  it('does not back off on a 429, because there is nothing to come back to', async () => {
+    // There is no accessor for the next-attempt instant — `#nextAttemptAt` is
+    // a private field and adding a getter would cost bundle bytes for a test.
+    // The observable used instead is the one that matters anyway: whether the
+    // NEXT flush reaches the network at all. If the 429 branch also called
+    // #backoff, this second flush would be short-circuited to 'retry' with no
+    // fetch, exactly as the 503 tests above demonstrate.
+    const fetchImpl = vi.fn(async () => reply(429)) as unknown as typeof fetch
+    const { queue, transport } = make(fetchImpl)
+    queue.add(event('m1'))
+    expect(await transport.flush()).toBe('dropped')
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+
+    queue.add(event('m2'))
+    expect(await transport.flush()).toBe('dropped')
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+  })
+
+  it('warns when a 202 body says events were over quota, and still drains them', async () => {
+    // THE path the real server produces. Before this, #reportBody read only
+    // `rejected`: an entirely-refused batch came back 202, every event was
+    // removed from the queue, and the developer was told nothing whatsoever —
+    // the identical failure the `rejected` handling was added to fix, one
+    // field over.
+    const body = JSON.stringify({ accepted: 0, rejected: 0, throttled: 0, over_quota: 2 })
+    const { queue, transport, warn } = make(
+      vi.fn(async () => new Response(body, { status: 202 })) as unknown as typeof fetch,
+    )
+    queue.add(event('m1'))
+    queue.add(event('m2'))
+    expect(await transport.flush()).toBe('sent')
+    expect(warn.mock.calls.join(' ')).toMatch(/quota/i)
+    // The count, so a developer can tell "2 of 20" from "20 of 20".
+    expect(warn.mock.calls.join(' ')).toContain('2 event(s)')
+    // Still removed: next month is not a retry window this queue can wait
+    // out, and holding them would wedge every healthy event behind them.
+    expect(queue.size()).toBe(0)
+  })
+
+  it('says nothing when a 202 reports over_quota: 0', async () => {
+    // The field is ALWAYS present, even at zero (routes.ts sends a stable
+    // shape on purpose). A presence check rather than a `> 0` check would
+    // therefore warn about the quota on every single successful flush.
+    const body = JSON.stringify({ accepted: 1, rejected: 0, throttled: 0, over_quota: 0 })
+    const { queue, transport, warn } = make(
+      vi.fn(async () => new Response(body, { status: 202 })) as unknown as typeof fetch,
+    )
+    queue.add(event('m1'))
+    expect(await transport.flush()).toBe('sent')
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('reports both halves of a partly-rejected, partly-over-quota batch', async () => {
+    // Invented beyond the brief: a batch can carry malformed events AND cross
+    // the quota, and the two are counted separately by the ingest for exactly
+    // the reason they must be reported separately here — one is the sender's
+    // bug to fix, the other is their operator's limit to raise. An
+    // if/else-if, or an early return after the first warn, reports one and
+    // silently loses the other.
+    const body = JSON.stringify({ accepted: 0, rejected: 1, throttled: 0, over_quota: 1 })
+    const { queue, transport, warn } = make(
+      vi.fn(async () => new Response(body, { status: 202 })) as unknown as typeof fetch,
+    )
+    queue.add(event('m1'))
+    queue.add(event('m2'))
+    expect(await transport.flush()).toBe('sent')
+    expect(warn).toHaveBeenCalledTimes(2)
+    expect(warn.mock.calls.join(' ')).toContain('rejected 1')
+    expect(warn.mock.calls.join(' ')).toMatch(/quota/i)
+    expect(queue.size()).toBe(0)
+  })
+
+  it('ignores a non-numeric over_quota instead of warning about it', async () => {
+    // Invented beyond the brief: the body comes off the network, so a proxy
+    // injecting a string, or an older server that predates the field, must
+    // not produce a scary quota warning on a perfectly delivered batch.
+    // `typeof === 'number'` holds this; a truthiness check does not.
+    const body = JSON.stringify({ accepted: 1, rejected: 0, throttled: 0, over_quota: 'lots' })
+    const { queue, transport, warn } = make(
+      vi.fn(async () => new Response(body, { status: 202 })) as unknown as typeof fetch,
+    )
+    queue.add(event('m1'))
+    expect(await transport.flush()).toBe('sent')
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('still counts a 202 with over_quota as a full success and clears the backoff', async () => {
+    // Invented beyond the brief: `over_quota` is REPORTED, never acted on as
+    // a failure. An implementation that returned 'dropped' or entered a
+    // backoff here would stop the next healthy flush — the events already
+    // left the queue, and next month's traffic has to keep flowing.
+    const overQuota = JSON.stringify({ accepted: 0, rejected: 0, throttled: 0, over_quota: 1 })
+    let first = true
+    const fetchImpl = vi.fn(async () => {
+      if (first) {
+        first = false
+        return new Response(overQuota, { status: 202 })
+      }
+      return reply(202)
+    }) as unknown as typeof fetch
+    const { queue, transport } = make(fetchImpl)
+    queue.add(event('m1'))
+    expect(await transport.flush()).toBe('sent')
+
+    queue.add(event('m2'))
+    expect(await transport.flush()).toBe('sent')
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+  })
+
+  it('never rejects when warn throws on the over_quota report', async () => {
+    // Invented beyond the brief: #reportBody now calls warn twice, and the
+    // host-supplied callback can throw. A throwing warn must not turn a
+    // delivered batch into a failure — this read is a feedback channel, not
+    // part of the contract.
+    const body = JSON.stringify({ accepted: 0, rejected: 0, throttled: 0, over_quota: 1 })
+    const { queue, transport } = make(
+      vi.fn(async () => new Response(body, { status: 202 })) as unknown as typeof fetch,
+      vi.fn(() => {
+        throw new Error('warn blew up')
+      }),
+    )
+    queue.add(event('m1'))
+    await expect(transport.flush()).resolves.toBe('sent')
+    expect(queue.size()).toBe(0)
+  })
+
   it('drops a batch it cannot serialise instead of retrying it forever', async () => {
     // A poison pill. An event whose property getter throws also throws inside
     // JSON.stringify — and because that call sits in the same try as the fetch,

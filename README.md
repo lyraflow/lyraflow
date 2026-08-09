@@ -180,16 +180,14 @@ within 24 hours of server time.
   as bot traffic**, deliberately: a tracking endpoint that returns an error
   breaks the customer's site. Malformed events are recorded in the
   `events_dead_letter` table with the reason; bot traffic is simply counted and
-  discarded. `/metrics` reports the accepted/rejected/throttled totals, so a
-  `202` that stored nothing is still visible there.
+  discarded. `/metrics` reports the accepted, rejected, throttled and
+  over-quota totals, so a `202` that stored nothing is still visible there.
 - `401` — missing or unknown write key.
 - `429` with `{"error":"quota_exceeded"}` — the project has used its monthly
   event quota. **No `retry-after`, deliberately**: unlike a `503`, this does not
   clear on its own shortly. It holds until the month rolls over or an operator
-  raises the limit, so retrying is pointless. Projects have no quota unless an
-  operator sets one (`projects.monthly_event_quota`; `NULL` means unlimited),
-  and only *accepted* events count toward it — malformed or throttled events
-  never do.
+  raises the limit, so retrying is pointless. No project has a quota until an
+  operator sets one; see *Quotas* under Operations.
 - `503` with `retry-after: 5` — the server is saturated or shutting down. Retry.
 - `400` / `413` — malformed JSON, or a body over 1 MiB. Retrying will not help.
 
@@ -199,13 +197,8 @@ the buffer saturates part-way through, with the counts describing how far it
 got; retry the whole batch. It never returns `429`: a batch answers `202` with
 `over_quota` counting the events refused, because its contract is a body
 carrying the tally rather than a wholesale failure over one event. Those events
-are not worth retrying either.
-
-A quota is enforced within a bounded lag, not to the exact event. Each server
-process holds its recent counts in memory and folds them into Postgres
-periodically, so a project can overshoot its quota by roughly one flush
-interval of its own traffic (more if several server processes are running)
-before refusals begin.
+are not worth retrying either. **Read `over_quota` even when the status is
+`202`** — for a batch, it is the only signal that events were refused.
 
 ### Retries
 
@@ -1337,6 +1330,79 @@ on disk indefinitely, and neither metric above can report it — the counter
 cannot move for a project the worker cannot see. There is no API for deleting
 a project today; if you remove a row by hand, drop that project's partitions
 in ClickHouse yourself at the same time.
+
+### Quotas
+
+**A quota is off by default, and no project has one until you set it.** The
+`projects.monthly_event_quota` column is nullable, `NULL` means unlimited, and
+`NULL` is what every project carries — both a new one and every existing one,
+which the upgrade rewrote on purpose rather than starting to enforce a limit
+nobody had opted into. There is no API or CLI for setting a quota yet; today
+it is a direct update:
+
+```sql
+-- 5,000,000 accepted events per calendar month for one project.
+UPDATE projects SET monthly_event_quota = 5000000 WHERE slug = 'acme';
+
+-- Back to unlimited.
+UPDATE projects SET monthly_event_quota = NULL WHERE slug = 'acme';
+```
+
+The value must be positive (a check constraint enforces it); use `NULL`, not
+`0`, to mean unlimited. The month is the **UTC calendar month**, so the budget
+resets at `00:00 UTC` on the 1st, not on a rolling 30-day window and not in
+the server's local timezone.
+
+**A change takes up to a minute to take effect.** Each server process caches
+the project row — quota included — for 60 seconds against the write key it
+arrived with, so events can still be refused for about that long after you
+raise a limit, and for about that long after you lower one they will still be
+accepted. Nothing needs restarting; wait it out.
+
+**Only *accepted* events count toward a quota.** Malformed events, events
+refused by the cardinality limits, bot traffic, and events dropped when the
+buffer saturates all leave it untouched. That is deliberate and it is a
+security property, not a convenience: if rejected traffic consumed the budget,
+anyone holding the write key — which ships in the browser bundle — could
+exhaust a project's month with nonsense payloads without a byte ever being
+stored.
+
+**Enforcement is a bound with known slack, not an exact cliff.** Each server
+process keeps its recent counts in memory, folds them into Postgres every 10
+seconds, and caches the persisted total for 5 seconds, so the figure the check
+acts on can trail reality by roughly those two intervals of that project's own
+traffic — about 15 seconds' worth. A project can therefore overshoot its quota
+before refusals begin: against a quota of 10, 15 events being accepted is
+normal and expected, not a bug. Neither interval is configurable. Running
+several server processes widens the same window by roughly a factor of the
+process count, because each holds its own pending tally and its own cache.
+Set a quota you can afford to exceed by a few seconds of peak traffic.
+
+Once a project is over, `/v1/track`, `/v1/identify` and `/v1/page` answer
+`429 {"error":"quota_exceeded"}` with no `retry-after`, and `/v1/batch` answers
+`202` with the refused events counted in `over_quota` (see *Responses*). The
+browser SDK handles both by **dropping** the events and warning on the console
+rather than retrying — a quota refusal does not clear on its own, so retrying
+it would keep every instrumented browser hammering the server for the rest of
+the month while the client-side queue grew for the life of the tab.
+
+The metric to watch is
+`lyraflow_ingest_events_total{outcome="over_quota"}` on `/metrics`. It is a
+process-lifetime counter of individual events refused, and it is the only
+place a refusal is visible server-side — over-quota events are deliberately
+*not* written to `events_dead_letter`, which records data that could not be
+parsed rather than valid data refused by policy. There is nothing that warns
+you as a project approaches its limit, and no command that reports current
+consumption; until there is, alert on this counter leaving zero, and read
+`ingest_counters` in Postgres for the month's totals.
+
+**If Postgres is unreachable, the quota is not enforced from persisted state.**
+The usage read falls back to the last known figure for the current month, or
+to zero, leaving only the process's own in-memory tally counting against the
+limit — a database blip must not turn into a project-wide refusal of events
+that were well inside their budget. The server logs `quota usage read failed`
+once per project per cache TTL while that lasts, which is the only signal that
+enforcement has degraded.
 
 ## Upgrading
 
