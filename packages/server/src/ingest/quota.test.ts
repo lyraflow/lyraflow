@@ -50,4 +50,25 @@ describe('isOverQuota', () => {
     // compiler, catches it.
     expect(() => isOverQuota(0, 0, undefined as unknown as number)).toThrow(/quota/i)
   })
+
+  it('refuses a persisted count that is not finite and non-negative, rather than failing open', () => {
+    // `Number(row?.count)` on a Postgres read for a project's first event of
+    // a month -- before any counter row exists -- yields exactly NaN.
+    // `NaN >= quota` is false, so an unguarded function would silently
+    // report "not over quota": the fail-open direction this file exists to
+    // prevent, for every project until its counters are first flushed.
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -1, -100]) {
+      expect(() => isOverQuota(bad, 0, 100)).toThrow(/quota/i)
+    }
+    // Zero remains legal: it is the ordinary state of a project that has
+    // accepted nothing yet, not a malformed read.
+    expect(isOverQuota(0, 0, 100)).toBe(false)
+  })
+
+  it('refuses a pending count that is not finite and non-negative, rather than failing open', () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -1, -100]) {
+      expect(() => isOverQuota(0, bad, 100)).toThrow(/quota/i)
+    }
+    expect(isOverQuota(0, 0, 100)).toBe(false)
+  })
 })
