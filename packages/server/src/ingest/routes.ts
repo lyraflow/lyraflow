@@ -272,11 +272,18 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
    * queries are most expensive, driven by a public browser-shipped write key
    * against a `max: 10` pool — a positive feedback loop during an outage.
    *
-   * Honoured for the same TTL as a successful read, and cleared by the next
-   * success. This is the bound ProjectCache gets from its separate negative
-   * map and NEGATIVE_TTL_MS; the shape differs (nothing here is
-   * attacker-keyed — an unknown write key is answered 401 long before this
-   * code runs) but the obligation is the same.
+   * Honoured for the same TTL as a successful read. This is the bound
+   * ProjectCache gets from its separate negative map and NEGATIVE_TTL_MS;
+   * the shape differs (nothing here is attacker-keyed — an unknown write key
+   * is answered 401 long before this code runs) but the obligation is the
+   * same.
+   *
+   * The delete on the success path only keeps this map from holding an entry
+   * per project forever; it is NOT load-bearing, and no test can catch its
+   * removal. A stale marker ages past one TTL and never blocks a read again,
+   * so leaving it merely wastes a map slot. Said plainly because the
+   * alternative — "cleared by the next success", which is true — reads like
+   * a guarantee something depends on.
    */
   const usageFailedAt = new Map<number, number>()
 

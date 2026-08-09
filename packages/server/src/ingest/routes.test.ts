@@ -1004,6 +1004,7 @@ describe('ingest quota enforcement', () => {
     // route. Asserting on the decision rather than only on the query count
     // catches all three: a frozen or never-expiring figure still reads 0
     // here, and still answers 202.
+    await quotaApp.close() // the beforeEach app; this test needs its own wiring
     quotaApp = buildQuotaApp({ quotaUsageTtlMs: 20 })
     await quotaApp.ready()
     await setQuota(5)
@@ -1046,6 +1047,133 @@ describe('ingest quota enforcement', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('keeps refusing an over-quota project on the LAST KNOWN figure once the read starts failing', async () => {
+    // Every other failure test here drives a pool that is permanently
+    // healthy or permanently failing, so the fallback expression is only
+    // ever evaluated against an EMPTY cache -- where "last known figure" and
+    // "zero" are the same answer. This one crosses from healthy to failing
+    // with a figure already cached, which is the only state that tells them
+    // apart.
+    //
+    // Turning that fallback into a bare 0 admits a project already past its
+    // limit for the whole outage: fail-open is the right direction for a
+    // project nothing is known about, not a licence to forget what was
+    // known a moment ago.
+    let failing = false
+    let attempts = 0
+    const flakyPg = {
+      query: (text: string, values?: unknown[]) => {
+        if (text.includes('FROM ingest_counters')) {
+          attempts++
+          if (failing) return Promise.reject(new Error('ECONNREFUSED'))
+        }
+        return pg.query(text, values)
+      },
+    } as unknown as Pool
+
+    await quotaApp.close() // the beforeEach app; this test needs its own wiring
+    quotaApp = buildQuotaApp({ counters: new IngestCounters(flakyPg), quotaUsageTtlMs: 20 })
+    await quotaApp.ready()
+    await seedCounterRow(pg, projectId, monthStart(0), { accepted: 5 })
+    await setQuota(5)
+
+    // Healthy: the project is at its limit and refused.
+    expect((await post('/v1/track', validEvent())).statusCode).toBe(429)
+    expect(attempts).toBe(1)
+
+    failing = true
+    await new Promise((r) => setTimeout(r, 40))
+
+    // The read is attempted and throws: the catch must fall back to the last
+    // known figure for this month, not to zero.
+    expect((await post('/v1/track', validEvent())).statusCode).toBe(429)
+    expect(attempts).toBe(2)
+
+    // And the negative entry must serve that same figure without a read --
+    // the second, separately-mutable copy of the fallback.
+    expect((await post('/v1/track', validEvent())).statusCode).toBe(429)
+    expect(attempts).toBe(2)
+  })
+
+  it('falls back to zero, not to last month, when the read fails across a month boundary', async () => {
+    // The failure path's own copy of the month check. During an outage
+    // spanning a month boundary, a fallback that ignores the entry's month
+    // keeps refusing a project into a month it has spent nothing of -- the
+    // fail-CLOSED direction, reached through the failure path rather than
+    // through the freshness check M11 covers.
+    let failing = false
+    let attempts = 0
+    const flakyPg = {
+      query: (text: string, values?: unknown[]) => {
+        if (text.includes('FROM ingest_counters')) {
+          attempts++
+          if (failing) return Promise.reject(new Error('ECONNREFUSED'))
+        }
+        return pg.query(text, values)
+      },
+    } as unknown as Pool
+
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(new Date(Date.UTC(2026, 0, 31, 23, 59, 59, 900)))
+      await quotaApp.close() // the beforeEach app; this test needs its own wiring
+      quotaApp = buildQuotaApp({ counters: new IngestCounters(flakyPg) })
+      await quotaApp.ready()
+      await seedCounterRow(pg, projectId, monthStart(0), { accepted: 5 })
+      await setQuota(5)
+
+      expect((await post('/v1/track', validEvent())).statusCode).toBe(429)
+      expect(attempts).toBe(1)
+
+      // Postgres goes away, and the month rolls over while it is away.
+      failing = true
+      vi.setSystemTime(new Date(Date.UTC(2026, 1, 1, 0, 0, 0, 100)))
+
+      // February is unknown, not spent. Zero is the honest fallback; last
+      // month's figure is not.
+      expect((await post('/v1/track', validEvent())).statusCode).toBe(202)
+      expect(attempts).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("never lets one project's FAILING read suppress another project's", async () => {
+    // The negative map needs its own cross-project test: keying only
+    // usageFailedAt by a constant, with usage and usageInflight left
+    // per-project, passes every other test in this block. The consequence is
+    // a quota bypass on one tenant triggered by an unrelated tenant's
+    // outage -- A's failure suppresses B's perfectly healthy read for a
+    // whole TTL, and B is answered from an empty fallback.
+    let attempts = 0
+    const perProjectPg = {
+      query: (text: string, values?: unknown[]) => {
+        if (text.includes('FROM ingest_counters')) {
+          attempts++
+          // Only project A's usage read fails. B's Postgres is fine.
+          if (Number(values?.[0]) === projectId) {
+            return Promise.reject(new Error('ECONNREFUSED'))
+          }
+        }
+        return pg.query(text, values)
+      },
+    } as unknown as Pool
+
+    await quotaApp.close() // the beforeEach app; this test needs its own wiring
+    quotaApp = buildQuotaApp({ counters: new IngestCounters(perProjectPg) })
+    await quotaApp.ready()
+    await seedCounterRow(pg, projectIdB, monthStart(0), { accepted: 5 })
+    await setQuota(5)
+    await setQuota(5, projectIdB)
+
+    // A's read fails, so A fails open.
+    expect((await post('/v1/track', validEvent())).statusCode).toBe(202)
+    // B is at its limit and its own read works. A's failure must not answer
+    // for it.
+    expect((await post('/v1/track', validEvent(), WRITE_KEY_B)).statusCode).toBe(429)
+    expect(attempts).toBe(2)
   })
 
   it("never lets one project's usage decide another project's quota", async () => {
