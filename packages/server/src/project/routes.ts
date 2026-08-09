@@ -57,6 +57,14 @@ export function registerProjectRoutes(app: FastifyInstance, deps: ProjectDeps): 
       [project.id],
     )
     const row = res.rows[0]
+    // This response varies entirely on the `x-lyraflow-server-key` header,
+    // which the response carries no `Vary` for, and it is the first route in
+    // this codebase whose 200 body is a credential (the write key). A shared
+    // cache keying on URL alone -- ignoring the auth header -- could serve
+    // one project's write key back out to a different caller. See
+    // privacy/export.ts's identical `no-store` for the same reasoning
+    // applied to a subject-access response.
+    reply.header('cache-control', 'no-store')
     if (!row) return reply.code(404).send({ error: 'project_not_found' })
 
     return reply.code(200).send({
