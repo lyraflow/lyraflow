@@ -37,19 +37,34 @@
  *   1. `GET /v1/project` — the project's `name`/`slug`/`write_key`. Must
  *      succeed for this command to do anything at all — there is no
  *      snippet without a write key.
- *   2. `GET /v1/schema/events` — every event name this project has
- *      recorded, up to the server's own page-size ceiling
- *      (`SCHEMA_MAX_LIMIT`). NOT time-windowed — `event_schema` carries no
- *      `count`, so this is the only way to learn an event fired at all,
- *      including one that stopped arriving before `--since`.
- *   3. `GET /v1/events/stats?group_by=event_name` — the SAME event names'
- *      counts, but WINDOWED by `--since` (default `7d`, an absolute instant
- *      resolved once up front — see `resolveInstant`, args.ts). An event
- *      present in (2) with a zero count from (3) is meaningful, not a
- *      display bug: it fired historically and has since stopped, which is
- *      arguably the single most useful thing this output can say about
- *      instrumentation that used to work. Dropping a zero-count row would
- *      silently erase exactly that signal.
+ *   2. `GET /v1/schema/events` — every event name this project has EVER
+ *      carried at least one PROPERTY on, up to the server's own page-size
+ *      ceiling (`SCHEMA_MAX_LIMIT`). NOT time-windowed, but also NOT
+ *      complete on its own: `event_schema` is fed by a materialized view
+ *      keyed on `mapKeys(properties)`/`mapKeys(properties_num)`
+ *      (002_events.sql), so an event that has NEVER carried a property
+ *      produces ZERO rows here no matter how many times it fired.
+ *      `lyraflow.track('signup')` with no second argument — the single most
+ *      common first call anyone makes — is exactly this case.
+ *   3. `GET /v1/events/stats?group_by=event_name` — counts for event names,
+ *      WINDOWED by `--since` (default `7d`, an absolute instant resolved
+ *      once up front — see `resolveInstant`, args.ts). Unlike (2), this
+ *      aggregates the raw `events` table directly, so it sees a
+ *      property-less event fine, as long as it fired inside the window.
+ *
+ * `mergeEventCounts` below takes the UNION of the two name lists, not just
+ * (2)'s — an early version of this command used (2) alone, and on a project
+ * whose events genuinely carry no properties (the ordinary case for a
+ * `track()` call with no second argument) that made a working install
+ * report "No events recorded yet." A name present only in (3) is a real,
+ * currently-firing event; a name present in (2) with a zero count from (3)
+ * is meaningful in the other direction — it fired historically and has
+ * since stopped, arguably the single most useful thing this output can say
+ * about instrumentation that used to work — so that row is kept rather than
+ * dropped. Neither source alone is complete even after the union: an event
+ * that has NEVER carried a property AND did not fire within `--since` is
+ * invisible to both requests, structurally, and this command has no way to
+ * surface it — narrowing `--since` is the only way a caller can find it.
  *
  * (2) and (3) are INFORMATIONAL — the snippet itself (host, write key,
  * methods) needs neither — so a failure in either degrades gracefully
@@ -121,13 +136,22 @@ interface EventCount {
 }
 
 /**
- * The `events` field's shape on the success path. `truncated` is `true`
- * exactly when `schema/events` came back with `SCHEMA_MAX_LIMIT` rows — the
- * ONLY signal available for "there may be more": the endpoint returns no
+ * The `events` field's shape on the success path. `counts` is the UNION of
+ * `schema/events`' names and `events/stats`' names — see the module
+ * docstring — not `schema/events`' own list alone, so it can include a name
+ * that has never carried a property, as long as it fired within the window.
+ *
+ * `truncated` is `true` exactly when `schema/events` — only that request;
+ * `events/stats` has its own, separate ceiling (`STATS_MAX_BUCKETS`,
+ * events/routes.ts) unrelated to this field — came back with
+ * `SCHEMA_MAX_LIMIT` rows. That is the ONLY signal available for "there may
+ * be more (all-time, property-bearing) names": the endpoint returns no
  * total count, so a full page is the sole evidence a list was cut rather
- * than complete. Present in BOTH modes (not just human text) so a caller
- * parsing `--json` can detect it programmatically instead of trusting the
- * human sentence to have been read.
+ * than complete. It says nothing about names added to `counts` by the
+ * `events/stats` half of the union, which is not paginated the same way.
+ * Present in BOTH modes (not just human text) so a caller parsing `--json`
+ * can detect it programmatically instead of trusting the human sentence to
+ * have been read.
  */
 interface EventsSectionOk {
   since: string
@@ -279,11 +303,25 @@ function buildSnippet(originHost: string, writeKey: string): string {
 
 /**
  * Sums `stats`' per-bucket counts down to one total per event name, then
- * pairs every name from `schema` (the all-time list) with that total —
- * `0` when the name never appears in `stats` at all, which is exactly the
- * "fired historically, stopped since `--since`" case this command exists
- * to surface. Order follows `schema`'s own (alphabetical — see
- * schema/routes.ts's `ORDER BY event_name ASC`), not `stats`'.
+ * pairs the UNION of `schema`'s names and `stats`' names with that total —
+ * see the module docstring for why the union, not `schema`'s list alone,
+ * is required: `schema/events` structurally cannot see an event that has
+ * never carried a property, no matter how many times it fired, and a
+ * `track()` call with no second argument is exactly that case.
+ *
+ * A name present in `schema` but absent from `totals` gets `0` — it fired
+ * historically and has since stopped, which is exactly the "fired
+ * historically, stopped since `--since`" case this command exists to
+ * surface. A name present only in `totals` (never in `schema`, because it
+ * has never carried a property) gets its real windowed count, which is
+ * never `0` here: `events/stats` only ever returns a bucket for a name that
+ * genuinely occurred.
+ *
+ * Sorted alphabetically rather than following either source's own order
+ * (`schema`'s own rows already arrive that way — see schema/routes.ts's
+ * `ORDER BY event_name ASC` — but a name added by the `stats` half of the
+ * union has no such guarantee), so the combined list has one deterministic
+ * order regardless of which source contributed a given name.
  */
 function mergeEventCounts(schema: SchemaEventsResponse, stats: StatsResponse): EventCount[] {
   const totals = new Map<string, number>()
@@ -291,9 +329,11 @@ function mergeEventCounts(schema: SchemaEventsResponse, stats: StatsResponse): E
     if (bucket.event_name === undefined) continue
     totals.set(bucket.event_name, (totals.get(bucket.event_name) ?? 0) + bucket.events)
   }
-  return schema.events.map((e) => ({
-    event_name: e.event_name,
-    count: totals.get(e.event_name) ?? 0,
+  const names = new Set(schema.events.map((e) => e.event_name))
+  for (const name of totals.keys()) names.add(name)
+  return [...names].sort().map((event_name) => ({
+    event_name,
+    count: totals.get(event_name) ?? 0,
   }))
 }
 
@@ -373,13 +413,16 @@ function renderHuman(snippet: string, events: EventsSection, sinceRaw: string): 
     // `truncated` is a HEURISTIC ("the list came back exactly at the page
     // ceiling"), not a fact from the server — which returns no total count
     // to check against. A project with EXACTLY SCHEMA_MAX_LIMIT distinct
-    // names would trip this heuristic despite the list already being
-    // complete, so the sentence hedges ("may have") rather than asserting
-    // more names exist, the same over-claim this whole field was added to
-    // stop making.
+    // property-bearing names would trip this heuristic despite the list
+    // already being complete, so the sentence hedges ("may have") rather
+    // than asserting more names exist, the same over-claim this whole field
+    // was added to stop making. It only qualifies the property-bearing,
+    // all-time half of the list (`schema/events`' own ceiling) — the
+    // window-only half added by the union below has no ceiling of its own
+    // here, only `events/stats`' separate bucket limit.
     const completeness = events.truncated
-      ? `showing the first ${SCHEMA_MAX_LIMIT} event names on record — this project may have more than that`
-      : 'every event name ever recorded for this project'
+      ? `showing the first ${SCHEMA_MAX_LIMIT} all-time, property-bearing event names, plus every other name that fired in this window — this project may have more than that`
+      : 'every event name that fired in this window, plus every all-time name that has ever carried a property (an all-time, property-less name that fired outside this window will not appear)'
     lines.push(
       `Event counts since ${sinceRaw} ago (${events.since} to ${events.until}), ${completeness}. A zero count means it fired before this window, not that it is broken:`,
     )

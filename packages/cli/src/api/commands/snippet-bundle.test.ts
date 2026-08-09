@@ -27,8 +27,19 @@ import { runSnippet } from './snippet.js'
  * output, so a change to `buildSnippet` (snippet.ts) that breaks the
  * template — while leaving the README's hand-written copy untouched — fails
  * here and nowhere else.
+ *
+ * Two things a first pass at this file left resting on a review's word
+ * rather than the harness's own construction, closed here: the bundle read
+ * off disk is resolved from the snippet's OWN parsed `src` (see
+ * `resolveBundlePath`), not a path hardcoded independently of it, so a
+ * mutation that repoints `src` is caught by what gets READ, not only by a
+ * separate string assertion; and the fake transport records the URL and
+ * write-key header of every request it receives (see `newPage`'s
+ * `requests`), so a mutation that breaks authentication or reachability
+ * (`writeKey`→`write_key`, `init({host})` diverging from `src`'s origin)
+ * fails here too, not only in `snippet.test.ts`'s string-level suite.
  */
-const BUNDLE_PATH = join(
+const SDK_BROWSER_DIST_DIR = join(
   import.meta.dirname,
   '..',
   '..',
@@ -36,7 +47,6 @@ const BUNDLE_PATH = join(
   '..',
   'sdk-browser',
   'dist',
-  'lyraflow.js',
 )
 
 const HOST = 'https://analytics.example.test'
@@ -113,6 +123,21 @@ function parseSnippet(html: string): { inline: string[]; src: string } {
   return { inline, src }
 }
 
+/**
+ * Resolves the LOCAL file this test reads from the `src` the snippet itself
+ * printed, rather than a filename hardcoded independently of it — a fixed
+ * `dist/lyraflow.js` constant would keep passing even if `buildSnippet`
+ * repointed `src` at a different file, since nothing would connect the two.
+ * Reading whatever `src`'s own path names means a mutation that changes
+ * `src` without changing what actually gets read is caught by THIS
+ * resolution, not only by the separate string assertion in the `points its
+ * src at the printed host` test below.
+ */
+function resolveBundlePath(src: string): string {
+  const filename = new URL(src).pathname.replace(/^\//, '')
+  return join(SDK_BROWSER_DIST_DIR, filename)
+}
+
 const open: Window[] = []
 
 afterEach(async () => {
@@ -122,9 +147,15 @@ afterEach(async () => {
   while (open.length > 0) await open.pop()?.happyDOM.close()
 })
 
+interface CapturedRequest {
+  url: string
+  writeKey: string | null
+}
+
 function newPage(): {
   run: (code: string) => void
   sent: string[]
+  requests: CapturedRequest[]
   api: () => SnippetApi
 } {
   const win = new Window({ url: 'https://shop.example.test/checkout' })
@@ -133,9 +164,23 @@ function newPage(): {
   // The fake transport. Installed before any SDK code runs, because
   // `Transport` binds `globalThis.fetch` in its constructor — which happens
   // during the `init` this page replays out of the stub queue.
+  //
+  // Records the URL and write-key HEADER of every request, not just the
+  // body — an SDK that cannot authenticate (a mismatched write key) or
+  // cannot reach the server (`init({host})` pointed somewhere other than
+  // `src`'s own origin) still passes every assertion below that only reads
+  // `sent`'s bodies, since this fake accepts and 202s anything unconditionally.
+  // `requests` closes that: it is what proves the SDK actually dialled the
+  // host and used the write key the snippet embedded, not merely that IT
+  // BELIEVES it did.
   const sent: string[] = []
-  ;(win as unknown as { fetch: unknown }).fetch = async (_url: string, init: { body: string }) => {
+  const requests: CapturedRequest[] = []
+  ;(win as unknown as { fetch: unknown }).fetch = async (
+    url: string,
+    init: { body: string; headers?: Record<string, string> },
+  ) => {
     sent.push(init.body)
+    requests.push({ url, writeKey: init.headers?.['x-lyraflow-write-key'] ?? null })
     const count = (JSON.parse(init.body) as { batch: unknown[] }).batch.length
     return {
       status: 202,
@@ -150,7 +195,7 @@ function newPage(): {
     win.document.head.appendChild(el)
   }
   const api = () => (win as unknown as { lyraflow: SnippetApi }).lyraflow
-  return { run, sent, api }
+  return { run, sent, requests, api }
 }
 
 /** Every event name the fake transport actually received, across all batches. */
@@ -160,15 +205,20 @@ function delivered(sent: string[]): string[] {
   )
 }
 
-/** The built bundle and the emitted snippet's two inline blocks, in document
- * order. `existsSync`'s message is the whole point of Step 2 of this
- * command's own task: deleting `dist/lyraflow.js` must fail HERE, by name,
- * not with a bare `ENOENT` from `readFileSync` three lines down. */
-function snippetParts(inline: string[]): { bundle: string; stub: string; initCall: string } {
-  expect(existsSync(BUNDLE_PATH), 'dist/lyraflow.js is missing — run pnpm build first').toBe(true)
+/** The built bundle — read from the LOCAL path `src` itself resolves to,
+ * via `resolveBundlePath` — and the emitted snippet's two inline blocks, in
+ * document order. `existsSync`'s message is the whole point of Step 2 of
+ * this command's own task: deleting `dist/lyraflow.js` must fail HERE, by
+ * name, not with a bare `ENOENT` from `readFileSync` three lines down. */
+function snippetParts(
+  src: string,
+  inline: string[],
+): { bundle: string; stub: string; initCall: string } {
+  const bundlePath = resolveBundlePath(src)
+  expect(existsSync(bundlePath), `${bundlePath} is missing — run pnpm build first`).toBe(true)
   expect(inline.length, 'the emitted snippet should have two inline scripts').toBe(2)
   const [stub, initCall] = inline as [string, string]
-  return { bundle: readFileSync(BUNDLE_PATH, 'utf8'), stub, initCall }
+  return { bundle: readFileSync(bundlePath, 'utf8'), stub, initCall }
 }
 
 describe('the snippet runSnippet emits, against the built bundle', () => {
@@ -179,9 +229,9 @@ describe('the snippet runSnippet emits, against the built bundle', () => {
 
   it('initialises the SDK and delivers events queued before the script loaded', async () => {
     const snippet = await emittedSnippet()
-    const { inline } = parseSnippet(snippet)
-    const { bundle, stub, initCall } = snippetParts(inline)
-    const { run, sent, api } = newPage()
+    const { inline, src } = parseSnippet(snippet)
+    const { bundle, stub, initCall } = snippetParts(src, inline)
+    const { run, sent, requests, api } = newPage()
 
     // 1. The stub, exactly as `runSnippet` printed it.
     run(stub)
@@ -218,6 +268,20 @@ describe('the snippet runSnippet emits, against the built bundle', () => {
       properties: { plan: 'trial' },
       context: { url: 'https://shop.example.test/checkout' },
     })
+
+    // Not just "an event arrived somewhere" — the SDK actually dialled the
+    // host `init({host})` named (the same origin `src` was loaded from) and
+    // authenticated with the write key `init({writeKey})` embedded. Renaming
+    // `writeKey`→`write_key` in the template, or pointing `init`'s host at a
+    // different origin than `src`, is an SDK that cannot reach or cannot
+    // authenticate to the real server — this fails on either, where the
+    // assertions above (which only inspect the fake's 202 response and the
+    // batch body) would not.
+    expect(requests.length).toBeGreaterThan(0)
+    for (const req of requests) {
+      expect(req.url).toBe(`${HOST}/v1/batch`)
+      expect(req.writeKey).toBe(WRITE_KEY)
+    }
   })
 
   it('delivers the same events when a cached bundle runs before the init block', async () => {
@@ -228,9 +292,9 @@ describe('the snippet runSnippet emits, against the built bundle', () => {
     // fix round found this as a SECOND, separate defect from the cold-cache
     // one above — fixing one did not fix the other.
     const snippet = await emittedSnippet()
-    const { inline } = parseSnippet(snippet)
-    const { bundle, stub, initCall } = snippetParts(inline)
-    const { run, sent, api } = newPage()
+    const { inline, src } = parseSnippet(snippet)
+    const { bundle, stub, initCall } = snippetParts(src, inline)
+    const { run, sent, requests, api } = newPage()
 
     run(stub)
     run('window.lyraflow.track("early_signup", { plan: "trial" })')
@@ -243,5 +307,10 @@ describe('the snippet runSnippet emits, against the built bundle', () => {
     await api().flush()
 
     expect(delivered(sent)).toEqual(['early_signup', 'after_load'])
+    expect(requests.length).toBeGreaterThan(0)
+    for (const req of requests) {
+      expect(req.url).toBe(`${HOST}/v1/batch`)
+      expect(req.writeKey).toBe(WRITE_KEY)
+    }
   })
 })

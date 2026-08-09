@@ -256,7 +256,8 @@ and `writeKey` with the `wk_…` key from *Running Lyraflow* above — the same
 one your server-side calls already use. Or skip the substitution entirely:
 `lyraflow snippet` (see [`packages/cli/README.md`](packages/cli/README.md))
 prints this exact block with your project's own host and write key already
-filled in, plus which of the methods above have actually fired anything yet.
+filled in, plus which event names have actually arrived, so you can tell
+"installed" from "firing" without opening a browser.
 
 The bundle is served by the app itself at two paths, unauthenticated (a
 `<script>` tag has no way to send a header):

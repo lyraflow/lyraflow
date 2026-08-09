@@ -493,6 +493,101 @@ describe('runSnippet', () => {
     })
   })
 
+  // --- event name union: schema/events alone is not enough ---------------
+  //
+  // `event_schema` (schema/events' source) is fed by a materialized view
+  // keyed on `mapKeys(properties)`/`mapKeys(properties_num)` (002_events.sql)
+  // -- an event that has NEVER carried a property produces ZERO rows there,
+  // no matter how many times it fired. `lyraflow.track('signup')` with no
+  // second argument -- the single most common first call anyone makes -- is
+  // exactly this shape. Before this section's fix, a project in exactly that
+  // state got "No events recorded yet." on a genuinely working install,
+  // because the event list came from schema/events alone. `events/stats`
+  // aggregates the raw `events` table directly, so it sees a property-less
+  // event fine as long as it fired inside the window -- these tests pin the
+  // UNION of the two sources, not schema/events' list alone.
+
+  describe('event name union — a name absent from schema/events can still surface', () => {
+    it('includes a name events/stats reports but schema/events has never seen, with its real count', async () => {
+      const client = fakeGetClient({
+        project: PROJECT,
+        // `raw_signup` never appears here -- the fixture for "this event has
+        // never carried a property".
+        schemaEvents: { events: [{ event_name: 'page_view' }] },
+        stats: {
+          buckets: [
+            { bucket: '2026-08-08T00:00:00.000Z', event_name: 'raw_signup', events: 4 },
+            { bucket: '2026-08-08T00:00:00.000Z', event_name: 'page_view', events: 1 },
+          ],
+        },
+      })
+      const { ctx, out } = makeCtx(client)
+      const code = await runSnippet(['--json'], ctx)
+      expect(code).toBe(0)
+      const parsed = JSON.parse(out.join(''))
+      expect(parsed.events.counts).toEqual([
+        { event_name: 'page_view', count: 1 },
+        { event_name: 'raw_signup', count: 4 },
+      ])
+    })
+
+    it('renders a property-less-only event in human mode too, instead of "No events recorded yet"', async () => {
+      const client = fakeGetClient({
+        project: PROJECT,
+        schemaEvents: { events: [] },
+        stats: {
+          buckets: [{ bucket: '2026-08-08T00:00:00.000Z', event_name: 'raw_signup', events: 1 }],
+        },
+      })
+      const { ctx, out } = makeCtx(client)
+      const code = await runSnippet([], ctx)
+      expect(code).toBe(0)
+      const text = out.join('')
+      expect(text).not.toContain('No events recorded yet')
+      expect(text).toMatch(/raw_signup\s+1/)
+    })
+
+    it('does not double-count a name present in both sources', async () => {
+      const client = fakeGetClient({
+        project: PROJECT,
+        schemaEvents: { events: [{ event_name: 'signup' }] },
+        stats: {
+          buckets: [
+            { bucket: '2026-08-08T00:00:00.000Z', event_name: 'signup', events: 3 },
+            { bucket: '2026-08-09T00:00:00.000Z', event_name: 'signup', events: 2 },
+          ],
+        },
+      })
+      const { ctx, out } = makeCtx(client)
+      await runSnippet(['--json'], ctx)
+      const parsed = JSON.parse(out.join(''))
+      expect(parsed.events.counts).toEqual([{ event_name: 'signup', count: 5 }])
+    })
+
+    it('sorts the merged list alphabetically regardless of which source a name came from', async () => {
+      // A name schema/events never saw (so it can only enter via the union)
+      // sorts BEFORE a name schema/events did see -- if the merge just
+      // appended stats-only names after schema's own list, this would come
+      // out schema-order-then-stats-order instead of one alphabetical list.
+      const client = fakeGetClient({
+        project: PROJECT,
+        schemaEvents: { events: [{ event_name: 'zzz_from_schema' }] },
+        stats: {
+          buckets: [
+            { bucket: '2026-08-08T00:00:00.000Z', event_name: 'aaa_from_stats', events: 2 },
+          ],
+        },
+      })
+      const { ctx, out } = makeCtx(client)
+      await runSnippet(['--json'], ctx)
+      const parsed = JSON.parse(out.join(''))
+      expect(parsed.events.counts.map((c: { event_name: string }) => c.event_name)).toEqual([
+        'aaa_from_stats',
+        'zzz_from_schema',
+      ])
+    })
+  })
+
   // --- informational requests degrade instead of failing the command -----
 
   describe('schema/events and events/stats are informational', () => {
