@@ -21,6 +21,7 @@ import { purgePerson } from './privacy/purge.js'
 import { registerPrivacyRoutes } from './privacy/routes.js'
 import { SuppressionStore } from './privacy/suppression-store.js'
 import { PurgeWorker } from './privacy/worker.js'
+import { registerProjectRoutes } from './project/routes.js'
 import { registerSchemaRoutes } from './schema/routes.js'
 import { registerSdkRoutes } from './sdk/routes.js'
 import { SegmentCache } from './segments/cache.js'
@@ -190,6 +191,7 @@ export function buildApp(input: {
     cache: segmentCache,
   })
   registerSchemaRoutes(app, { projects, readiness, ch })
+  registerProjectRoutes(app, { projects, readiness, pg })
   // One shared object, not one built per registration: registerExportRoute
   // takes the exact same PrivacyDeps registerPrivacyRoutes does (export.ts's
   // own docstring), and constructing a second literal here is exactly the
