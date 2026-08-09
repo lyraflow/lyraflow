@@ -186,7 +186,9 @@ function hasHost(ctx: CommandContext): ctx is SnippetContext {
  * carries a trailing slash, so the double-slash cannot occur.
  *
  * Can throw (an unparseable `host`) only in a state that is already
- * unreachable by the time this runs — see the two call sites' own comments.
+ * unreachable by the time this runs — see the call site's own comment: it
+ * runs only after `GET /v1/project` has already parsed the identical
+ * string successfully via `Client`'s own `new URL(...)`.
  */
 function normalizeHost(host: string): string {
   return new URL(host).origin
@@ -222,6 +224,24 @@ function escapeHtmlAttr(s: string): string {
  * tokenizer (an escaped forward slash inside a string, not a closing tag)
  * that decodes to the identical JS string value. The standard mitigation
  * for embedding untrusted data inside an inline `<script>`.
+ *
+ * THIS FUNCTION HAS TWO CALLERS WITH DIFFERENT STAKES — do not delete the
+ * `</` guard because the host caller "can't need it":
+ *   - for `host` (`normalizeHost`'s output), this IS belt-and-suspenders —
+ *     a real URL `origin` structurally cannot contain `</` at all, so the
+ *     guard is provably unreachable there (see `escapeHtmlAttr`'s own
+ *     docstring for the identical reasoning on the other substitution
+ *     site).
+ *   - for `write_key`, it is LOAD-BEARING. The write key comes straight
+ *     from `GET /v1/project`'s response body — server-supplied, and never
+ *     normalised the way `host` is. A project row containing
+ *     `wk_"+alert(1)+"</script><script>alert(2)</script>` (a compromised
+ *     or misconfigured self-hosted database, not a hypothetical) would,
+ *     without this guard, close the inline `<script>` element early and
+ *     have its OWN injected markup parsed and executed on every page that
+ *     pastes this snippet — confirmed directly: `snippet.test.ts`'s
+ *     write-key-injection test fails exactly this way with the guard
+ *     removed. Keep it.
  */
 function jsStringLiteral(s: string): string {
   return JSON.stringify(s).replace(/<\//g, '<\\/')
@@ -350,8 +370,15 @@ function renderHuman(snippet: string, events: EventsSection, sinceRaw: string): 
     // here can be a secret typed into the wrong slot (the same reasoning
     // `schema`'s `parseSchemaLimit`, catalog.ts, gives for echoing
     // `--limit` only after its own regex has proven it is plain digits).
+    // `truncated` is a HEURISTIC ("the list came back exactly at the page
+    // ceiling"), not a fact from the server — which returns no total count
+    // to check against. A project with EXACTLY SCHEMA_MAX_LIMIT distinct
+    // names would trip this heuristic despite the list already being
+    // complete, so the sentence hedges ("may have") rather than asserting
+    // more names exist, the same over-claim this whole field was added to
+    // stop making.
     const completeness = events.truncated
-      ? `showing the first ${SCHEMA_MAX_LIMIT} event names on record — this project has more than that, so some may be missing`
+      ? `showing the first ${SCHEMA_MAX_LIMIT} event names on record — this project may have more than that`
       : 'every event name ever recorded for this project'
     lines.push(
       `Event counts since ${sinceRaw} ago (${events.since} to ${events.until}), ${completeness}. A zero count means it fired before this window, not that it is broken:`,
@@ -420,28 +447,28 @@ export async function runSnippet(argv: string[], ctx: CommandContext): Promise<n
     )
   }
 
-  let host: string
-  try {
-    host = normalizeHost(ctx.host)
-  } catch {
-    // Also unreachable in practice: `ctx.host` is always the exact string
-    // `Client` was already built from, and `Client`'s own `#buildUrl`
-    // (client.ts) requires the identical `new URL(...)` parse to succeed
-    // for ANY request this command makes — a host that fails here would
-    // already have failed `GET /v1/project` below instead, reported
-    // through the ordinary `ApiError` path. Kept as an explicit,
-    // reportable failure anyway rather than an assumed invariant nothing
-    // enforces, the same reasoning command-support.ts gives for never
-    // trusting one silently.
-    return reportUsageError(
-      new UsageError('the configured host (--host, or LYRAFLOW_HOST) is not a usable base URL'),
-      mode,
-      ctx,
-    )
-  }
-
   try {
     const project = await ctx.client.get<ProjectResponse>('/v1/project')
+
+    // `normalizeHost` runs AFTER the first request has already succeeded,
+    // deliberately — not before it, the way the first cut of this fix had
+    // it. A genuinely unparseable `--host`/`LYRAFLOW_HOST` must fail the
+    // same way it does for every other command in this CLI: `Client`'s own
+    // `#buildUrl` (client.ts) throws `ApiError('invalid_url', "the
+    // configured host is not a usable base URL (--host, or
+    // LYRAFLOW_HOST)")` on the FIRST request that ever needs to build a
+    // URL from it — exit 1, not exit 2. Running `normalizeHost` before any
+    // request, as a separate usage-error check, diverged from that: same
+    // bad host, same env var, exit 2 here and exit 1 everywhere else — a
+    // real regression the previous round of this fix introduced, and one
+    // `binary.test.ts`'s cross-command parity sweep (Task 4 adds `snippet`
+    // to it) would have caught the moment it ran. Placed here, a bad host
+    // never reaches `normalizeHost` at all in practice — the identical
+    // `new URL(...)` parse `Client` needs has already failed first, on the
+    // exact same string, so this call cannot throw a DIFFERENT outcome
+    // than `GET /v1/project` just did.
+    const host = normalizeHost(ctx.host)
+
     const until = ctx.now()
     const eventsSection = await fetchEventsSection(ctx, since, until)
     const snippet = buildSnippet(host, project.write_key)

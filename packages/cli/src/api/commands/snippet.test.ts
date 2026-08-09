@@ -1,7 +1,6 @@
 import { SNIPPET_METHODS, VERSION } from '@lyraflow/sdk-browser'
 import { describe, expect, it } from 'vitest'
-import { ApiError } from '../client.js'
-import type { Client } from '../client.js'
+import { ApiError, Client } from '../client.js'
 import type { CommandContext } from '../context.js'
 import { SCHEMA_MAX_LIMIT } from './catalog.js'
 import { runSnippet } from './snippet.js'
@@ -126,6 +125,23 @@ const clientWithNoEvents = fakeGetClient({
 const clientRejecting401 = fakeGetClient({
   project: new ApiError(401, 'invalid_server_key', 'the server key was rejected'),
 })
+
+/**
+ * Structural parse of the snippet's own script elements — used to prove
+ * the write-key encoding is actually load-bearing (an injected value that
+ * breaks it produces a DIFFERENT element count and a syntax error, not
+ * merely "the sentinel string is absent somewhere in the blob").
+ */
+function extractScriptBodies(html: string): string[] {
+  const re = /<script\b[^>]*>([\s\S]*?)<\/script>/g
+  const bodies: string[] = []
+  let m = re.exec(html)
+  while (m !== null) {
+    bodies.push(m[1] ?? '')
+    m = re.exec(html)
+  }
+  return bodies
+}
 
 describe('runSnippet', () => {
   it('emits a snippet carrying the host and the write key', async () => {
@@ -272,6 +288,43 @@ describe('runSnippet', () => {
     expect(text).toContain(`host: "${HOST}"`)
   })
 
+  describe('write key encoding', () => {
+    // The write key comes straight from `GET /v1/project`'s response body
+    // — server-supplied, and unlike `host` it is NEVER normalised (there
+    // is no "origin" to reduce it to). `jsStringLiteral`'s `</` guard is
+    // LOAD-BEARING here, not belt-and-suspenders: without it, a write key
+    // shaped like this closes the inline `<script>` element early and
+    // whatever follows is parsed and executed as real markup on every page
+    // that pastes the snippet.
+    const INJECTED_KEY = 'wk_"+alert(1)+"</script><script>alert(2)</script>'
+
+    it('keeps the snippet at exactly three script elements, each parseable, with the key round-tripping exactly', async () => {
+      const client = fakeGetClient({
+        project: { ...PROJECT, write_key: INJECTED_KEY },
+        schemaEvents: { events: [] },
+        stats: { buckets: [] },
+      })
+      const { ctx, out } = makeCtx(client)
+      const code = await runSnippet([], ctx)
+      expect(code).toBe(0)
+      const text = out.join('')
+
+      const bodies = extractScriptBodies(text)
+      expect(bodies).toHaveLength(3)
+      for (const body of bodies) {
+        expect(() => new Function(body)).not.toThrow()
+      }
+
+      // Not just "does not crash" -- the init() block's own `writeKey`
+      // literal must decode to EXACTLY the original injected value.
+      const initBody = bodies[2] ?? ''
+      const literalMatch = /writeKey:\s*("(?:[^"\\]|\\.)*")/.exec(initBody)
+      expect(literalMatch).not.toBeNull()
+      const undoScriptGuard = (literalMatch?.[1] ?? '').replace(/<\\\//g, '</')
+      expect(JSON.parse(undoScriptGuard)).toBe(INJECTED_KEY)
+    })
+  })
+
   it('returns 1 when the project endpoint rejects the key', async () => {
     const { ctx, calls } = makeCtx(clientRejecting401)
     expect(await runSnippet([], ctx)).toBe(1)
@@ -324,6 +377,30 @@ describe('runSnippet', () => {
       await runSnippet(['--json'], ctx)
       const parsed = JSON.parse(out.join(''))
       expect(parsed.host).toBe(HOST)
+    })
+
+    it('an unparseable host fails through the ordinary invalid_url path (exit 1), the same as every other command', async () => {
+      // A REAL `Client`, not the fake — this is specifically about parity
+      // with `Client`'s own `#buildUrl` failure, which a fake client
+      // cannot exercise at all (it never parses `host` as a URL in the
+      // first place). A first cut of this fix ran `normalizeHost` BEFORE
+      // any request and reported it as a usage error — exit 2,
+      // `usage_error` — while every other command in this CLI (and this
+      // command itself, before that fix) reaches `Client`'s own
+      // `invalid_url` and exits 1 for the identical bad host. Fixed by
+      // deferring `normalizeHost` until after `GET /v1/project` has
+      // already parsed the same string successfully — a bad host now
+      // fails AT that request, through the exact same code path.
+      const realClient = new Client({ host: 'not a url at all', serverKey: 'sk_test' })
+      const { ctx, out, errOut } = makeCtx(realClient, { host: 'not a url at all' })
+      const code = await runSnippet(['--json'], ctx)
+      expect(code).toBe(1)
+      const text = out.join('') + errOut.join('')
+      const parsed = JSON.parse(text.trim())
+      expect(parsed.code).toBe('invalid_url')
+      expect(parsed.error).toBe(
+        'the configured host is not a usable base URL (--host, or LYRAFLOW_HOST)',
+      )
     })
 
     const MALICIOUS_PATH_SHAPES: { label: string; raw: string; forbidden: string[] }[] = [
@@ -402,7 +479,11 @@ describe('runSnippet', () => {
 
       const { ctx: humanCtx, out: humanOut } = makeCtx(client)
       await runSnippet([], humanCtx)
-      expect(humanOut.join('')).toContain('this project has more than that')
+      // Hedged, not asserted as fact: `truncated` is a heuristic (the
+      // list came back exactly at the page ceiling), and a project with
+      // EXACTLY that many names would otherwise get a false claim.
+      expect(humanOut.join('')).toContain('this project may have more than that')
+      expect(humanOut.join('')).not.toContain('has more than that')
     })
 
     it('does not flag truncation when the list is under the ceiling', async () => {
