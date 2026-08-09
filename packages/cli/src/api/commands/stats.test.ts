@@ -183,14 +183,14 @@ describe('runStats', () => {
   })
 
   it('never leaks a sentinel secret placed in ANY argv slot — positional, --flag=value, a flag’s separate value, past --, first, or last', async () => {
-    // Deliberately never puts the secret as --interval's (or --since's)
-    // OWN value with nothing else: those flags' validators legitimately
-    // echo back what they were given (e.g. parseInterval's "got \"...\""),
-    // which is expected, useful behaviour for a non-secret flag — not the
-    // positional-redaction leak this test exists to sweep for. Every
-    // shape here keeps the secret in a slot that can ONLY ever be reached
-    // through positional handling: a bare positional, or a flag whose own
-    // value is never echoed anywhere by design (--host/--server-key).
+    // This used to skip --interval's and --since's own values, excused in
+    // a comment as "expected, useful behaviour for a non-secret flag" —
+    // which is verbatim the argument that had been deleted for --limit one
+    // commit earlier, and the same argument made the two times before that.
+    // A flag's value is whatever the caller typed or an agent templated;
+    // `lyraflow stats --since $LYRAFLOW_SERVER_KEY` is one keystroke from a
+    // real command. Every slot is swept now, --interval and --since/--until
+    // included; the diagnostic they lost is checked separately below.
     const secret = 'sk_live_SENTINEL_never_here'
     const shapes: string[][] = [
       [secret],
@@ -207,6 +207,17 @@ describe('runStats', () => {
       // this sweep itself missed until Task 8's review found it in
       // node:util's own ERR_PARSE_ARGS_UNKNOWN_OPTION message (fixed in
       // args.ts, shared by every command group including this one).
+      ['--interval', secret], // formerly carved out, all six shapes
+      [`--interval=${secret}`],
+      ['--since', secret],
+      [`--since=${secret}`],
+      ['--until', secret],
+      [`--until=${secret}`],
+      // --interval valid so the failure lands on --since instead: they are
+      // validated in sequence, and only the first bad one throws.
+      ['--interval', '1h', '--since', secret],
+      // --since valid so the failure lands on --until.
+      ['--since', '15m', '--until', secret],
     ]
 
     for (const argv of shapes) {
@@ -216,6 +227,27 @@ describe('runStats', () => {
       expect(out.join('')).not.toContain(secret)
       expect(errOut.join('')).not.toContain(secret)
     }
+  })
+
+  it('still says something useful about a bad --interval/--since without repeating what was typed', async () => {
+    // Redacting must not cost the diagnostic. --interval's valid set is
+    // small enough to print in full, which tells a caller more than echoing
+    // their typo back did.
+    const { client, calls } = makeClient({ buckets: [] })
+    const { ctx, errOut } = makeCtx(client)
+    expect(await runStats(['--interval', '5m'], ctx)).toBe(2)
+    expect(calls).toHaveLength(0)
+    const interval = errOut.join('')
+    expect(interval).toContain('--interval')
+    expect(interval).toContain('1m')
+    expect(interval).toContain('1h')
+    expect(interval).toContain('1d')
+    expect(interval).not.toContain('5m')
+
+    const second = makeCtx(client)
+    expect(await runStats(['--since', 'last tuesday'], second.ctx)).toBe(2)
+    expect(second.errOut.join('')).toContain('--since')
+    expect(second.errOut.join('')).not.toContain('last tuesday')
   })
 
   it('anchors --since to a given --until (not to a real "now") when --since is omitted, at a non-default interval', async () => {

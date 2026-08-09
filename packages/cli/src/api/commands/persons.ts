@@ -41,6 +41,7 @@ import { UsageError, parseCommandArgs } from '../args.js'
 import type { CommandContext } from '../context.js'
 import { type Mode, emitError, emitObject, resolveMode } from '../output.js'
 import {
+  UNIVERSAL_FLAGS,
   checkNoPositionals,
   checkStrayFlags,
   isEpipe,
@@ -73,9 +74,6 @@ function isSubcommand(value: string): value is Subcommand {
 }
 
 const USAGE = 'usage: lyraflow persons <get|export|delete> <id> [--yes] [--json|--human]'
-
-/** Flags every subcommand accepts, regardless of which one runs. */
-const UNIVERSAL_FLAGS = new Set(['host', 'server-key', 'json', 'human'])
 
 /**
  * `--yes` is `delete`-only. Without a per-subcommand check, `persons get

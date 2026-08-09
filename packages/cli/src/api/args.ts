@@ -54,11 +54,14 @@ function unitMs(unit: string): number {
  * other than `UsageError` — is enforced once, downstream in
  * `resolveInstant`, by validating the resulting `Date` rather than the
  * input digits. See `assertValidInstant`.
+ *
+ * NEVER ECHOES `input`. See `resolveInstant`'s docstring for the rule and
+ * why "the shape is narrow" stopped being an acceptable argument for it.
  */
 export function parseDuration(input: string): number {
   const match = DURATION_RE.exec(input)
   if (!match) {
-    throw new UsageError(`not a duration: "${input}" (expected e.g. "15m", "24h", "7d")`)
+    throw new UsageError('not a duration (expected e.g. "15m", "24h", "7d")')
   }
   const [, amount, unit] = match
   return Number(amount) * unitMs(unit as string)
@@ -148,13 +151,20 @@ function isRealCalendarDate(
  * usage error must exit 2, never crash the process with an unhandled
  * `RangeError`.
  */
-function assertValidInstant(date: Date, input: string): Date {
+function assertValidInstant(date: Date, flag: string | undefined): Date {
   if (Number.isNaN(date.getTime())) {
     throw new UsageError(
-      `"${input}" resolves to an instant outside the range JavaScript's Date can represent`,
+      `${describeFlag(flag)} resolves to an instant outside the range JavaScript's Date can represent`,
     )
   }
   return date
+}
+
+/** Names the flag a bad value came from, for a message that must not
+ * contain the value itself. `undefined` for a direct caller that did not
+ * say (only this module's own tests today). */
+function describeFlag(flag: string | undefined): string {
+  return flag === undefined ? 'the value given' : `the value given for ${flag}`
 }
 
 /**
@@ -163,10 +173,22 @@ function assertValidInstant(date: Date, input: string): Date {
  * fallback is worse than throwing: a bad `--since` that quietly became
  * "15 minutes ago" would answer a question nobody asked, and look like
  * real data.
+ *
+ * `flag` names which flag the value came from (`"--since"`, `"--until"`).
+ * It exists because NO MESSAGE HERE MAY CONTAIN `input`. These messages
+ * echoed it until the final Plan 7 review, which is the fourth time this
+ * class shipped on this branch — each time defended as "the shape is
+ * narrow", the same sentence that had been deleted for `--limit` one commit
+ * earlier. The shape is not the point: a flag value is whatever the caller
+ * typed or an agent templated, `lyraflow events --since $LYRAFLOW_SERVER_KEY`
+ * is one keystroke from a real command, and CLI output lands in shell
+ * history, CI logs and agent transcripts. Naming the flag and stating what
+ * was expected keeps the whole diagnostic; repeating the value adds nothing
+ * the caller does not already have.
  */
-export function resolveInstant(input: string, now: Date): Date {
+export function resolveInstant(input: string, now: Date, flag?: string): Date {
   if (DURATION_RE.test(input)) {
-    return assertValidInstant(new Date(now.getTime() - parseDuration(input)), input)
+    return assertValidInstant(new Date(now.getTime() - parseDuration(input)), flag)
   }
 
   const isoMatch = ISO_INSTANT_RE.exec(input)
@@ -182,12 +204,12 @@ export function resolveInstant(input: string, now: Date): Date {
     )
     if (isReal) {
       const ms = Date.parse(input)
-      if (!Number.isNaN(ms)) return assertValidInstant(new Date(ms), input)
+      if (!Number.isNaN(ms)) return assertValidInstant(new Date(ms), flag)
     }
   }
 
   throw new UsageError(
-    `not a valid instant: "${input}" (expected a duration like "15m", "24h", "7d", or an ISO 8601 instant like "2026-08-01T00:00:00.000Z")`,
+    `${describeFlag(flag)} is not a valid instant (expected a duration like "15m", "24h", "7d", or an ISO 8601 instant like "2026-08-01T00:00:00.000Z")`,
   )
 }
 

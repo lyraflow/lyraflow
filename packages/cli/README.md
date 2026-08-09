@@ -118,6 +118,12 @@ which includes:
   command line, and a value from a command line can be a secret typed one
   slot off — so the error names the flag and the environment variable to
   check, never what either of them was set to;
+- the host answered `2xx` with something this CLI cannot use — a body that
+  is not JSON, not a JSON object, or an object missing the list of records
+  the command asked for. `code` is `invalid_response_body` or
+  `invalid_response_shape`. Usually it means `--host`/`LYRAFLOW_HOST` is
+  pointed at something that is not a Lyraflow server: an auth proxy's login
+  page, a load balancer's error JSON, one host off;
 - for `persons export` specifically, a stream that ended without its
   terminating `{"type":"end",…}` line — the data received is real but
   incomplete, `code` is `export_incomplete`;
@@ -208,8 +214,9 @@ a JSON object, one per line, not prose:
   lyraflow events --after 'WyIyMDI2LTA4LTA5IDAzOjE3OjM0LjM3MSIsIjIyMjIyMjIyLTIyMjItMjIyMi0yMjIyLTIyMjIyMjIyMjIyNSJd' --json
   ```
 
-- **A truncation warning.** A *cursorless* poll (the very first one, or the
-  first after an empty one) that comes back with exactly `--limit` events
+- **A truncation warning.** A *cursorless* poll — the first one, and any
+  poll before the session has ever received a cursor — that comes back with
+  exactly `--limit` events
   cannot tell "that was everything" from "a burst pushed older events out of
   the page" — the CLI says so, loudly, naming the oldest event actually shown.
   Captured against a live server with a deliberately small `--limit`:
@@ -232,12 +239,14 @@ precise about what this guarantees and what it does not:
 - **Once a cursor exists, nothing already seen is repeated, and nothing after
   it is missed** — every later poll asks for `after: <cursor>` and nothing
   else, never a `since` that could re-scan or drift.
-- **A cursorless poll is a tail, not a full scan.** If more than one page's
-  worth of events arrived before the first poll (or the first poll after an
-  empty one) runs, only the newest page is shown, and the truncation warning
-  above fires on stderr naming the oldest event actually shown — the older
-  ones in that burst are gone from `--follow`'s perspective the moment the
-  cursor advances past them.
+- **A cursorless poll is a tail, not a full scan.** A session starts without
+  a cursor and stays that way until a poll actually returns events; once it
+  has one it never goes back (an empty poll later on does not clear it). If
+  more than one page's worth of events arrives while it is still in that
+  state, only the newest page is shown, and the truncation warning above
+  fires on stderr naming the oldest event actually shown — the older ones in
+  that burst are gone from `--follow`'s perspective the moment the cursor
+  advances past them.
 - **An event delivered late, but timestamped before the current cursor
   position, can still be missed.** Ingest admits events up to 24 hours behind
   the server's own clock (clock skew), and forward-only keyset paging has no

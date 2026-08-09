@@ -24,6 +24,20 @@ import type { CommandContext } from '../context.js'
 import { type Mode, emitError, resolveMode } from '../output.js'
 
 /**
+ * The flags EVERY subcommand of every multi-subcommand group accepts,
+ * whichever one runs: the two that decide which server to talk to, and the
+ * two that decide how output is rendered. The base every `ALLOWED_FLAGS`
+ * set in persons.ts and catalog.ts is built from — see `checkStrayFlags`
+ * for why a per-subcommand set is needed on top of a group's own `ArgSpec`.
+ *
+ * One home, not two identical copies (persons.ts and catalog.ts each had
+ * one). The copies happened to agree; the point is that nothing made them,
+ * and this module's whole premise is that an invariant enforced by "whoever
+ * edits one remembers the other" is not an invariant.
+ */
+export const UNIVERSAL_FLAGS: ReadonlySet<string> = new Set(['host', 'server-key', 'json', 'human'])
+
+/**
  * EPIPE means the reader (e.g. `head`, `less`) closed the pipe before this
  * command was done writing — a normal end for a streaming command, not a
  * failure. Every write in a command's main loop goes through a catch that

@@ -29,8 +29,11 @@
  * window". That is correct for a human staring at a terminal, and it is
  * also the one place `--follow` can silently and PERMANENTLY lose events:
  * if a burst larger than `limit` arrives while the loop has no cursor yet
- * (the very first poll, or any poll right after an empty one), the poll
- * returns only the newest page of that burst, the loop then advances past
+ * — the first poll, and every poll after it until one comes back with
+ * events, since `cursor` is only ever assigned and NEVER reset (an empty
+ * poll later in the session leaves the existing cursor exactly where it
+ * was) — the poll returns only the newest page of that burst, the loop
+ * then advances past
  * everything older, and `next_cursor` never looks backwards again. This
  * command cannot recover those events after the fact — re-polling with the
  * new cursor gets what comes AFTER the newest row shown, never the older
@@ -224,9 +227,13 @@ export async function runEvents(argv: string[], ctx: CommandContext): Promise<nu
     // Validated — and the process of validating it complete — before any
     // network call. A bad --since must never reach the API; see the "call
     // the API before validating --since" mutation this guards against.
-    since = resolveInstant(typeof flags.since === 'string' ? flags.since : '15m', ctx.now())
+    since = resolveInstant(
+      typeof flags.since === 'string' ? flags.since : '15m',
+      ctx.now(),
+      '--since',
+    )
     if (typeof flags.until === 'string') {
-      until = resolveInstant(flags.until, ctx.now())
+      until = resolveInstant(flags.until, ctx.now(), '--until')
     }
     limit = typeof flags.limit === 'string' ? parseLimit(flags.limit) : EVENTS_DEFAULT_LIMIT
     assertWindowNotInverted(since, until)
@@ -278,8 +285,10 @@ export async function runEvents(argv: string[], ctx: CommandContext): Promise<nu
       const res = await ctx.client.get<EventsResponse>('/v1/events', query)
       emitRecords(res.events, mode, EVENTS_COLUMNS, ctx.write)
 
-      // THE CRITICAL CASE: a cursorless poll (first ever, or the first
-      // after an empty one) that comes back with exactly `limit` events
+      // THE CRITICAL CASE: a cursorless poll — the first one, or any poll
+      // before this session has EVER obtained a cursor (it is never reset
+      // once set; see the module docstring) — that comes back with exactly
+      // `limit` events
       // cannot tell "that was everything" from "a burst pushed older
       // events out of the page" — the server has no way to say which, and
       // by the time the NEXT poll runs with the new cursor, the older rows

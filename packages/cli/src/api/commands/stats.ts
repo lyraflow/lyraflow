@@ -46,9 +46,13 @@ function isValidInterval(value: string): value is Interval {
   return (VALID_INTERVALS as readonly string[]).includes(value)
 }
 
+/** Never echoes `raw` — see `resolveInstant`'s docstring (args.ts) for the
+ * rule and the four times this class shipped before it was one. The valid
+ * set is small enough to print in full, which is a better diagnostic than
+ * repeating the typo back anyway. */
 function parseInterval(raw: string): Interval {
   if (!isValidInterval(raw)) {
-    throw new UsageError(`--interval must be one of "1m", "1h", "1d", got "${raw}"`)
+    throw new UsageError('--interval must be one of "1m", "1h", "1d"')
   }
   return raw
 }
@@ -151,11 +155,11 @@ export async function runStats(argv: string[], ctx: CommandContext): Promise<num
     // `until` resolved BEFORE `since`'s default is computed — the default
     // needs to know it, per defaultSince's own docstring.
     if (typeof flags.until === 'string') {
-      until = resolveInstant(flags.until, ctx.now())
+      until = resolveInstant(flags.until, ctx.now(), '--until')
     }
     since =
       typeof flags.since === 'string'
-        ? resolveInstant(flags.since, ctx.now())
+        ? resolveInstant(flags.since, ctx.now(), '--since')
         : defaultSince(interval, until, ctx.now())
     assertWindowNotInverted(since, until)
   } catch (err) {

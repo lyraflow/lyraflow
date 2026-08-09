@@ -35,10 +35,20 @@ export interface ClientConfig {
  * `code` is the server's own `error` field when the response carried a
  * parseable JSON body with one (every route in this API sends at least
  * `{ error: string }` on a non-2xx response) — otherwise a synthetic
- * `http_<status>` / `no_response` fallback. `message` is always a fixed,
- * human-readable sentence chosen by this client, NEVER a passthrough of
- * anything the server or the underlying network stack said — see the
- * class-wide guarantee below.
+ * `http_<status>` / `no_response` fallback.
+ *
+ * `message` is a fixed, human-readable sentence chosen by this client on
+ * every path EXCEPT two, both in `#toApiError`: a `400`/`422`, and the
+ * generic non-2xx fallback, use the server's own `error` string when it
+ * sent one. That is deliberate — a rejected query's reason is the whole
+ * diagnostic, and it cannot be reconstructed from `code` alone — but it is
+ * a real caveat and this docstring claimed the opposite for two plans:
+ * `--host` is user-configurable by design, so an arbitrary host chooses
+ * that text, and a caller must not treat an `ApiError`'s `message` as
+ * trusted, first-party prose. (`code` has always been server-sourced in
+ * exactly the same way.) What is NOT server-sourced anywhere, on any path,
+ * is anything this CLI was configured with — see the guarantee below, which
+ * is the one that actually holds.
  *
  * GUARANTEE: nothing that reaches this class — not `message`, not `code`,
  * not the inherited `stack` — may ever contain ANY VALUE THIS CLIENT WAS
@@ -265,13 +275,36 @@ export class Client {
    * from a non-JSON or empty body would be the one path that breaks that
    * contract. The body itself is never included in the message: it is
    * untrusted response text, same reasoning as not echoing `Location`.
+   *
+   * AND the body must be a JSON OBJECT, not merely JSON. `null`, `[]`,
+   * `"hello"` and `42` all parse; every route in this API answers a 2xx
+   * with an object (see the response interfaces in commands/), and every
+   * caller in this CLI reads a named field off what this returns. Without
+   * this check the caller's very first property read is what fails, as a
+   * raw `TypeError` that `reportCommandFailure` rethrows — a Node stack
+   * trace on stderr under `--json`, where the contract promises
+   * `{error, code}`. That is not hypothetical for a self-hosted product
+   * with a user-supplied `--host`: an auth proxy's interstitial, a load
+   * balancer's error page served as JSON, or `LYRAFLOW_HOST` pointed one
+   * host off all produce it. Caught here, once, so no present or future
+   * command has to remember. output.ts's `emitRecords` closes the other
+   * half — a well-formed object whose expected LIST field is missing.
    */
   async #readJson<T>(res: Response): Promise<T> {
+    let body: unknown
     try {
-      return (await res.json()) as T
+      body = await res.json()
     } catch {
       throw new ApiError(res.status, 'invalid_response_body', 'the server returned a non-JSON body')
     }
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+      throw new ApiError(
+        res.status,
+        'invalid_response_body',
+        'the server returned a body that is not a JSON object',
+      )
+    }
+    return body as T
   }
 
   #buildUrl(path: string, query?: Record<string, string | number | undefined>): string {
@@ -310,9 +343,13 @@ export class Client {
    * Every route in this API answers a non-2xx with at least
    * `{ error: string }` (see packages/server/src/**\/routes.ts) — `error`
    * becomes `code` here unconditionally, so a caller can always branch on
-   * it. `message` is a fixed, hand-picked sentence per status: never the
-   * server's own text verbatim, and never anything about the request (which
-   * carried the key in a header this method never reads).
+   * it. `message` is a hand-picked sentence per status, except for the two
+   * paths that fall back to `serverError` — a `400`/`422`, where the
+   * server's own reason IS the diagnostic, and the generic non-2xx case.
+   * Those two are untrusted text from whatever answered the request; see
+   * the `ApiError` docstring. Nothing here ever says anything about the
+   * REQUEST, which carried the key in a header this method never reads,
+   * and the host in a URL this method never sees.
    */
   async #toApiError(res: Response): Promise<ApiError> {
     const status = res.status

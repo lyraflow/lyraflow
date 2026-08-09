@@ -8,6 +8,7 @@ import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow
 import { UsageError, hasRawFlag, parseCommandArgs } from './api/args.js'
 import { Client } from './api/client.js'
 import { runDeletions, runSchema, runSegments } from './api/commands/catalog.js'
+import { reportParseFailure } from './api/commands/command-support.js'
 import { runEvents } from './api/commands/events.js'
 import { runPersons } from './api/commands/persons.js'
 import { runStats } from './api/commands/stats.js'
@@ -314,11 +315,32 @@ function wireFollowInterrupt(argv: string[]): FollowInterrupt {
  * `output_schema` (OUTPUT_SCHEMA_VERSION) moves only when a documented JSON
  * field changes shape or meaning, which is the one that actually matters
  * for deciding whether to trust the output.
+ *
+ * Returns the process exit code, like every other command handler: 0, or 2
+ * for a usage error. It did not, and did not catch a failed parse either,
+ * until the final Plan 7 review — a seam, not a decision: `runVersion` came
+ * from Task 6 and `reportParseFailure` was extracted in Task 7 for the six
+ * command groups, and nobody came back. `lyraflow --version --unknown-flag`
+ * printed a raw `UsageError` stack trace and exited 1 where the contract
+ * says 2 and JSON under `--json`. That matters more here than anywhere
+ * else: this is the command the README tells an agent to run FIRST, to read
+ * `output_schema` before trusting any field name, and `--host` — accepted
+ * by all six other commands — is the obvious thing for an operator to reach
+ * for. It is still rejected here (this command talks to nothing, and a flag
+ * silently accepted and ignored is the failure `checkStrayFlags` exists to
+ * prevent), but now as an ordinary usage error.
  */
-export async function runVersion(args: string[], ctx: CommandContext): Promise<void> {
-  const { flags } = parseCommandArgs(args, { booleans: ['json', 'human'] })
+export async function runVersion(args: string[], ctx: CommandContext): Promise<number> {
+  let flags: Record<string, string | boolean>
+  try {
+    ;({ flags } = parseCommandArgs(args, { booleans: ['json', 'human'] }))
+  } catch (err) {
+    if (!(err instanceof UsageError)) throw err
+    return reportParseFailure(err, args, ctx)
+  }
   const mode = resolveMode(flags, ctx.isTty)
   emitObject({ version: CLI_VERSION, output_schema: OUTPUT_SCHEMA_VERSION }, mode, ctx.write)
+  return 0
 }
 
 async function main(): Promise<void> {
@@ -331,7 +353,7 @@ async function main(): Promise<void> {
       // shared `CommandContext` shape; constructing a `Client` does no I/O
       // and never validates its config (see client.ts), so this is safe
       // even with no real host/key configured.
-      await runVersion(args, {
+      process.exitCode = await runVersion(args, {
         client: new Client({ host: '', serverKey: '' }),
         write: (s) => process.stdout.write(s),
         writeErr: (s) => process.stderr.write(s),

@@ -225,6 +225,43 @@ function safeHeader(col: Column): string {
 }
 
 /**
+ * The one shape this module was never hardened against: the CONTAINER
+ * itself. Every guard above (`toCell`, `safeGet`, `safeJsonLine`,
+ * `describeUnknown`) protects against hostile values INSIDE `records`, and
+ * every test passed an array — so `emitRecords`' first statement,
+ * `records.length`, was an unguarded property read on caller-supplied data
+ * in the module whose docstring promises it never crashes. A host answering
+ * `200 application/json` with `{}` made all five list commands exit 1 with
+ * a raw `TypeError: Cannot read properties of undefined (reading 'length')`
+ * and a Node stack trace on stderr — under `--json`, where the contract
+ * promises `{error, code}`.
+ *
+ * Three layers were each correct alone: `Client` guaranteed only "the body
+ * is JSON" (it now also guarantees "an object" — see its `#readJson`), the
+ * command modules' TypeScript interfaces declare these fields non-optional
+ * and nothing enforces that at runtime, and this module guarded everything
+ * except the container. This is that gap, closed where it cannot recur:
+ * every list this CLI prints, present or future, comes through here.
+ *
+ * Raised as `ApiError`, deliberately, rather than a new error class: the
+ * request did reach the server and the answer was unusable, which is
+ * exactly what `ApiError` means and exactly what every command's existing
+ * `reportCommandFailure` already renders as `{error, code}` with exit 1. A
+ * new class would be rethrown by that same function and crash instead.
+ * `status` is 0 for the same reason `no_response` uses 0 — the HTTP status
+ * was fine; what came back under it was not.
+ */
+function assertList(records: unknown): asserts records is unknown[] {
+  if (!Array.isArray(records)) {
+    throw new ApiError(
+      0,
+      'invalid_response_shape',
+      'the server returned a 2xx response with no list of records where one was expected',
+    )
+  }
+}
+
+/**
  * NDJSON in `json` mode: one `JSON.stringify`d record per line, nothing
  * else — no wrapping array, no header, no summary line, because records
  * are data. An empty list writes nothing at all in EITHER mode: an agent
@@ -248,6 +285,7 @@ export function emitRecords(
   columns: Column[],
   write: (s: string) => void,
 ): void {
+  assertList(records)
   if (records.length === 0) return
 
   if (mode === 'json') {
@@ -277,8 +315,24 @@ export function emitRecords(
  * line of `key: value` pairs — this is what makes `--version`'s human
  * output a single line "for free": `emitObject` never special-cases the
  * number of fields, so a caller does not have to either.
+ *
+ * `null`/`undefined` is the one value this REFUSES rather than renders, for
+ * the same reason `emitRecords` refuses a non-array (see `assertList`):
+ * every caller passes either a record read off a 2xx body or an object this
+ * CLI built itself, and "there is no record here at all" is a failed
+ * request answered with a 200, not something to print the word `null` for
+ * and exit 0 over. A string or a number still renders — those are values,
+ * badly shaped but present, and refusing them would cost the module's own
+ * "never crashes on a hostile value" property for no gain.
  */
 export function emitObject(record: unknown, mode: Mode, write: (s: string) => void): void {
+  if (record === null || record === undefined) {
+    throw new ApiError(
+      0,
+      'invalid_response_shape',
+      'the server returned a 2xx response with no record where one was expected',
+    )
+  }
   if (mode === 'json') {
     write(`${safeJsonLine(record)}\n`)
     return

@@ -9,17 +9,13 @@ import { UsageError, parseCommandArgs } from '../args.js'
 import type { CommandContext } from '../context.js'
 import { type Column, type Mode, emitObject, emitRecords, resolveMode } from '../output.js'
 import {
+  UNIVERSAL_FLAGS,
   checkNoPositionals,
   checkStrayFlags,
   reportCommandFailure,
   reportParseFailure,
   reportUsageError,
 } from './command-support.js'
-
-/** Flags every subcommand in this file accepts, regardless of which one
- * runs — see `checkStrayFlags`'s own docstring for why a per-subcommand
- * check is needed on top of this. */
-const UNIVERSAL_FLAGS = new Set(['host', 'server-key', 'json', 'human'])
 
 // ---------------------------------------------------------------------------
 // deletions

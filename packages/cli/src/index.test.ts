@@ -8,15 +8,20 @@ import { type CommandContext, createPrompt, extractOverride, runVersion } from '
 // `CommandContext` exists for Task 7's `events`/`stats`, but the interface
 // is shared, so a test context still has to satisfy all of it. `client` is
 // never called here, so an unused fake stands in rather than a real one.
-function makeCtx(isTty: boolean): { ctx: CommandContext; out: string[] } {
+function makeCtx(isTty: boolean): { ctx: CommandContext; out: string[]; errOut: string[] } {
   const out: string[] = []
+  const errOut: string[] = []
   return {
     ctx: {
       client: {} as Client,
       write: (s) => out.push(s),
-      writeErr: () => {
-        throw new Error('runVersion should never write to stderr')
-      },
+      // Was `throw new Error('runVersion should never write to stderr')`.
+      // It never did — because it had no parse-failure path at all, which
+      // was the bug: an unrecognised flag escaped as a raw UsageError with
+      // a stack trace and exit 1, where the contract says 2 and JSON under
+      // --json. Collected rather than forbidden now; the success-path tests
+      // below assert it stays empty for them specifically.
+      writeErr: (s) => errOut.push(s),
       isTty,
       stdinIsTty: false,
       now: () => new Date('2026-08-08T12:00:00.000Z'),
@@ -24,6 +29,7 @@ function makeCtx(isTty: boolean): { ctx: CommandContext; out: string[] } {
       prompt: () => Promise.reject(new Error('runVersion should never prompt')),
     },
     out,
+    errOut,
   }
 }
 
@@ -63,6 +69,59 @@ describe('runVersion', () => {
     await runVersion(['--human'], ctx)
     const text = out.join('')
     expect(text).toBe(`version: ${CLI_VERSION}  output_schema: ${OUTPUT_SCHEMA_VERSION}\n`)
+  })
+
+  it('returns 0 and writes nothing to stderr on the ordinary path', async () => {
+    // The other half of loosening makeCtx's writeErr from "throw" to
+    // "collect": without this, that loosening would silently remove a real
+    // assertion the success-path tests used to make for free.
+    const { ctx, errOut } = makeCtx(true)
+    expect(await runVersion(['--json'], ctx)).toBe(0)
+    expect(errOut).toEqual([])
+  })
+
+  it('reports an unrecognised flag as a usage error instead of throwing, honouring --json', async () => {
+    // This is the command the README tells an agent to run FIRST, to read
+    // output_schema before trusting any field name — and it was the one
+    // command with no parse-failure handling at all. All six command groups
+    // wrap parseCommandArgs in try/catch → reportParseFailure; runVersion
+    // came from Task 6, reportParseFailure was extracted in Task 7, and
+    // nobody went back. `lyraflow --version --unknown-flag` printed a raw
+    // UsageError stack trace and exited 1.
+    const { ctx, out, errOut } = makeCtx(true)
+    expect(await runVersion(['--json', '--unknown-flag'], ctx)).toBe(2)
+    expect(out).toEqual([])
+    const parsed = JSON.parse(errOut.join('')) as { error: string; code: string }
+    expect(parsed.code).toBe('usage_error')
+    // Renders as JSON because a --json that DID parse still wins over isTty
+    // (true here) — the same rule reportParseFailure gives every other
+    // command.
+    expect(parsed.error).toMatch(/unrecognised option/)
+  })
+
+  it('rejects --host here rather than silently ignoring it, and says so as a usage error', async () => {
+    // --host is accepted by all six other commands, so an operator reaching
+    // for it here is likely. This command talks to nothing, so accepting
+    // and ignoring it would be the silently-vanishing-flag failure
+    // checkStrayFlags exists to prevent. Exit 2, not a stack trace.
+    const { ctx, errOut } = makeCtx(false)
+    expect(await runVersion(['--host', 'http://example.test'], ctx)).toBe(2)
+    expect(JSON.parse(errOut.join('')).code).toBe('usage_error')
+  })
+
+  it('never echoes an unrecognised flag’s own text, even here', async () => {
+    // The same sweep every other command group has. `--<secret>` reaches
+    // node:util's ERR_PARSE_ARGS_UNKNOWN_OPTION, which bakes the raw token
+    // into its message twice; args.ts rebuilds the message from an index
+    // instead, and this pins that runVersion gets that for free now that it
+    // routes through the same path.
+    const secret = 'sk_live_SENTINEL_never_here'
+    for (const argv of [[`--${secret}`], ['--json', `--${secret}`], [secret]]) {
+      const { ctx, out, errOut } = makeCtx(false)
+      await runVersion(argv, ctx)
+      expect(out.join('')).not.toContain(secret)
+      expect(errOut.join('')).not.toContain(secret)
+    }
   })
 })
 

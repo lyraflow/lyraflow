@@ -328,6 +328,25 @@ describe('the built CLI against a real, in-process server', () => {
     for (const line of lines) expect(() => JSON.parse(line)).not.toThrow()
   })
 
+  it('--version reports a bad flag as exit 2 and JSON, not a stack trace', async () => {
+    // Against the real binary, because the defect was in how `main` called
+    // `runVersion` as much as in `runVersion` itself: the exit code was
+    // never set from its result. `--version` is what the README tells an
+    // agent to run first.
+    const bad = await run(['--version', '--unknown-flag', '--json'])
+    expect(bad.code).toBe(2)
+    expect(bad.stdout).toBe('')
+    expect(bad.stderr).not.toContain('UsageError')
+    expect(bad.stderr).not.toMatch(/\n\s+at /)
+    expect(JSON.parse(bad.stderr.trim()).code).toBe('usage_error')
+
+    // And the ordinary path still exits 0 with the documented object.
+    const good = await run(['--version', '--json'])
+    expect(good.code).toBe(0)
+    expect(good.stderr).toBe('')
+    expect(Object.keys(JSON.parse(good.stdout.trim())).sort()).toEqual(['output_schema', 'version'])
+  })
+
   it('exits 2 on a usage error and writes nothing to stdout', async () => {
     const { stdout, stderr, code } = await run(['events', '--since', 'bad'])
     expect(code).toBe(2)
@@ -468,6 +487,95 @@ describe('the built CLI against a real, in-process server', () => {
     expect(parsed.error).toContain('LYRAFLOW_HOST')
     expect(parsed.error).not.toContain('not-a-url')
   })
+
+  /** A stub host that answers every request `200 application/json` with one
+   * fixed body. The real server this file boots always answers correctly,
+   * so it cannot produce the case below — but an auth proxy's interstitial,
+   * a load balancer's JSON error page, or `LYRAFLOW_HOST` pointed one host
+   * off all can, and all of them are ordinary for a self-hosted product
+   * whose host is user-supplied. */
+  async function hostAnswering(body: string): Promise<{ url: string; close: () => Promise<void> }> {
+    const server: Server = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(body)
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+    const address = server.address()
+    if (address === null || typeof address === 'string') throw new Error('stub host has no port')
+    return {
+      url: `http://127.0.0.1:${address.port}`,
+      close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    }
+  }
+
+  it('reports a wrong-shaped 2xx body as {error, code} with exit 1, never a raw stack trace', async () => {
+    // Before this, all five list commands died on `records.length` (or, for
+    // a `null` body, one property read earlier still) with a raw TypeError
+    // and a Node stack trace on stderr — under `--json`, where the contract
+    // promises {error, code}. Three layers were each correct alone: the
+    // client guaranteed only "the body is JSON", the command modules'
+    // TypeScript interfaces are erased at runtime, and output.ts had been
+    // hardened against hostile values INSIDE the record list but never
+    // against the list itself. Fixed in two of those three (client.ts's
+    // #readJson now requires an object; output.ts's emitRecords requires a
+    // list) — deliberately NOT by adding per-command field validation,
+    // which would be a second hand-written copy of the server's contract
+    // for six response shapes, free to drift from the first.
+    const commands: string[][] = [
+      ['events', '--since', '1h'],
+      ['stats'],
+      ['segments', 'list'],
+      ['schema', 'events'],
+      ['schema', 'properties'],
+    ]
+    for (const body of ['{}', 'null', '[]', '"hello"']) {
+      const host = await hostAnswering(body)
+      try {
+        for (const argv of commands) {
+          const result = await run([...argv, '--json'], { host: host.url })
+          const where = `${argv.join(' ')} against body ${body}`
+          expect(result.code, where).toBe(1)
+          expect(result.stdout, where).toBe('')
+          expect(result.stderr, where).not.toContain('TypeError')
+          expect(result.stderr, where).not.toMatch(/\n\s+at /)
+          const parsed = JSON.parse(result.stderr.trim())
+          expect(typeof parsed.error).toBe('string')
+          expect(['invalid_response_body', 'invalid_response_shape']).toContain(parsed.code)
+        }
+      } finally {
+        await host.close()
+      }
+    }
+  }, 60_000)
+
+  it('does NOT invent fields a wrong-shaped 2xx object is missing — the deliberate edge of the fix', async () => {
+    // Pinning the boundary rather than leaving it to be rediscovered. The
+    // guarantee is "a wrong-shaped body never crashes, and never silently
+    // becomes an empty record list"; it is NOT "every documented field is
+    // validated". A `{}` body to a single-record command is therefore
+    // printed as `{}` with exit 0 — honest output of what the server
+    // actually sent, and visible to an agent as a missing field, rather
+    // than a per-command validator mirroring six response shapes.
+    const host = await hostAnswering('{}')
+    try {
+      const result = await run(['persons', 'get', 'nobody', '--json'], { host: host.url })
+      expect(result.code).toBe(0)
+      expect(result.stdout.trim()).toBe('{}')
+
+      // A `null` body to the same command IS refused, because "there is no
+      // record here at all" is a failed request answered with a 200.
+      const nullHost = await hostAnswering('null')
+      try {
+        const nullResult = await run(['persons', 'get', 'nobody', '--json'], { host: nullHost.url })
+        expect(nullResult.code).toBe(1)
+        expect(JSON.parse(nullResult.stderr.trim()).code).toBe('invalid_response_body')
+      } finally {
+        await nullHost.close()
+      }
+    } finally {
+      await host.close()
+    }
+  }, 20_000)
 
   it('honours --human at a non-tty, in the direction detection alone would get wrong', async () => {
     // A subprocess's stdout is a pipe, so detection alone would pick json —

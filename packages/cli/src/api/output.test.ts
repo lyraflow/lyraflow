@@ -43,6 +43,39 @@ describe('resolveMode', () => {
 })
 
 describe('emitRecords', () => {
+  it('refuses a missing or non-array collection as an ApiError, in both modes, instead of crashing', () => {
+    // THE CONTAINER, not its contents. Every other guard in this module —
+    // toCell, safeGet, safeJsonLine, describeUnknown — protects against
+    // hostile values INSIDE `records`, and every test in this file passed
+    // an array, so `records.length` (the function's FIRST statement) was an
+    // unguarded property read on caller-supplied data in the module whose
+    // docstring promises it never crashes. A 2xx body of `{}` made all five
+    // list commands die with `TypeError: Cannot read properties of
+    // undefined (reading 'length')`.
+    //
+    // ApiError specifically, not a new class: every command already routes
+    // its catch through reportCommandFailure, which renders an ApiError as
+    // {error, code} with exit 1 and RETHROWS anything else — so a bespoke
+    // class would have crashed in exactly the same way it was meant to
+    // prevent.
+    for (const mode of ['json', 'human'] as const) {
+      for (const bad of [undefined, null, {}, 'hello', 42]) {
+        const out: string[] = []
+        let thrown: unknown
+        try {
+          emitRecords(bad as unknown as unknown[], mode, COLUMNS, (s) => out.push(s))
+        } catch (err) {
+          thrown = err
+        }
+        expect(thrown, `${mode} / ${String(bad)}`).toBeInstanceOf(ApiError)
+        expect((thrown as ApiError).code).toBe('invalid_response_shape')
+        // Nothing may reach stdout: a half-written table or a stray record
+        // line would corrupt the stream the caller is parsing.
+        expect(out).toEqual([])
+      }
+    }
+  })
+
   it('writes one JSON object per line, and nothing else', () => {
     // NDJSON: it streams, it works with jq, and it matches the export
     // endpoint's existing format. No wrapper, no header, no summary line —
@@ -278,10 +311,37 @@ describe('emitObject', () => {
   })
 
   it('does not crash on a non-object record in either mode', () => {
+    // Still true, and deliberately kept: a string or a number is a value,
+    // badly shaped but present, and this module's job is to render it
+    // rather than take the process down. Only "no record at all" is
+    // refused — see the test below.
     const out: string[] = []
     emitObject('just a string', 'human', (s) => out.push(s))
     emitObject(42, 'json', (s) => out.push(s))
     expect(out.join('')).toBe('just a string\n42\n')
+  })
+
+  it('refuses null/undefined as an ApiError rather than printing the word "null" and reporting success', () => {
+    // The `emitObject` half of the wrong-shaped-body Critical. `persons
+    // get`, `persons delete`, `deletions get` and `segments run` all hand
+    // a 2xx body straight to this function; a body of `null` used to print
+    // the literal `null` and exit 0, which tells an agent the record it
+    // asked for exists and is empty. It does not — the request failed and
+    // was answered with a 200.
+    for (const mode of ['json', 'human'] as const) {
+      for (const bad of [null, undefined]) {
+        const out: string[] = []
+        let thrown: unknown
+        try {
+          emitObject(bad, mode, (s) => out.push(s))
+        } catch (err) {
+          thrown = err
+        }
+        expect(thrown, `${mode} / ${String(bad)}`).toBeInstanceOf(ApiError)
+        expect((thrown as ApiError).code).toBe('invalid_response_shape')
+        expect(out).toEqual([])
+      }
+    }
   })
 
   it('does not crash rendering a human-mode field whose stringification is fully poisoned', () => {

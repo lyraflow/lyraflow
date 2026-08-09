@@ -610,12 +610,18 @@ describe('runEvents', () => {
     // using it as a carrier for the "flag's own value" shapes below is
     // safe and does not depend on --event never being validated.
     //
-    // --limit USED to be a carve-out here: its validator echoed whatever it
-    // was handed, for a non-secret typo. It was the last leaking slot of the
-    // 144 this sweep and its siblings cover, and "the shape is narrow" was
-    // the argument the three previous times this class shipped — so the
-    // carve-out is gone and the shapes below include it. --since/--until
-    // remain carve-outs: see the separate assertion after this loop.
+    // --limit used to be a carve-out here, then --since/--until were the
+    // last two: each validator echoed whatever it was handed, excused as a
+    // non-secret typo. "The shape is narrow" was the argument every one of
+    // the four times this class shipped on this branch — including, for
+    // --since/--until, in a comment written one commit AFTER the identical
+    // argument had been deleted for --limit. There are no carve-outs left,
+    // and this loop covers all of them.
+    //
+    // (An earlier version of this comment ended "--since/--until remain
+    // carve-outs: see the separate assertion after this loop." There was no
+    // such assertion. A pointer to a test that does not exist reads exactly
+    // like coverage.)
     const secret = 'sk_live_SENTINEL_never_here'
     const shapes: string[][] = [
       [secret], // bare positional, first
@@ -634,6 +640,14 @@ describe('runEvents', () => {
       // args.ts, shared by every command group including this one).
       ['--limit', secret], // --limit's own value, formerly carved out
       [`--limit=${secret}`],
+      ['--since', secret], // --since/--until's own values, likewise
+      [`--since=${secret}`],
+      ['--until', secret],
+      [`--until=${secret}`],
+      // --since given a value shaped like a duration so the FIRST parse
+      // succeeds and the secret reaches --until's parse instead: the two
+      // are resolved in sequence, and only one of them can fail first.
+      ['--since', '15m', '--until', secret],
     ]
 
     for (const argv of shapes) {
@@ -661,6 +675,36 @@ describe('runEvents', () => {
     const second = makeCtx(client)
     expect(await runEvents(['--limit', '9999'], second.ctx)).toBe(2)
     expect(second.errOut.join('')).toContain('9999')
+  })
+
+  it('still says something useful about a bad --since/--until without repeating what was typed', async () => {
+    // Same standard the --limit redaction was held to: the diagnostic is
+    // which flag was wrong and what the accepted forms are. Only the value
+    // is gone — and the flag name is exactly what the message gained, since
+    // "not a valid instant" alone could not say which of the two it meant.
+    const { client, calls } = makeClient([EMPTY_PAGE])
+    const { ctx, errOut } = makeCtx(client)
+    expect(await runEvents(['--since', 'yesterday'], ctx)).toBe(2)
+    expect(calls).toHaveLength(0)
+    const since = errOut.join('')
+    expect(since).toContain('--since')
+    expect(since).toContain('15m')
+    expect(since).toContain('ISO 8601')
+    expect(since).not.toContain('yesterday')
+
+    const second = makeCtx(client)
+    expect(await runEvents(['--since', '15m', '--until', 'tomorrow'], second.ctx)).toBe(2)
+    const until = second.errOut.join('')
+    expect(until).toContain('--until')
+    expect(until).not.toContain('--since')
+    expect(until).not.toContain('tomorrow')
+
+    // The out-of-range branch is a second message with its own
+    // interpolation, and it used to echo the value too.
+    const third = makeCtx(client)
+    expect(await runEvents(['--since', '999999999d'], third.ctx)).toBe(2)
+    expect(third.errOut.join('')).toContain('--since')
+    expect(third.errOut.join('')).not.toContain('999999999d')
   })
 
   it('honours a --json that did parse when an unrelated flag fails to, rather than defaulting from isTty', async () => {

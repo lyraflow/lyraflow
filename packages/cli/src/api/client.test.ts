@@ -369,6 +369,45 @@ describe('Client', () => {
     expect(err.message.toLowerCase()).toContain('non-json')
   })
 
+  it('wraps a 2xx body that is JSON but not an object in ApiError, for every such shape', async () => {
+    // The first layer of the wrong-shaped-body Critical. `null`, `[]`,
+    // `"hello"` and `42` all PARSE — so the old guard, which only caught a
+    // SyntaxError, passed each of them straight through to a caller whose
+    // very next act is a property read. `null` in particular crashed at
+    // `res.events` with a raw TypeError before `emitRecords` (which now
+    // guards the other half) was ever reached; under `--json` that reaches
+    // stderr as a Node stack trace where the contract promises
+    // {error, code}. Reachable in practice for a self-hosted product with a
+    // user-supplied --host: an auth proxy, a load balancer's JSON error
+    // page, or LYRAFLOW_HOST pointed one host off.
+    for (const body of ['null', '[]', '"hello"', '42', '[{"event_id":"e1"}]']) {
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response(body, { status: 200, headers: { 'content-type': 'application/json' } }),
+      ) as unknown as typeof fetch
+      const client = make(fetchImpl)
+      const err = (await client.get('/v1/events').catch((e) => e)) as ApiError
+      expect(err, `body ${body}`).toBeInstanceOf(ApiError)
+      expect(err.code).toBe('invalid_response_body')
+      expect(err.message).toContain('not a JSON object')
+      // The body is never echoed — same rule as `Location` and the key.
+      expect(err.message).not.toContain('hello')
+    }
+  })
+
+  it('still accepts an ordinary 2xx object body unchanged', async () => {
+    // The guard above must not have narrowed what actually works: this is
+    // the shape every route in this API really sends.
+    const fetchImpl = vi.fn(async () =>
+      reply(200, { events: [{ event_id: 'e1' }], next_cursor: 'c1' }),
+    ) as unknown as typeof fetch
+    const client = make(fetchImpl)
+    expect(await client.get('/v1/events')).toEqual({
+      events: [{ event_id: 'e1' }],
+      next_cursor: 'c1',
+    })
+  })
+
   it('wraps an empty 2xx body in ApiError instead of a raw SyntaxError', async () => {
     const fetchImpl = vi.fn(
       async () => new Response('', { status: 200 }),
