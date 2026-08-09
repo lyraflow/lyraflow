@@ -311,7 +311,12 @@ afterAll(async () => {
   await ch.close()
 })
 
-describe('the built CLI against a real, subprocess-run server', () => {
+// The CLI is subprocess-run; the server is not — it is buildApp() in this
+// process, for the reason the module docstring above sets out. Naming it
+// otherwise would put a false claim in every CI line and failure message
+// this file emits, in the one file whose whole job is stopping tests from
+// claiming more than they do.
+describe('the built CLI against a real, in-process server', () => {
   it('prints NDJSON when its output is a pipe', async () => {
     // A subprocess's stdout is a pipe, so this exercises the real detection
     // rather than a mocked isTty.
@@ -396,6 +401,14 @@ describe('the built CLI against a real, subprocess-run server', () => {
       const { stdout, stderr } = await run(argv, { serverKey: SERVER_KEY })
       expect(stdout + stderr).not.toContain(SERVER_KEY)
     }
+
+    // `not.toContain` also passes when nothing was printed at all, and four
+    // of the five shapes above are failure paths where empty output is
+    // plausible. Assert the success path actually produced something, so
+    // this cannot decay into a test that proves silence.
+    const { stdout } = await run(['events', '--since', '1h'], { serverKey: SERVER_KEY })
+    expect(stdout).not.toBe('')
+    expect(stdout).not.toContain(SERVER_KEY)
   })
 
   it('honours --human at a non-tty, in the direction detection alone would get wrong', async () => {
