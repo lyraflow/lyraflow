@@ -132,6 +132,7 @@ describe('parseCommandArgs', () => {
       flags: { since: '15m', json: true },
       positionals: ['get', 'user-42'],
       positionalIndexes: [0, 1],
+      positionalContext: [undefined, undefined],
     })
   })
 
@@ -139,6 +140,34 @@ describe('parseCommandArgs', () => {
     const result = parseCommandArgs(['--since', '15m', 'get', '--json', 'user-42'], SPEC)
     expect(result.positionals).toEqual(['get', 'user-42'])
     expect(result.positionalIndexes).toEqual([2, 4])
+  })
+
+  it("reports the preceding option's canonical NAME for positionalContext — never a raw argv string, never a value", () => {
+    const result = parseCommandArgs(['--since', '15m', 'oops'], SPEC)
+    expect(result.positionals).toEqual(['oops'])
+    expect(result.positionalContext).toEqual(['since'])
+  })
+
+  it('positionalContext is the value-bearing token itself for --flag=value syntax — the exact leak round 3 fixed', () => {
+    // Before this fix, a caller building "after <this token>" from raw
+    // argv would echo the option's OWN value here, since `--since=15m` is
+    // one token that contains it. positionalContext must give only the
+    // canonical flag NAME ("since"), never this raw token.
+    const result = parseCommandArgs(['--since=15m', 'oops'], SPEC)
+    expect(result.positionals).toEqual(['oops'])
+    expect(result.positionalContext).toEqual(['since'])
+  })
+
+  it('positionalContext is undefined when the preceding token is itself a positional, not an option', () => {
+    const result = parseCommandArgs(['get', 'oops'], SPEC)
+    expect(result.positionals).toEqual(['get', 'oops'])
+    expect(result.positionalContext).toEqual([undefined, undefined])
+  })
+
+  it('positionalContext is undefined for a positional reachable only past a `--` terminator', () => {
+    const result = parseCommandArgs(['--since', '15m', '--', 'oops'], SPEC)
+    expect(result.positionals).toEqual(['oops'])
+    expect(result.positionalContext).toEqual([undefined])
   })
 
   it('leaves an unset boolean absent rather than defaulting it to false', () => {

@@ -177,29 +177,29 @@ function isEpipe(err: unknown): boolean {
 
 /**
  * Reports that argv carried more positional arguments than this command
- * takes — WITHOUT ever including their values. A positional can be
- * anything the caller mistyped where a flag value belonged, including a
- * secret: `lyraflow events $LYRAFLOW_SERVER_KEY` (forgetting the flag
- * name) makes the key itself a positional, and an earlier version of this
- * message interpolated `positionals.join(' ')` straight into the error —
- * exactly the "not in an error message" prohibition this CLI exists to
- * hold everywhere else. `positionalIndexes` (args.ts) gives a real argv
- * index without ever comparing against — let alone printing — the value,
- * so the message can still say roughly WHERE the problem is.
+ * takes — WITHOUT ever including their values, and WITHOUT ever reading a
+ * raw argv string at all. A positional can be anything the caller mistyped
+ * where a flag value belonged, including a secret: `lyraflow events
+ * $LYRAFLOW_SERVER_KEY` (forgetting the flag name) makes the key itself a
+ * positional. This has been fixed twice already: an earlier version
+ * interpolated `positionals.join(' ')` straight into the error; the
+ * version after that fixed the value leak but still read
+ * `argv[firstIndex - 1]` to describe WHERE the positional appeared — which
+ * for `--flag=value` syntax IS the value, since Node's `parseArgs` treats
+ * `--server-key=sk_live_...` as a single token. `context` (from
+ * `parseCommandArgs`'s `positionalContext`) is the preceding option's
+ * canonical NAME only — never `--name`, never anything with `=value`
+ * attached, never a raw argv string — so this function's own parameter
+ * list makes both mistakes structurally unreachable rather than merely
+ * avoided this time.
  */
 function positionalsUsageMessage(
-  argv: string[],
-  positionals: string[],
-  positionalIndexes: number[],
+  count: number,
+  context: string | undefined,
+  ordinal: number,
 ): string {
-  const count = positionals.length
   const plural = count === 1 ? '' : 's'
-  const firstIndex = positionalIndexes[0]
-  if (firstIndex === undefined || firstIndex === 0) {
-    return `${count} unexpected positional argument${plural} at the start of the arguments`
-  }
-  const prev = argv[firstIndex - 1]
-  const location = prev?.startsWith('-') ? `after ${prev}` : `at position ${firstIndex}`
+  const location = context !== undefined ? `after --${context}` : `as argument ${ordinal}`
   return `${count} unexpected positional argument${plural} ${location}`
 }
 
@@ -238,8 +238,9 @@ export async function runEvents(argv: string[], ctx: CommandContext): Promise<nu
   let flags: Record<string, string | boolean>
   let positionals: string[]
   let positionalIndexes: number[]
+  let positionalContext: (string | undefined)[]
   try {
-    ;({ flags, positionals, positionalIndexes } = parseCommandArgs(argv, {
+    ;({ flags, positionals, positionalIndexes, positionalContext } = parseCommandArgs(argv, {
       strings: ['since', 'until', 'event', 'person', 'limit', 'after', 'host', 'server-key'],
       booleans: ['follow', 'json', 'human'],
     }))
@@ -263,9 +264,10 @@ export async function runEvents(argv: string[], ctx: CommandContext): Promise<nu
   const mode = resolveMode(flags, ctx.isTty)
 
   if (positionals.length > 0) {
+    const ordinal = (positionalIndexes[0] ?? 0) + 1
     try {
       emitError(
-        new UsageError(positionalsUsageMessage(argv, positionals, positionalIndexes)),
+        new UsageError(positionalsUsageMessage(positionals.length, positionalContext[0], ordinal)),
         mode,
         ctx.writeErr,
       )

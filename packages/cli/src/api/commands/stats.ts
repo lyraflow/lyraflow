@@ -56,9 +56,13 @@ function isEpipe(err: unknown): boolean {
  * The server's own default window WIDTH per interval
  * (`STATS_DEFAULT_WINDOW_MS`, events/routes.ts), duplicated here — not
  * merely mirrored in a comment — because it is needed for real computation
- * below, not just documentation. `1m` → 1h, `1h` → 24h, `1d` → 7d.
+ * below, not just documentation. `1m` → 1h, `1h` → 24h, `1d` → 7d. Pinned
+ * against that source directly in `stats.test.ts` (the same technique
+ * `events.test.ts` uses for `EVENTS_MAX_LIMIT`/`EVENTS_DEFAULT_LIMIT`, and
+ * `CLI_VERSION`'s own test uses against `package.json`), so a hand-copy
+ * that drifts is caught rather than trusted to stay in sync by discipline.
  */
-const DEFAULT_WINDOW_MS: Record<Interval, number> = {
+export const DEFAULT_WINDOW_MS: Record<Interval, number> = {
   '1m': 60 * 60_000,
   '1h': 24 * 60 * 60_000,
   '1d': 7 * 24 * 60 * 60_000,
@@ -110,23 +114,18 @@ function defaultSince(interval: Interval, until: Date | undefined, now: Date): D
 
 /**
  * Reports that argv carried more positional arguments than this command
- * takes, WITHOUT ever including their values — see events.ts's identical
- * helper for the full reasoning (a positional can be a secret mistyped
- * where a flag value belonged).
+ * takes, WITHOUT ever including their values and WITHOUT ever reading a
+ * raw argv string at all — see events.ts's identical helper for the full
+ * reasoning, including why an earlier version's "read the token before
+ * it" fix was itself still a leak for `--flag=value` syntax.
  */
 function positionalsUsageMessage(
-  argv: string[],
-  positionals: string[],
-  positionalIndexes: number[],
+  count: number,
+  context: string | undefined,
+  ordinal: number,
 ): string {
-  const count = positionals.length
   const plural = count === 1 ? '' : 's'
-  const firstIndex = positionalIndexes[0]
-  if (firstIndex === undefined || firstIndex === 0) {
-    return `${count} unexpected positional argument${plural} at the start of the arguments`
-  }
-  const prev = argv[firstIndex - 1]
-  const location = prev?.startsWith('-') ? `after ${prev}` : `at position ${firstIndex}`
+  const location = context !== undefined ? `after --${context}` : `as argument ${ordinal}`
   return `${count} unexpected positional argument${plural} ${location}`
 }
 
@@ -140,8 +139,9 @@ export async function runStats(argv: string[], ctx: CommandContext): Promise<num
   let flags: Record<string, string | boolean>
   let positionals: string[]
   let positionalIndexes: number[]
+  let positionalContext: (string | undefined)[]
   try {
-    ;({ flags, positionals, positionalIndexes } = parseCommandArgs(argv, {
+    ;({ flags, positionals, positionalIndexes, positionalContext } = parseCommandArgs(argv, {
       strings: ['since', 'until', 'interval', 'host', 'server-key'],
       booleans: ['by-event', 'json', 'human'],
     }))
@@ -162,9 +162,10 @@ export async function runStats(argv: string[], ctx: CommandContext): Promise<num
   const mode = resolveMode(flags, ctx.isTty)
 
   if (positionals.length > 0) {
+    const ordinal = (positionalIndexes[0] ?? 0) + 1
     try {
       emitError(
-        new UsageError(positionalsUsageMessage(argv, positionals, positionalIndexes)),
+        new UsageError(positionalsUsageMessage(positionals.length, positionalContext[0], ordinal)),
         mode,
         ctx.writeErr,
       )

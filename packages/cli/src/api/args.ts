@@ -218,19 +218,36 @@ export interface ArgSpec {
  * subcommand words (`get`, `delete`) and their ids, exactly as typed.
  *
  * `positionalIndexes` is `positionals`' parallel array of each entry's
- * original index in `argv` — not its value. This exists so a caller
- * rejecting unexpected positionals (a real regression this shipped once:
- * see events.ts/stats.ts's "unexpected argument(s)" message) can report
- * WHERE one appeared without ever echoing WHAT it was. A positional can be
- * anything the user mistyped where a flag value belonged — including a
- * secret passed as `lyraflow events $LYRAFLOW_SERVER_KEY` by mistake — and
- * this CLI's whole guarantee about a key never appearing in output would
- * be undone by "helpfully" printing the token back.
+ * original index in `argv` — a plain number, never a value.
+ *
+ * `positionalContext` is `positionals`' parallel array of the canonical
+ * FLAG NAME (e.g. `"server-key"`, never `"--server-key"` and never
+ * anything with `=value` attached) of whichever option token immediately
+ * precedes it in argv's own token stream — or `undefined` when nothing
+ * does (the positional is first, or the token before it is itself a
+ * positional, or it's the `--` terminator).
+ *
+ * Both exist for exactly one reason, twice-learned the hard way: a caller
+ * rejecting unexpected positionals (a real regression this shipped
+ * TWICE — first by echoing the positional's own value, then by echoing
+ * the argv token immediately before it, which for `--flag=value` syntax
+ * IS the value) needs to report roughly WHERE a positional appeared
+ * without ever being able to reach WHAT it, or its neighbour, was. A
+ * positional can be anything the user mistyped where a flag value
+ * belonged — including a secret passed as `lyraflow events
+ * $LYRAFLOW_SERVER_KEY`, or `--server-key=$LYRAFLOW_SERVER_KEY foo`. Both
+ * fields are numbers or option NAMES only — never a raw argv string,
+ * never anything sourced from a token's own `value` — so nothing that
+ * reaches a caller through `ParsedArgs` can ever be a secret, regardless
+ * of what a future caller does with them. See
+ * `commands/command-support.ts`'s `positionalsUsageMessage`, the one place
+ * in this CLI allowed to build the actual message from these two fields.
  */
 export interface ParsedArgs {
   flags: Record<string, string | boolean>
   positionals: string[]
   positionalIndexes: number[]
+  positionalContext: (string | undefined)[]
 }
 
 /**
@@ -263,12 +280,26 @@ export function parseCommandArgs(argv: string[], spec: ArgSpec): ParsedArgs {
     throw new UsageError(err instanceof Error ? err.message : 'invalid arguments')
   }
 
-  const positionalIndexes = parsed.tokens.filter((t) => t.kind === 'positional').map((t) => t.index)
+  const positionalIndexes: number[] = []
+  const positionalContext: (string | undefined)[] = []
+  for (let i = 0; i < parsed.tokens.length; i++) {
+    const token = parsed.tokens[i]
+    if (token?.kind !== 'positional') continue
+    positionalIndexes.push(token.index)
+    // Only `kind`/`name` are ever read here — never `value`, on either
+    // this token or the preceding one. That is the entire guarantee this
+    // field exists to make: it is structurally impossible for
+    // `positionalContext` to carry anything a token's own `value` field
+    // held, because that field is never touched.
+    const prev = parsed.tokens[i - 1]
+    positionalContext.push(prev?.kind === 'option' ? prev.name : undefined)
+  }
 
   return {
     flags: parsed.values as Record<string, string | boolean>,
     positionals: parsed.positionals,
     positionalIndexes,
+    positionalContext,
   }
 }
 

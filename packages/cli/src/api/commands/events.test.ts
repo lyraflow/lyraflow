@@ -566,13 +566,71 @@ describe('runEvents', () => {
   })
 
   it('still gives a specific, useful diagnostic for an ordinary typo — redacting the value must not swallow the location too', async () => {
+    // Deliberately NOT --follow here: if a future mutation removed the
+    // positionals check entirely, --follow would fall through into an
+    // unbounded follow loop against the default (never-cancelling) sleep
+    // and hang/OOM the test runner instead of failing cleanly. --event
+    // exercises the identical "after a real flag" code path with no such
+    // risk.
     const { client, calls } = makeClient([EMPTY_PAGE])
     const { ctx, errOut } = makeCtx(client)
-    const code = await runEvents(['--follow', 'oops'], ctx)
+    const code = await runEvents(['--event', 'signup', 'oops'], ctx)
     expect(code).toBe(2)
     expect(calls).toHaveLength(0)
     const parsed = JSON.parse(errOut.join('')) as { error: string }
-    expect(parsed.error).toBe('1 unexpected positional argument after --follow')
+    expect(parsed.error).toBe('1 unexpected positional argument after --event')
+  })
+
+  it('never echoes a flag’s value when the positional follows a --flag=value token — the leak round 3 found', async () => {
+    // Round 2's fix stopped echoing the positional's OWN value, but built
+    // the location by reading the raw argv token immediately before it —
+    // and for `--flag=value` syntax, that token IS the value.
+    // `--server-key=sk_live_...` is one token; "the token before the
+    // positional" is that whole thing.
+    const secretLookingValue = 'sk_live_TOPSECRET_abc123'
+    const { client, calls } = makeClient([EMPTY_PAGE])
+    const { ctx, errOut } = makeCtx(client)
+    const code = await runEvents([`--server-key=${secretLookingValue}`, 'foo'], ctx)
+    expect(code).toBe(2)
+    expect(calls).toHaveLength(0)
+    expect(errOut.join('')).not.toContain(secretLookingValue)
+    const parsed = JSON.parse(errOut.join('')) as { error: string }
+    expect(parsed.error).toBe('1 unexpected positional argument after --server-key')
+  })
+
+  it('never leaks a sentinel secret placed in ANY argv slot — positional, --flag=value, a flag’s separate value, past --, first, or last', async () => {
+    // The generalised invariant round 2's and round 3's individually-named
+    // exploit tests are each one example of. A sentinel placed in any one
+    // of these ten slots must never appear anywhere in stdout or stderr,
+    // on any code path (usage error, --json parse-failure error, or a
+    // clean run). `--event`'s own value is never echoed anywhere (it only
+    // ever reaches the outgoing HTTP query, never CLI text output), so
+    // using it as a carrier for the "flag's own value" shapes below is
+    // safe and does not depend on --event never being validated — unlike
+    // --since/--until/--limit, whose validators legitimately echo back
+    // what they were given for a non-secret typo, which is expected
+    // behaviour this sweep is not testing.
+    const secret = 'sk_live_SENTINEL_never_here'
+    const shapes: string[][] = [
+      [secret], // bare positional, first
+      ['--event', 'signup', secret], // positional after a flag+value
+      [secret, '--event', 'signup'], // positional, then more flags after
+      [`--server-key=${secret}`, 'foo'], // --flag=value, value is the secret
+      [`--event=${secret}`], // --flag=value with no trailing positional
+      ['--server-key', secret, 'foo'], // flag's own separate value, then a positional
+      ['--host', 'H', '--', secret], // past a -- terminator
+      ['--host', 'H', '--', '--server-key', secret], // past --, flag-shaped positional + value
+      ['--event', 'signup', 'a', secret], // not first, not last
+      [secret, secret], // repeated
+    ]
+
+    for (const argv of shapes) {
+      const { client } = makeClient([EMPTY_PAGE])
+      const { ctx, out, errOut } = makeCtx(client)
+      await runEvents(argv, ctx)
+      expect(out.join('')).not.toContain(secret)
+      expect(errOut.join('')).not.toContain(secret)
+    }
   })
 
   it('honours a --json that did parse when an unrelated flag fails to, rather than defaulting from isTty', async () => {

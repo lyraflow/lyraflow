@@ -1,8 +1,10 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { Client } from '../client.js'
 import { ApiError } from '../client.js'
 import type { CommandContext } from '../context.js'
-import { runStats } from './stats.js'
+import { DEFAULT_WINDOW_MS, runStats } from './stats.js'
 
 const NOW = new Date('2026-08-08T12:00:00.000Z')
 
@@ -166,6 +168,50 @@ describe('runStats', () => {
     expect(errOut.join('')).toMatch(/1 unexpected/)
   })
 
+  it('never echoes a flag’s value when the positional follows a --flag=value token — the leak round 3 found', async () => {
+    const secretLookingValue = 'sk_live_TOPSECRET_abc123'
+    const { client, calls } = makeClient({ buckets: [] })
+    const { ctx, errOut } = makeCtx(client)
+    const code = await runStats([`--server-key=${secretLookingValue}`, 'foo'], ctx)
+    expect(code).toBe(2)
+    expect(calls).toHaveLength(0)
+    expect(errOut.join('')).not.toContain(secretLookingValue)
+    const parsed = JSON.parse(errOut.join('')) as { error: string }
+    expect(parsed.error).toBe('1 unexpected positional argument after --server-key')
+  })
+
+  it('never leaks a sentinel secret placed in ANY argv slot — positional, --flag=value, a flag’s separate value, past --, first, or last', async () => {
+    // Deliberately never puts the secret as --interval's (or --since's)
+    // OWN value with nothing else: those flags' validators legitimately
+    // echo back what they were given (e.g. parseInterval's "got \"...\""),
+    // which is expected, useful behaviour for a non-secret flag — not the
+    // positional-redaction leak this test exists to sweep for. Every
+    // shape here keeps the secret in a slot that can ONLY ever be reached
+    // through positional handling: a bare positional, or a flag whose own
+    // value is never echoed anywhere by design (--host/--server-key).
+    const secret = 'sk_live_SENTINEL_never_here'
+    const shapes: string[][] = [
+      [secret],
+      ['--interval', '1h', secret],
+      [secret, '--interval', '1h'],
+      [`--server-key=${secret}`, 'foo'],
+      [`--host=${secret}`],
+      ['--server-key', secret, 'foo'],
+      ['--host', 'H', '--', secret],
+      ['--host', 'H', '--', '--server-key', secret],
+      ['--interval', '1h', 'a', secret],
+      [secret, secret],
+    ]
+
+    for (const argv of shapes) {
+      const { client } = makeClient({ buckets: [] })
+      const { ctx, out, errOut } = makeCtx(client)
+      await runStats(argv, ctx)
+      expect(out.join('')).not.toContain(secret)
+      expect(errOut.join('')).not.toContain(secret)
+    }
+  })
+
   it('anchors --since to a given --until (not to a real "now") when --since is omitted, at a non-default interval', async () => {
     // The exact hole this closes: at any interval other than 1h, since was
     // previously left unsent whenever --since was omitted, regardless of
@@ -242,5 +288,38 @@ describe('runStats', () => {
       },
     })
     await expect(runStats([], ctx)).rejects.toBe(boom)
+  })
+
+  describe('DEFAULT_WINDOW_MS', () => {
+    it('matches the server’s own STATS_DEFAULT_WINDOW_MS, so the two cannot silently drift', () => {
+      // Same technique events.test.ts's EVENTS_MAX_LIMIT/EVENTS_DEFAULT_LIMIT
+      // pin test uses (itself the same technique output.ts's CLI_VERSION
+      // test uses against package.json): read the independent source of
+      // truth off disk rather than trust a hand-copy to stay in sync by
+      // discipline. packages/cli has no dependency on packages/server, so
+      // this reads the source file directly instead of importing the
+      // constant.
+      const routesSrc = readFileSync(
+        join(import.meta.dirname, '..', '..', '..', '..', 'server', 'src', 'events', 'routes.ts'),
+        'utf8',
+      )
+      const block =
+        /export const STATS_DEFAULT_WINDOW_MS: Record<keyof typeof STATS_INTERVALS, number> = \{([\s\S]*?)\}/.exec(
+          routesSrc,
+        )?.[1]
+      expect(block).toBeDefined()
+
+      const evalProduct = (expr: string): number =>
+        expr
+          .split('*')
+          .map((factor) => Number(factor.trim().replace(/_/g, '')))
+          .reduce((a, b) => a * b, 1)
+
+      for (const interval of ['1m', '1h', '1d'] as const) {
+        const match = new RegExp(`'${interval}':\\s*([^,]+),`).exec(block as string)
+        expect(match).not.toBeNull()
+        expect(evalProduct(match?.[1] as string)).toBe(DEFAULT_WINDOW_MS[interval])
+      }
+    })
   })
 })
