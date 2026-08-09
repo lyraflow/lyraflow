@@ -240,9 +240,20 @@ afterAll(async () => {
 // real date it happens to run on.
 const NOW = new Date()
 
-/** ISO instant for the 15th of the month `n` months before NOW's month. */
+/**
+ * ISO instant for the 15th of the month `n` months before NOW's month --
+ * except when NOW's own real day-of-month is earlier than the 15th (true on
+ * a real run for roughly half of every month), in which case the day is
+ * clamped down to NOW's own day. Without the clamp, `monthsAgo(0)` (today's
+ * month) would land on the 15th regardless of the real date, seeding a
+ * timestamp up to two weeks in the FUTURE relative to the real process
+ * clock whenever a run happens to land before the 15th -- harmless (the
+ * current month is never expired either way) but needlessly odd for a
+ * fixture that is supposed to represent "recent, real data."
+ */
 function monthsAgo(n: number): string {
-  return new Date(Date.UTC(NOW.getUTCFullYear(), NOW.getUTCMonth() - n, 15)).toISOString()
+  const day = Math.min(15, NOW.getUTCDate())
+  return new Date(Date.UTC(NOW.getUTCFullYear(), NOW.getUTCMonth() - n, day)).toISOString()
 }
 
 /** `YYYYMM` for the month `n` months before NOW's month -- matches `monthsAgo(n)`'s own month. */
@@ -357,6 +368,49 @@ describe('RetentionStore', () => {
         new Date('2099-01-01T00:00:00Z'),
       ),
     ).rejects.toThrow(new RegExp(String(projectA)))
+  })
+
+  // The validity half of the clock check, not just the skew comparison.
+  // `Invalid Date`'s `getTime()` is `NaN`, and `NaN > MAX_CLOCK_SKEW_MS` is
+  // `false` -- a bare skew comparison lets it walk straight through,
+  // producing an `Invalid Date` boundary that makes `expiredPartitions`
+  // return `[]` unconditionally: a clean, silent, zero-drop "success" a
+  // scheduler cannot tell from a healthy run. Same trap the
+  // `retentionMonths` check defends against with `Number.isInteger`; the
+  // `now` check must not reintroduce it. Two different ways to construct an
+  // `Invalid Date`, since `now` is an injected seam that could arrive as
+  // either shape -- a bad ISO-string parse (`new Date(process.env.X)`) or a
+  // bad numeric epoch (`new Date(NaN)`).
+  it('refuses an invalid `now` instead of silently dropping nothing', async () => {
+    await seedEventAt(projectA, monthsAgo(14), 'old_evt')
+    await seedEventAt(projectA, monthsAgo(0), 'keeper_evt')
+    await expect(
+      store.dropExpired({ projectId: projectA, retentionMonths: 13 }, new Date('not-a-date')),
+    ).rejects.toThrow(/invalid/i)
+    await expect(
+      store.dropExpired({ projectId: projectA, retentionMonths: 13 }, new Date(Number.NaN)),
+    ).rejects.toThrow(/invalid/i)
+    expect(await eventNames(projectA)).toEqual(['old_evt', 'keeper_evt'])
+  })
+
+  // Pins the BOUND ITSELF, not just its direction. Every clock test above
+  // uses a `now` decades out, which would pass unchanged for ANY
+  // `MAX_CLOCK_SKEW_MS` from a day to seventy years -- widening the
+  // constant later (a plausible "this keeps failing in CI, let me widen it"
+  // edit) would go unnoticed by them. These two bracket the real 24-hour
+  // bound tightly enough that only that exact value satisfies both.
+  it('refuses a `now` just over 24 hours from the process clock', async () => {
+    const justOver = new Date(Date.now() + 25 * 60 * 60 * 1000)
+    await expect(
+      store.dropExpired({ projectId: projectA, retentionMonths: 13 }, justOver),
+    ).rejects.toThrow(/clock/i)
+  })
+
+  it('accepts a `now` just under 24 hours from the process clock', async () => {
+    const justUnder = new Date(Date.now() + 23 * 60 * 60 * 1000)
+    await expect(
+      store.dropExpired({ projectId: projectA, retentionMonths: 13 }, justUnder),
+    ).resolves.toBeDefined()
   })
 
   // Without this check, `retentionMonths: 0` does not "do nothing" --

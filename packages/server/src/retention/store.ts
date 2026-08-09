@@ -210,6 +210,23 @@ export class RetentionStore {
     // existed: every row gone, no throw. Sanity-checking `now` against the
     // one clock this process actually trusts is the only place that can
     // catch it.
+    //
+    // The validity half is not decoration. `now.getTime()` is `NaN` for an
+    // `Invalid Date` (a bad `new Date(process.env.RETENTION_NOW)` or a
+    // failed CLI `--now` parse -- `now` is the injected seam, so this is
+    // directly reachable), and `NaN > MAX_CLOCK_SKEW_MS` is `false`: a bare
+    // skew comparison would let it walk straight through, produce an
+    // `Invalid Date` boundary, and make `expiredPartitions` return `[]`
+    // unconditionally -- a clean, silent, zero-drop "success" a scheduler
+    // cannot tell from a healthy run. Same trap the `retentionMonths` check
+    // below defends against with `Number.isInteger`; this must not
+    // reintroduce it for `now`.
+    if (Number.isNaN(now.getTime())) {
+      throw new Error(
+        `refusing to evaluate retention for project ${target.projectId}: now (${String(now)}) is an invalid Date`,
+      )
+    }
+
     const skewMs = Math.abs(Date.now() - now.getTime())
     if (skewMs > MAX_CLOCK_SKEW_MS) {
       throw new Error(
