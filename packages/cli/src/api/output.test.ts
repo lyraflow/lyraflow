@@ -159,6 +159,57 @@ describe('emitRecords', () => {
     expect(text).toContain('line1\\nline2\\ttabbed\\nmore')
   })
 
+  it('escapes ESC and every other control character in a table cell, so a cell cannot drive the terminal', () => {
+    // The Critical this widening was written for, at the layer it was
+    // fixed: a cell is DATA, and a terminal handed `ESC[...` treats it as a
+    // COMMAND. This payload is the one proven live against `lyraflow
+    // snippet` — move the cursor up six lines, erase that line, print a
+    // third-party script tag over it, move back down — and it is a legal
+    // `event_name` for any visitor to an instrumented page to send, since
+    // ingest bounds only length.
+    const payload = '\u001b[6A\u001b[2K<script src="https://evil.test/l.js"></script>\u001b[6B'
+    const out: string[] = []
+    emitRecords([{ a: 1, b: payload }], 'human', COLUMNS, (s) => out.push(s))
+    const text = out.join('')
+    // Not one assertion about one escape — the invariant: NO control
+    // character reaches the terminal from a cell, whichever one it was.
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting their absence is the point.
+    expect(text).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/)
+    expect(text).toContain('\\x1b[6A\\x1b[2K')
+    expect(text.split('\n').filter(Boolean)).toHaveLength(2)
+  })
+
+  it('escapes the C1 control block, where 0x9b is CSI by another name', () => {
+    const out: string[] = []
+    emitRecords([{ a: 1, b: '\u009b2Kwiped\u0085\u007f' }], 'human', COLUMNS, (s) => out.push(s))
+    const text = out.join('')
+    expect(text).toContain('\\x9b2Kwiped\\x85\\x7f')
+  })
+
+  it('leaves ordinary values byte-for-byte alone — the widening is not a filter', () => {
+    // What the fix must NOT break. Every human renderer in this CLI now
+    // routes through the widened `sanitizeForLine`, so anything it touches
+    // that it did not touch before is a regression in five other commands.
+    const values = [
+      'signup',
+      'checkout.completed',
+      'héllo 世界 🎉',
+      'a b  c',
+      'wk_live_abc123',
+      '2026-08-09T11:51:23.548Z',
+      'quote " backslash \\ pipe |',
+    ]
+    const out: string[] = []
+    emitRecords(
+      values.map((b, i) => ({ a: i, b })),
+      'human',
+      COLUMNS,
+      (s) => out.push(s),
+    )
+    const text = out.join('')
+    for (const v of values) expect(text).toContain(v)
+  })
+
   it('renders numbers, booleans, null, undefined and unicode as safe table cells', () => {
     const rows = [
       { a: 1, b: 42 },

@@ -65,22 +65,69 @@ export interface Column {
   get: (row: never) => string
 }
 
+/** C0 (0x00–0x1f), DEL (0x7f) and C1 (0x80–0x9f) — every codepoint a
+ * terminal may treat as an instruction rather than as text. See
+ * `sanitizeForLine` below for why escaping all of them, not only the two
+ * that break the layout, is the point. */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching control characters is this constant's entire job.
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/g
+
 /**
  * Replaces the characters that would otherwise break the single-line
  * guarantee this module makes for both a table row and a human `emitObject`
  * line: a raw newline (bare `\n`, `\r`, or `\r\n`) would split one row into
  * two; a raw tab has no fixed display width and would silently defeat
- * `padEnd` alignment. Both are replaced with a visible two-character escape
- * rather than dropped, so the value's presence is still visible instead of
- * silently vanishing.
+ * `padEnd` alignment. Both are replaced with a visible escape rather than
+ * dropped, so the value's presence is still visible instead of silently
+ * vanishing.
+ *
+ * EVERY OTHER CONTROL CHARACTER IS ESCAPED TOO, and that half is not
+ * cosmetic. Newline and tab break the LAYOUT; `ESC` (0x1b) breaks the
+ * TERMINAL. A value carrying `ESC[2K` or `ESC[6A` is not text the terminal
+ * prints — it is a command the terminal OBEYS: move the cursor up six
+ * lines, erase the line that is there, and write something else over it.
+ * Server data reaches this module (an event name, a property key, a segment
+ * name) and server data reaches the server from ingest, whose own validation
+ * (`packages/core/src/ingest/payloads.ts`) bounds LENGTH and nothing else —
+ * no character class — and whose write key is public by construction. So
+ * "the bytes in this cell were chosen by a stranger who visited the
+ * customer's website" is the ordinary case, not the exotic one, and a
+ * renderer that hands those bytes to a terminal verbatim lets that stranger
+ * rewrite lines the operator already read, including lines the operator is
+ * about to copy and paste. That was a real defect on this branch: a forged
+ * `event_name` rewrote the bundle URL inside `lyraflow snippet`'s own
+ * paste-ready block and then erased its own row, with exit code 0 and
+ * nothing on screen to hint at it.
+ *
+ * The escape is `\xNN` (lowercase hex, always two digits) rather than a
+ * character dropped or replaced with `?`: reversible enough that an
+ * operator who sees `\x1b` can tell exactly which byte was there, and
+ * inert — every character of the replacement is printable ASCII, so the
+ * output of this function can contain no control character at all, by
+ * construction. C1 (0x80–0x9f) is included because a terminal in an
+ * 8-bit-control mode treats 0x9b as CSI, i.e. as `ESC[` by another name.
+ *
+ * Ordinary values are untouched: printable ASCII, accented Latin, CJK,
+ * emoji and every other non-control codepoint pass through byte-for-byte.
  *
  * Deliberately NOT applied to the JSON path: `JSON.stringify` already
  * escapes every control character inside a string it serialises (a real
- * newline becomes the two literal characters `\`+`n`, never a raw newline),
- * so JSON output is single-line-safe by construction and needs no help here.
+ * newline becomes the two literal characters `\`+`n`, and `ESC` becomes the
+ * six literal characters `\`+`u001b`), so JSON output is single-line-safe
+ * AND terminal-safe by construction and needs no help here — verified
+ * directly in output.test.ts rather than assumed.
+ *
+ * Exported because a command that renders its own human output instead of
+ * going through `emitRecords`/`emitObject` (`snippet`'s events table is the
+ * only one today) must still route server-supplied text through THE SAME
+ * function. A second, hand-rolled sanitiser is how the defect above shipped
+ * in the first place: every other renderer in this CLI was already correct.
  */
-function sanitizeForLine(s: string): string {
-  return s.replace(/\r\n|\n|\r/g, '\\n').replace(/\t/g, '\\t')
+export function sanitizeForLine(s: string): string {
+  return s
+    .replace(/\r\n|\n|\r/g, '\\n')
+    .replace(/\t/g, '\\t')
+    .replace(CONTROL_CHARACTERS, (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, '0')}`)
 }
 
 /**

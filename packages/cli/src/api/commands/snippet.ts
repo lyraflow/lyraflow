@@ -94,7 +94,7 @@ import { SNIPPET_METHODS, VERSION } from '@lyraflow/sdk-browser'
 import { UsageError, parseCommandArgs, resolveInstant } from '../args.js'
 import { ApiError } from '../client.js'
 import type { CommandContext } from '../context.js'
-import { type Mode, emitObject, resolveMode } from '../output.js'
+import { type Mode, emitObject, resolveMode, sanitizeForLine } from '../output.js'
 import { SCHEMA_MAX_LIMIT } from './catalog.js'
 import {
   UNIVERSAL_FLAGS,
@@ -381,10 +381,35 @@ async function fetchEventsSection(
  * always renders the header line and NDJSON shape this command does not
  * want, and its JSON-mode branch cannot express the freeform multi-section
  * human text (the raw multi-line snippet plus this table) this command
- * needs below it. */
+ * needs below it.
+ *
+ * EVERY NAME GOES THROUGH `sanitizeForLine` FIRST, and this is the one line
+ * of this function that is load-bearing rather than cosmetic. `event_name`
+ * is not this CLI's text: it arrives from `/v1/track`, whose write key is
+ * public by construction (see this module's own docstring) and whose
+ * validation bounds only LENGTH (`z.string().min(1).max(128)`,
+ * packages/core/src/ingest/payloads.ts) — no character class, so `\n`, `\r`
+ * and `ESC` are all accepted event names, choosable by any visitor to the
+ * instrumented site. Printed raw, a name carrying `ESC[6A`/`ESC[2K` moves
+ * the terminal's cursor back up over the snippet this command just printed,
+ * erases a line of it, writes a third-party `<script src=…>` in its place,
+ * and then erases its own row on the way back down — so the operator
+ * selects a block that no longer says what the CLI computed, pastes it into
+ * a live page, and nothing on screen ever hinted at it. A bare `\n` forges
+ * a whole extra row without needing an escape sequence at all.
+ *
+ * Sanitising BEFORE `width` is measured, not at the point of printing, is
+ * the other half: the escaped form is what occupies columns on screen, so
+ * measuring the raw name would misalign every row after a hostile one — the
+ * same reason `emitRecords` measures `safeGet`'s already-sanitised cells.
+ *
+ * This function is where the branch's own Critical lived. `renderHuman`
+ * below explains why the SNIPPET must not be sanitised; that reasoning was
+ * read as covering this table too, and it never did. */
 function renderEventsTable(counts: EventCount[]): string {
-  const width = Math.max(...counts.map((c) => c.event_name.length))
-  return counts.map((c) => `  ${c.event_name.padEnd(width)}  ${c.count}`).join('\n')
+  const rows = counts.map((c) => ({ name: sanitizeForLine(c.event_name), count: c.count }))
+  const width = Math.max(...rows.map((r) => r.name.length))
+  return rows.map((r) => `  ${r.name.padEnd(width)}  ${r.count}`).join('\n')
 }
 
 /**
@@ -397,11 +422,29 @@ function renderEventsTable(counts: EventCount[]): string {
  * thing for `--json` below, where `JSON.stringify` escapes newlines
  * correctly by construction (output.ts's own module docstring) — so only
  * the human branch needs its own renderer.
+ *
+ * WHICH PART OF THIS OUTPUT IS EXEMPT FROM `sanitizeForLine`, EXACTLY:
+ * the `snippet` string, and nothing else. It is exempt because THIS CLI
+ * BUILT IT — `buildSnippet` above assembles it from a fixed template, a
+ * normalised origin and a `jsStringLiteral`-encoded write key, so its
+ * newlines are ours and are the point of the command. Every other string
+ * on the page below it comes from the SERVER, and server strings are
+ * sanitised like anywhere else in this CLI: the event names go through
+ * `sanitizeForLine` in `renderEventsTable` (see its docstring for what a
+ * raw one does to a terminal), and the degraded `code`/`message` pair
+ * below goes through it here for the same reason — `code` is echoed from
+ * the response body by `Client#toApiError` (client.ts), so it is server
+ * text too, not a fixed string this module chose.
+ *
+ * "Rendered by hand" is not "rendered without the shared helper". The
+ * exemption is one value wide.
  */
 function renderHuman(snippet: string, events: EventsSection, sinceRaw: string): string {
   const lines = [snippet, '']
   if ('error' in events) {
-    lines.push(`Event counts unavailable: ${events.error.message} (${events.error.code}).`)
+    lines.push(
+      `Event counts unavailable: ${sanitizeForLine(events.error.message)} (${sanitizeForLine(events.error.code)}).`,
+    )
   } else if (events.counts.length === 0) {
     lines.push('No events recorded yet.')
   } else {

