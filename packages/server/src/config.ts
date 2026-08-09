@@ -111,8 +111,15 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     retentionIntervalMs: num(env, 'LYRAFLOW_RETENTION_INTERVAL_MS', 3_600_000),
     // Off is a legitimate choice for an operator managing retention some
     // other way (their own job, their own tooling) — silently doing nothing
-    // is not. Disabling this logs once at startup (see app.ts/index.ts) so
-    // the choice is visible rather than merely absent.
+    // is not. Disabling this logs once at startup (see index.ts) so the
+    // choice is visible rather than merely absent.
+    //
+    // Only the lowercase literals "true"/"false" are accepted — see bool()
+    // above. `LYRAFLOW_RETENTION_ENABLED=FALSE` or `=0` is refused with a
+    // thrown error before any logger exists, not silently coerced to `true`:
+    // silently accepting an unrecognised "off" spelling would keep deleting
+    // data an operator believed they had turned off, which is the worse
+    // failure of the two by a wide margin.
     retentionEnabled: bool(env, 'LYRAFLOW_RETENTION_ENABLED', true),
   }
 }

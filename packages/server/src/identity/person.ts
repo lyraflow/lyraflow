@@ -137,7 +137,14 @@ export function registerPersonRoutes(app: FastifyInstance, deps: PersonDeps): vo
     // reachable through this endpoint anyway: `scope.group` always includes
     // the canonical id itself even with no bindings or merges, so the only
     // way to land here with zero events is an id nothing has ever recorded,
-    // or one entirely erased by the boundary above.
+    // one entirely erased by the boundary above, OR — since Plan 9 — one
+    // whose every event has aged out under data retention (see README's
+    // *Retention* section). That third cause 404s identically to the other
+    // two even though `person_traits` and `identity_bindings` can still
+    // hold real, undeleted data for that person: this query only counts
+    // events, so a person past retention is indistinguishable here from one
+    // who never existed. There is no way to tell the three apart from this
+    // response alone.
     if (summary.events === 0) {
       return reply.code(404).send({ error: 'person_not_found' })
     }

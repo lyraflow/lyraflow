@@ -138,6 +138,58 @@ describe('RetentionWorker', () => {
     worker.stop()
   })
 
+  // shutdown.ts now calls `retention.stop()` mid-drain, which can land while
+  // a `runOnce()` this same tick started is still in flight — see that
+  // file's own comment on why. `stop()`'s own docstring claims it does not
+  // await the in-flight run; this proves that claim rather than trusting
+  // the prose: `dropExpired` blocks on a gate this test controls, `stop()`
+  // is called and must return before the gate is ever released (raced
+  // against a timer, not merely called and hoped for), and the in-flight
+  // run is then let through and still resolves normally, unaffected by
+  // having been "stopped" underneath it.
+  it('stop() returns immediately even while a run is in flight, and the in-flight run still completes', async () => {
+    let releaseDrop: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      releaseDrop = resolve
+    })
+    const runs: number[] = []
+    const worker = makeWorker({
+      dropExpired: async (t) => {
+        await gate
+        runs.push(t.projectId)
+        return []
+      },
+    })
+
+    const runOncePromise = worker.runOnce()
+    // Let the run actually start and reach the gate before stop() is called
+    // — otherwise this would only prove stop() is fast when called before
+    // any work began, which stop()'s existing test above already covers.
+    await Promise.resolve()
+    await Promise.resolve()
+
+    const stillPending = await Promise.race([
+      (async () => {
+        worker.stop()
+        return 'stop-returned' as const
+      })(),
+      new Promise<'timed-out'>((resolve) => setTimeout(() => resolve('timed-out'), 50)),
+    ])
+    expect(stillPending).toBe('stop-returned')
+
+    // The run itself has not been affected by stop() — it is still
+    // genuinely blocked on the gate, not silently abandoned.
+    const raceWithGate = await Promise.race([
+      runOncePromise.then(() => 'settled' as const),
+      new Promise<'pending'>((resolve) => setTimeout(() => resolve('pending'), 0)),
+    ])
+    expect(raceWithGate).toBe('pending')
+
+    releaseDrop()
+    await runOncePromise
+    expect(runs).toEqual([targetA.projectId])
+  })
+
   // --- Additional coverage beyond the brief's named tests ---
 
   it('reports a run-level failure with no projectId, distinct from a per-project one', async () => {

@@ -22,6 +22,7 @@ import { registerPrivacyRoutes } from './privacy/routes.js'
 import { SuppressionStore } from './privacy/suppression-store.js'
 import { PurgeWorker } from './privacy/worker.js'
 import { registerProjectRoutes } from './project/routes.js'
+import { wrapWithDropLogging } from './retention/logging.js'
 import { RetentionStore } from './retention/store.js'
 import { RetentionWorker } from './retention/worker.js'
 import { registerSchemaRoutes } from './schema/routes.js'
@@ -151,24 +152,12 @@ export function buildApp(input: {
   const retentionStore = new RetentionStore({ pg, ch, dryRun: false })
   const retention = new RetentionWorker({
     listProjects: () => retentionStore.listProjects(),
-    // Guard 5: `RetentionStore#dropExpired` returns every partition it
-    // touched but writes nothing down itself — this wrapper is the one
-    // place that does. Once a partition is dropped it is gone for good, and
-    // this line is the only record it ever existed, so every actual drop is
-    // logged at `info` (never behind a debug level, never collapsed into a
-    // count) naming the project, table and partition.
-    dropExpired: async (target, now) => {
-      const results = await retentionStore.dropExpired(target, now)
-      for (const r of results) {
-        if (r.dropped) {
-          app.log.info(
-            { projectId: r.projectId, table: r.table, partition: r.partition },
-            'retention dropped partition',
-          )
-        }
-      }
-      return results
-    },
+    // Guard 5 — see logging.ts's own docstring for the full reasoning,
+    // including why it is a standalone function rather than inlined here.
+    dropExpired: wrapWithDropLogging(
+      (target, now) => retentionStore.dropExpired(target, now),
+      app.log,
+    ),
     // The live process clock, not an injected fixed value — `dropExpired`
     // refuses any `now` more than 24h from it (see store.ts), and there is
     // no seam here that would ever need to differ from the real clock.

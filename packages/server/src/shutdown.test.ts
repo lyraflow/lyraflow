@@ -17,8 +17,9 @@ function harness(insert: (rows: unknown[]) => Promise<void>) {
   })
   const counters = { flush: vi.fn(async () => {}) } as unknown as IngestCounters
   const purge = { stop: vi.fn() }
+  const retention = { stop: vi.fn() }
   const app = Fastify()
-  return { readiness, buffer, counters, purge, app }
+  return { readiness, buffer, counters, purge, retention, app }
 }
 
 // installShutdownHandlers only calls buffer.add()/drain() generically — it
@@ -44,6 +45,7 @@ describe('installShutdownHandlers', () => {
       buffer: asEventBuffer(h.buffer),
       counters: h.counters,
       purge: h.purge,
+      retention: h.retention,
       drainDeadlineMs: 5000,
       onExit: () => {},
     })
@@ -55,6 +57,48 @@ describe('installShutdownHandlers', () => {
     expect(inserted.flat()).toHaveLength(1)
     expect(h.counters.flush).toHaveBeenCalled()
     expect(h.purge.stop).toHaveBeenCalled()
+    expect(h.retention.stop).toHaveBeenCalled()
+  })
+
+  it('stops the retention worker beside the purge worker, before the drain completes', async () => {
+    // Mirrors the purge test directly below: retention.stop() (Important 1
+    // of the Task 4 fix round) must fire at the same point in shutdown that
+    // purge.stop() already does, for the reason its own docstring gives —
+    // bounding how much of a still-running project's drops can complete
+    // with no Guard 5 log line at all.
+    let releaseInsert: () => void = () => {}
+    const insertGate = new Promise<void>((resolve) => {
+      releaseInsert = resolve
+    })
+    const h = harness(async () => {
+      await insertGate
+    })
+    const shutdown = installShutdownHandlers({
+      app: h.app,
+      readiness: h.readiness,
+      buffer: asEventBuffer(h.buffer),
+      counters: h.counters,
+      purge: h.purge,
+      retention: h.retention,
+      drainDeadlineMs: 5000,
+      onExit: () => {},
+    })
+
+    h.buffer.add({ n: 1 })
+    const shutdownPromise = shutdown()
+
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(h.retention.stop).toHaveBeenCalledTimes(1)
+    const stillDraining = await Promise.race([
+      shutdownPromise.then(() => 'settled' as const),
+      new Promise<'pending'>((resolve) => setTimeout(() => resolve('pending'), 0)),
+    ])
+    expect(stillDraining).toBe('pending')
+
+    releaseInsert()
+    await shutdownPromise
   })
 
   it('stops the purge worker before the drain completes', async () => {
@@ -76,6 +120,7 @@ describe('installShutdownHandlers', () => {
       buffer: asEventBuffer(h.buffer),
       counters: h.counters,
       purge: h.purge,
+      retention: h.retention,
       drainDeadlineMs: 5000,
       onExit: () => {},
     })
@@ -113,6 +158,7 @@ describe('installShutdownHandlers', () => {
       buffer: asEventBuffer(h.buffer),
       counters: h.counters,
       purge: h.purge,
+      retention: h.retention,
       drainDeadlineMs: 50,
       onExit: (code) => exits.push(code),
     })
@@ -133,6 +179,7 @@ describe('installShutdownHandlers', () => {
       buffer: asEventBuffer(h.buffer),
       counters: h.counters,
       purge: h.purge,
+      retention: h.retention,
       drainDeadlineMs: 5000,
       onExit: () => {},
     })

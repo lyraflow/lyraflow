@@ -1234,11 +1234,19 @@ reach:
   had (`identify()`'s payload), partitioned by project only, with no time
   dimension to expire against. A person past retention keeps their traits and
   their identity links (`identity_bindings`, in Postgres, is untouched by
-  this worker entirely) but has no event history left — so a subject-access
-  request for that person, run through `GET /v1/persons/:id/export` (see
-  *Privacy: deletion and export* above), returns a profile with `traits` and
-  no `event` lines. That is retention working as intended, not a bug in the
-  export.
+  this worker entirely) — but **not retrievably**. `GET /v1/persons/:id` and
+  `GET /v1/persons/:id/export` (see *Privacy: deletion and export* above)
+  both decide whether a person exists at all from the same query, an event
+  count, and answer `404 person_not_found` when it is zero — identically to
+  an id that was never recorded. Once retention has dropped every partition
+  holding this person's events, that count is zero, so **both routes 404**,
+  not a profile with `traits` and no `event` lines. The traits and identity
+  links are still there, physically, in `person_traits` and
+  `identity_bindings`; nothing in this API can read them back out once every
+  event is gone. If you are answering a data-subject access request for
+  someone past retention, the honest answer this API can give is "no record
+  found" — state that plainly rather than reading the 404 as proof the
+  person was never recorded.
 - `event_schema` — the distinct event and property names Lyraflow has ever
   seen, used for autocomplete (see *Autocomplete: event and property names*
   under *Segments* above). It is not partitioned by time at all, so an event
@@ -1259,14 +1267,19 @@ Two environment variables control the worker:
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `LYRAFLOW_RETENTION_INTERVAL_MS` | `3600000` (1 hour) | How often the worker looks for expired partitions to drop. Dropping a partition is a metadata operation, and retention is measured in months, so a missed hour costs nothing. |
-| `LYRAFLOW_RETENTION_ENABLED` | `true` | Set to `false` to turn the worker off entirely. |
+| `LYRAFLOW_RETENTION_ENABLED` | `true` | Set to `false` to turn the worker off entirely. Only the lowercase literals `true`/`false` are accepted — `FALSE`, `0`, or any other spelling fails to boot with an error rather than being silently read as `true`, since silently coercing an unrecognised "off" spelling back to "on" would keep deleting data an operator believed they had disabled. |
 
 **Disabling it means retention is nobody's job unless you make it
 somebody's.** `LYRAFLOW_RETENTION_ENABLED=false` is a legitimate choice for an
 operator who prunes ClickHouse some other way, but Lyraflow will not do it for
 you, silently or otherwise, once it is off — the server logs a line at
 startup saying so, precisely so that choice is visible in the boot log rather
-than merely absent.
+than merely absent. **A disabled worker also reports `0` on both metrics
+below, forever** — it never runs, so `lyraflow_retention_last_run_timestamp_seconds`
+never leaves `0` and `lyraflow_retention_partitions_dropped_total` never
+leaves `0` either. If you disable retention deliberately, disable or exclude
+the alert on the first metric too, or it will fire permanently for a state
+you chose on purpose.
 
 Two `/metrics` series exist to alert on:
 
@@ -1279,7 +1292,14 @@ Two `/metrics` series exist to alert on:
   is the only signal that tells the two apart, and by the time it is noticed
   the wrong way, the failure it exists to prevent (partitions never dropped,
   disk quietly filling) has already been arriving, unannounced, since the
-  worker stopped.
+  worker stopped. **This timestamp still advances even on a run where every
+  single project's drop failed** — the worker moves on to the next project
+  and reports each failure through its own error log rather than aborting
+  the run, so a completed run (this metric's whole definition) is not the
+  same claim as "something was actually dropped". If you need to know that
+  drops are succeeding, not merely that the worker is alive, watch the error
+  log and the counter below together with this timestamp, not this
+  timestamp alone.
 - `lyraflow_retention_partitions_dropped_total` — a counter of partitions
   actually dropped since process start. A dry run or a run that found
   nothing expired does not advance it.

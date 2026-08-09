@@ -17,6 +17,19 @@ export interface ShutdownOptions {
   // The narrowest type that says what shutdown needs — not `PurgeWorker`
   // itself — so a test can pass a stub without a database.
   purge: { stop(): void }
+  // Same narrowing, and stopped for a DIFFERENT reason than `purge` is:
+  // `RetentionWorker.stop()` cannot make an in-flight drop reversible, but it
+  // stops the NEXT one from starting mid-shutdown, and — the part that
+  // actually matters — it stops Guard 5's log line from being the only
+  // record of a drop that happens after the process has decided it is going
+  // away. `dropExpired` logs per project, not per partition-across-the-whole-
+  // run, so a SIGTERM arriving between two projects' drops previously lost
+  // every already-executed drop from the project(s) still in flight when the
+  // signal landed, with no line ever written for them — the exact gap Guard
+  // 5 exists to close. See retention/worker.ts's own docstring for why
+  // `stop()` not awaiting the in-flight run is still safe: a drop already
+  // issued to ClickHouse completes server-side regardless.
+  retention: { stop(): void }
   drainDeadlineMs: number
   onExit?: (code: number) => void
 }
@@ -27,7 +40,7 @@ export interface ShutdownOptions {
  * is buffered, which would make the upgrade story dishonest.
  */
 export function installShutdownHandlers(opts: ShutdownOptions): () => Promise<void> {
-  const { app, readiness, buffer, counters, purge, drainDeadlineMs } = opts
+  const { app, readiness, buffer, counters, purge, retention, drainDeadlineMs } = opts
   const exit = opts.onExit ?? ((code: number) => process.exit(code))
   let running: Promise<void> | null = null
 
@@ -44,6 +57,10 @@ export function installShutdownHandlers(opts: ShutdownOptions): () => Promise<vo
       // ingest buffer, whose rows are only in this process's memory and are
       // lost if it is missed. A purge is durable in Postgres and is not.
       purge.stop()
+      // Same reasoning, plus Guard 5: stopping here bounds how much of a
+      // still-running project's drops can ever complete with no log line —
+      // see this option's own docstring above.
+      retention.stop()
 
       const result = await buffer.drain(drainDeadlineMs)
       if (result.dropped > 0) {

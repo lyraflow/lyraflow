@@ -27,6 +27,7 @@ installShutdownHandlers({
   buffer: app.deps.buffer,
   counters: app.deps.counters,
   purge: app.deps.purge,
+  retention: app.deps.retention,
   drainDeadlineMs: config.drainDeadlineMs,
 })
 
