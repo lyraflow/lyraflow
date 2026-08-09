@@ -138,7 +138,37 @@ describe('Client', () => {
     // lines, which look like "    at ...").
     expect(err.message).not.toMatch(/\n\s*at /)
     expect(err.message).not.toContain('TypeError')
-    expect(err.message).toContain('a.test')
+    // And NOT the host. This assertion used to be `toContain('a.test')` —
+    // it pinned the leak in place rather than catching it. `host` is a raw
+    // argv value (`extractOverride`, index.ts), so `--host=<a secret typed
+    // one slot off>` put that value into stdout/stderr in all six command
+    // groups. The message names the setting to fix instead; see the class
+    // docstring's GUARANTEE in client.ts, which now covers `host` too.
+    expect(err.message).not.toContain('a.test')
+    expect(err.message).toContain('--host')
+    expect(err.message).toContain('LYRAFLOW_HOST')
+  })
+
+  it('never puts the configured host in an invalid_url message either', async () => {
+    // The second of the two paths that leaked it — a different message,
+    // built in a different method (`#buildUrl`, before any socket exists),
+    // and the one the review actually caught first. `path` is left out too:
+    // it carries `encodeURIComponent(id)` for persons/deletions/segments,
+    // and that id is a raw positional.
+    const client = new Client({
+      host: 'sk_live_SENTINEL_never_here',
+      serverKey: SERVER_KEY,
+      fetchImpl: (() => {
+        throw new Error('fetch must never be reached for an unusable host')
+      }) as unknown as typeof fetch,
+    })
+    const err = (await client.get('/v1/persons/also-secret').catch((e) => e)) as ApiError
+    expect(err).toBeInstanceOf(ApiError)
+    expect(err.code).toBe('invalid_url')
+    expect(err.message).not.toContain('sk_live_SENTINEL_never_here')
+    expect(err.message).not.toContain('also-secret')
+    expect(err.message).toContain('--host')
+    expect(err.message).toContain('LYRAFLOW_HOST')
   })
 
   it('streams NDJSON line by line rather than buffering', async () => {

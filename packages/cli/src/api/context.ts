@@ -55,9 +55,39 @@ export interface CommandContext {
    * fix "now" rather than racing the real clock — `--since`'s relative
    * defaults (e.g. "the last 15 minutes") are resolved against this. */
   now: () => Date
-  /** Injected so `--follow` can be tested without real time passing; also
-   * the hook a real dispatch would wire to cancellation (e.g. SIGINT). */
+  /** Injected so `--follow` can be tested without real time passing. NOT
+   * the cancellation hook — see `onInterrupt`, and the note there on why a
+   * cancellable sleep alone could not carry that job. */
   sleep: (ms: number) => Promise<void>
+  /**
+   * Registers a handler to run when the process is being interrupted
+   * (SIGINT/SIGTERM), immediately before it exits — `events --follow`'s
+   * only way to write its resume cursor on a `Ctrl-C` or a `docker stop`.
+   *
+   * THE HANDLER RUNS SYNCHRONOUSLY, INSIDE THE SIGNAL HANDLER ITSELF, and
+   * the process ends the moment it returns: it may not await anything, and
+   * nothing it schedules will run. That is the whole point. The previous
+   * design cancelled `sleep` instead and let the follow loop unwind through
+   * its own catch — which works only when the signal lands during the sleep
+   * between polls. A `--follow` session spends the rest of its life inside
+   * an HTTP request, and there the abort was OBSERVED BY NOTHING: the loop
+   * was awaiting `client.get`, so the signal was consumed by the listener
+   * (installing one suppresses Node's default kill) and discarded, leaving
+   * the process alive for up to undici's 301-second `headersTimeout`. One
+   * `Ctrl-C` did nothing; one `SIGTERM` did nothing, and systemd/`docker
+   * stop` then SIGKILLed the process past its grace period — losing the
+   * resume cursor that was the entire point.
+   *
+   * `writeErrNow` is a SYNCHRONOUS stderr writer, not `writeErr`: on POSIX
+   * `process.stderr` is asynchronous when it is a pipe, and a queued write
+   * is simply dropped when the process exits underneath it — which is
+   * exactly how this CLI is run by an agent harness.
+   *
+   * Optional: a caller that cannot be interrupted (a test, `--version`'s
+   * placeholder context) supplies nothing, and a command that registers a
+   * handler must tolerate it never being called.
+   */
+  onInterrupt?: (handler: (writeErrNow: (s: string) => void) => void) => void
   /**
    * Asks a yes/no confirmation question and resolves the answer — `persons
    * delete`'s only route to a "are you sure" prompt, injected so the

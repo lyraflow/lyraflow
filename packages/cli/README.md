@@ -113,7 +113,11 @@ which includes:
 - the server answered a non-2xx status (a rejected key, a `400`, a `503`, …);
 - the request **never reached anything** — an unreachable host, a DNS
   failure, a malformed `--host`. `code` is `no_response` or `invalid_url` in
-  that case, and the message never claims otherwise;
+  that case, and the message never claims otherwise. Note what that message
+  does *not* contain: the host you passed. `--host` is a value from your
+  command line, and a value from a command line can be a secret typed one
+  slot off — so the error names the flag and the environment variable to
+  check, never what either of them was set to;
 - for `persons export` specifically, a stream that ended without its
   terminating `{"type":"end",…}` line — the data received is real but
   incomplete, `code` is `export_incomplete`;
@@ -131,7 +135,7 @@ lyraflow events --server-key sk_wrong --json
 # exit 1 — reached the server, rejected
 
 lyraflow events --host http://127.0.0.1:1 --json
-# {"error":"could not reach http://127.0.0.1:1","code":"no_response"}
+# {"error":"could not reach the configured host (--host, or LYRAFLOW_HOST)","code":"no_response"}
 # exit 1 too — reached nothing at all
 ```
 
@@ -240,16 +244,20 @@ precise about what this guarantees and what it does not:
   way to notice a row landing behind where it has already moved past. This is
   inherent to the paging scheme, not a bug this CLI works around.
 
-**`--follow` exits `0` on `SIGINT`/`SIGTERM` (e.g. `Ctrl-C`), writing the
-resume cursor to stderr first, same as a normal non-`--follow` run** —
-verified against the built binary, not only a test with a fake clock: the
-signal aborts the wait between polls, the loop's own catch for that runs, and
-the cursor is written before the process exits. If the signal instead arrives
-while a poll's own request is still in flight, the exit is bounded by that
-request finishing (this CLI cannot cancel an in-flight HTTP request today),
-not instant — and if nothing has happened within a couple of seconds, a
-second `Ctrl-C` falls back to an ordinary immediate kill, the same as any
-other command.
+**`--follow` exits `0` on `SIGINT`/`SIGTERM` (e.g. `Ctrl-C`, or the single
+`SIGTERM` `docker stop` and systemd send), writing the resume cursor to
+stderr first, same as a normal non-`--follow` run.** One signal is always
+enough, and it takes effect immediately — including while a poll's own HTTP
+request is still open, which is where a follow session spends most of its
+time. The cursor is written from inside the signal handler itself, so
+nothing is waited on and nothing is lost; measured against a host that
+accepts the connection and never answers, the process is gone within about
+ten milliseconds of the signal. There is no "press it again" fallback to
+know about, because there is nothing to fall back from.
+
+Only `events --follow` handles these signals. Every other command — `events`
+without `--follow` included — keeps the ordinary behaviour: the signal kills
+it outright, with no exit code of its own.
 
 ## `lyraflow stats`
 

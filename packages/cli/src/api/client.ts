@@ -41,12 +41,22 @@ export interface ClientConfig {
  * class-wide guarantee below.
  *
  * GUARANTEE: nothing that reaches this class — not `message`, not `code`,
- * not the inherited `stack` — may ever contain `serverKey`. That value goes
- * out in one request header and nowhere else: never interpolated into a
- * message, never attached as `cause`, never logged. An error that echoed it
- * would land in shell history, CI logs and an agent's transcript, none of
- * which are secret-safe storage. See client.test.ts's "no leak" suite for
- * the specific paths this was checked against.
+ * not the inherited `stack` — may ever contain ANY VALUE THIS CLIENT WAS
+ * CONFIGURED WITH: not `serverKey`, and not `host` either. Both arrive from
+ * argv or the environment (`extractOverride`, index.ts), so both can be a
+ * secret typed one slot off; `serverKey` goes out in one request header and
+ * nowhere else, and `host` goes out as the request URL and nowhere else.
+ * Neither is ever interpolated into a message, attached as `cause`, or
+ * logged. An error that echoed either would land in shell history, CI logs
+ * and an agent's transcript, none of which are secret-safe storage.
+ *
+ * `host` was NOT covered by this until the final Plan 7 review: two
+ * messages built from `this.#host` leaked it in all six command groups, and
+ * five separate sentinel sweeps missed it because every one of them
+ * constructs a FAKE `Client` (so `#buildUrl` never runs) while the one
+ * suite that drives the real client only ever put the sentinel in the
+ * ENVIRONMENT. See client.test.ts's "no leak" suite and binary.test.ts's
+ * "argv, real client" case for the composition that actually covers it.
  */
 export class ApiError extends Error {
   constructor(
@@ -211,7 +221,19 @@ export class Client {
       // etc.) never mentions request headers — but nothing enforces that on
       // every fetch-shaped thing this could be called with, so the message
       // below is built fresh rather than forwarded.
-      throw new ApiError(0, 'no_response', `could not reach ${this.#host}`)
+      //
+      // The message NAMES THE FLAG AND THE ENVIRONMENT VARIABLE, never the
+      // value itself. `host` is `extractOverride(args, 'host')` (index.ts)
+      // — a RAW ARGV VALUE — so `lyraflow events --host=<secret>` (a
+      // secret typed one slot off, an agent templating the wrong variable)
+      // put that value straight into stdout/stderr, in all six command
+      // groups, until the final Plan 7 review found it. Nothing configured
+      // is interpolated here; an operator already knows what they passed.
+      throw new ApiError(
+        0,
+        'no_response',
+        'could not reach the configured host (--host, or LYRAFLOW_HOST)',
+      )
     }
 
     // `res.type === 'opaqueredirect'` covers a fetch implementation that
@@ -257,15 +279,18 @@ export class Client {
     try {
       url = new URL(path, this.#host)
     } catch {
-      // A malformed `host` (from a misconfigured env var, say) throws here
-      // before any network call — same reasoning as the network-failure
-      // catch above: build a clear message from values already known to be
-      // safe (host, path — neither is ever the key) rather than forwarding
-      // whatever URL's own TypeError said.
+      // A malformed `host` (from a misconfigured env var, or a `--host`
+      // typo) throws here before any network call. Neither `host` NOR
+      // `path` is interpolated — see `#request`'s no_response catch for why
+      // the host cannot be, and note that `path` is not safe either: it
+      // carries `encodeURIComponent(id)` for every `persons`/`deletions`/
+      // `segments` command, and that id is a raw positional a caller can
+      // just as easily have typed a secret into. The message names what to
+      // fix instead of repeating what was typed.
       throw new ApiError(
         0,
         'invalid_url',
-        `could not build a request URL from host "${this.#host}" and path "${path}"`,
+        'the configured host is not a usable base URL (--host, or LYRAFLOW_HOST)',
       )
     }
     if (query) {

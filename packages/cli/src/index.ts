@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { writeSync } from 'node:fs'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { pathToFileURL } from 'node:url'
@@ -174,26 +175,15 @@ export function createPrompt(
 /**
  * The real `CommandContext['sleep']` for `events --follow` — identical to a
  * plain `setTimeout`-based sleep except that it also rejects the moment
- * `signal` aborts. `events.ts`'s own `--follow` loop already has a catch
- * block for a rejected sleep (see its module docstring: "a cancelled sleep
- * ... ends the follow session cleanly ... still exits 0" and writes the
- * resume cursor first) — that path existed and was tested since Task 8/9,
- * but nothing in the real dispatch below ever rejected `sleep` to reach it.
- * A real SIGINT during `--follow` fell through to Node's own default signal
- * handling instead: an immediate, uncatchable kill with no exit code at all
- * (a shell reports 130) and the resume cursor never written — confirmed
- * against the built binary before this existed. This function, plus the
- * `AbortController` wired to SIGINT/SIGTERM below, is what makes the
- * already-tested catch path reachable for real.
+ * `signal` aborts, so a follow loop sitting between polls unwinds through
+ * its own cancelled-sleep catch instead of waiting out the remaining delay.
  *
- * KNOWN GAP, not fixed here: if the signal arrives while a poll's own HTTP
- * request is still in flight — rather than during the sleep between polls —
- * this cannot cancel that request; `Client` (client.ts) takes no
- * `AbortSignal` today. The loop only notices the abort once that request
- * settles and it reaches the next `ctx.sleep` call, so the exit is bounded
- * by that request's latency, not instant. Cancelling an in-flight request is
- * a change to the whole HTTP client, not to signal wiring, and is out of
- * scope here.
+ * THIS IS NOT WHAT ENDS THE PROCESS ON A SIGNAL, and a version of this file
+ * that believed it was shipped a Critical: a `--follow` session spends most
+ * of its life awaiting an HTTP request, not this sleep, and an abort nobody
+ * is awaiting is an abort nobody observes. `wireFollowInterrupt` below is
+ * what actually ends the process, promptly, from whichever await the loop
+ * happens to be sitting on.
  */
 export function abortableSleep(signal: AbortSignal): (ms: number) => Promise<void> {
   return (ms: number) =>
@@ -215,34 +205,106 @@ export function abortableSleep(signal: AbortSignal): (ms: number) => Promise<voi
 }
 
 /**
- * Wires SIGINT/SIGTERM to `controller` — but ONLY for `events --follow`,
- * never for any other command or for `events` without `--follow`. `sleep`
- * (`CommandContext`) is read only by that one loop (see its own docstring);
- * a handler that merely aborts a controller nothing else ever checks would
- * be a silent no-op for every other command while still disabling Node's
- * own default SIGINT/SIGTERM handling for it — trading one hang for
- * another. Gated on a raw pre-scan of `argv` (`hasRawFlag`, the same
- * convention `extractOverride`/the `--json` pre-scans below already use),
- * not on `runEvents`'s own parsed flags, because the wiring has to exist
- * BEFORE that parse runs.
+ * A stderr write that is finished by the time it returns. `process.stderr`
+ * is asynchronous on POSIX whenever it is a pipe — which is how an agent
+ * harness, `docker compose exec … | tee`, and this repo's own subprocess
+ * tests all run this CLI — so a `process.stderr.write` issued immediately
+ * before `process.exit` is queued and then dropped. The one line that must
+ * survive an interrupt is `--follow`'s resume cursor, so that line goes
+ * through here instead.
  *
- * `process.once`, not `process.on`: the FIRST signal aborts the controller
- * and gives the follow loop a chance to unwind cleanly through its own
- * `ctx.sleep` catch (see `abortableSleep`'s docstring for the one case that
- * can delay it — an in-flight request). A SECOND signal, if the first one
- * hasn't ended the process yet, finds no listener left for that event and
- * falls through to Node's own default kill — the same escape hatch a hung
- * process always has, deliberately not replaced with a bespoke force-exit
- * timer that would need its own timeout tuned against production latency.
+ * Falls back to the ordinary async write if `writeSync` itself fails (a
+ * non-blocking fd can answer `EAGAIN`); a best-effort line beats none, and
+ * a stderr that cannot be written at all changes nothing about the exit.
  */
-function wireFollowInterrupt(argv: string[]): AbortController {
-  const controller = new AbortController()
-  if (hasRawFlag(argv, 'follow')) {
-    const onSignal = () => controller.abort()
-    process.once('SIGINT', onSignal)
-    process.once('SIGTERM', onSignal)
+function writeErrSync(s: string): void {
+  try {
+    writeSync(2, s)
+  } catch {
+    try {
+      process.stderr.write(s)
+    } catch {
+      // Nothing left to try, and nothing that depends on it.
+    }
   }
-  return controller
+}
+
+/** What `main` hands a command so it can be interrupted — see
+ * `wireFollowInterrupt`. */
+interface FollowInterrupt {
+  signal: AbortSignal
+  onInterrupt: (handler: (writeErrNow: (s: string) => void) => void) => void
+}
+
+/**
+ * Wires SIGINT/SIGTERM to an immediate, cursor-preserving shutdown — but
+ * ONLY for `events --follow`, never for any other command or for `events`
+ * without `--follow`. Installing a listener SUPPRESSES NODE'S OWN DEFAULT
+ * KILL for that signal, so wiring one for a command that does not act on it
+ * does not merely do nothing: it makes that command unkillable by the
+ * signal a human or an init system actually sends. Gated on a raw pre-scan
+ * of `argv` (`hasRawFlag`, the same convention `extractOverride`/the
+ * `--json` pre-scans below already use), not on `runEvents`'s own parsed
+ * flags, because the wiring has to exist BEFORE that parse runs.
+ *
+ * ONE SIGNAL IS ALWAYS ENOUGH. The handler does not wait for anything —
+ * not the in-flight HTTP request, not the sleep between polls — because
+ * there is nothing to wait for: the resume cursor is known inside the loop
+ * at all times, and a registered `onInterrupt` handler hands it over
+ * synchronously. The previous design instead aborted a controller and hoped
+ * the loop would notice, which it could only do from `ctx.sleep`; a signal
+ * arriving during a poll's own request was consumed by this listener and
+ * discarded, leaving the process alive for up to undici's 301-second
+ * `headersTimeout` and requiring a SECOND signal (of the same kind — a
+ * SIGINT after a SIGTERM found the SIGTERM listener already spent and the
+ * SIGINT one still installed, so mixed pairs survived both) to die at all.
+ * Measured against a server that accepts the connection and never answers,
+ * before the fix: `INT` alone, `INT`+`TERM` and `TERM`+`INT` all survived
+ * past 8 seconds and had to be SIGKILLed.
+ *
+ * Exits 0, the same code a `--follow` session that stops any other way
+ * reports, and the code packages/cli/README.md documents: an interrupted
+ * tail is a normal end, not a failure. Handlers run before the exit, in
+ * registration order, each guarded so that one throwing cannot stop the
+ * others or the exit itself.
+ */
+function wireFollowInterrupt(argv: string[]): FollowInterrupt {
+  const controller = new AbortController()
+  const handlers: ((writeErrNow: (s: string) => void) => void)[] = []
+
+  if (hasRawFlag(argv, 'follow')) {
+    const onSignal = () => {
+      // Belt and braces, and deliberately first: `process.exit` below is
+      // what actually ends this process, but if this handler is ever
+      // changed to return instead, an aborted signal still makes the follow
+      // loop unwind through its own cancelled-sleep catch rather than poll
+      // on forever with nobody listening.
+      controller.abort()
+      for (const handler of handlers) {
+        try {
+          handler(writeErrSync)
+        } catch {
+          // A handler that throws must not cost the exit, nor the other
+          // handlers' chance to write what they know.
+        }
+      }
+      process.exit(0)
+    }
+    // `process.on`, not `process.once`: the handler exits the process, so a
+    // second delivery is unreachable in practice — but a listener that
+    // removes itself before it has exited is a window where a signal
+    // arriving in that instant would fall through to a default kill and
+    // lose the cursor. There is no such window this way.
+    process.on('SIGINT', onSignal)
+    process.on('SIGTERM', onSignal)
+  }
+
+  return {
+    signal: controller.signal,
+    onInterrupt: (handler) => {
+      handlers.push(handler)
+    },
+  }
 }
 
 /**
@@ -383,8 +445,9 @@ async function main(): Promise<void> {
       // itself a no-op (no signal listeners installed) unless --follow is
       // actually present in argv — see its own docstring for why this must
       // not run for the other five commands, or for a plain `events` call
-      // with no --follow.
-      const followAbort = command === 'events' ? wireFollowInterrupt(args) : new AbortController()
+      // with no --follow. Passing an empty argv for the other five is how
+      // that no-op is reached without a second code path to keep in step.
+      const interrupt = wireFollowInterrupt(command === 'events' ? args : [])
 
       const ctx: CommandContext = {
         client: new Client({ host, serverKey }),
@@ -393,7 +456,8 @@ async function main(): Promise<void> {
         write,
         writeErr,
         now: () => new Date(),
-        sleep: abortableSleep(followAbort.signal),
+        sleep: abortableSleep(interrupt.signal),
+        onInterrupt: interrupt.onInterrupt,
         // Built once per invocation, real stdin/stderr — only `persons
         // delete` (via runPersons) ever actually calls this; every other
         // command here never reaches it, the same way `stats` never reads

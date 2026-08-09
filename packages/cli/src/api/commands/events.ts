@@ -244,6 +244,22 @@ export async function runEvents(argv: string[], ctx: CommandContext): Promise<nu
   // loop settles into below once it has one.
   let cursor = typeof flags.after === 'string' ? flags.after : undefined
 
+  // The interrupt path, and the ONLY thing that makes a single Ctrl-C (or a
+  // single SIGTERM from `docker stop`/systemd) end a `--follow` session
+  // promptly. `cursor` is read through this closure, so whatever the loop
+  // knows at the instant the signal lands is what gets written — including
+  // while a poll's own HTTP request is still in flight, which is where a
+  // follow session spends most of its life and where the previous,
+  // sleep-cancellation-only design silently swallowed the signal entirely.
+  // See `CommandContext['onInterrupt']` for the constraints on this
+  // callback: synchronous, no awaiting, and its own synchronous writer
+  // because a queued `writeErr` does not survive the exit that follows.
+  if (follow) {
+    ctx.onInterrupt?.((writeErrNow) => {
+      if (cursor) emitObject({ next_cursor: cursor }, mode, writeErrNow)
+    })
+  }
+
   try {
     for (;;) {
       const hadCursor = cursor !== undefined

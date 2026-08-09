@@ -46,6 +46,7 @@
 
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
+import { type Server, createServer } from 'node:http'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { type ClickHouseClient, type Pool, createChClient, createPgPool } from '@lyraflow/db'
@@ -411,6 +412,63 @@ describe('the built CLI against a real, in-process server', () => {
     expect(stdout).not.toContain(SERVER_KEY)
   })
 
+  it('never prints a --host taken from argv, in any of the six command groups, on either client failure path', async () => {
+    // THE COMPOSITION NO TEST ON THIS BRANCH HAD: a sentinel in ARGV *and*
+    // a real `Client`. Five separate sentinel sweeps (events.test.ts,
+    // stats.test.ts, persons.test.ts, catalog.test.ts ×3) put a sentinel in
+    // `--host` and asserted nothing about it, because every one of them
+    // builds a FAKE client — so `#buildUrl` and `#request`, the two places
+    // that interpolated `#host`, never ran at all. The one suite that drives
+    // the real client (this file) only ever put the sentinel in the
+    // ENVIRONMENT, where `--host`'s own value never appears. Both halves
+    // passed; the leak sat in the middle, in all six groups:
+    //
+    //   $ lyraflow stats --host=sk_live_SENTINEL_never_here
+    //   {"error":"could not build a request URL from host
+    //    \"sk_live_SENTINEL_never_here\" and path \"/v1/events/stats\"",...}
+    //
+    // `--host` is a raw argv value (`extractOverride`, index.ts): a secret
+    // typed one slot off, or an agent templating the wrong variable, lands
+    // there as easily as a URL does.
+    const secret = 'sk_live_SENTINEL_never_here'
+    const groups: string[][] = [
+      ['events', '--since', '1h'],
+      ['stats'],
+      ['persons', 'get', 'nobody'],
+      ['segments', 'list'],
+      ['schema', 'events'],
+      ['deletions', 'get', '1'],
+    ]
+
+    for (const argv of groups) {
+      // Path 1 — `invalid_url`: the value is not a usable base URL at all,
+      // so this fails inside `#buildUrl` before any socket is opened.
+      const bad = await run([...argv, `--host=${secret}`, '--json'])
+      expect(bad.code, `invalid_url path for ${argv[0]}`).toBe(1)
+      expect(bad.stdout + bad.stderr).not.toContain(secret)
+      expect(JSON.parse(bad.stderr.trim()).code).toBe('invalid_url')
+
+      // Path 2 — `no_response`: a well-formed URL that resolves to nothing,
+      // so this fails inside `#request`'s own catch instead. A different
+      // message, built in a different place; the leak was in both.
+      const unreachable = await run([...argv, `--host=http://${secret}.invalid:9`, '--json'])
+      expect(unreachable.code, `no_response path for ${argv[0]}`).toBe(1)
+      expect(unreachable.stdout + unreachable.stderr).not.toContain(secret)
+      expect(JSON.parse(unreachable.stderr.trim()).code).toBe('no_response')
+    }
+  }, 60_000)
+
+  it('still says which setting to fix when --host is unusable, without repeating what was passed', async () => {
+    // Redacting must not cost the diagnostic — the same standard the
+    // `--limit` redaction was held to. The flag and the environment
+    // variable are both named; only the value is gone.
+    const { stderr } = await run(['stats', '--host=not-a-url', '--json'])
+    const parsed = JSON.parse(stderr.trim())
+    expect(parsed.error).toContain('--host')
+    expect(parsed.error).toContain('LYRAFLOW_HOST')
+    expect(parsed.error).not.toContain('not-a-url')
+  })
+
   it('honours --human at a non-tty, in the direction detection alone would get wrong', async () => {
     // A subprocess's stdout is a pipe, so detection alone would pick json —
     // --human must win over that, not merely agree with a tty-backed test.
@@ -602,46 +660,191 @@ describe('the built CLI against a real, in-process server', () => {
     }
   }, 15_000)
 
-  it('a non-follow command still dies on SIGINT the ordinary way, not held open by the follow fix', async () => {
-    // The other half of the same review finding: wireFollowInterrupt
-    // (index.ts) installs a SIGINT/SIGTERM listener ONLY when `--follow` is
-    // present in argv, specifically so every other invocation keeps Node's
-    // own default signal handling (an immediate, uncatchable kill)
-    // untouched. Pointed at an address that accepts a TCP connection and
-    // never answers, so the request is still genuinely in flight when the
-    // signal arrives — a fast-failing host would prove nothing here. If a
-    // future change widened the SIGINT wiring to every command, this
-    // request would instead exit 0 (or hang) once whatever it's awaiting
-    // eventually settles, rather than dying on the signal the way a plain
-    // `events` call always has.
-    const child = spawn(process.execPath, [CLI_ENTRY, 'events', '--since', '15m', '--json'], {
-      env: {
-        ...process.env,
-        // A non-routable address that a connection attempt blackholes
-        // against rather than refuses — the request hangs instead of
-        // failing fast, which is what this test needs. Port 9999, NOT a
-        // low/"unsafe" port (e.g. 1): undici's fetch refuses those
-        // synchronously (the same list a browser's `fetch` honours), which
-        // made an earlier version of this test fail for the wrong reason —
-        // the request never even started, so there was nothing for SIGINT
-        // to interrupt.
-        LYRAFLOW_HOST: 'http://10.255.255.1:9999',
-        LYRAFLOW_SERVER_KEY: 'sk_test',
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
+  /**
+   * A stub host that answers the FIRST poll with a well-formed events page
+   * — so the follow loop really does hold a cursor — and then accepts every
+   * later request and never answers it. That is the state a `--follow`
+   * session is in for almost all of its life (2s of sleep per poll, an open
+   * request the rest of the time), and it is the one state the real server
+   * this file boots cannot be made to produce, because it always answers.
+   * Same precedent as the blackhole address the non-follow signal test
+   * below already uses for the same reason.
+   */
+  async function hangingAfterFirstPoll(): Promise<{
+    url: string
+    pollInFlight: Promise<void>
+    close: () => Promise<void>
+  }> {
+    let polls = 0
+    let arrived: () => void = () => {}
+    const pollInFlight = new Promise<void>((resolve) => {
+      arrived = resolve
     })
+    const server: Server = createServer((_req, res) => {
+      polls += 1
+      if (polls === 1) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        // A real event, not an empty page: the loop only adopts a cursor
+        // when a poll actually returned events (events.ts keys on what it
+        // observed, not on `next_cursor` alone), and a session with no
+        // cursor could not prove the cursor survives the interrupt.
+        res.end(
+          JSON.stringify({
+            events: [{ event_id: 'stub-1', timestamp: '2026-08-09T00:00:00.000Z' }],
+            next_cursor: 'CURSOR-FROM-FIRST-POLL',
+          }),
+        )
+        return
+      }
+      arrived() // accepted, deliberately never answered
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+    const address = server.address()
+    if (address === null || typeof address === 'string') throw new Error('stub host has no port')
+    return {
+      url: `http://127.0.0.1:${address.port}`,
+      pollInFlight,
+      close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    }
+  }
 
-    const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
-      (resolve) => {
-        child.on('close', (code, signal) => resolve({ code, signal }))
-      },
-    )
+  for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+    it(`--follow exits promptly on ONE ${sig} arriving while a poll is still in flight`, async () => {
+      // The Critical the final whole-branch review found, and the exact
+      // shape the two tests either side of this one structurally could not
+      // see: one covers a signal during the SLEEP, the other a signal
+      // during a request on a command with no --follow. Nothing covered a
+      // signal during a REQUEST under --follow — which is where a follow
+      // session spends most of its life.
+      //
+      // Installing a signal listener suppresses Node's own default kill.
+      // The listener used to only `controller.abort()`, and the loop was
+      // awaiting `client.get`, not `ctx.sleep` — so the signal was consumed
+      // and DISCARDED. Measured before the fix, against a host that accepts
+      // the connection and never answers: SIGINT alone, SIGINT→SIGTERM and
+      // SIGTERM→SIGINT all survived past 8 seconds (bounded by undici's
+      // 301-second headersTimeout) and had to be SIGKILLed, losing the
+      // resume cursor that was the point of wiring signals at all.
+      //
+      // "It exits" is not the property. "It exits promptly, on the FIRST
+      // signal, having written the cursor" is — hence the elapsed-time
+      // assertion below, which is what a passing-but-worthless version of
+      // this test would fail.
+      const host = await hangingAfterFirstPoll()
+      const child = spawn(
+        process.execPath,
+        [CLI_ENTRY, 'events', '--follow', '--since', '15m', '--json'],
+        {
+          env: { ...process.env, LYRAFLOW_HOST: host.url, LYRAFLOW_SERVER_KEY: 'sk_stub' },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      )
 
-    await new Promise((resolve) => setTimeout(resolve, 500))
-    child.kill('SIGINT')
+      let stdout = ''
+      let stderr = ''
+      child.stdout.on('data', (chunk: Buffer) => {
+        stdout += chunk.toString()
+      })
+      child.stderr.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString()
+      })
 
-    const { code, signal } = await closed
-    expect(signal).toBe('SIGINT')
-    expect(code).toBeNull()
-  }, 10_000)
+      const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+        (resolve) => {
+          child.on('close', (code, signal) => resolve({ code, signal }))
+        },
+      )
+
+      try {
+        // Not a fixed sleep: wait until the second poll has genuinely
+        // reached the stub and is sitting there unanswered. A timing guess
+        // here could signal during the sleep instead and silently test the
+        // case the other test already covers.
+        await host.pollInFlight
+
+        const sentAt = Date.now()
+        child.kill(sig)
+        const { code, signal } = await closed
+        const elapsed = Date.now() - sentAt
+
+        // `signal: null` is what proves the process ended through its own
+        // handler rather than a default kill; `code: 0` is the documented
+        // contract for an interrupted tail (see packages/cli/README.md).
+        expect(signal).toBeNull()
+        expect(code).toBe(0)
+        // Generous by three orders of magnitude against the 301s the bug
+        // allowed, and still far below the 2s poll interval — so this can
+        // only pass if the exit did not wait for the in-flight request.
+        expect(elapsed).toBeLessThan(1000)
+
+        // The cursor from the first poll must survive the interrupt: it is
+        // the whole reason a follow session gets a signal handler at all,
+        // and it is written from inside the signal handler, so an
+        // implementation that queued it on an async stderr pipe would lose
+        // it here.
+        const resumeLine = stderr
+          .trim()
+          .split('\n')
+          .find((line) => line.includes('next_cursor'))
+        expect(resumeLine).toBeDefined()
+        expect(JSON.parse(resumeLine as string)).toEqual({
+          next_cursor: 'CURSOR-FROM-FIRST-POLL',
+        })
+
+        for (const line of stdout.trim().split('\n').filter(Boolean)) {
+          expect(() => JSON.parse(line)).not.toThrow()
+        }
+      } finally {
+        child.kill('SIGKILL')
+        await host.close()
+      }
+    }, 20_000)
+  }
+
+  for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+    it(`a non-follow command still dies on ${sig} the ordinary way, not held open by the follow fix`, async () => {
+      // The other half of the same review finding: wireFollowInterrupt
+      // (index.ts) installs a SIGINT/SIGTERM listener ONLY when `--follow` is
+      // present in argv, specifically so every other invocation keeps Node's
+      // own default signal handling (an immediate, uncatchable kill)
+      // untouched. Pointed at an address that accepts a TCP connection and
+      // never answers, so the request is still genuinely in flight when the
+      // signal arrives — a fast-failing host would prove nothing here. If a
+      // future change widened the wiring to every command, this request would
+      // instead exit 0 (or hang) once whatever it's awaiting eventually
+      // settles, rather than dying on the signal the way a plain `events`
+      // call always has. Both signals, not only SIGINT: the follow fix makes
+      // one of them end the process with code 0, so "the default is intact"
+      // has to be checked for each of them separately.
+      const child = spawn(process.execPath, [CLI_ENTRY, 'events', '--since', '15m', '--json'], {
+        env: {
+          ...process.env,
+          // A non-routable address that a connection attempt blackholes
+          // against rather than refuses — the request hangs instead of
+          // failing fast, which is what this test needs. Port 9999, NOT a
+          // low/"unsafe" port (e.g. 1): undici's fetch refuses those
+          // synchronously (the same list a browser's `fetch` honours), which
+          // made an earlier version of this test fail for the wrong reason —
+          // the request never even started, so there was nothing for the
+          // signal to interrupt.
+          LYRAFLOW_HOST: 'http://10.255.255.1:9999',
+          LYRAFLOW_SERVER_KEY: 'sk_test',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+
+      const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+        (resolve) => {
+          child.on('close', (code, signal) => resolve({ code, signal }))
+        },
+      )
+
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      child.kill(sig)
+
+      const { code, signal } = await closed
+      expect(signal).toBe(sig)
+      expect(code).toBeNull()
+    }, 10_000)
+  }
 })
