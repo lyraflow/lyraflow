@@ -155,6 +155,63 @@ describe('runStats', () => {
     expect(calls).toHaveLength(0)
   })
 
+  it('never echoes a positional argument’s value into the usage error — a real regression this shipped once', async () => {
+    const secretLookingValue = 'sk_live_TOPSECRET_abc123'
+    const { client, calls } = makeClient({ buckets: [] })
+    const { ctx, errOut } = makeCtx(client)
+    const code = await runStats([secretLookingValue], ctx)
+    expect(code).toBe(2)
+    expect(calls).toHaveLength(0)
+    expect(errOut.join('')).not.toContain(secretLookingValue)
+    expect(errOut.join('')).toMatch(/1 unexpected/)
+  })
+
+  it('anchors --since to a given --until (not to a real "now") when --since is omitted, at a non-default interval', async () => {
+    // The exact hole this closes: at any interval other than 1h, since was
+    // previously left unsent whenever --since was omitted, regardless of
+    // whether --until was given — so the server computed its OWN default
+    // since relative to its own current now(), completely ignoring a
+    // caller-supplied, possibly-past --until. That silently and
+    // structurally defeated the inverted-window guard below, since an
+    // unsent `since` can never be "after" anything.
+    const { client, calls } = makeClient({ buckets: [] })
+    const { ctx } = makeCtx(client)
+    await runStats(['--interval', '1m', '--until', '2026-08-01T00:00:00.000Z'], ctx)
+    expect(calls[0]?.query.until).toBe('2026-08-01T00:00:00.000Z')
+    // STATS_DEFAULT_WINDOW_MS['1m'] (events/routes.ts) is 1 hour.
+    expect(calls[0]?.query.since).toBe('2026-07-31T23:00:00.000Z')
+  })
+
+  it('anchors --since to a given --until at the default (1h) interval too, not only the non-default ones', async () => {
+    const { client, calls } = makeClient({ buckets: [] })
+    const { ctx } = makeCtx(client)
+    await runStats(['--until', '2026-08-01T00:00:00.000Z'], ctx)
+    expect(calls[0]?.query.until).toBe('2026-08-01T00:00:00.000Z')
+    expect(calls[0]?.query.since).toBe('2026-07-31T00:00:00.000Z')
+  })
+
+  it('the default --since is structurally never after a given --until, at any interval — the case that used to slip past the inverted-window guard', async () => {
+    const { client, calls } = makeClient({ buckets: [] })
+    const { ctx } = makeCtx(client)
+    const code = await runStats(['--interval', '1m', '--until', '2020-01-01T00:00:00.000Z'], ctx)
+    expect(code).toBe(0)
+    expect(calls).toHaveLength(1)
+    const since = new Date(calls[0]?.query.since as string).getTime()
+    const until = new Date(calls[0]?.query.until as string).getTime()
+    expect(since).toBeLessThanOrEqual(until)
+  })
+
+  it('an ApiError whose own code duck-types as EPIPE still exits 1, never a silent 0', async () => {
+    const err = new ApiError(500, 'EPIPE', 'the request failed with status 500')
+    const { client } = makeClient(err)
+    const { ctx, out, errOut } = makeCtx(client)
+    const code = await runStats([], ctx)
+    expect(code).toBe(1)
+    expect(out.join('')).toBe('')
+    const parsed = JSON.parse(errOut.join('')) as { code: string }
+    expect(parsed.code).toBe('EPIPE')
+  })
+
   it('honours a --json that did parse when an unrelated flag fails to, rather than defaulting from isTty', async () => {
     const { client, calls } = makeClient({ buckets: [] })
     const { ctx, errOut } = makeCtx(client, { isTty: true })

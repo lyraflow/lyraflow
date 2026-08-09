@@ -53,28 +53,81 @@ function isEpipe(err: unknown): boolean {
 }
 
 /**
- * The CLI's own default `since` when omitted: 24 hours, matching the
- * documented default at the default (`1h`) interval. At any other interval
- * a flat 24h figure would overshoot the server's own bucket-count ceiling
- * (`STATS_MAX_BUCKETS`, events/routes.ts) for the one call shape that can
- * least afford to be told to narrow it — a bare `--interval 1m` with
- * nothing else. Rather than duplicate the server's own per-interval
- * scaling here (`STATS_DEFAULT_WINDOW_MS` — a constant this package has no
- * dependency on and should not track for drift), `since` is simply left
- * unsent at any non-default interval, so the server's own default window
- * applies instead.
- *
- * For the record (so Task 10's docs can state all three truthfully rather
- * than only the one this CLI computes itself): the server's own defaults
- * at the other two intervals are `1m` → 1h, `1d` → 7d
- * (`STATS_DEFAULT_WINDOW_MS`, events/routes.ts) — this CLI's 24h figure at
- * `1h` is not a separate decision, it is that same table's `1h` entry
- * computed here instead of left to the server, purely so the resolved
- * `since` is visible in `--json` output like every other explicit query.
+ * The server's own default window WIDTH per interval
+ * (`STATS_DEFAULT_WINDOW_MS`, events/routes.ts), duplicated here — not
+ * merely mirrored in a comment — because it is needed for real computation
+ * below, not just documentation. `1m` → 1h, `1h` → 24h, `1d` → 7d.
  */
-function defaultSince(interval: Interval, now: Date): Date | undefined {
+const DEFAULT_WINDOW_MS: Record<Interval, number> = {
+  '1m': 60 * 60_000,
+  '1h': 24 * 60 * 60_000,
+  '1d': 7 * 24 * 60 * 60_000,
+}
+
+/**
+ * The CLI's own default `since` when omitted.
+ *
+ * TWO DIFFERENT CASES, because the server's own default behaves
+ * differently depending on whether `until` was given:
+ *
+ * 1. `--until` WAS given, `--since` was not: `since` is always computed
+ *    here, anchored to the caller's own `until` — at every interval, not
+ *    only `1h`. This is the one case that cannot be left to the server: the
+ *    server's own default (`since ?? now - STATS_DEFAULT_WINDOW_MS`,
+ *    routes.ts) always anchors to ITS OWN `Date.now()`, never to a
+ *    caller-supplied `until`. Leaving `since` unsent here would pair a
+ *    real, current-time-anchored default window with a caller's possibly
+ *    stale `until` — silently producing an effectively inverted or
+ *    badly-mismatched window server-side, for every interval, not just the
+ *    non-default ones. (Confirmed directly: `--interval 1m` with a past
+ *    `--until` and no `--since` returned zero rows with exit 0 before this
+ *    fix — the server computed `since` from real `now`, miles past the
+ *    given `until`.)
+ * 2. `--until` was NOT given either: unchanged from the original behaviour
+ *    — 24h, but only at the default (`1h`) interval. At any other interval
+ *    a flat 24h figure would overshoot the server's own bucket-count
+ *    ceiling (`STATS_MAX_BUCKETS`, events/routes.ts) for the one call
+ *    shape that can least afford to be told to narrow it — a bare
+ *    `--interval 1m` with nothing else. `since` is simply left unsent in
+ *    that case, so the server's own default window (anchored to its own
+ *    `now`, which is exactly correct when there is no `until` to disagree
+ *    with) applies instead.
+ *
+ * For the record (so Task 10's docs can state all three truthfully): the
+ * server's other two per-interval defaults are `1m` → 1h, `1d` → 7d
+ * (`STATS_DEFAULT_WINDOW_MS`) — this CLI's 24h figure at `1h` is that same
+ * table's `1h` entry, computed here instead of left to the server, purely
+ * so the resolved `since` is visible in `--json` output like every other
+ * explicit query parameter.
+ */
+function defaultSince(interval: Interval, until: Date | undefined, now: Date): Date | undefined {
+  if (until) {
+    return new Date(until.getTime() - DEFAULT_WINDOW_MS[interval])
+  }
   if (interval !== '1h') return undefined
-  return new Date(now.getTime() - 24 * 60 * 60 * 1000)
+  return new Date(now.getTime() - DEFAULT_WINDOW_MS['1h'])
+}
+
+/**
+ * Reports that argv carried more positional arguments than this command
+ * takes, WITHOUT ever including their values — see events.ts's identical
+ * helper for the full reasoning (a positional can be a secret mistyped
+ * where a flag value belonged).
+ */
+function positionalsUsageMessage(
+  argv: string[],
+  positionals: string[],
+  positionalIndexes: number[],
+): string {
+  const count = positionals.length
+  const plural = count === 1 ? '' : 's'
+  const firstIndex = positionalIndexes[0]
+  if (firstIndex === undefined || firstIndex === 0) {
+    return `${count} unexpected positional argument${plural} at the start of the arguments`
+  }
+  const prev = argv[firstIndex - 1]
+  const location = prev?.startsWith('-') ? `after ${prev}` : `at position ${firstIndex}`
+  return `${count} unexpected positional argument${plural} ${location}`
 }
 
 /**
@@ -86,8 +139,9 @@ function defaultSince(interval: Interval, now: Date): Date | undefined {
 export async function runStats(argv: string[], ctx: CommandContext): Promise<number> {
   let flags: Record<string, string | boolean>
   let positionals: string[]
+  let positionalIndexes: number[]
   try {
-    ;({ flags, positionals } = parseCommandArgs(argv, {
+    ;({ flags, positionals, positionalIndexes } = parseCommandArgs(argv, {
       strings: ['since', 'until', 'interval', 'host', 'server-key'],
       booleans: ['by-event', 'json', 'human'],
     }))
@@ -110,7 +164,7 @@ export async function runStats(argv: string[], ctx: CommandContext): Promise<num
   if (positionals.length > 0) {
     try {
       emitError(
-        new UsageError(`unexpected argument(s): ${positionals.join(' ')}`),
+        new UsageError(positionalsUsageMessage(argv, positionals, positionalIndexes)),
         mode,
         ctx.writeErr,
       )
@@ -127,13 +181,15 @@ export async function runStats(argv: string[], ctx: CommandContext): Promise<num
     // All validated, and validation complete, before any network call —
     // same rule `events` follows, for the same reason.
     interval = typeof flags.interval === 'string' ? parseInterval(flags.interval) : '1h'
-    since =
-      typeof flags.since === 'string'
-        ? resolveInstant(flags.since, ctx.now())
-        : defaultSince(interval, ctx.now())
+    // `until` resolved BEFORE `since`'s default is computed — the default
+    // needs to know it, per defaultSince's own docstring.
     if (typeof flags.until === 'string') {
       until = resolveInstant(flags.until, ctx.now())
     }
+    since =
+      typeof flags.since === 'string'
+        ? resolveInstant(flags.since, ctx.now())
+        : defaultSince(interval, until, ctx.now())
     if (since && until && since.getTime() > until.getTime()) {
       throw new UsageError(
         `--since (${since.toISOString()}) is after --until (${until.toISOString()})`,
@@ -161,14 +217,19 @@ export async function runStats(argv: string[], ctx: CommandContext): Promise<num
     emitRecords(res.buckets, mode, STATS_COLUMNS, ctx.write)
     return 0
   } catch (err) {
-    if (isEpipe(err)) return 0
-    if (!(err instanceof ApiError)) throw err
-    try {
-      emitError(err, mode, ctx.writeErr)
-    } catch (writeErr) {
-      if (isEpipe(writeErr)) return 0
-      throw writeErr
+    // See events.ts's identical ordering comment: instanceof ApiError
+    // must win over the EPIPE duck-type check, since ApiError.code is
+    // sourced from the server's own response body.
+    if (err instanceof ApiError) {
+      try {
+        emitError(err, mode, ctx.writeErr)
+      } catch (writeErr) {
+        if (isEpipe(writeErr)) return 0
+        throw writeErr
+      }
+      return 1
     }
-    return 1
+    if (isEpipe(err)) return 0
+    throw err
   }
 }

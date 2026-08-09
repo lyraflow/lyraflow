@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { SCHEMA_VERSION } from '@lyraflow/core'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
-import { UsageError, parseCommandArgs } from './api/args.js'
+import { UsageError, hasRawFlag, parseCommandArgs } from './api/args.js'
 import { Client } from './api/client.js'
 import { runEvents } from './api/commands/events.js'
 import { runStats } from './api/commands/stats.js'
@@ -148,11 +148,17 @@ async function main(): Promise<void> {
         // process.exitCode, not process.exit(2): see the create-project
         // case above for why — the writeErr call just above this needs to
         // actually flush before the process ends.
+        //
+        // hasRawFlag, not `resolveMode({}, isTty)`: this branch runs
+        // before either command's own parse ever does, so a --json in argv
+        // must still be honoured here too — the exact gap events.ts's and
+        // stats.ts's own parse-failure paths were fixed for earlier, just
+        // one dispatch layer up.
         emitError(
           new UsageError(
             'LYRAFLOW_HOST and LYRAFLOW_SERVER_KEY must be set (or pass --host/--server-key)',
           ),
-          resolveMode({}, isTty),
+          resolveMode({ json: hasRawFlag(args, 'json'), human: hasRawFlag(args, 'human') }, isTty),
           writeErr,
         )
         process.exitCode = 2
@@ -208,14 +214,48 @@ export function extractOverride(args: string[], flag: string): string | undefine
   return value
 }
 
+/**
+ * Handles the failure mode `events.ts`'s/`stats.ts`'s own synchronous
+ * `isEpipe` guards CANNOT: `process.stdout.write()` on a pipe is
+ * asynchronous. When the reader closes early (a real `| head`), Node does
+ * NOT throw synchronously from `write()` — the failure arrives later as an
+ * `'error'` event on the underlying socket, after `write()` has already
+ * returned, which no `try`/`catch` around a `write` call can ever observe.
+ * Confirmed directly against a real subprocess piped into a reader that
+ * closes early (index.epipe.test.ts): the crash is `Emitted 'error' event
+ * on Socket instance`, not a thrown exception anywhere in this codebase's
+ * own call stack. This handler is the one place that failure can be
+ * caught at all — global, not per-command, which is deliberate: a broken
+ * pipe on stdout means the same thing (the reader is gone, stop cleanly)
+ * regardless of which subcommand was writing when it happened.
+ *
+ * Any OTHER stdout error (not EPIPE — a full disk, say) is NOT swallowed:
+ * it rethrows, which Node's default `'error'`-event handling turns into an
+ * uncaught exception and a non-zero exit, the same as if this listener had
+ * never been installed. index.epipe.test.ts confirms this with a second,
+ * ordinary failure (a missing required env var for `migrate`) still
+ * exiting non-zero with this handler installed — the handler only ever
+ * changes behaviour on the one error code it names.
+ */
+function installStdoutEpipeGuard(): void {
+  process.stdout.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EPIPE') {
+      process.exit(0)
+    }
+    throw err
+  })
+}
+
 // Runs `main()` only when this file is the process entry point (`node
 // dist/index.js`, or the `lyraflow` bin symlink to it) — never on import.
 // Without this guard, importing the module to reach `runVersion` and
 // `CommandContext` for testing would also execute the switch above against
 // the test runner's own `process.argv`, which is not this CLI's argv at
-// all.
+// all — and would attach a real `process.stdout` listener onto the test
+// runner's own process for every test file that imports this module.
 const isMain =
   process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
 if (isMain) {
+  installStdoutEpipeGuard()
   await main()
 }

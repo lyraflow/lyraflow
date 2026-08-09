@@ -1,8 +1,10 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { Client } from '../client.js'
 import { ApiError } from '../client.js'
 import type { CommandContext } from '../context.js'
-import { runEvents } from './events.js'
+import { EVENTS_DEFAULT_LIMIT, EVENTS_MAX_LIMIT, runEvents } from './events.js'
 
 const NOW = new Date('2026-08-08T12:00:00.000Z')
 
@@ -32,9 +34,9 @@ function makeClient(responses: unknown[]): { client: Client; calls: FakeCall[] }
 }
 
 /** `write`/`writeErr` throwing this is exactly what a real broken pipe
- * (`| head`) looks like — see client.ts's `#request` catch comment for the
- * analogous "never assume a caught value's shape" reasoning; here we
- * construct the specific shape Node actually throws. */
+ * (`| head`) looks like as a SYNCHRONOUS throw — see events.ts's `isEpipe`
+ * docstring for why that is only half the real story, and
+ * index.epipe.test.ts for the other half (the real, asynchronous case). */
 function epipe(): Error {
   return Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })
 }
@@ -58,6 +60,18 @@ function makeCtx(
     out,
     errOut,
   }
+}
+
+/** Parses every non-empty line of `errOut` as JSON — valid whenever `mode`
+ * is `'json'`, which every `makeCtx` in this file defaults to (`isTty:
+ * false`, no `--json`/`--human` passed). */
+function parseErrLines(errOut: string[]): Record<string, unknown>[] {
+  return errOut
+    .join('')
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l) as Record<string, unknown>)
 }
 
 const EMPTY_PAGE = { events: [], next_cursor: null }
@@ -289,10 +303,10 @@ describe('runEvents', () => {
     expect(calls[1]?.query.since).toBe('2026-08-08T11:45:00.000Z')
   })
 
-  it('stops following after the injected sleep is cancelled', async () => {
+  it('stops following after the injected sleep is cancelled, and surfaces the resume cursor', async () => {
     const page = { events: [makeEvent()], next_cursor: 'cursor-1' }
     const { client, calls } = makeClient([page])
-    const { ctx } = makeCtx(client, {
+    const { ctx, errOut } = makeCtx(client, {
       sleep: () => Promise.reject(new Error('cancelled')),
     })
 
@@ -300,6 +314,10 @@ describe('runEvents', () => {
 
     expect(code).toBe(0)
     expect(calls).toHaveLength(1)
+    // This is the case that most wants a resume cursor: a long-running
+    // --follow session that got cancelled mid-flight.
+    const lines = parseErrLines(errOut)
+    expect(lines).toContainEqual({ next_cursor: 'cursor-1' })
   })
 
   it('polls every 2000ms while following', async () => {
@@ -331,7 +349,26 @@ describe('runEvents', () => {
     expect(code).toBe(1)
     expect(calls).toHaveLength(2)
     expect(sleeps).toBe(1)
-    expect(JSON.parse(errOut.join('')) as { code: string }).toMatchObject({ code: 'draining' })
+    const errLines = parseErrLines(errOut)
+    expect(errLines).toContainEqual(
+      expect.objectContaining({ code: 'draining' }) as unknown as Record<string, unknown>,
+    )
+  })
+
+  it('an ApiError whose own code duck-types as EPIPE still exits 1, never a silent 0', async () => {
+    // ApiError.code is sourced verbatim from the server's response body
+    // (client.ts) — a non-2xx response the server happened to answer with
+    // `{"error":"EPIPE"}` must not be mistaken for a closed pipe.
+    const err = new ApiError(500, 'EPIPE', 'the request failed with status 500')
+    const { client } = makeClient([err])
+    const { ctx, out, errOut } = makeCtx(client)
+    const code = await runEvents([], ctx)
+    expect(code).toBe(1)
+    expect(out.join('')).toBe('')
+    const errLines = parseErrLines(errOut)
+    expect(errLines).toContainEqual(
+      expect.objectContaining({ code: 'EPIPE' }) as unknown as Record<string, unknown>,
+    )
   })
 
   it('returns 2 and prints usage on a bad --since, without calling the API', async () => {
@@ -412,7 +449,7 @@ describe('runEvents', () => {
     const { client, calls } = makeClient([EMPTY_PAGE])
     const { ctx } = makeCtx(client)
     await runEvents([], ctx)
-    expect(calls[0]?.query.limit).toBe(50)
+    expect(calls[0]?.query.limit).toBe(EVENTS_DEFAULT_LIMIT)
   })
 
   it('keeps --limit on every poll of a --follow session, not just the first', async () => {
@@ -493,6 +530,51 @@ describe('runEvents', () => {
     expect(calls).toHaveLength(0)
   })
 
+  it('never echoes a positional argument’s value into the usage error — a real regression this shipped once', async () => {
+    // `lyraflow events $LYRAFLOW_SERVER_KEY` (forgetting the flag name)
+    // makes the key itself a positional. An earlier version of this
+    // message interpolated the positional's VALUE straight into the
+    // error, which would put a secret in stdout/stderr, shell history,
+    // CI logs, and this CLI's own transcript.
+    const secretLookingValue = 'sk_live_TOPSECRET_abc123'
+    const { client, calls } = makeClient([EMPTY_PAGE])
+    const { ctx, errOut } = makeCtx(client)
+    const code = await runEvents([secretLookingValue], ctx)
+    expect(code).toBe(2)
+    expect(calls).toHaveLength(0)
+    expect(errOut.join('')).not.toContain(secretLookingValue)
+    // Still says SOMETHING useful — count and rough location, not silence.
+    expect(errOut.join('')).toMatch(/1 unexpected/)
+  })
+
+  it('never echoes a positional value reachable past a `--` terminator either', async () => {
+    // The second exploit shape the review named:
+    // `events --host H --server-key sk_real -- --server-key sk_live_...`
+    // — everything after `--` is positional, including a token that LOOKS
+    // like a flag.
+    const secretLookingValue = 'sk_live_TOPSECRET_abc123'
+    const { client, calls } = makeClient([EMPTY_PAGE])
+    const { ctx, errOut } = makeCtx(client)
+    const code = await runEvents(
+      ['--host', 'H', '--server-key', 'sk_real', '--', '--server-key', secretLookingValue],
+      ctx,
+    )
+    expect(code).toBe(2)
+    expect(calls).toHaveLength(0)
+    expect(errOut.join('')).not.toContain(secretLookingValue)
+    expect(errOut.join('')).toMatch(/2 unexpected/)
+  })
+
+  it('still gives a specific, useful diagnostic for an ordinary typo — redacting the value must not swallow the location too', async () => {
+    const { client, calls } = makeClient([EMPTY_PAGE])
+    const { ctx, errOut } = makeCtx(client)
+    const code = await runEvents(['--follow', 'oops'], ctx)
+    expect(code).toBe(2)
+    expect(calls).toHaveLength(0)
+    const parsed = JSON.parse(errOut.join('')) as { error: string }
+    expect(parsed.error).toBe('1 unexpected positional argument after --follow')
+  })
+
   it('honours a --json that did parse when an unrelated flag fails to, rather than defaulting from isTty', async () => {
     const { client, calls } = makeClient([EMPTY_PAGE])
     const { ctx, errOut } = makeCtx(client, { isTty: true })
@@ -503,22 +585,42 @@ describe('runEvents', () => {
     expect(() => JSON.parse(errOut.join(''))).not.toThrow()
   })
 
-  it('surfaces next_cursor on stderr after a non-follow run, so it can be fed back via --after', async () => {
+  it('surfaces next_cursor as a real JSON object on stderr after a non-follow run, so it can be fed back via --after', async () => {
     const page = { events: [makeEvent({ event_id: 'e1' })], next_cursor: 'cursor-1' }
     const { client } = makeClient([page])
     const { ctx, errOut } = makeCtx(client)
     await runEvents([], ctx)
+    expect(parseErrLines(errOut)).toContainEqual({ next_cursor: 'cursor-1' })
+  })
+
+  it('renders next_cursor as a readable human line too, in human mode', async () => {
+    const page = { events: [makeEvent({ event_id: 'e1' })], next_cursor: 'cursor-1' }
+    const { client } = makeClient([page])
+    const { ctx, errOut } = makeCtx(client, { isTty: true })
+    await runEvents([], ctx)
     expect(errOut.join('')).toContain('next_cursor: cursor-1')
   })
 
-  it('does not surface next_cursor on stderr while --follow is running (only on a non-follow run)', async () => {
+  it('does not surface next_cursor on stderr on an ordinary poll boundary — only on cancellation or a non-follow run', async () => {
+    // Two full, successful polls (both sleeps resolve), THEN a cancelled
+    // third sleep. Exactly one next_cursor line should appear in total —
+    // the one from cancellation — not one per ordinary poll boundary too.
     const page1 = { events: [makeEvent({ event_id: 'e1' })], next_cursor: 'cursor-1' }
-    const { client } = makeClient([page1])
+    const page2 = { events: [makeEvent({ event_id: 'e2' })], next_cursor: 'cursor-2' }
+    let sleeps = 0
+    const { client, calls } = makeClient([page1, page2, EMPTY_PAGE])
     const { ctx, errOut } = makeCtx(client, {
-      sleep: () => Promise.reject(new Error('stop')),
+      sleep: () => {
+        sleeps++
+        if (sleeps >= 3) return Promise.reject(new Error('stop'))
+        return Promise.resolve()
+      },
     })
     await runEvents(['--follow'], ctx)
-    expect(errOut.join('')).not.toContain('next_cursor:')
+    expect(calls).toHaveLength(3)
+    const cursorLines = parseErrLines(errOut).filter((l) => 'next_cursor' in l)
+    expect(cursorLines).toHaveLength(1)
+    expect(cursorLines[0]).toEqual({ next_cursor: 'cursor-2' })
   })
 
   it('never leaks the sleep/client wiring into the emitted error on a usage failure', async () => {
@@ -552,7 +654,7 @@ describe('runEvents', () => {
   })
 
   describe('the burst-larger-than-one-page Critical', () => {
-    it('warns on stderr, naming the oldest event shown, when a cursorless first poll comes back exactly full', async () => {
+    it('warns on stderr (as real JSON), naming the oldest event shown, when a cursorless first poll comes back exactly full', async () => {
       const events = makeBurst(120)
       const { client, calls } = makeRealisticClient(events)
       const { ctx, out, errOut } = makeCtx(client)
@@ -570,9 +672,14 @@ describe('runEvents', () => {
       // 70 older events exist in the window and were never displayed.
       expect(shown[0]?.event_id).toBe('e070')
 
-      const warning = errOut.join('')
-      expect(warning).toMatch(/warning:.*--limit 50/)
-      expect(warning).toContain(shown[0]?.timestamp as string)
+      const errLines = parseErrLines(errOut)
+      const warningLine = errLines.find((l) => 'warning' in l) as { warning: string } | undefined
+      expect(warningLine).toBeDefined()
+      expect(warningLine?.warning).toMatch(/--limit 50/)
+      expect(warningLine?.warning).toContain(shown[0]?.timestamp as string)
+      // The advice must name --until, not --since — see the "advice is
+      // followable" test below for proof this direction actually works.
+      expect(warningLine?.warning).toMatch(/--until/)
     })
 
     it('warns again on a full page after an earlier empty poll — not only on the very first poll', async () => {
@@ -596,12 +703,10 @@ describe('runEvents', () => {
       expect(calls[1]?.query.after).toBeUndefined()
       expect(calls[1]?.query.since).toBe('2026-08-08T11:45:00.000Z')
 
-      const warnings = errOut
-        .join('')
-        .split('\n')
-        .filter((l) => l.startsWith('warning:'))
-      expect(warnings).toHaveLength(1)
-      expect(warnings[0]).toMatch(/--limit 50/)
+      const errLines = parseErrLines(errOut)
+      const warningLines = errLines.filter((l) => 'warning' in l) as { warning: string }[]
+      expect(warningLines).toHaveLength(1)
+      expect(warningLines[0]?.warning).toMatch(/--limit 50/)
     })
 
     it('does not warn when a page comes back under the limit — there is nothing hidden', async () => {
@@ -609,7 +714,8 @@ describe('runEvents', () => {
       const { client } = makeRealisticClient(events)
       const { ctx, errOut } = makeCtx(client)
       await runEvents([], ctx)
-      expect(errOut.join('')).not.toMatch(/warning:/)
+      const errLines = parseErrLines(errOut)
+      expect(errLines.some((l) => 'warning' in l)).toBe(false)
     })
 
     it('does not warn once a cursor already exists, even when a full page arrives — draining a backlog is normal, not the Critical', async () => {
@@ -635,7 +741,107 @@ describe('runEvents', () => {
       expect(calls).toHaveLength(2)
       expect(calls[0]?.query.after).toBe(firstCursor)
       expect(calls[1]?.query.after).not.toBe(firstCursor)
-      expect(errOut.join('')).not.toMatch(/warning:/)
+      const errLines = parseErrLines(errOut)
+      expect(errLines.some((l) => 'warning' in l)).toBe(false)
+    })
+
+    it('does not warn on a full page once a cursor was established normally through --follow (not only via --after)', async () => {
+      // Pins the false-positive guard for the shape a real session
+      // actually takes: the cursor comes from the SERVER's own
+      // next_cursor on an earlier poll, never from --after. Mutating the
+      // "hadCursor" check to key off `flags.after` instead of the real
+      // cursor variable would pass every OTHER test in this file (none of
+      // them establish a cursor this way and then hit a full page) but
+      // fail this one.
+      const page1 = { events: [makeEvent({ event_id: 'seed' })], next_cursor: 'cursor-seed' }
+      const fullPage = { events: makeBurst(EVENTS_DEFAULT_LIMIT), next_cursor: 'cursor-full' }
+      let sleeps = 0
+      const { client, calls } = makeClient([page1, fullPage])
+      const { ctx, errOut } = makeCtx(client, {
+        sleep: () => {
+          sleeps++
+          if (sleeps >= 2) return Promise.reject(new Error('stop'))
+          return Promise.resolve()
+        },
+      })
+      await runEvents(['--follow'], ctx)
+      expect(calls).toHaveLength(2)
+      expect(calls[1]?.query.after).toBe('cursor-seed')
+      const errLines = parseErrLines(errOut)
+      expect(errLines.some((l) => 'warning' in l)).toBe(false)
+    })
+
+    it("the warning's advice is followable — rerunning with the same --since and the named --until actually reveals the hidden older events", async () => {
+      const events = makeBurst(120)
+      const { client } = makeRealisticClient(events)
+
+      const { ctx: ctx1, out: out1, errOut: errOut1 } = makeCtx(client)
+      await runEvents([], ctx1)
+      const shown1 = out1
+        .join('')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l) as FakeEventRecord)
+      const warning1 = parseErrLines(errOut1).find((l) => 'warning' in l) as
+        | { warning: string }
+        | undefined
+      const namedTimestamp = /events older than (\S+) in this window/.exec(
+        warning1?.warning ?? '',
+      )?.[1]
+      expect(namedTimestamp).toBe(shown1[0]?.timestamp)
+
+      // Follow the advice literally: same (default) --since, --until set
+      // to the named timestamp.
+      const { ctx: ctx2, out: out2 } = makeCtx(client)
+      await runEvents(['--until', namedTimestamp as string], ctx2)
+      const shown2 = out2
+        .join('')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l) as FakeEventRecord)
+
+      expect(shown2.length).toBeGreaterThan(0)
+      // Reveals events strictly older than anything call 1 showed.
+      expect(shown2[0]?.event_id).toBe('e021')
+      expect((shown2[0]?.timestamp as string) < (shown1[0]?.timestamp as string)).toBe(true)
+
+      // Contrast with the OLD (wrong) advice direction: widening --since
+      // further back changes nothing, since a cursorless request always
+      // answers with the newest `limit` regardless of how far `since`
+      // reaches — proving that direction would NOT have helped.
+      const { ctx: ctx3, out: out3 } = makeCtx(client)
+      await runEvents(['--since', '1h'], ctx3)
+      const shown3 = out3
+        .join('')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l) as FakeEventRecord)
+      expect(shown3[0]?.event_id).toBe(shown1[0]?.event_id)
+    })
+  })
+
+  describe('EVENTS_MAX_LIMIT / EVENTS_DEFAULT_LIMIT', () => {
+    it('matches the server’s own EVENTS_MAX_LIMIT, so the two cannot silently drift', () => {
+      // Same technique output.ts's CLI_VERSION pin test uses against
+      // package.json: read the independent source of truth off disk
+      // rather than trust a hand-copy to stay in sync by discipline.
+      // packages/cli has no dependency on packages/server (by design —
+      // this CLI only ever talks to it over HTTP), so this reads the
+      // source file directly instead of importing the constant.
+      const routesSrc = readFileSync(
+        join(import.meta.dirname, '..', '..', '..', '..', 'server', 'src', 'events', 'routes.ts'),
+        'utf8',
+      )
+      const maxMatch = /export const EVENTS_MAX_LIMIT = (\d+)/.exec(routesSrc)
+      expect(maxMatch).not.toBeNull()
+      expect(Number(maxMatch?.[1])).toBe(EVENTS_MAX_LIMIT)
+
+      const defaultMatch =
+        /limit:\s*z\.coerce\.number\(\)\.int\(\)\.positive\(\)\.max\(EVENTS_MAX_LIMIT\)\.default\((\d+)\)/.exec(
+          routesSrc,
+        )
+      expect(defaultMatch).not.toBeNull()
+      expect(Number(defaultMatch?.[1])).toBe(EVENTS_DEFAULT_LIMIT)
     })
   })
 })

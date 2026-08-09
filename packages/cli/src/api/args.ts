@@ -216,10 +216,21 @@ export interface ArgSpec {
  * a `false` default, so a caller can tell "not set" from "explicitly off"
  * if it ever needs to. `positionals` is everything else, in argv order:
  * subcommand words (`get`, `delete`) and their ids, exactly as typed.
+ *
+ * `positionalIndexes` is `positionals`' parallel array of each entry's
+ * original index in `argv` — not its value. This exists so a caller
+ * rejecting unexpected positionals (a real regression this shipped once:
+ * see events.ts/stats.ts's "unexpected argument(s)" message) can report
+ * WHERE one appeared without ever echoing WHAT it was. A positional can be
+ * anything the user mistyped where a flag value belonged — including a
+ * secret passed as `lyraflow events $LYRAFLOW_SERVER_KEY` by mistake — and
+ * this CLI's whole guarantee about a key never appearing in output would
+ * be undone by "helpfully" printing the token back.
  */
 export interface ParsedArgs {
   flags: Record<string, string | boolean>
   positionals: string[]
+  positionalIndexes: number[]
 }
 
 /**
@@ -229,22 +240,35 @@ export interface ParsedArgs {
  * own; this only narrows that rejection to `UsageError`; so every caller
  * catches one error type regardless of what, specifically, was wrong with
  * the input.
+ *
+ * `tokens: true` costs nothing extra here (Node still does the same parse
+ * either way) and is the only way to get each positional's real `argv`
+ * index without re-deriving it by searching for the value — which would
+ * mean comparing against the value at all, the exact thing this module
+ * exists to avoid doing carelessly with something that might be a secret.
  */
+function runParseArgs(argv: string[], options: Record<string, { type: 'string' | 'boolean' }>) {
+  return parseArgs({ args: argv, options, strict: true, allowPositionals: true, tokens: true })
+}
+
 export function parseCommandArgs(argv: string[], spec: ArgSpec): ParsedArgs {
   const options: Record<string, { type: 'string' | 'boolean' }> = {}
   for (const name of spec.strings ?? []) options[name] = { type: 'string' }
   for (const name of spec.booleans ?? []) options[name] = { type: 'boolean' }
 
-  let parsed: ReturnType<typeof parseArgs>
+  let parsed: ReturnType<typeof runParseArgs>
   try {
-    parsed = parseArgs({ args: argv, options, strict: true, allowPositionals: true })
+    parsed = runParseArgs(argv, options)
   } catch (err) {
     throw new UsageError(err instanceof Error ? err.message : 'invalid arguments')
   }
 
+  const positionalIndexes = parsed.tokens.filter((t) => t.kind === 'positional').map((t) => t.index)
+
   return {
     flags: parsed.values as Record<string, string | boolean>,
     positionals: parsed.positionals,
+    positionalIndexes,
   }
 }
 

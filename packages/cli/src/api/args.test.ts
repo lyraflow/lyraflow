@@ -131,7 +131,14 @@ describe('parseCommandArgs', () => {
     expect(result).toEqual({
       flags: { since: '15m', json: true },
       positionals: ['get', 'user-42'],
+      positionalIndexes: [0, 1],
     })
+  })
+
+  it("reports each positional's real argv index, not its value — the whole reason it exists", () => {
+    const result = parseCommandArgs(['--since', '15m', 'get', '--json', 'user-42'], SPEC)
+    expect(result.positionals).toEqual(['get', 'user-42'])
+    expect(result.positionalIndexes).toEqual([2, 4])
   })
 
   it('leaves an unset boolean absent rather than defaulting it to false', () => {
