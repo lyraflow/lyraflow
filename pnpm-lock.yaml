@@ -32,6 +32,10 @@ importers:
       '@lyraflow/db':
         specifier: workspace:*
         version: link:../db
+    devDependencies:
+      '@lyraflow/server':
+        specifier: workspace:*
+        version: link:../server
 
   packages/core:
     dependencies:
