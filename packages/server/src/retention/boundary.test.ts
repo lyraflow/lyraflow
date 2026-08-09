@@ -118,4 +118,26 @@ describe('assertDroppable', () => {
     expect(() => assertDroppable(202510, 202507, 42)).toThrow(/202507/)
     expect(() => assertDroppable(202510, 202507, 42)).toThrow(/42/)
   })
+
+  it('rejects a non-finite or non-integer partition instead of silently passing', () => {
+    // NaN >= boundaryMonth is false, so without an explicit check a garbage
+    // partition value would sail straight through the `>=` guard below and
+    // reach the caller as "droppable."
+    expect(() => assertDroppable(Number.NaN, 202507, 42)).toThrow(/partition/)
+    expect(() => assertDroppable(Number.POSITIVE_INFINITY, 202507, 42)).toThrow(/partition/)
+    expect(() => assertDroppable(Number.NEGATIVE_INFINITY, 202507, 42)).toThrow(/partition/)
+    expect(() => assertDroppable(202507.5, 202507, 42)).toThrow(/partition/)
+  })
+
+  it('rejects a non-finite or non-integer boundary month instead of silently passing', () => {
+    expect(() => assertDroppable(202507, Number.NaN, 42)).toThrow(/boundary/)
+    expect(() => assertDroppable(202507, Number.POSITIVE_INFINITY, 42)).toThrow(/boundary/)
+    expect(() => assertDroppable(202507, Number.NEGATIVE_INFINITY, 42)).toThrow(/boundary/)
+    expect(() => assertDroppable(202507, 202507.5, 42)).toThrow(/boundary/)
+  })
+
+  it('names the bad value itself, not just which argument it was', () => {
+    expect(() => assertDroppable(Number.NaN, 202507, 42)).toThrow(/NaN/)
+    expect(() => assertDroppable(202507, Number.NaN, 42)).toThrow(/NaN/)
+  })
 })
