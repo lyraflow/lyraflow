@@ -44,6 +44,13 @@ const ch = createChClient(CH)
 
 const SLUG = 'retention-wiring'
 const SERVER_KEY = 'sk_ret_wiring'
+/**
+ * This file's project is created with exactly this `retention_months`, and
+ * the survivor assertions below are stated in terms of it rather than of
+ * "something got dropped" — see the fixture months in the first test for
+ * why that distinction is the whole point of this file.
+ */
+const RETENTION_MONTHS = 13
 
 let projectId: number
 let app: FastifyInstance
@@ -63,6 +70,12 @@ function monthsAgo(n: number): string {
 
 const chAt = (iso: string) => iso.replace('T', ' ').replace('Z', '')
 
+/** The ClickHouse partition month (`YYYYMM`) a `monthsAgo(n)` fixture lands in. */
+function partitionOf(n: number): number {
+  const d = new Date(Date.UTC(NOW.getUTCFullYear(), NOW.getUTCMonth() - n, 1))
+  return d.getUTCFullYear() * 100 + (d.getUTCMonth() + 1)
+}
+
 let seedCounter = 0
 const eventId = () => {
   seedCounter += 1
@@ -72,8 +85,14 @@ const eventId = () => {
   return `fe200000-0000-4000-8000-${String(seedCounter).padStart(12, '0')}`
 }
 
-/** `monthsAgoN` is which expired month to seed into — distinct values land in distinct partitions. */
-async function seedOldEvent(monthsAgoN = 14): Promise<void> {
+/**
+ * Seeds one event `monthsAgoN` months back — distinct values land in
+ * distinct partitions. NOT necessarily an expired month: the survivor
+ * fixtures below deliberately seed months this project's own
+ * `RETENTION_MONTHS` must KEEP, which is what makes "dropped the right
+ * partitions" distinguishable from "dropped everything".
+ */
+async function seedEventAt(monthsAgoN: number): Promise<void> {
   seedCounter += 1
   await ch.insert({
     table: 'events',
@@ -202,8 +221,8 @@ beforeAll(async () => {
 
   const r = await pg.query<{ id: string }>(
     `INSERT INTO projects (name, slug, write_key, server_key_hash, retention_months)
-     VALUES ('Retention Wiring', $1, 'wk_ret_wiring', $2, 13) RETURNING id`,
-    [SLUG, hashServerKey(SERVER_KEY)],
+     VALUES ('Retention Wiring', $1, 'wk_ret_wiring', $2, $3) RETURNING id`,
+    [SLUG, hashServerKey(SERVER_KEY), RETENTION_MONTHS],
   )
   projectId = Number(r.rows[0]?.id)
 
@@ -242,8 +261,24 @@ describe('retention wiring (app.ts)', () => {
     expect(res.body).toContain('lyraflow_retention_partitions_dropped_total 0')
   })
 
-  it('drops the expired partition through the real app, logs one line per drop, and moves the metrics', async () => {
-    await seedOldEvent()
+  // THE SURVIVORS ARE THE POINT. This is the only file that drives the real
+  // `buildApp` wiring, so it is the only place that can prove app.ts hands
+  // `dropExpired` each project's OWN configured retention rather than some
+  // other number. Seeded exclusively with expired months, it could not: a
+  // wiring that drops correctly and one that drops everything both leave
+  // zero rows behind and both log drops, so `app.ts`'s
+  // `dropExpired(target, now)` could be replaced with
+  // `dropExpired({ ...target, retentionMonths: 1 }, now)` — up to 119 extra
+  // months destroyed on every tick — and the whole suite still passed.
+  // store.test.ts and consequences.test.ts have survivors but bypass
+  // `buildApp` entirely (they construct `RetentionStore` themselves), so
+  // neither can see this. Hence the three fixtures below, stated against
+  // RETENTION_MONTHS: one month past it that must go, one month inside it
+  // and the current month that must both stay.
+  it("drops only the months past the project's configured retention, logs one line per drop, and moves the metrics", async () => {
+    await seedEventAt(RETENTION_MONTHS + 1) // expired: strictly older than the boundary
+    await seedEventAt(RETENTION_MONTHS - 1) // survivor: inside the configured window
+    await seedEventAt(0) // survivor: the current month
 
     const infoSpy = vi.spyOn(app.log, 'info')
     const beforeRun = Date.now()
@@ -268,16 +303,31 @@ describe('retention wiring (app.ts)', () => {
     expect(tables).toContain('events')
     expect(tables).toContain('device_index')
 
+    // ONE partition month, and it is the expired one — not merely "some
+    // partition was dropped". A wiring that ignored the project's
+    // `retention_months` and passed a smaller number would drop the
+    // RETENTION_MONTHS - 1 month too, and this set would not match.
+    expect(new Set(dropLines.map(([fields]) => fields.partition))).toEqual(
+      new Set([partitionOf(RETENTION_MONTHS + 1)]),
+    )
+
     infoSpy.mockRestore()
 
-    // The partition is genuinely gone, not merely reported as gone.
+    // What is physically left on disk, per month — the assertion the log
+    // lines above cannot make. The expired month is genuinely gone, and
+    // BOTH survivors are genuinely still there.
     const remaining = await ch.query({
-      query: 'SELECT count() AS c FROM events WHERE project_id = {p:UInt32}',
+      query: `SELECT toYYYYMM(timestamp) AS m, count() AS c FROM events
+              WHERE project_id = {p:UInt32} GROUP BY m`,
       query_params: { p: projectId },
       format: 'JSONEachRow',
     })
-    const remainingRows = await remaining.json<{ c: string }>()
-    expect(remainingRows[0]?.c).toBe('0')
+    const byMonth = new Map(
+      (await remaining.json<{ m: number; c: string }>()).map((r) => [r.m, Number(r.c)]),
+    )
+    expect(byMonth.get(partitionOf(RETENTION_MONTHS + 1)) ?? 0).toBe(0)
+    expect(byMonth.get(partitionOf(RETENTION_MONTHS - 1))).toBe(1)
+    expect(byMonth.get(partitionOf(0))).toBe(1)
 
     // The metrics moved.
     const after = await app.inject({ method: 'GET', url: '/metrics' })
@@ -314,7 +364,7 @@ describe('retention wiring (app.ts)', () => {
   // assertion is there so a subtler bug that only shows up on non-empty runs
   // cannot hide behind it.
   it('accumulates lyraflow_retention_partitions_dropped_total across runs — an empty run does not reset it, and a later run adds to it rather than replacing it', async () => {
-    await seedOldEvent(15)
+    await seedEventAt(15)
     await app.deps.retention.runOnce()
     const afterRun1 = await partitionsDroppedTotal()
     expect(afterRun1).toBeGreaterThan(0)
@@ -330,7 +380,7 @@ describe('retention wiring (app.ts)', () => {
     // independent signal from the metric under test — so the assertion
     // below is "the metric grew by exactly what this run did", not a
     // hardcoded guess at how many tables RETENTION_TABLES has.
-    await seedOldEvent(17)
+    await seedEventAt(17)
     const infoSpy = vi.spyOn(app.log, 'info')
     await app.deps.retention.runOnce()
     const run3Drops = infoSpy.mock.calls.filter(

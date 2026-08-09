@@ -235,6 +235,89 @@ describe('RetentionWorker', () => {
     expect(swept).toEqual([targetA.projectId])
   })
 
+  // --- The activation path itself: start() actually driving runOnce ---
+  //
+  // Every test above calls `runOnce()` by hand, and the two live files that
+  // drive the real wiring (retention/wiring.test.ts) do the same. Nothing
+  // executed the interval callback, so `setInterval(() => {}, ...)` in
+  // `start()` — retention never running in production, forever — passed the
+  // entire suite, with `/metrics` unable to tell a worker that never runs
+  // from a healthy one with nothing left to expire.
+
+  it('start() drives runOnce on its own interval, not merely installs a timer', async () => {
+    vi.useFakeTimers()
+    try {
+      let listCalls = 0
+      const worker = makeWorker({
+        listProjects: async () => {
+          listCalls += 1
+          return []
+        },
+      })
+      worker.start()
+      // No leading-edge run: setInterval fires first at intervalMs, and
+      // asserting that here is what stops this test from passing on a
+      // start() that ran once and then never again.
+      expect(listCalls).toBe(0)
+
+      // Async advance: the callback is `void this.runOnce()`, so the work it
+      // starts settles on microtasks the synchronous advance would not flush.
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(listCalls).toBe(1)
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(listCalls).toBe(2)
+
+      worker.stop()
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(listCalls).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // Parity with PurgeWorker, the class this one models itself on and whose
+  // equivalents live in privacy/worker.test.ts — both properties are already
+  // claimed in comments in worker.ts and were asserted nowhere.
+  it('start() unrefs its timer so a pending tick cannot keep the process alive', () => {
+    const originalSetInterval = globalThis.setInterval
+    let unrefCalled = false
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval').mockImplementation(((
+      handler: () => void,
+      timeout?: number,
+    ) => {
+      const t = originalSetInterval(handler, timeout)
+      const originalUnref = t.unref.bind(t)
+      t.unref = () => {
+        unrefCalled = true
+        return originalUnref()
+      }
+      return t
+    }) as typeof setInterval)
+
+    const worker = makeWorker()
+    try {
+      worker.start()
+      expect(unrefCalled).toBe(true)
+    } finally {
+      worker.stop()
+      setIntervalSpy.mockRestore()
+    }
+  })
+
+  it('start() is idempotent: a second call does not install a second interval', () => {
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval')
+    const worker = makeWorker()
+    try {
+      worker.start()
+      worker.start()
+      expect(setIntervalSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      worker.stop()
+      setIntervalSpy.mockRestore()
+    }
+  })
+
   // --- Additional coverage beyond the brief's named tests ---
 
   it('reports a run-level failure with no projectId, distinct from a per-project one', async () => {
