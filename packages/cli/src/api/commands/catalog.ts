@@ -10,10 +10,16 @@ import type { CommandContext } from '../context.js'
 import { type Column, type Mode, emitObject, emitRecords, resolveMode } from '../output.js'
 import {
   checkNoPositionals,
+  checkStrayFlags,
   reportCommandFailure,
   reportParseFailure,
   reportUsageError,
 } from './command-support.js'
+
+/** Flags every subcommand in this file accepts, regardless of which one
+ * runs — see `checkStrayFlags`'s own docstring for why a per-subcommand
+ * check is needed on top of this. */
+const UNIVERSAL_FLAGS = new Set(['host', 'server-key', 'json', 'human'])
 
 // ---------------------------------------------------------------------------
 // deletions
@@ -100,6 +106,9 @@ export async function runDeletions(argv: string[], ctx: CommandContext): Promise
   )
   if (positionalsCode !== undefined) return positionalsCode
 
+  const strayFlagsCode = checkStrayFlags(flags, UNIVERSAL_FLAGS, mode, ctx)
+  if (strayFlagsCode !== undefined) return strayFlagsCode
+
   return runDeletionsGet(id, mode, ctx)
 }
 
@@ -172,6 +181,8 @@ const MEMBERS_COLUMNS: Column[] = [
 const SEGMENTS_USAGE =
   'usage: lyraflow segments <list|run <id> [--members] [--cursor <c>]> [--json|--human]'
 
+const SEGMENTS_RUN_ALLOWED = new Set([...UNIVERSAL_FLAGS, 'members', 'cursor'])
+
 async function runSegmentsList(mode: Mode, ctx: CommandContext): Promise<number> {
   try {
     const res = await ctx.client.get<SegmentsListResponse>('/v1/segments')
@@ -193,6 +204,16 @@ async function runSegmentsList(mode: Mode, ctx: CommandContext): Promise<number>
  * `next_cursor`. Without `--members`, there is no record list at all, so
  * the summary is the ONLY output and goes to stdout instead — an agent
  * asking only for a count should not have to read stderr to get it.
+ *
+ * `--cursor` without `--members` is rejected outright rather than sent:
+ * the server's own cursor decodes a walk POSITION through the members
+ * page (`decodeWalkCursor`, segments/routes.ts) — with no `include:
+ * ["members"]` in the request body, there is no page to resume, so this
+ * combination can only ever 400, or (if the server ever loosened that)
+ * silently adopt the cursor's own stale `as_of` for a plain count nobody
+ * asked to be pinned to one. Caught here, client-side, the same reasoning
+ * `events.ts`'s own inverted-window check uses: a usage error the caller
+ * can fix beats a request that was always going to be nonsensical.
  */
 async function runSegmentsRun(
   id: string,
@@ -202,6 +223,15 @@ async function runSegmentsRun(
 ): Promise<number> {
   const wantMembers = flags.members === true
   const cursor = typeof flags.cursor === 'string' ? flags.cursor : undefined
+
+  if (cursor !== undefined && !wantMembers) {
+    return reportUsageError(
+      new UsageError('--cursor requires --members (there is no members page to resume otherwise)'),
+      mode,
+      ctx,
+    )
+  }
+
   const body: Record<string, unknown> = {
     ...(wantMembers ? { include: ['members'] } : {}),
     ...(cursor !== undefined ? { cursor } : {}),
@@ -261,6 +291,8 @@ export async function runSegments(argv: string[], ctx: CommandContext): Promise<
       ctx,
     )
     if (positionalsCode !== undefined) return positionalsCode
+    const strayFlagsCode = checkStrayFlags(flags, UNIVERSAL_FLAGS, mode, ctx)
+    if (strayFlagsCode !== undefined) return strayFlagsCode
     return runSegmentsList(mode, ctx)
   }
 
@@ -282,6 +314,8 @@ export async function runSegments(argv: string[], ctx: CommandContext): Promise<
       ctx,
     )
     if (positionalsCode !== undefined) return positionalsCode
+    const strayFlagsCode = checkStrayFlags(flags, SEGMENTS_RUN_ALLOWED, mode, ctx)
+    if (strayFlagsCode !== undefined) return strayFlagsCode
     return runSegmentsRun(id, flags, mode, ctx)
   }
 
@@ -326,6 +360,12 @@ const SCHEMA_PROPERTIES_COLUMNS: Column[] = [
 
 const SCHEMA_USAGE =
   'usage: lyraflow schema <events|properties> [--q <prefix>] [--event <name>] [--limit <n>] [--json|--human]'
+
+/** `--event` is `properties`-only — `schema events --event X` parses (the
+ * group's own `ArgSpec` has to accept `--event` for `properties`) and
+ * would otherwise silently do nothing. */
+const SCHEMA_EVENTS_ALLOWED = new Set([...UNIVERSAL_FLAGS, 'q', 'limit'])
+const SCHEMA_PROPERTIES_ALLOWED = new Set([...UNIVERSAL_FLAGS, 'q', 'event', 'limit'])
 
 /**
  * Matches the server's own `SCHEMA_MAX_LIMIT` (schema/routes.ts) and its
@@ -440,6 +480,14 @@ export async function runSchema(argv: string[], ctx: CommandContext): Promise<nu
     ctx,
   )
   if (positionalsCode !== undefined) return positionalsCode
+
+  const strayFlagsCode = checkStrayFlags(
+    flags,
+    subcommand === 'events' ? SCHEMA_EVENTS_ALLOWED : SCHEMA_PROPERTIES_ALLOWED,
+    mode,
+    ctx,
+  )
+  if (strayFlagsCode !== undefined) return strayFlagsCode
 
   return subcommand === 'events'
     ? runSchemaEvents(flags, mode, ctx)

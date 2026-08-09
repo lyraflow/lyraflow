@@ -186,4 +186,58 @@ describe('parseCommandArgs', () => {
   it('rejects a value attached to a boolean flag', () => {
     expect(() => parseCommandArgs(['--json=false'], SPEC)).toThrow(UsageError)
   })
+
+  // --- the leak found in Task 8's review: node:util's own
+  // ERR_PARSE_ARGS_UNKNOWN_OPTION bakes the raw offending token into its
+  // message, twice — reachable whenever a secret ends up AS a flag name
+  // (e.g. `--${maybeSecret}` from a templating bug in machine-generated
+  // argv), which is exactly the shape an unrecognised `--flag` is.
+
+  it('never echoes an unrecognised --flag-shaped token into the UsageError message', () => {
+    const secret = '--sk_live_SENTINEL_never_here'
+    try {
+      parseCommandArgs([secret], SPEC)
+      throw new Error('expected parseCommandArgs to throw')
+    } catch (err) {
+      expect(err).toBeInstanceOf(UsageError)
+      expect((err as UsageError).message).not.toContain('sk_live_SENTINEL_never_here')
+    }
+  })
+
+  it('never echoes an unrecognised --flag=value-shaped token either', () => {
+    const secret = '--sk_live_SENTINEL_never_here=x'
+    try {
+      parseCommandArgs([secret], SPEC)
+      throw new Error('expected parseCommandArgs to throw')
+    } catch (err) {
+      expect(err).toBeInstanceOf(UsageError)
+      expect((err as UsageError).message).not.toContain('sk_live_SENTINEL_never_here')
+    }
+  })
+
+  it('still names the argument position for an ordinary unknown-flag typo, just not its content', () => {
+    expect(() => parseCommandArgs(['--since', '15m', '--nope'], SPEC)).toThrow(
+      'unrecognised option at argument 3',
+    )
+  })
+
+  it('accounts for a known string flag consuming its own value when locating the unknown option', () => {
+    // '15m' is --since's own value, not a second option — the unknown
+    // flag is really at index 2 (0-based), argument 3.
+    expect(() => parseCommandArgs(['--since', '15m', '--nope'], SPEC)).toThrow(
+      'unrecognised option at argument 3',
+    )
+    // Past a `--` terminator, nothing is ever "unknown" — everything there
+    // is a positional by definition, so this must not throw at all.
+    expect(() => parseCommandArgs(['--', '--nope'], SPEC)).not.toThrow()
+  })
+
+  it('leaves every other parseArgs rejection message untouched — those only ever name a KNOWN flag', () => {
+    // Confirmed empirically against Node 22's real parseArgs: unlike the
+    // unknown-option case, these two error shapes only ever interpolate a
+    // flag name that came from this command's own `spec`, never raw argv
+    // content — so there is nothing to redact here.
+    expect(() => parseCommandArgs(['--json=false'], SPEC)).toThrow(/--json/)
+    expect(() => parseCommandArgs(['--since'], SPEC)).toThrow(/--since/)
+  })
 })

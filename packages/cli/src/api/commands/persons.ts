@@ -10,13 +10,20 @@
  *   - a declined confirmation prompt returns 1 — the operation the caller
  *     asked for did not happen, which is a different fact from "it
  *     succeeded" (0);
- *   - running without `--yes` outside a terminal returns 2 and never calls
- *     the API at all — an agent's stdout/stderr are essentially never a
+ *   - running without `--yes` when STDIN is not a terminal returns 2 and
+ *     never calls the API at all — an agent's stdin is essentially never a
  *     TTY, so requiring an explicit flag there is what stops an accidental
  *     invocation from erasing someone, while `--yes` still lets a caller do
- *     it deliberately;
- *   - nothing here EVER waits on a prompt nobody can answer — see
- *     `runDelete` and index.ts's `createPrompt` for how that is enforced.
+ *     it deliberately. Gated on stdin, not stdout: a review round found a
+ *     pty-allocated harness (tmux, `script`, most agent runners) commonly
+ *     reports stdout AS a terminal too, which made an earlier, stdout-keyed
+ *     version of this check wrongly skip `--yes` under exactly the
+ *     environment most agents actually run in;
+ *   - nothing here EVER waits on a prompt nobody can answer, no matter HOW
+ *     the input stops answering — closed cleanly, destroyed, errored, or
+ *     simply silent forever — see `runDelete` and index.ts's `createPrompt`
+ *     for how each of those is closed, including the bounded-timeout
+ *     backstop for the last one, which `stdinIsTty` alone cannot rule out.
  *
  * NEITHER the confirmation prompt NOR any message this file constructs ever
  * interpolates the raw id positional the caller typed — the id is the
@@ -35,6 +42,7 @@ import type { CommandContext } from '../context.js'
 import { type Mode, emitError, emitObject, resolveMode } from '../output.js'
 import {
   checkNoPositionals,
+  checkStrayFlags,
   isEpipe,
   reportCommandFailure,
   reportParseFailure,
@@ -65,6 +73,21 @@ function isSubcommand(value: string): value is Subcommand {
 }
 
 const USAGE = 'usage: lyraflow persons <get|export|delete> <id> [--yes] [--json|--human]'
+
+/** Flags every subcommand accepts, regardless of which one runs. */
+const UNIVERSAL_FLAGS = new Set(['host', 'server-key', 'json', 'human'])
+
+/**
+ * `--yes` is `delete`-only. Without a per-subcommand check, `persons get
+ * --yes` parses fine (the whole group's `ArgSpec` has to accept `--yes`
+ * SOMEWHERE) and then silently does nothing — see `checkStrayFlags`'s own
+ * docstring.
+ */
+const ALLOWED_FLAGS: Record<Subcommand, ReadonlySet<string>> = {
+  get: UNIVERSAL_FLAGS,
+  export: UNIVERSAL_FLAGS,
+  delete: new Set([...UNIVERSAL_FLAGS, 'yes']),
+}
 
 /**
  * `{"type":"end","events":N}` — the export's own terminating line
@@ -126,16 +149,21 @@ async function runGet(id: string, mode: Mode, ctx: CommandContext): Promise<numb
  * trustworthy," which a stream with no terminator is not.
  */
 async function runExport(id: string, mode: Mode, ctx: CommandContext): Promise<number> {
+  // The guarantee is "the LAST line received was the terminator" — not
+  // "a terminator-shaped line appeared somewhere in the stream". Keyed on
+  // every line, not `||=`'d once true, so a real (if server-side
+  // unreachable today) `end` line followed by more content still reports
+  // the honest answer: the export did not end cleanly.
   let sawEnd = false
   try {
     for await (const line of ctx.client.getLines(`/v1/persons/${encodeURIComponent(id)}/export`)) {
+      sawEnd = isEndLine(line)
       try {
         ctx.write(`${line}\n`)
       } catch (writeErr) {
         if (isEpipe(writeErr)) return 0
         throw writeErr
       }
-      if (isEndLine(line)) sawEnd = true
     }
   } catch (err) {
     return reportCommandFailure(err, mode, ctx)
@@ -143,10 +171,18 @@ async function runExport(id: string, mode: Mode, ctx: CommandContext): Promise<n
 
   if (!sawEnd) {
     try {
-      emitError(
-        new Error(
-          'the export stream ended without its terminating end line; the data received is incomplete and must not be trusted',
-        ),
+      // Deliberately NOT `emitError` — its generic fallback for a plain
+      // `Error` always renders `code: 'error'`, indistinguishable on the
+      // wire from any other unexpected failure this CLI reports. This
+      // condition is specific and recoverable-by-knowing (the data
+      // received is real, just incomplete), so it gets its own `code`
+      // rather than blending into the generic shape.
+      emitObject(
+        {
+          error:
+            'the export stream ended without its terminating end line; the data received is incomplete and must not be trusted',
+          code: 'export_incomplete',
+        },
         mode,
         ctx.writeErr,
       )
@@ -163,13 +199,22 @@ async function runExport(id: string, mode: Mode, ctx: CommandContext): Promise<n
  * design; this is the enforcement of it.
  *
  * `yes` short-circuits BOTH the terminal check and the prompt, regardless
- * of `ctx.isTty` — deliberately, so the same flag that lets a human skip
- * the prompt at a real terminal is also what lets an agent (whose
- * stdout/stderr is essentially never a TTY) delete at all. Without this,
- * `--yes` at a terminal would still stop and wait on a prompt nobody
- * necessarily wants answered interactively just because a TTY happens to
- * be attached (e.g. a human running this inside a script from an
- * interactive shell).
+ * of `ctx.stdinIsTty` — deliberately, so the same flag that lets a human
+ * skip the prompt at a real terminal is also what lets an agent (whose
+ * stdin is essentially never a TTY) delete at all. Without this, `--yes`
+ * at a terminal would still stop and wait on a prompt nobody necessarily
+ * wants answered interactively just because a TTY happens to be attached
+ * (e.g. a human running this inside a script from an interactive shell).
+ *
+ * Gated on `ctx.stdinIsTty`, NOT `ctx.isTty` (stdout) — "can anyone answer
+ * a prompt" is a property of the INPUT, not the output; see
+ * `context.ts`'s own docstring on the two fields for why conflating them
+ * is exactly what let a pty-allocated agent harness (tmux, `script`, most
+ * agent runners — where stdout commonly reports as a TTY) skip `--yes`
+ * and then hang forever on a prompt nobody was going to answer. `stdinIsTty`
+ * alone does not fully close that hang (a pty commonly reports stdin as a
+ * TTY too) — `createPrompt` (index.ts) closes the rest of it with a bounded
+ * timeout backstop.
  */
 async function runDelete(
   id: string,
@@ -180,21 +225,48 @@ async function runDelete(
   const yes = flags.yes === true
 
   if (!yes) {
-    if (!ctx.isTty) {
+    if (!ctx.stdinIsTty) {
       return reportUsageError(
         new UsageError(
-          'refusing to delete without --yes when stdout is not a terminal (nothing to prompt)',
+          'refusing to delete without --yes when stdin is not a terminal (nothing to prompt)',
         ),
         mode,
         ctx,
       )
     }
 
-    // Deliberately no id in the question — see the module docstring.
-    const confirmed = await ctx.prompt(
-      'This permanently erases this person and their event history. Continue?',
-    )
-    if (!confirmed) {
+    let confirmed: boolean
+    try {
+      // Deliberately no id in the question — see the module docstring.
+      confirmed = await ctx.prompt(
+        'This permanently erases this person and their event history. Continue?',
+      )
+    } catch (err) {
+      // A REJECTED prompt is the confirmation mechanism itself failing —
+      // not an answer, and not something that should escape as an
+      // unhandled rejection (no defined exit code, a raw stack trace
+      // instead of this CLI's usual error shape). Same "fails safe, never
+      // deletes" rule a declined prompt gets, mapped to the same exit code.
+      if (isEpipe(err)) return 0
+      try {
+        emitError(
+          new Error('the confirmation prompt failed; the person was not deleted'),
+          mode,
+          ctx.writeErr,
+        )
+      } catch (writeErr) {
+        if (!isEpipe(writeErr)) throw writeErr
+      }
+      return 1
+    }
+
+    // `!== true`, not `!confirmed`: `prompt`'s contract returns a
+    // `boolean`, but nothing at runtime enforces that a caller-injected
+    // implementation (this is the one place in the product where the
+    // caller supplies the function) actually returns one — a strict
+    // comparison is the one branch on the whole product where costing
+    // nothing buys "a truthy non-`true` value can never delete".
+    if (confirmed !== true) {
       try {
         emitError(new Error('deletion declined; the person was not deleted'), mode, ctx.writeErr)
       } catch (writeErr) {
@@ -276,6 +348,9 @@ export async function runPersons(argv: string[], ctx: CommandContext): Promise<n
     ctx,
   )
   if (positionalsCode !== undefined) return positionalsCode
+
+  const strayFlagsCode = checkStrayFlags(flags, ALLOWED_FLAGS[subcommand], mode, ctx)
+  if (strayFlagsCode !== undefined) return strayFlagsCode
 
   switch (subcommand) {
     case 'get':

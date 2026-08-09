@@ -268,6 +268,50 @@ function runParseArgs(argv: string[], options: Record<string, { type: 'string' |
   return parseArgs({ args: argv, options, strict: true, allowPositionals: true, tokens: true })
 }
 
+/**
+ * `node:util`'s own `ERR_PARSE_ARGS_UNKNOWN_OPTION` bakes the offending
+ * token's RAW TEXT into `err.message`, twice ("Unknown option '--xyz'. To
+ * specify a positional argument starting with a '-', place it at the end
+ * of the command after '--', as in '-- "--xyz"'") — and unlike every other
+ * `parseArgs` error this module has checked (an unrecognised option value
+ * on a boolean, a missing string value: both name only a KNOWN flag from
+ * this command's own `spec`, never anything user-supplied), this is the one
+ * shape where the echoed text is arbitrary argv content. An agent
+ * templating a flag name from untrusted input (`--${maybeSecret}`, a typo
+ * that drops the leading `--` off a value) makes this the exact same class
+ * of leak `positionalsUsageMessage` (command-support.ts) exists to close
+ * for a misplaced positional — found here, for the flag-shaped case,
+ * during Task 8's review.
+ *
+ * `parseArgs` throws before returning anything, so there is no `tokens`
+ * array to read the real culprit's index off of the way
+ * `parseCommandArgs`'s own success path does below — this re-derives it by
+ * walking `argv` a second time, independently, using ONLY each token's
+ * shape (does it start with `--`? is its name — never its value — in the
+ * known option set?) and never its content. Approximates `parseArgs`' own
+ * long-option recognition closely enough for this purpose: stops at a bare
+ * `--` terminator, and a known `strings`-type option with no `=` consumes
+ * the following token as its value rather than being treated as itself an
+ * unknown option's location. Getting the exact index wrong (a case this
+ * function is not proven exhaustive against) only ever costs precision —
+ * the result is always a bare number or `undefined`, so there is no way
+ * for a wrong guess to leak anything either.
+ */
+function findUnknownOptionIndex(argv: string[], spec: ArgSpec): number | undefined {
+  const known = new Set<string>([...(spec.strings ?? []), ...(spec.booleans ?? [])])
+  const stringNames = new Set(spec.strings ?? [])
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i]
+    if (token === '--') break
+    if (token === undefined || !token.startsWith('--')) continue
+    const eqAt = token.indexOf('=')
+    const name = eqAt === -1 ? token.slice(2) : token.slice(2, eqAt)
+    if (!known.has(name)) return i
+    if (eqAt === -1 && stringNames.has(name)) i++ // consumes the next token as its value
+  }
+  return undefined
+}
+
 export function parseCommandArgs(argv: string[], spec: ArgSpec): ParsedArgs {
   const options: Record<string, { type: 'string' | 'boolean' }> = {}
   for (const name of spec.strings ?? []) options[name] = { type: 'string' }
@@ -277,6 +321,20 @@ export function parseCommandArgs(argv: string[], spec: ArgSpec): ParsedArgs {
   try {
     parsed = runParseArgs(argv, options)
   } catch (err) {
+    if (
+      err instanceof Error &&
+      (err as NodeJS.ErrnoException).code === 'ERR_PARSE_ARGS_UNKNOWN_OPTION'
+    ) {
+      // Deliberately does NOT touch `err.message` — see
+      // `findUnknownOptionIndex`'s own docstring for why that string can
+      // never be trusted here.
+      const index = findUnknownOptionIndex(argv, spec)
+      throw new UsageError(
+        index !== undefined
+          ? `unrecognised option at argument ${index + 1} (if it was meant to be a value, place it after "--")`
+          : 'unrecognised option',
+      )
+    }
     throw new UsageError(err instanceof Error ? err.message : 'invalid arguments')
   }
 

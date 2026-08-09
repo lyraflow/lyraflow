@@ -18,6 +18,7 @@ function makeCtx(isTty: boolean): { ctx: CommandContext; out: string[] } {
         throw new Error('runVersion should never write to stderr')
       },
       isTty,
+      stdinIsTty: false,
       now: () => new Date('2026-08-08T12:00:00.000Z'),
       sleep: () => Promise.resolve(),
       prompt: () => Promise.reject(new Error('runVersion should never prompt')),
@@ -102,13 +103,17 @@ describe('extractOverride', () => {
 describe('createPrompt', () => {
   // The one property `persons delete`'s safety design actually rests on:
   // an irreversible operation must never hang waiting for an answer nobody
-  // is going to give it. Both "the stream ends outright" (piped from
-  // /dev/null) and "the stream ends after the user typed something but
-  // never pressed enter" (Ctrl+D on a partial/empty line at a real
-  // terminal) close the input stream without ever emitting a 'line' event
-  // — both must resolve `false`, not hang.
+  // is going to give it. A review round found "the input stream closed" —
+  // the only ending the first version handled — is one of FOUR distinct
+  // ways an answer never arrives, proven against a real pty: a clean
+  // `end()`, `destroy()` with no error (never reaches `'end'` at all,
+  // so `rl`'s own `'close'` never fires either), `destroy(err)` (which
+  // ALSO must not become an unhandled `'error'`-event crash), and input
+  // that simply never produces anything, ever — closed only by a bounded
+  // timeout, since no stream event can ever announce "nothing is
+  // happening".
 
-  it('resolves false, not hang, when the input stream ends with no answer at all', async () => {
+  it('resolves false, not hang, when the input stream ends with no answer at all (end())', async () => {
     const input = new PassThrough()
     const output = new PassThrough()
     const prompt = createPrompt(input, output)
@@ -124,6 +129,28 @@ describe('createPrompt', () => {
     const result = prompt('Continue?')
     input.write('y')
     input.end()
+    await expect(result).resolves.toBe(false)
+  })
+
+  it('resolves false, not hang, when the input stream is destroyed with no error — never reaches "end", so rl\'s own "close" never fires', async () => {
+    const input = new PassThrough()
+    const output = new PassThrough()
+    const prompt = createPrompt(input, output)
+    const result = prompt('Continue?')
+    input.destroy()
+    await expect(result).resolves.toBe(false)
+  })
+
+  it('resolves false, not hang, when the input stream is destroyed WITH an error — and the error does not crash the process', async () => {
+    const input = new PassThrough()
+    const output = new PassThrough()
+    const prompt = createPrompt(input, output)
+    const result = prompt('Continue?')
+    // If this listener were the only thing standing between this and an
+    // unhandled 'error' event, the test process itself would crash before
+    // the assertion below ever ran — the absence of a crash IS part of
+    // what this test proves, not just the resolved value.
+    input.destroy(new Error('stream boom'))
     await expect(result).resolves.toBe(false)
   })
 
@@ -161,5 +188,42 @@ describe('createPrompt', () => {
     input.write('n\n')
     await result
     expect(written).toContain('Really delete this?')
+  })
+
+  // --- the fourth ending: input that simply never says anything, ever ---
+  // The shape a `stdinIsTty: true` check alone cannot rule out (a pty
+  // allocated but nothing typed into it) — the bounded timeout is the
+  // backstop of last resort for exactly this case. Uses a short overridden
+  // `timeoutMs` rather than the real two-minute `PROMPT_TIMEOUT_MS`.
+
+  it('resolves false after the timeout when the input never produces anything at all', async () => {
+    const input = new PassThrough()
+    const output = new PassThrough()
+    const prompt = createPrompt(input, output, 20)
+    const result = prompt('Continue?')
+    await expect(result).resolves.toBe(false)
+  })
+
+  it('writes an explicit "no reply" message to output when the timeout fires — distinct from a real decline', async () => {
+    const input = new PassThrough()
+    const output = new PassThrough()
+    let written = ''
+    output.on('data', (chunk: Buffer) => {
+      written += chunk.toString()
+    })
+    const prompt = createPrompt(input, output, 20)
+    await prompt('Continue?')
+    expect(written).toMatch(/no reply/i)
+  })
+
+  it('an answer arriving before the timeout still wins — the timeout is a backstop, not a race it competes to lose', async () => {
+    const input = new PassThrough()
+    const output = new PassThrough()
+    // A generous timeout relative to how fast the answer arrives below —
+    // if the timeout fired first this would resolve false, not true.
+    const prompt = createPrompt(input, output, 60_000)
+    const result = prompt('Continue?')
+    input.write('y\n')
+    await expect(result).resolves.toBe(true)
   })
 })

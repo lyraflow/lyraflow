@@ -31,6 +31,10 @@ function controllableBody() {
     stream,
     push: (s: string) => controller.enqueue(enc.encode(s)),
     close: () => controller.close(),
+    // Simulates the connection itself dying mid-read (a killed server, a
+    // proxy timeout, ClickHouse taking the socket down) — as opposed to
+    // `close()`, which is a clean, successful end of the body.
+    error: (err: unknown) => controller.error(err),
   }
 }
 
@@ -458,5 +462,57 @@ describe('Client', () => {
     expect(err).toBeInstanceOf(ApiError)
     expect(err.status).toBe(404)
     expect(err.code).toBe('segment_not_found')
+  })
+
+  // --- getLines: a mid-stream connection failure must surface as ApiError,
+  // never a raw undici/Node error escaping straight to a caller's stack
+  // trace (found in Task 8's review, reproduced with a real socket
+  // destroyed mid-stream against the built binary).
+
+  it('surfaces a mid-stream body error as ApiError, not the raw underlying error', async () => {
+    const { stream, push, error } = controllableBody()
+    const fetchImpl = vi.fn(
+      async () => new Response(stream, { status: 200 }),
+    ) as unknown as typeof fetch
+    const client = make(fetchImpl)
+
+    const seen: string[] = []
+    const consumer = (async () => {
+      for await (const line of client.getLines('/v1/persons/p1/export')) seen.push(line)
+    })()
+
+    push('{"type":"person"}\n')
+    // A real await tick lets the pushed line actually reach the consumer
+    // before the stream fails — proving lines received before the abort
+    // are not lost, not just that the promise eventually rejects.
+    await tick()
+    error(new TypeError('terminated'))
+
+    const err = await consumer.catch((e) => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect((err as ApiError).message).not.toContain('terminated')
+    expect((err as ApiError).status).toBe(200)
+    // What arrived before the abort is preserved — a caller (persons.ts's
+    // runExport) still writes every line it actually received.
+    expect(seen).toEqual(['{"type":"person"}'])
+  })
+
+  it('a clean stream end (no error) still behaves exactly as before this fix', async () => {
+    const { stream, push, close } = controllableBody()
+    const fetchImpl = vi.fn(
+      async () => new Response(stream, { status: 200 }),
+    ) as unknown as typeof fetch
+    const client = make(fetchImpl)
+
+    const seen: string[] = []
+    const consumer = (async () => {
+      for await (const line of client.getLines('/v1/persons/p1/export')) seen.push(line)
+    })()
+
+    push('{"type":"person"}\n{"type":"end","events":0}\n')
+    close()
+    await consumer
+
+    expect(seen).toEqual(['{"type":"person"}', '{"type":"end","events":0}'])
   })
 })

@@ -52,6 +52,7 @@ function makeCtx(
     ctx: {
       client,
       isTty: false,
+      stdinIsTty: false,
       write: (s) => out.push(s),
       writeErr: (s) => errOut.push(s),
       now: () => NOW,
@@ -62,6 +63,10 @@ function makeCtx(
     out,
     errOut,
   }
+}
+
+function epipe(): Error {
+  return Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })
 }
 
 function parseJsonLines(lines: string[]): Record<string, unknown>[] {
@@ -132,6 +137,44 @@ describe('runDeletions', () => {
     expect(calls).toHaveLength(0)
     expect(errOut.join('')).not.toContain(SECRET)
   })
+
+  it('treats an EPIPE on write as a clean stop (exit 0) — previously unpinned for this command group', async () => {
+    const { client } = makeClient({
+      get: { status: 'pending', requested_at: NOW.toISOString(), completed_at: null },
+    })
+    const { ctx } = makeCtx(client, {
+      write: () => {
+        throw epipe()
+      },
+    })
+    const code = await runDeletions(['get', '7'], ctx)
+    expect(code).toBe(0)
+  })
+
+  it('never leaks a sentinel secret placed in ANY argv slot', async () => {
+    const secret = 'sk_live_SENTINEL_never_here'
+    const shapes: string[][] = [
+      [secret],
+      ['get', secret],
+      ['get', '7', secret],
+      [`--server-key=${secret}`, 'get', '7'],
+      ['--server-key', secret, 'get', '7'],
+      ['--host', 'H', '--', secret],
+      ['--host', 'H', '--', '--server-key', secret],
+      ['get', '7', 'a', secret],
+      [secret, secret],
+      [`--${secret}`, 'get', '7'],
+    ]
+    for (const argv of shapes) {
+      const { client } = makeClient({
+        get: { status: 'pending', requested_at: NOW.toISOString(), completed_at: null },
+      })
+      const { ctx, out, errOut } = makeCtx(client)
+      await runDeletions(argv, ctx)
+      expect(out.join('')).not.toContain(secret)
+      expect(errOut.join('')).not.toContain(secret)
+    }
+  })
 })
 
 // --- segments -----------------------------------------------------------
@@ -185,6 +228,33 @@ describe('runSegments > list', () => {
     const code = await runSegments(['list', 'extra'], ctx)
     expect(code).toBe(2)
     expect(calls).toHaveLength(0)
+  })
+
+  it('rejects --members on list — that flag belongs to the sibling `run` subcommand', async () => {
+    const { client, calls } = makeClient({ get: { segments: [] } })
+    const { ctx } = makeCtx(client)
+    const code = await runSegments(['list', '--members'], ctx)
+    expect(code).toBe(2)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('rejects --cursor on list too, for the same reason', async () => {
+    const { client, calls } = makeClient({ get: { segments: [] } })
+    const { ctx } = makeCtx(client)
+    const code = await runSegments(['list', '--cursor', 'abc'], ctx)
+    expect(code).toBe(2)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('treats an EPIPE on write as a clean stop (exit 0) — previously unpinned for this command group', async () => {
+    const { client } = makeClient({ get: { segments: SEGMENTS } })
+    const { ctx } = makeCtx(client, {
+      write: () => {
+        throw epipe()
+      },
+    })
+    const code = await runSegments(['list'], ctx)
+    expect(code).toBe(0)
   })
 })
 
@@ -259,6 +329,36 @@ describe('runSegments > run', () => {
     await runSegments(['run', 'a b'], ctx)
     expect(calls[0]?.path).toBe('/v1/segments/a%20b/preview')
   })
+
+  it('rejects --cursor without --members, without calling the API — a cursor with no members page to resume can only 400 or silently pin a stale as_of', async () => {
+    const { client, calls } = makeClient({ post: WITH_MEMBERS })
+    const { ctx } = makeCtx(client)
+    const code = await runSegments(['run', '1', '--cursor', 'abc123'], ctx)
+    expect(code).toBe(2)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('treats an EPIPE on write as a clean stop (exit 0), count-only path', async () => {
+    const { client } = makeClient({ post: SUMMARY_ONLY })
+    const { ctx } = makeCtx(client, {
+      write: () => {
+        throw epipe()
+      },
+    })
+    const code = await runSegments(['run', '1'], ctx)
+    expect(code).toBe(0)
+  })
+
+  it('treats an EPIPE on write as a clean stop (exit 0), --members path (stdout carries the member rows)', async () => {
+    const { client } = makeClient({ post: WITH_MEMBERS })
+    const { ctx } = makeCtx(client, {
+      write: () => {
+        throw epipe()
+      },
+    })
+    const code = await runSegments(['run', '1', '--members'], ctx)
+    expect(code).toBe(0)
+  })
 })
 
 describe('runSegments > usage', () => {
@@ -278,6 +378,33 @@ describe('runSegments > usage', () => {
     const code = await runSegments([], ctx)
     expect(code).toBe(2)
     expect(calls).toHaveLength(0)
+  })
+
+  it('never leaks a sentinel secret placed in ANY argv slot, across list/run', async () => {
+    const secret = 'sk_live_SENTINEL_never_here'
+    const shapes: string[][] = [
+      [secret],
+      ['run', secret],
+      ['run', '1', secret],
+      [`--server-key=${secret}`, 'run', '1'],
+      ['--server-key', secret, 'run', '1'],
+      ['--host', 'H', '--', secret],
+      ['--host', 'H', '--', '--server-key', secret],
+      ['run', '1', 'a', secret],
+      [secret, secret],
+      [`--${secret}`, 'run', '1'],
+      ['list', secret], // unexpected positional after list
+    ]
+    for (const argv of shapes) {
+      const { client } = makeClient({
+        get: { segments: [] },
+        post: { person_count: 0, as_of: NOW.toISOString() },
+      })
+      const { ctx, out, errOut } = makeCtx(client)
+      await runSegments(argv, ctx)
+      expect(out.join('')).not.toContain(secret)
+      expect(errOut.join('')).not.toContain(secret)
+    }
   })
 })
 
@@ -330,6 +457,25 @@ describe('runSchema > events', () => {
     expect(code).toBe(0)
     expect(calls[0]?.arg).toMatchObject({ limit: SCHEMA_MAX_LIMIT })
   })
+
+  it('rejects --event on `events` — that flag belongs to the sibling `properties` subcommand', async () => {
+    const { client, calls } = makeClient({ get: { events: [] } })
+    const { ctx } = makeCtx(client)
+    const code = await runSchema(['events', '--event', 'signup'], ctx)
+    expect(code).toBe(2)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('treats an EPIPE on write as a clean stop (exit 0) — previously unpinned for this command group', async () => {
+    const { client } = makeClient({ get: { events: [{ event_name: 'signup' }] } })
+    const { ctx } = makeCtx(client, {
+      write: () => {
+        throw epipe()
+      },
+    })
+    const code = await runSchema(['events'], ctx)
+    expect(code).toBe(0)
+  })
 })
 
 describe('runSchema > properties', () => {
@@ -354,6 +500,19 @@ describe('runSchema > properties', () => {
     const { ctx } = makeCtx(client)
     await runSchema(['properties', '--event', 'signup'], ctx)
     expect(calls[0]?.arg).toMatchObject({ event: 'signup' })
+  })
+
+  it('treats an EPIPE on write as a clean stop (exit 0)', async () => {
+    const { client } = makeClient({
+      get: { properties: [{ property_key: 'plan', value_kind: 'string' }] },
+    })
+    const { ctx } = makeCtx(client, {
+      write: () => {
+        throw epipe()
+      },
+    })
+    const code = await runSchema(['properties'], ctx)
+    expect(code).toBe(0)
   })
 })
 
@@ -382,6 +541,31 @@ describe('runSchema > usage', () => {
     const code = await runSchema(['events', 'extra'], ctx)
     expect(code).toBe(2)
     expect(calls).toHaveLength(0)
+  })
+
+  it('never leaks a sentinel secret placed in ANY argv slot, across events/properties', async () => {
+    const secret = 'sk_live_SENTINEL_never_here'
+    const shapes: string[][] = [
+      [secret],
+      ['events', secret], // unexpected positional after the subcommand
+      [`--server-key=${secret}`, 'events'],
+      ['--server-key', secret, 'events'],
+      ['--host', 'H', '--', secret],
+      ['--host', 'H', '--', '--server-key', secret],
+      ['events', 'a', secret],
+      [secret, secret],
+      [`--${secret}`, 'events'],
+      // --q/--event ARE legitimately echoed to the outgoing query by
+      // design (never into CLI-authored text) — not exercised here, same
+      // reasoning events.test.ts's own sweep gives for --event's value.
+    ]
+    for (const argv of shapes) {
+      const { client } = makeClient({ get: { events: [], properties: [] } })
+      const { ctx, out, errOut } = makeCtx(client)
+      await runSchema(argv, ctx)
+      expect(out.join('')).not.toContain(secret)
+      expect(errOut.join('')).not.toContain(secret)
+    }
   })
 })
 

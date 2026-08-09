@@ -51,6 +51,7 @@ function makeCtx(
     ctx: {
       client,
       isTty: false,
+      stdinIsTty: false,
       write: (s) => out.push(s),
       writeErr: (s) => errOut.push(s),
       now: () => NOW,
@@ -623,6 +624,10 @@ describe('runEvents', () => {
       ['--host', 'H', '--', '--server-key', secret], // past --, flag-shaped positional + value
       ['--event', 'signup', 'a', secret], // not first, not last
       [secret, secret], // repeated
+      [`--${secret}`], // secret AS an unrecognised flag name — the leak
+      // this sweep itself missed until Task 8's review found it in
+      // node:util's own ERR_PARSE_ARGS_UNKNOWN_OPTION message (fixed in
+      // args.ts, shared by every command group including this one).
     ]
 
     for (const argv of shapes) {

@@ -44,43 +44,129 @@ function clients() {
 }
 
 /**
+ * How long `createPrompt` waits for an answer before giving up and
+ * declining on the caller's behalf. Exported so a test can assert its real
+ * value directly rather than hard-coding it a second time; `createPrompt`
+ * itself takes an overridable `timeoutMs` so a test does not have to wait
+ * the real two minutes to prove the backstop fires.
+ *
+ * Two minutes, per review: generous enough that a real human confirming a
+ * genuinely destructive action is never cut off mid-thought, short enough
+ * that an unattended, silent stdin (see `createPrompt`'s own docstring for
+ * why `stdinIsTty` alone cannot rule this out) does not tie up a caller
+ * indefinitely either.
+ */
+export const PROMPT_TIMEOUT_MS = 2 * 60_000
+
+/**
  * The real, process-wide implementation of `CommandContext['prompt']` —
  * `persons delete`'s only route to an interactive "are you sure" question.
  * Writes the question to STDERR (never stdout — a prompt is not a record),
  * reads one line from stdin, and answers `true` only for `y`/`yes`
- * (case-insensitive); anything else, INCLUDING no answer at all, is a
- * decline.
+ * (case-insensitive); anything else, INCLUDING no answer at all in any of
+ * the shapes below, is a decline.
  *
- * MUST NOT HANG. `rl.question`'s callback only fires once a line is
- * actually submitted — if stdin closes first (piped from `/dev/null`, or a
- * real terminal's Ctrl+D on an empty line), NOTHING calls that callback,
- * ever. That is exactly the "wait forever for a reply nobody is going to
- * give it" failure `context.ts`'s own docstring on `prompt` warns against
- * for an irreversible operation. Guarded here with an `answered` flag and a
- * `'close'` listener: if the interface closes before an answer arrives,
- * the promise still resolves — to `false`, a decline, since "no answer" is
- * a strictly safer default than "yes" for something that erases data.
+ * MUST NOT HANG, and "the input stream closed" turned out to be only ONE
+ * of the ways it can stop producing an answer — a review round on this
+ * exact function found the other two by testing against a real pty, which
+ * is how most agent harnesses (tmux, `script`, most agent runners) run a
+ * CLI, and where `stdinIsTty` is commonly TRUE, defeating the
+ * `!stdinIsTty` guard `runDelete` (persons.ts) uses to skip prompting
+ * altogether:
+ *
+ *   1. `input.end()` — a clean close. `rl`'s own `'close'` event fires.
+ *      Handled since the first version of this function.
+ *   2. `input.destroy()` with no error — the stream tears down WITHOUT ever
+ *      emitting `'end'`, so `rl`'s `'close'` (which fires off of `'end'`)
+ *      never fires either. `rl` alone hangs forever here. Closed by
+ *      listening for `input`'s OWN `'close'` event directly, not only
+ *      `rl`'s.
+ *   3. `input.destroy(err)` — emits `'error'` before `'close'`. An
+ *      unhandled `'error'` event is itself an uncaught exception in Node,
+ *      so this needs an explicit listener both to resolve `false` AND to
+ *      stop that crash — two different failures from one gap. Confirmed
+ *      empirically that ONE listener is not enough: `readline` internally
+ *      attaches its own handler to `input`'s `'error'` event and RE-EMITS
+ *      it on the `rl` Interface object itself — `input.on('error', ...)`
+ *      satisfies `input`'s own no-listener check, but does nothing for
+ *      that separate re-emission, which crashed the process even with
+ *      `input`'s own listener present until `rl.on('error', ...)` was
+ *      added too.
+ *   4. The one no stream event can ever announce: input that simply never
+ *      produces anything at all — no data, no close, no error, ever (a pty
+ *      allocated but nothing typed into it). No listener fires for
+ *      "nothing is happening"; only a bounded timeout can end this one.
+ *      `PROMPT_TIMEOUT_MS` is the backstop for exactly this case, and
+ *      writes an explicit message to `output` when it fires so a caller
+ *      reading the transcript later knows the answer was "no reply", not
+ *      a real decline.
  *
  * `input`/`output` default to the real `process.stdin`/`process.stderr` —
- * overridable so index.test.ts can prove the EOF/no-answer behaviour above
- * against a fake stream instead of the real process's stdin, which a test
- * runner does not control the same way.
+ * overridable so index.test.ts can prove all four endings above against a
+ * fake stream instead of the real process's stdin, which a test runner
+ * does not control the same way. `timeoutMs` defaults to
+ * `PROMPT_TIMEOUT_MS`, overridable so a test can prove the timeout backstop
+ * itself without a real two-minute wait.
  */
 export function createPrompt(
   input: NodeJS.ReadableStream = process.stdin,
   output: NodeJS.WritableStream = process.stderr,
+  timeoutMs: number = PROMPT_TIMEOUT_MS,
 ): (question: string) => Promise<boolean> {
   return (question: string) =>
     new Promise<boolean>((resolve) => {
       const rl = createInterface({ input, output })
-      let answered = false
-      rl.question(`${question} [y/N] `, (answer) => {
-        answered = true
+      let settled = false
+
+      const finish = (value: boolean) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        input.removeListener('close', onInputClose)
+        input.removeListener('error', onInputError)
+        rl.removeListener('error', onRlError)
         rl.close()
-        resolve(/^y(es)?$/i.test(answer.trim()))
-      })
-      rl.once('close', () => {
-        if (!answered) resolve(false)
+        resolve(value)
+      }
+
+      // `rl`'s OWN 'close' — fires off input's 'end' (ending #1 above).
+      rl.once('close', () => finish(false))
+      // `input`'s 'close' directly — ending #2, which never reaches `rl`'s
+      // own 'close' at all (destroy() with no error skips 'end' entirely).
+      const onInputClose = () => finish(false)
+      input.on('close', onInputClose)
+      // Ending #3 (`destroy(err)`) needs TWO listeners, not one — confirmed
+      // empirically, the hard way: `readline` internally attaches its own
+      // listener to `input`'s 'error' event and RE-EMITS it on the `rl`
+      // Interface object itself. `input.on('error', ...)` below satisfies
+      // `input`'s own requirement (an EventEmitter only throws on 'error'
+      // when NOTHING is listening), but does nothing for the SEPARATE
+      // re-emission on `rl` — that needs its own listener, or Node throws
+      // an uncaught exception from `rl`'s emission specifically, not
+      // `input`'s. Without `rl.on('error', ...)`, this ending crashed the
+      // process, even though `input.on('error', ...)` was already present.
+      const onInputError = () => finish(false)
+      const onRlError = () => finish(false)
+      input.on('error', onInputError)
+      rl.on('error', onRlError)
+
+      // Ending #4: nothing happens, ever. The backstop of last resort —
+      // see the module docstring for why no stream event can substitute
+      // for this.
+      const timer = setTimeout(() => {
+        try {
+          output.write(
+            `\n(no reply within ${Math.round(timeoutMs / 1000)}s; treating as declined — nothing was deleted)\n`,
+          )
+        } catch {
+          // A broken output stream at this point changes nothing about
+          // the answer this resolves to — `finish(false)` runs either way.
+        }
+        finish(false)
+      }, timeoutMs)
+
+      rl.question(`${question} [y/N] `, (answer) => {
+        finish(/^y(es)?$/i.test(answer.trim()))
       })
     })
 }
@@ -114,6 +200,7 @@ async function main(): Promise<void> {
         write: (s) => process.stdout.write(s),
         writeErr: (s) => process.stderr.write(s),
         isTty: process.stdout.isTTY ?? false,
+        stdinIsTty: process.stdin.isTTY ?? false,
         now: () => new Date(),
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
         // runVersion never prompts — placeholder to satisfy CommandContext's
@@ -183,6 +270,7 @@ async function main(): Promise<void> {
     case 'segments':
     case 'schema': {
       const isTty = process.stdout.isTTY ?? false
+      const stdinIsTty = process.stdin.isTTY ?? false
       const write = (s: string) => {
         process.stdout.write(s)
       }
@@ -220,6 +308,7 @@ async function main(): Promise<void> {
       const ctx: CommandContext = {
         client: new Client({ host, serverKey }),
         isTty,
+        stdinIsTty,
         write,
         writeErr,
         now: () => new Date(),

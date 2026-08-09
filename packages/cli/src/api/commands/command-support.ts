@@ -140,6 +140,44 @@ export function checkNoPositionals(
 }
 
 /**
+ * Checks that every flag actually PRESENT in `flags` (`Object.keys`, i.e.
+ * flags the caller genuinely passed, not every flag a command's
+ * `ArgSpec` merely declares) belongs to `allowed` for the SPECIFIC
+ * subcommand about to run.
+ *
+ * A command group with multiple subcommands (`persons`, `segments`,
+ * `schema`) necessarily gives `parseCommandArgs` the UNION of every
+ * subcommand's own flags, so one parse call can accept any of them before
+ * the subcommand word itself is even known. Without a check like this
+ * afterwards, a flag that belongs to a SIBLING subcommand — `schema events
+ * --event X` (`--event` is `properties`-only), `segments list --members`
+ * (`--members` is `run`-only), `persons get --yes` (`--yes` is
+ * `delete`-only) — parses successfully and then silently vanishes: an
+ * agent that typo'd the subcommand, or copied a flag from the wrong one,
+ * gets no signal that anything was ignored. Found in Task 8's review as
+ * the flag-shaped mirror of the unexpected-positional gap
+ * `checkNoPositionals` already closes.
+ *
+ * Naming the stray flag BY NAME in the message is safe here, unlike a
+ * positional's value: `parseCommandArgs` (strict mode) already rejected
+ * anything not in the command group's own recognised option set, so every
+ * key in `flags` can only ever be one of THIS command's own declared flag
+ * names — never arbitrary, untrusted argv content.
+ */
+export function checkStrayFlags(
+  flags: Record<string, string | boolean>,
+  allowed: ReadonlySet<string>,
+  mode: Mode,
+  ctx: Pick<CommandContext, 'writeErr'>,
+): number | undefined {
+  const stray = Object.keys(flags).filter((name) => !allowed.has(name))
+  if (stray.length === 0) return undefined
+  const plural = stray.length === 1 ? '' : 's'
+  const message = `unexpected flag${plural} for this subcommand: ${stray.map((s) => `--${s}`).join(', ')}`
+  return reportUsageError(new UsageError(message), mode, ctx)
+}
+
+/**
  * Throws a `UsageError` when `since` is after `until` — never silently
  * printing nothing and exiting 0, which is what an inverted window did
  * before this existed. Takes both as optional since `stats`' `since` can

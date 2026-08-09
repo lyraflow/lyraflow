@@ -21,10 +21,29 @@ export interface CommandContext {
    * than calling `fetch` themselves. Unused by `runVersion`, which talks
    * to nothing over the network. */
   client: Client
-  /** Whether the destination is a real terminal — `resolveMode`'s second
-   * argument, threaded through here so a test can fake it without a real
-   * TTY. */
+  /** Whether STDOUT is a real terminal — `resolveMode`'s second argument,
+   * threaded through here so a test can fake it without a real TTY. This is
+   * an OUTPUT-rendering signal only (human table vs. JSON); it answers "does
+   * a human appear to be reading this", never "can anyone answer a
+   * prompt" — see `stdinIsTty` for that question, and its own docstring for
+   * why the two must not be conflated. Real dispatch populates this from
+   * `process.stdout.isTTY`. */
   isTty: boolean
+  /**
+   * Whether STDIN is a real terminal — the question `persons delete`'s
+   * `--yes` requirement actually needs answered: "is there an input a
+   * human could type into," never "does the output look nice." Kept
+   * separate from `isTty` on purpose: a pty-allocated agent harness (tmux,
+   * `script`, most agent runners) commonly reports BOTH stdout and stdin as
+   * TTYs, so this alone does not make an unattended prompt safe — see
+   * `prompt`'s own docstring for the bounded-timeout backstop that closes
+   * that gap. What this DOES fix on its own: a caller whose stdout happens
+   * to be a pty (logged through `script`, say) but whose stdin is a closed
+   * pipe or `/dev/null` — keying the `--yes` requirement on `isTty`
+   * (stdout) there would wrongly skip it and then have nothing to prompt.
+   * Real dispatch populates this from `process.stdin.isTTY`.
+   */
+  stdinIsTty: boolean
   /** Where normal output goes. Never `console.log`/`console.error` directly
    * from a command handler — writing through this is what lets a test
    * capture output without touching real stdout. */
@@ -52,10 +71,16 @@ export interface CommandContext {
    * screens, terminal scrollback).
    *
    * A real dispatch's implementation must resolve `false` — never hang —
-   * when the input stream closes without an answer (e.g. Ctrl+D at a
-   * terminal, or stdin piped from `/dev/null`): an irreversible operation
-   * must not wait forever for a reply nobody is going to give it. See
-   * index.ts's `createPrompt`.
+   * no matter HOW the input stream stops producing an answer: a clean
+   * `end()` (stdin piped from `/dev/null`, or Ctrl+D at a terminal), a
+   * `destroy()` with no `'end'` at all, a `destroy(err)` (an `'error'`
+   * event that must not go unhandled either), AND — the shape a `stdinIsTty:
+   * true` check cannot rule out, since a pty-allocated harness typically
+   * reports stdin as a real TTY too — an input that simply never produces
+   * anything at all. "Is anyone there" is not something this stream alone
+   * can ever decide, so a real implementation also needs a bounded timeout
+   * that resolves `false` as the backstop of last resort. See index.ts's
+   * `createPrompt` for how all of these are closed.
    */
   prompt: (question: string) => Promise<boolean>
 }

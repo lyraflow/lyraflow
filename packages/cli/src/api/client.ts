@@ -118,6 +118,25 @@ export class Client {
    * server — every line it writes ends in `\n` — but a truncated or
    * malformed stream could produce one) is still yielded once the body
    * ends, so a caller never silently loses trailing content.
+   *
+   * A server ending its OWN generator cleanly without a final terminator
+   * line (export.ts's own documented truncation signal) is NOT this
+   * method's concern — that is indistinguishable, at this layer, from a
+   * normal end of a short response, and callers (persons.ts's `runExport`)
+   * detect it themselves by checking for the terminator among the lines
+   * they received. What IS this method's concern: the CONNECTION itself
+   * dying mid-read — a killed server process, a proxy timeout, ClickHouse
+   * taking the socket down — which surfaces as the body's own async
+   * iterator THROWING (a bare `TypeError` from undici, e.g. `'terminated'`,
+   * carrying no relation to `ApiError` at all). Every OTHER failure path in
+   * this client surfaces as `ApiError` — `#request`'s network/redirect/
+   * status handling, `#readJson`'s non-JSON-body guard — and callers catch
+   * `ApiError` specifically to map exit codes (`reportCommandFailure`,
+   * command-support.ts); a raw, unrelated error escaping ONLY from this one
+   * streaming method would be the single path that breaks that contract,
+   * reaching a caller as an uncaught exception with a raw Node stack trace
+   * instead of a reportable failure. Wrapped here, once, so every future
+   * streaming caller inherits the fix rather than repeating it.
    */
   async *getLines(
     path: string,
@@ -128,14 +147,26 @@ export class Client {
 
     const decoder = new TextDecoder()
     let buffer = ''
-    for await (const chunk of res.body) {
-      buffer += decoder.decode(chunk as Uint8Array, { stream: true })
-      let newlineAt = buffer.indexOf('\n')
-      while (newlineAt !== -1) {
-        yield stripTrailingCR(buffer.slice(0, newlineAt))
-        buffer = buffer.slice(newlineAt + 1)
-        newlineAt = buffer.indexOf('\n')
+    try {
+      for await (const chunk of res.body) {
+        buffer += decoder.decode(chunk as Uint8Array, { stream: true })
+        let newlineAt = buffer.indexOf('\n')
+        while (newlineAt !== -1) {
+          yield stripTrailingCR(buffer.slice(0, newlineAt))
+          buffer = buffer.slice(newlineAt + 1)
+          newlineAt = buffer.indexOf('\n')
+        }
       }
+    } catch {
+      // The body's own iterator threw mid-stream — never the raw error
+      // itself (untrusted, and its shape is not this client's to promise;
+      // see the docstring above), always a fresh ApiError built from
+      // values already known to be safe (the response's own status).
+      throw new ApiError(
+        res.status,
+        'stream_interrupted',
+        'the response stream ended unexpectedly while reading it',
+      )
     }
     buffer += decoder.decode()
     if (buffer.length > 0) yield stripTrailingCR(buffer)
