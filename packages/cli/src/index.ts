@@ -230,6 +230,26 @@ function writeErrSync(s: string): void {
   }
 }
 
+/**
+ * How long an interrupted `--follow` will wait for stdout's own backlog to
+ * reach the reader before giving up and exiting anyway. Bounds the wait on
+ * something entirely under the CALLER's control (their reader), never on
+ * the server — an in-flight request is abandoned instantly regardless.
+ *
+ * Two seconds: the same order as the poll interval, so it is invisible to a
+ * human who pressed Ctrl-C, and far longer than any reader that is actually
+ * reading needs. A reader that has gone away instead produces EPIPE, which
+ * `installStdoutEpipeGuard` already turns into an immediate clean exit.
+ */
+const STDOUT_FLUSH_GRACE_MS = 2000
+
+/** Written to stderr, before the resume cursor, when the grace above runs
+ * out — so a truncated record stream is never silently reported as a clean
+ * exit 0, and a caller knows the cursor on the next line may skip records
+ * that never arrived. */
+const STDOUT_TRUNCATED_LINE =
+  '{"warning":"interrupted while output was still being written; some records may not have reached the reader, so the next_cursor below may skip them"}'
+
 /** What `main` hands a command so it can be interrupted — see
  * `wireFollowInterrupt`. */
 interface FollowInterrupt {
@@ -268,6 +288,26 @@ interface FollowInterrupt {
  * tail is a normal end, not a failure. Handlers run before the exit, in
  * registration order, each guarded so that one throwing cannot stop the
  * others or the exit itself.
+ *
+ * THE ONE THING IT DOES WAIT FOR — and the regression the first version of
+ * this fix introduced. `process.exit` drops whatever `process.stdout` has
+ * buffered, and on POSIX stdout is asynchronous when it is a pipe, so a
+ * reader slower than the CLI is writing leaves real records queued.
+ * Measured: a 500-record page into a reader that had not started consuming,
+ * interrupted mid-poll, delivered 148 of 500 — and then wrote a resume
+ * cursor positioned AFTER the 352 that never arrived, so `--after` would
+ * skip them permanently. Silent loss, reported as exit 0, in the command
+ * whose entire promise is "no event twice, none missed". The previous
+ * sleep-cancellation design did not have this, because it unwound normally
+ * and Node flushed on its way out.
+ *
+ * So: flush stdout first, then write the cursor, then exit. Bounded by
+ * `STDOUT_FLUSH_GRACE_MS`, because "one signal is enough" must stay
+ * literally true even against a reader that never reads again — and if that
+ * bound is ever hit, the truncation is REPORTED rather than silent, so a
+ * caller knows not to trust the cursor that follows it. This waits on the
+ * caller's own reader, never on the server: an in-flight request is still
+ * abandoned instantly, which is the whole point of the fix.
  */
 function wireFollowInterrupt(argv: string[]): FollowInterrupt {
   const controller = new AbortController()
@@ -281,15 +321,45 @@ function wireFollowInterrupt(argv: string[]): FollowInterrupt {
       // loop unwind through its own cancelled-sleep catch rather than poll
       // on forever with nobody listening.
       controller.abort()
-      for (const handler of handlers) {
-        try {
-          handler(writeErrSync)
-        } catch {
-          // A handler that throws must not cost the exit, nor the other
-          // handlers' chance to write what they know.
+
+      let settled = false
+      // A holder, not a bare `let`: `finish` is declared before the timer
+      // exists and has to be able to clear it, and `finish` can also run
+      // before the timer is ever created (the nothing-pending path below).
+      const grace: { timer?: ReturnType<typeof setTimeout> } = {}
+      const finish = (flushed: boolean) => {
+        if (settled) return
+        settled = true
+        if (grace.timer !== undefined) clearTimeout(grace.timer)
+        if (!flushed) writeErrSync(`${STDOUT_TRUNCATED_LINE}\n`)
+        for (const handler of handlers) {
+          try {
+            handler(writeErrSync)
+          } catch {
+            // A handler that throws must not cost the exit, nor the other
+            // handlers' chance to write what they know.
+          }
         }
+        process.exit(0)
       }
-      process.exit(0)
+
+      // The overwhelmingly common case — between polls, or with a reader
+      // keeping up — is nothing pending at all, and takes the immediate
+      // path with no timer and no waiting.
+      if (process.stdout.writableLength === 0) {
+        finish(true)
+        return
+      }
+      grace.timer = setTimeout(() => finish(false), STDOUT_FLUSH_GRACE_MS)
+      try {
+        // A zero-length write whose callback fires once everything queued
+        // ahead of it has been handed to the OS — writes complete in order,
+        // so this is "tell me when the backlog is gone" without reaching
+        // into the stream's internals or polling `writableLength`.
+        process.stdout.write('', () => finish(true))
+      } catch {
+        finish(false)
+      }
     }
     // `process.on`, not `process.once`: the handler exits the process, so a
     // second delivery is unreachable in practice — but a listener that

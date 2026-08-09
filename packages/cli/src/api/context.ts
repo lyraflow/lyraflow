@@ -64,9 +64,14 @@ export interface CommandContext {
    * (SIGINT/SIGTERM), immediately before it exits — `events --follow`'s
    * only way to write its resume cursor on a `Ctrl-C` or a `docker stop`.
    *
-   * THE HANDLER RUNS SYNCHRONOUSLY, INSIDE THE SIGNAL HANDLER ITSELF, and
-   * the process ends the moment it returns: it may not await anything, and
-   * nothing it schedules will run. That is the whole point. The previous
+   * THE HANDLER RUNS SYNCHRONOUSLY, AT EXIT TIME, and the process ends the
+   * moment it returns: it may not await anything, and nothing it schedules
+   * will run. (Exit time is usually the signal handler itself; when stdout
+   * still has records buffered it is instead the moment that backlog
+   * finishes flushing, or a bounded grace expires — see
+   * `wireFollowInterrupt`. Either way the handler's own contract is
+   * unchanged: run, write what you know, return.) That is the whole point.
+   * The previous
    * design cancelled `sleep` instead and let the follow loop unwind through
    * its own catch — which works only when the signal lands during the sleep
    * between polls. A `--follow` session spends the rest of its life inside

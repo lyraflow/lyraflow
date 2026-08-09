@@ -258,11 +258,21 @@ precise about what this guarantees and what it does not:
 stderr first, same as a normal non-`--follow` run.** One signal is always
 enough, and it takes effect immediately — including while a poll's own HTTP
 request is still open, which is where a follow session spends most of its
-time. The cursor is written from inside the signal handler itself, so
-nothing is waited on and nothing is lost; measured against a host that
-accepts the connection and never answers, the process is gone within about
-ten milliseconds of the signal. There is no "press it again" fallback to
-know about, because there is nothing to fall back from.
+time. The in-flight request is abandoned rather than waited for; measured
+against a host that accepts the connection and never answers, the process is
+gone within about ten milliseconds of the signal. There is no "press it
+again" fallback to know about, because there is nothing to fall back from.
+
+The one thing it does wait for is your own reader. If records are still
+being written when the signal arrives (a pipe into something slower than the
+CLI), they are flushed before the process exits, so an interrupt never
+silently drops records the cursor then skips past. That wait is bounded at
+two seconds; if a reader is so far behind that it expires, the CLI says so
+on stderr, immediately before the cursor it invalidates:
+
+```json
+{"warning":"interrupted while output was still being written; some records may not have reached the reader, so the next_cursor below may skip them"}
+```
 
 Only `events --follow` handles these signals. Every other command — `events`
 without `--follow` included — keeps the ordinary behaviour: the signal kills

@@ -778,7 +778,7 @@ describe('the built CLI against a real, in-process server', () => {
    * Same precedent as the blackhole address the non-follow signal test
    * below already uses for the same reason.
    */
-  async function hangingAfterFirstPoll(): Promise<{
+  async function hangingAfterFirstPoll(eventCount = 1): Promise<{
     url: string
     pollInFlight: Promise<void>
     close: () => Promise<void>
@@ -788,20 +788,24 @@ describe('the built CLI against a real, in-process server', () => {
     const pollInFlight = new Promise<void>((resolve) => {
       arrived = resolve
     })
+    // Padded so a page of them cannot fit in a 64 KiB pipe buffer — the
+    // flush tests below depend on the child genuinely having a backlog,
+    // not on winning a race.
+    const events = Array.from({ length: eventCount }, (_, i) => ({
+      event_id: `stub-${String(i).padStart(6, '0')}`,
+      timestamp: '2026-08-09T00:00:00.000Z',
+      anonymous_id: 'a'.repeat(400),
+      url: 'u'.repeat(400),
+    }))
     const server: Server = createServer((_req, res) => {
       polls += 1
       if (polls === 1) {
         res.writeHead(200, { 'content-type': 'application/json' })
-        // A real event, not an empty page: the loop only adopts a cursor
+        // Real events, not an empty page: the loop only adopts a cursor
         // when a poll actually returned events (events.ts keys on what it
         // observed, not on `next_cursor` alone), and a session with no
         // cursor could not prove the cursor survives the interrupt.
-        res.end(
-          JSON.stringify({
-            events: [{ event_id: 'stub-1', timestamp: '2026-08-09T00:00:00.000Z' }],
-            next_cursor: 'CURSOR-FROM-FIRST-POLL',
-          }),
-        )
+        res.end(JSON.stringify({ events, next_cursor: 'CURSOR-FROM-FIRST-POLL' }))
         return
       }
       arrived() // accepted, deliberately never answered
@@ -908,6 +912,120 @@ describe('the built CLI against a real, in-process server', () => {
       }
     }, 20_000)
   }
+
+  it('an interrupt does not drop records stdout has not flushed yet', async () => {
+    // THE REGRESSION THE FIRST VERSION OF THE SIGNAL FIX INTRODUCED, found
+    // by asking what the fix broke rather than whether it worked.
+    // `process.exit` discards whatever `process.stdout` still has buffered,
+    // and on POSIX stdout is ASYNCHRONOUS when it is a pipe — which is how
+    // every agent harness runs this CLI. Measured with this exact fixture
+    // before the flush was added: 148 of 500 records delivered, exit 0, and
+    // a resume cursor positioned after the 352 that never arrived, so
+    // `--after` would skip them forever. Silent loss reported as success,
+    // in the command whose stated promise is "no event twice, none missed".
+    //
+    // The reader here does not start consuming until AFTER the signal, so
+    // the backlog is guaranteed rather than raced: 500 padded records is
+    // several hundred KiB against a 64 KiB pipe buffer.
+    const RECORDS = 500
+    const host = await hangingAfterFirstPoll(RECORDS)
+    const child = spawn(
+      process.execPath,
+      [CLI_ENTRY, 'events', '--follow', '--since', '15m', '--limit', String(RECORDS), '--json'],
+      {
+        env: { ...process.env, LYRAFLOW_HOST: host.url, LYRAFLOW_SERVER_KEY: 'sk_stub' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    )
+
+    let stderr = ''
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString()
+    })
+    const closed = new Promise<{ code: number | null }>((resolve) => {
+      child.on('close', (code) => resolve({ code }))
+    })
+
+    try {
+      await host.pollInFlight
+
+      let stdout = ''
+      child.kill('SIGINT')
+      // Only now does anything read stdout. Everything the child wrote is
+      // sitting in the pipe and in its own stream buffer.
+      child.stdout.on('data', (chunk: Buffer) => {
+        stdout += chunk.toString()
+      })
+
+      const { code } = await closed
+      expect(code).toBe(0)
+
+      const lines = stdout.trim().split('\n').filter(Boolean)
+      expect(lines.length).toBe(RECORDS)
+      for (const line of lines) expect(() => JSON.parse(line)).not.toThrow()
+      expect(JSON.parse(lines[0] as string).event_id).toBe('stub-000000')
+      expect(JSON.parse(lines[RECORDS - 1] as string).event_id).toBe('stub-000499')
+
+      // Nothing was truncated, so the cursor is trustworthy and the
+      // truncation warning must NOT have been written.
+      expect(stderr).not.toContain('may not have reached the reader')
+      expect(stderr).toContain('CURSOR-FROM-FIRST-POLL')
+    } finally {
+      child.kill('SIGKILL')
+      await host.close()
+    }
+  }, 30_000)
+
+  it('says so, and still exits, when a reader that never reads makes the flush time out', async () => {
+    // The other side of that fix: waiting for stdout must not become a new
+    // way to hang, so the wait is bounded — and when the bound is hit the
+    // truncation is REPORTED, immediately before the cursor it invalidates,
+    // rather than left to look like a clean exit 0. This reader never
+    // consumes a byte.
+    const host = await hangingAfterFirstPoll(500)
+    const child = spawn(
+      process.execPath,
+      [CLI_ENTRY, 'events', '--follow', '--since', '15m', '--limit', '500', '--json'],
+      {
+        env: { ...process.env, LYRAFLOW_HOST: host.url, LYRAFLOW_SERVER_KEY: 'sk_stub' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    )
+    let stderr = ''
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString()
+    })
+    const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+      (resolve) => {
+        child.on('close', (code, signal) => resolve({ code, signal }))
+      },
+    )
+
+    try {
+      await host.pollInFlight
+      const sentAt = Date.now()
+      child.kill('SIGINT')
+      const { code, signal } = await closed
+      const elapsed = Date.now() - sentAt
+
+      expect(signal).toBeNull()
+      expect(code).toBe(0)
+      // Bounded: one signal is still enough, even here. The grace is 2s;
+      // this proves it is neither ignored nor unbounded.
+      expect(elapsed).toBeGreaterThanOrEqual(1500)
+      expect(elapsed).toBeLessThan(6000)
+
+      const lines = stderr.trim().split('\n').filter(Boolean)
+      const warningAt = lines.findIndex((l) => l.includes('may not have reached the reader'))
+      const cursorAt = lines.findIndex((l) => l.includes('CURSOR-FROM-FIRST-POLL'))
+      expect(warningAt).toBeGreaterThanOrEqual(0)
+      expect(cursorAt).toBeGreaterThan(warningAt)
+      expect(() => JSON.parse(lines[warningAt] as string)).not.toThrow()
+    } finally {
+      child.kill('SIGKILL')
+      await host.close()
+    }
+  }, 30_000)
 
   for (const sig of ['SIGINT', 'SIGTERM'] as const) {
     it(`a non-follow command still dies on ${sig} the ordinary way, not held open by the follow fix`, async () => {
