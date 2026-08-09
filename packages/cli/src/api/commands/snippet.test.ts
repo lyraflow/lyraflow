@@ -705,6 +705,26 @@ describe('runSnippet', () => {
     // nothing about the real path.
     const WINDOW_TOO_LARGE = new ApiError(400, 'window_too_large', 'window_too_large')
 
+    it('leaves the success arm exactly four keys — no `partial` when both requests answered', async () => {
+      // The risk the `partial` field introduces, pinned at the layer a
+      // consumer actually reads: the CLI README documents the success arm
+      // as exact-set `{since, until, counts, truncated}`, and adding an
+      // optional field is exactly the change that quietly widens it.
+      //
+      // KNOWN LIMIT, since a test that overstates what it proves is worse
+      // than none: this reads the SERIALISED output, and `JSON.stringify`
+      // drops a key whose value is `undefined` — so a `partial: undefined`
+      // written into the success shape passes here (verified, not assumed).
+      // What it does catch is a `partial` carrying a real value on the
+      // success path, which is the mutation that would break a consumer.
+      const { ctx, out } = makeCtx(fakeClient)
+      await runSnippet(['--json'], ctx)
+      const parsed = JSON.parse(out.join(''))
+      expect(Object.keys(parsed.events).sort()).toEqual(
+        ['counts', 'since', 'truncated', 'until'].sort(),
+      )
+    })
+
     it('keeps the all-time schema names when events/stats fails, instead of losing both', async () => {
       // The Important the whole-branch review found. One `try` around both
       // requests meant a `window_too_large` from `events/stats` — which the
