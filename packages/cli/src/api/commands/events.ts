@@ -67,10 +67,16 @@
  * full-page truncation above, not implied to be covered by the same fix.
  */
 
-import { UsageError, hasRawFlag, parseCommandArgs, resolveInstant } from '../args.js'
-import { ApiError } from '../client.js'
+import { UsageError, parseCommandArgs, resolveInstant } from '../args.js'
 import type { CommandContext } from '../context.js'
-import { type Column, emitError, emitObject, emitRecords, resolveMode } from '../output.js'
+import { type Column, emitObject, emitRecords, resolveMode } from '../output.js'
+import {
+  assertWindowNotInverted,
+  checkNoPositionals,
+  reportCommandFailure,
+  reportParseFailure,
+  reportUsageError,
+} from './command-support.js'
 
 /** One row of GET /v1/events — the full server contract (events/routes.ts's FeedRow). */
 interface EventRecord {
@@ -154,55 +160,6 @@ function parseLimit(raw: string): number {
   return n
 }
 
-/** EPIPE means the reader (e.g. `head`, `less`) closed the pipe before this
- * command was done writing — a normal end for a streaming command, not a
- * failure. Every write in this function's main loop goes through a catch
- * that checks this, so a closed pipe always resolves to a clean exit 0
- * instead of an unhandled-exception stack trace and exit 1 (which under
- * this CLI's contract means "the request failed" — it did not).
- *
- * THIS ONLY CATCHES A SYNCHRONOUSLY-THROWING WRITER. `process.stdout`'s
- * real failure mode when piped to something that exits early (`| head`) is
- * NOT a synchronous throw — it is an asynchronous `'error'` event on the
- * underlying socket, arriving after `write()` has already returned, which
- * no `try`/`catch` here can ever observe. That is handled separately, at
- * the stream level, in index.ts's `process.stdout.on('error', ...)` — see
- * that file's comment for why it has to live there instead of here. This
- * guard stays anyway: it is real protection against exactly what it claims
- * (a writer that throws), which is worth keeping regardless of what else
- * a real broken pipe does. */
-function isEpipe(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'EPIPE'
-}
-
-/**
- * Reports that argv carried more positional arguments than this command
- * takes — WITHOUT ever including their values, and WITHOUT ever reading a
- * raw argv string at all. A positional can be anything the caller mistyped
- * where a flag value belonged, including a secret: `lyraflow events
- * $LYRAFLOW_SERVER_KEY` (forgetting the flag name) makes the key itself a
- * positional. This has been fixed twice already: an earlier version
- * interpolated `positionals.join(' ')` straight into the error; the
- * version after that fixed the value leak but still read
- * `argv[firstIndex - 1]` to describe WHERE the positional appeared — which
- * for `--flag=value` syntax IS the value, since Node's `parseArgs` treats
- * `--server-key=sk_live_...` as a single token. `context` (from
- * `parseCommandArgs`'s `positionalContext`) is the preceding option's
- * canonical NAME only — never `--name`, never anything with `=value`
- * attached, never a raw argv string — so this function's own parameter
- * list makes both mistakes structurally unreachable rather than merely
- * avoided this time.
- */
-function positionalsUsageMessage(
-  count: number,
-  context: string | undefined,
-  ordinal: number,
-): string {
-  const plural = count === 1 ? '' : 's'
-  const location = context !== undefined ? `after --${context}` : `as argument ${ordinal}`
-  return `${count} unexpected positional argument${plural} ${location}`
-}
-
 /**
  * `lyraflow events [--since] [--until] [--event] [--person] [--limit]
  *   [--after] [--follow] [--json|--human]`
@@ -246,36 +203,17 @@ export async function runEvents(argv: string[], ctx: CommandContext): Promise<nu
     }))
   } catch (err) {
     if (!(err instanceof UsageError)) throw err
-    // The parse as a whole failed, so there is no ParsedArgs to read a mode
-    // from — but a --json that DID appear in argv should still win here;
-    // see hasRawFlag's docstring.
-    const failMode = resolveMode(
-      { json: hasRawFlag(argv, 'json'), human: hasRawFlag(argv, 'human') },
-      ctx.isTty,
-    )
-    try {
-      emitError(err, failMode, ctx.writeErr)
-    } catch (writeErr) {
-      if (!isEpipe(writeErr)) throw writeErr
-    }
-    return 2
+    return reportParseFailure(err, argv, ctx)
   }
 
   const mode = resolveMode(flags, ctx.isTty)
 
-  if (positionals.length > 0) {
-    const ordinal = (positionalIndexes[0] ?? 0) + 1
-    try {
-      emitError(
-        new UsageError(positionalsUsageMessage(positionals.length, positionalContext[0], ordinal)),
-        mode,
-        ctx.writeErr,
-      )
-    } catch (writeErr) {
-      if (!isEpipe(writeErr)) throw writeErr
-    }
-    return 2
-  }
+  const positionalsCode = checkNoPositionals(
+    { positionals, positionalIndexes, positionalContext },
+    mode,
+    ctx,
+  )
+  if (positionalsCode !== undefined) return positionalsCode
 
   let since: Date
   let until: Date | undefined
@@ -289,19 +227,10 @@ export async function runEvents(argv: string[], ctx: CommandContext): Promise<nu
       until = resolveInstant(flags.until, ctx.now())
     }
     limit = typeof flags.limit === 'string' ? parseLimit(flags.limit) : EVENTS_DEFAULT_LIMIT
-    if (until && since.getTime() > until.getTime()) {
-      throw new UsageError(
-        `--since (${since.toISOString()}) is after --until (${until.toISOString()})`,
-      )
-    }
+    assertWindowNotInverted(since, until)
   } catch (err) {
     if (!(err instanceof UsageError)) throw err
-    try {
-      emitError(err, mode, ctx.writeErr)
-    } catch (writeErr) {
-      if (!isEpipe(writeErr)) throw writeErr
-    }
-    return 2
+    return reportUsageError(err, mode, ctx)
   }
 
   const event = typeof flags.event === 'string' ? flags.event : undefined
@@ -401,23 +330,6 @@ export async function runEvents(argv: string[], ctx: CommandContext): Promise<nu
     }
     return 0
   } catch (err) {
-    // instanceof ApiError MUST be checked before isEpipe: ApiError's own
-    // `code` field is sourced verbatim from the server's response body
-    // (client.ts), so a non-2xx response the server happened to answer
-    // with `{"error":"EPIPE"}` would otherwise duck-type as a closed pipe
-    // and turn a real, reportable failure into a silent exit 0. Checking
-    // the class first means only a genuine thrown Error (never an
-    // ApiError) can ever reach the isEpipe check below.
-    if (err instanceof ApiError) {
-      try {
-        emitError(err, mode, ctx.writeErr)
-      } catch (writeErr) {
-        if (isEpipe(writeErr)) return 0
-        throw writeErr
-      }
-      return 1
-    }
-    if (isEpipe(err)) return 0
-    throw err
+    return reportCommandFailure(err, mode, ctx)
   }
 }

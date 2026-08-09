@@ -4,10 +4,16 @@
  * "how much, over time".
  */
 
-import { UsageError, hasRawFlag, parseCommandArgs, resolveInstant } from '../args.js'
-import { ApiError } from '../client.js'
+import { UsageError, parseCommandArgs, resolveInstant } from '../args.js'
 import type { CommandContext } from '../context.js'
-import { type Column, emitError, emitRecords, resolveMode } from '../output.js'
+import { type Column, emitRecords, resolveMode } from '../output.js'
+import {
+  assertWindowNotInverted,
+  checkNoPositionals,
+  reportCommandFailure,
+  reportParseFailure,
+  reportUsageError,
+} from './command-support.js'
 
 /** One row of GET /v1/events/stats — flat, per events/routes.ts's own docstring on why. */
 interface StatsBucket {
@@ -47,20 +53,13 @@ function parseInterval(raw: string): Interval {
   return raw
 }
 
-/** See isEpipe in events.ts for the full reasoning — same guarantee, same shape. */
-function isEpipe(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'EPIPE'
-}
-
 /**
  * The server's own default window WIDTH per interval
- * (`STATS_DEFAULT_WINDOW_MS`, events/routes.ts), duplicated here — not
- * merely mirrored in a comment — because it is needed for real computation
- * below, not just documentation. `1m` → 1h, `1h` → 24h, `1d` → 7d. Pinned
- * against that source directly in `stats.test.ts` (the same technique
- * `events.test.ts` uses for `EVENTS_MAX_LIMIT`/`EVENTS_DEFAULT_LIMIT`, and
- * `CLI_VERSION`'s own test uses against `package.json`), so a hand-copy
- * that drifts is caught rather than trusted to stay in sync by discipline.
+ * (`STATS_DEFAULT_WINDOW_MS`, events/routes.ts). Pinned against that
+ * source directly in `stats.test.ts` (the same technique `events.test.ts`
+ * uses for `EVENTS_MAX_LIMIT`/`EVENTS_DEFAULT_LIMIT`), not merely
+ * hand-copied and trusted to stay in sync. `1m` → 1h, `1h` → 24h, `1d` →
+ * 7d.
  */
 export const DEFAULT_WINDOW_MS: Record<Interval, number> = {
   '1m': 60 * 60_000,
@@ -113,23 +112,6 @@ function defaultSince(interval: Interval, until: Date | undefined, now: Date): D
 }
 
 /**
- * Reports that argv carried more positional arguments than this command
- * takes, WITHOUT ever including their values and WITHOUT ever reading a
- * raw argv string at all — see events.ts's identical helper for the full
- * reasoning, including why an earlier version's "read the token before
- * it" fix was itself still a leak for `--flag=value` syntax.
- */
-function positionalsUsageMessage(
-  count: number,
-  context: string | undefined,
-  ordinal: number,
-): string {
-  const plural = count === 1 ? '' : 's'
-  const location = context !== undefined ? `after --${context}` : `as argument ${ordinal}`
-  return `${count} unexpected positional argument${plural} ${location}`
-}
-
-/**
  * `lyraflow stats [--since] [--until] [--interval] [--by-event] [--json|--human]`
  *
  * Returns the process exit code: 0 success, 1 the request failed, 2 usage
@@ -147,33 +129,17 @@ export async function runStats(argv: string[], ctx: CommandContext): Promise<num
     }))
   } catch (err) {
     if (!(err instanceof UsageError)) throw err
-    const failMode = resolveMode(
-      { json: hasRawFlag(argv, 'json'), human: hasRawFlag(argv, 'human') },
-      ctx.isTty,
-    )
-    try {
-      emitError(err, failMode, ctx.writeErr)
-    } catch (writeErr) {
-      if (!isEpipe(writeErr)) throw writeErr
-    }
-    return 2
+    return reportParseFailure(err, argv, ctx)
   }
 
   const mode = resolveMode(flags, ctx.isTty)
 
-  if (positionals.length > 0) {
-    const ordinal = (positionalIndexes[0] ?? 0) + 1
-    try {
-      emitError(
-        new UsageError(positionalsUsageMessage(positionals.length, positionalContext[0], ordinal)),
-        mode,
-        ctx.writeErr,
-      )
-    } catch (writeErr) {
-      if (!isEpipe(writeErr)) throw writeErr
-    }
-    return 2
-  }
+  const positionalsCode = checkNoPositionals(
+    { positionals, positionalIndexes, positionalContext },
+    mode,
+    ctx,
+  )
+  if (positionalsCode !== undefined) return positionalsCode
 
   let interval: Interval
   let since: Date | undefined
@@ -191,19 +157,10 @@ export async function runStats(argv: string[], ctx: CommandContext): Promise<num
       typeof flags.since === 'string'
         ? resolveInstant(flags.since, ctx.now())
         : defaultSince(interval, until, ctx.now())
-    if (since && until && since.getTime() > until.getTime()) {
-      throw new UsageError(
-        `--since (${since.toISOString()}) is after --until (${until.toISOString()})`,
-      )
-    }
+    assertWindowNotInverted(since, until)
   } catch (err) {
     if (!(err instanceof UsageError)) throw err
-    try {
-      emitError(err, mode, ctx.writeErr)
-    } catch (writeErr) {
-      if (!isEpipe(writeErr)) throw writeErr
-    }
-    return 2
+    return reportUsageError(err, mode, ctx)
   }
 
   const byEvent = flags['by-event'] === true
@@ -218,19 +175,6 @@ export async function runStats(argv: string[], ctx: CommandContext): Promise<num
     emitRecords(res.buckets, mode, STATS_COLUMNS, ctx.write)
     return 0
   } catch (err) {
-    // See events.ts's identical ordering comment: instanceof ApiError
-    // must win over the EPIPE duck-type check, since ApiError.code is
-    // sourced from the server's own response body.
-    if (err instanceof ApiError) {
-      try {
-        emitError(err, mode, ctx.writeErr)
-      } catch (writeErr) {
-        if (isEpipe(writeErr)) return 0
-        throw writeErr
-      }
-      return 1
-    }
-    if (isEpipe(err)) return 0
-    throw err
+    return reportCommandFailure(err, mode, ctx)
   }
 }
