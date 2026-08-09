@@ -186,6 +186,50 @@ describe('emitRecords', () => {
     expect(text).toContain('\\x9b2Kwiped\\x85\\x7f')
   })
 
+  it('leaves no raw control character in a json line either, including the ones JSON.stringify does not escape', () => {
+    // The claim `sanitizeForLine`'s docstring used to make about this path
+    // — "terminal-safe by construction … verified directly in
+    // output.test.ts" — was false twice over: `JSON.stringify` escapes C0
+    // and passes DEL (0x7f) and the whole C1 block (0x80–0x9f) through RAW,
+    // and no test here exercised the json path with a control character at
+    // all. Both halves closed: this is that test, and `escapeJsonControls`
+    // is what makes it pass.
+    //
+    // 0x9b matters most: it is CSI, i.e. `ESC[` in one byte, so a raw one
+    // in a `--json` line piped to a terminal drives it exactly as the
+    // event-name payload did.
+    const payload = 'x\u001by\u007fz\u009b2Kw\u0085end'
+    const out: string[] = []
+    emitRecords([{ a: 1, b: payload }], 'json', COLUMNS, (s) => out.push(s))
+    const text = out.join('')
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting their absence is the point.
+    expect(text.replace(/\n$/, '')).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/)
+    // Escaped, NOT altered — the json contract still carries the exact
+    // bytes, spelled in json's own escape syntax.
+    expect(JSON.parse(text)).toEqual({ a: 1, b: payload })
+    expect(text).toContain('\\u007f')
+    expect(text).toContain('\\u009b')
+  })
+
+  it('escapes control characters in a degraded "could not be serialised" line too', () => {
+    // That line embeds `String(err)` for an error this module did not
+    // create — a thrown Error whose message came off the wire lands there,
+    // so it is no more trusted than a record field.
+    const out: string[] = []
+    const hostile = {
+      toJSON: () => {
+        throw new Error('boom \u009b2K \u007f')
+      },
+    }
+    emitRecords([hostile], 'json', COLUMNS, (s) => out.push(s))
+    const text = out.join('')
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting their absence is the point.
+    expect(text.replace(/\n$/, '')).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/)
+    const parsed = JSON.parse(text)
+    expect(parsed.error).toBe('this record could not be serialised as JSON')
+    expect(parsed.detail).toContain('boom')
+  })
+
   it('leaves ordinary values byte-for-byte alone — the widening is not a filter', () => {
     // What the fix must NOT break. Every human renderer in this CLI now
     // routes through the widened `sanitizeForLine`, so anything it touches
@@ -434,6 +478,37 @@ describe('emitObject', () => {
 })
 
 describe('emitError', () => {
+  // Both values come off the wire whenever `err` is an `ApiError`: `code`
+  // IS the response body's `error` field (`Client#toApiError`), and for a
+  // 400/422 so is `message`. This is the renderer all seven command groups
+  // share, and it printed both raw — six raw ESC bytes on a real terminal
+  // from `events`, `stats`, `schema` and `snippet` alike, measured live
+  // through a proxy returning an escape-laden `error` field.
+  const HOSTILE_MESSAGE = '\u001b[2Kwiped\u001b[6A'
+  const HOSTILE_CODE = 'bad_\u009b2K'
+
+  it('escapes control characters in a human error line, in the shared renderer', () => {
+    const out: string[] = []
+    emitError(new ApiError(400, HOSTILE_CODE, HOSTILE_MESSAGE), 'human', (s) => out.push(s))
+    const text = out.join('')
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting their absence is the point.
+    expect(text.replace(/\n$/, '')).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/)
+    expect(text).toContain('\\x1b[2Kwiped\\x1b[6A')
+    expect(text).toContain('bad_\\x9b2K')
+    // Still one line, and still the shape every command's docs promise.
+    expect(text.split('\n').filter(Boolean)).toHaveLength(1)
+  })
+
+  it('escapes DEL and C1 in a json error line, which JSON.stringify leaves raw', () => {
+    const out: string[] = []
+    emitError(new ApiError(400, HOSTILE_CODE, HOSTILE_MESSAGE), 'json', (s) => out.push(s))
+    const text = out.join('')
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting their absence is the point.
+    expect(text.replace(/\n$/, '')).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/)
+    // Escaped, not altered: it parses, and parses back to the exact bytes.
+    expect(JSON.parse(text)).toEqual({ error: HOSTILE_MESSAGE, code: HOSTILE_CODE })
+  })
+
   it('writes a single json object with error and code', () => {
     const out: string[] = []
     emitError(new ApiError(401, 'invalid_server_key', 'the server key was rejected'), 'json', (s) =>

@@ -751,7 +751,7 @@ describe('runSnippet', () => {
       // And what happened is still said, without the stutter (M3): the
       // client's message for a 400 IS the code, so `${message} (${code})`
       // printed `window_too_large (window_too_large)`.
-      expect(text).toContain('Event counts unavailable: (window_too_large)')
+      expect(text).toContain('Event counts unavailable: window_too_large —')
       expect(text).not.toContain('window_too_large (window_too_large)')
       // Counts are UNKNOWN, not zero: `0` would assert "it fired before
       // this window", which nothing here established.
@@ -801,6 +801,24 @@ describe('runSnippet', () => {
       expect(text).toContain('All-time event names unavailable')
       // A real message, distinct from the code, still renders in full.
       expect(text).toContain('the server is saturated or shutting down (draining)')
+    })
+
+    it('says the window in prose when schema/events failed and nothing fired', async () => {
+      // The sentence is built from the two instants rather than the joined
+      // `<since> to <until>` string the other branches use — that read
+      // "No events fired between X to Y".
+      const client = fakeGetClient({
+        project: PROJECT,
+        schemaEvents: new ApiError(503, 'draining', 'retry'),
+        stats: { buckets: [] },
+      })
+      const { ctx, out } = makeCtx(client)
+      expect(await runSnippet([], ctx)).toBe(0)
+      const text = out.join('')
+      expect(text).toContain(
+        'No events fired between 2026-08-01T12:00:00.000Z and 2026-08-08T12:00:00.000Z.',
+      )
+      expect(text).not.toContain('12:00:00.000Z to 2026-08-08')
     })
 
     it('degrades to the both-failed shape only when BOTH requests fail', async () => {

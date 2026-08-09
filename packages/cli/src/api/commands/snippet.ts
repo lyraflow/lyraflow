@@ -535,6 +535,13 @@ function renderEventsTable(counts: EventCount[]): string {
  * the body's `error` field for 400/422 — which IS the code — so the obvious
  * `${message} (${code})` printed `window_too_large (window_too_large)`.
  *
+ * The collapsed form is the BARE code, not a parenthesised one: the
+ * parentheses exist to mark "and here is the machine-readable code for the
+ * sentence you just read", and with nothing before them they left a
+ * sentence reading `Event counts unavailable: (window_too_large) —`, a
+ * parenthetical attached to nothing. When the code IS the whole message, it
+ * is the sentence.
+ *
  * Fixed HERE, in the renderer, rather than by carrying the server's own
  * `detail` through `ApiError`: `detail` would be a better message, but
  * `ApiError.message` is what every command in this CLI renders and what
@@ -548,7 +555,7 @@ function renderEventsTable(counts: EventCount[]): string {
  */
 function describeFailure(code: string, message: string): string {
   const safeCode = sanitizeForLine(code)
-  return message === code ? `(${safeCode})` : `${sanitizeForLine(message)} (${safeCode})`
+  return message === code ? safeCode : `${sanitizeForLine(message)} (${safeCode})`
 }
 
 /**
@@ -631,7 +638,7 @@ function renderHuman(snippet: string, events: EventsSection): string {
     )
     lines.push(
       events.counts.length === 0
-        ? `No events fired between ${window}.`
+        ? `No events fired between ${events.since} and ${events.until}.`
         : `Event counts for ${window}, every event name that fired in this window (a name that fired only outside it is missing here, where the all-time list would have shown it):`,
     )
     if (events.counts.length > 0) lines.push(renderEventsTable(events.counts))

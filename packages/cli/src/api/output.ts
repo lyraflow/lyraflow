@@ -110,12 +110,25 @@ const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/g
  * Ordinary values are untouched: printable ASCII, accented Latin, CJK,
  * emoji and every other non-control codepoint pass through byte-for-byte.
  *
- * Deliberately NOT applied to the JSON path: `JSON.stringify` already
- * escapes every control character inside a string it serialises (a real
- * newline becomes the two literal characters `\`+`n`, and `ESC` becomes the
- * six literal characters `\`+`u001b`), so JSON output is single-line-safe
- * AND terminal-safe by construction and needs no help here — verified
- * directly in output.test.ts rather than assumed.
+ * ONE CONTROL CHARACTER NEVER REACHES THE THIRD REPLACEMENT: `\r` (0x0d),
+ * consumed by the first, which maps `\r\n`, `\n` and a lone `\r` all to the
+ * same `\n`. So `zz_cr\rOVERWRITTEN` prints exactly as a value carrying a
+ * newline would. Harmless — a lone `\r` moves the cursor to column 0, which
+ * is what a newline does too, minus the line feed — and pre-existing, but
+ * it is the one place this function is lossy about WHICH byte was there,
+ * and the docstring should say so rather than let a reader infer `\xNN`
+ * covers everything.
+ *
+ * NOT APPLIED TO THE JSON PATH — but not because `JSON.stringify` makes it
+ * unnecessary. It does not: `JSON.stringify` escapes C0 (so `ESC` becomes
+ * the six literal characters `\`+`u001b`) and passes DEL (0x7f) and the
+ * WHOLE C1 BLOCK (0x80–0x9f) through RAW. 0x9b raw in a JSON line is CSI —
+ * the same byte this function escapes four paragraphs above for exactly
+ * that reason. That gap is closed by `escapeJsonControls` below, applied at
+ * every point this module serialises, rather than by running this function
+ * over JSON: `\xNN` is not JSON escape syntax, and rewriting a serialised
+ * document with a rule meant for display text would corrupt it. The JSON
+ * path needs `\u007f`, and gets it.
  *
  * Exported because a command that renders its own human output instead of
  * going through `emitRecords`/`emitObject` (`snippet`'s events table is the
@@ -128,6 +141,38 @@ export function sanitizeForLine(s: string): string {
     .replace(/\r\n|\n|\r/g, '\\n')
     .replace(/\t/g, '\\t')
     .replace(CONTROL_CHARACTERS, (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, '0')}`)
+}
+
+/** The control characters `JSON.stringify` leaves RAW inside a string it
+ * serialises: DEL and C1. C0 it already escapes itself. */
+const JSON_RAW_CONTROLS = /[\u007f-\u009f]/g
+
+/**
+ * Finishes what `JSON.stringify` starts. It escapes C0 and stops there, so
+ * a DEL or any C1 byte — 0x9b is CSI, an `ESC[` a terminal obeys without
+ * needing an `ESC` — travels through `--json` intact. Measured on this
+ * CLI's own output before this function existed: `lyraflow snippet --json`
+ * emitted 1621 bytes containing two raw control characters, codes 127 and
+ * 155, for a project carrying one hostile event name. `--json` is the
+ * format an agent pipes somewhere, and "somewhere" is very often a terminal.
+ *
+ * Runs over the SERIALISED document, which is safe precisely because
+ * `JSON.stringify` has already escaped everything structural: outside a
+ * string literal, JSON is printable ASCII only, so a byte in this range can
+ * only be string CONTENT. `\uXXXX` is JSON's own escape syntax, so the
+ * result is still valid JSON and `JSON.parse` returns the IDENTICAL string
+ * — nothing is lost, only spelled differently. That is why this is worth
+ * doing at all: it costs nothing a consumer can observe, and it makes the
+ * "terminal-safe" claim true rather than nearly true.
+ *
+ * A non-issue for surrogate pairs and every other non-control codepoint:
+ * this range contains none of them, and characters outside it are untouched.
+ */
+function escapeJsonControls(json: string): string {
+  return json.replace(
+    JSON_RAW_CONTROLS,
+    (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`,
+  )
 }
 
 /**
@@ -203,10 +248,14 @@ function toCell(value: unknown): string {
  * what happened rather than inventing a value: it says the record could not
  * be serialised and includes the real error's message, not a guess at the
  * record's shape.
+ *
+ * `escapeJsonControls` runs over the serialised line for the reason its own
+ * docstring gives: `JSON.stringify` alone leaves DEL and every C1 byte raw,
+ * and a raw 0x9b is a CSI introducer in whatever reads this stream.
  */
 function safeJsonLine(value: unknown): string {
   try {
-    return JSON.stringify(value) ?? 'null'
+    return escapeJsonControls(JSON.stringify(value) ?? 'null')
   } catch (err) {
     return describeSerialisationFailure(err)
   }
@@ -226,10 +275,15 @@ function safeJsonLine(value: unknown): string {
  */
 function describeSerialisationFailure(err: unknown): string {
   try {
-    return JSON.stringify({
-      error: 'this record could not be serialised as JSON',
-      detail: describeUnknown(err),
-    })
+    return escapeJsonControls(
+      JSON.stringify({
+        error: 'this record could not be serialised as JSON',
+        // `describeUnknown` is `String(err)` on a value this module does not
+        // control -- a thrown Error whose message came off the wire lands
+        // here, so this line is no more trusted than a record field is.
+        detail: describeUnknown(err),
+      }),
+    )
   } catch {
     return UNSERIALISABLE_LINE
   }
@@ -445,11 +499,30 @@ export function emitError(err: unknown, mode: Mode, write: (s: string) => void):
  * the gap between. `describeError`'s own internal guards (via
  * `describeUnknown`) are what make the COMMON case informative; this outer
  * catch is what makes the promise actually hold for every case.
+ *
+ * BOTH VALUES ARE SERVER TEXT WHENEVER `err` IS AN `ApiError`, and this is
+ * the line that renders an error for all seven command groups. `code` is
+ * the response body's own `error` field, echoed by `Client#toApiError`
+ * (client.ts), and for a 400/422 `message` is that same field — so a host
+ * answering `{"error":"[2K…"}` had six raw `ESC` bytes on the
+ * operator's terminal from `events`, `stats`, `schema` and `snippet` alike,
+ * measured live through a proxy. It needs a hostile or misconfigured server
+ * rather than any visitor to an instrumented page, so it is a lower bar
+ * than the event-name path — but it is the same pair, in the same shape,
+ * and `snippet`'s own renderer already routes it through `sanitizeForLine`.
+ * A shared renderer left inconsistent with a command-local one reads as a
+ * deliberate exemption to the next person; it is not one.
+ *
+ * The `json` branch gets `escapeJsonControls` rather than `sanitizeForLine`
+ * for the reason that function's docstring gives: `\xNN` is not JSON escape
+ * syntax, and `JSON.stringify` leaves DEL and C1 raw on its own.
  */
 function renderErrorLine(err: unknown, mode: Mode): string {
   try {
     const { error, code } = describeError(err)
-    return mode === 'json' ? `${JSON.stringify({ error, code })}\n` : `Error: ${error} (${code})\n`
+    return mode === 'json'
+      ? `${escapeJsonControls(JSON.stringify({ error, code }))}\n`
+      : `Error: ${sanitizeForLine(error)} (${sanitizeForLine(code)})\n`
   } catch {
     return mode === 'json' ? FIXED_JSON_ERROR_LINE : FIXED_HUMAN_ERROR_LINE
   }
