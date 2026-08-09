@@ -873,7 +873,17 @@ caller holding the server key read their own project's events in a different
 order, which they could already do by choosing their own `since`/`until`, so
 there is nothing here for a signature to protect. `next_cursor` is `null` on
 an empty page. `limit` above 500 is rejected with `400 {"error":"invalid_query"}`,
-never silently clamped.
+never silently clamped. A malformed, truncated, or hand-built `after` is a
+`400`:
+
+```json
+{ "error": "invalid_cursor" }
+```
+
+`person` follows the same device-window ceiling `GET /v1/persons/:id` does
+(see *Identity resolution* above): a person spanning more than 200 device
+windows is `400 person_history_too_fragmented` rather than an unbounded
+query, with the same shape that read already documents.
 
 ### `GET /v1/events/stats`
 

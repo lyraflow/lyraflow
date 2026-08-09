@@ -13,8 +13,18 @@ surface on top of them.
 
 `create-project`, `migrate`, and `healthcheck` are separate, operational
 commands this binary also ships (used once per install, not per query) — see
-*Running Lyraflow* in the main README for those. Everything below is the
-read-oriented surface.
+*Running Lyraflow* in the main README for those. `healthcheck` reads its own
+env var, `LYRAFLOW_URL` (defaulting to `http://localhost:3000`), not
+`LYRAFLOW_HOST` — the two are not interchangeable and neither falls back to
+the other:
+
+```sh
+LYRAFLOW_URL=http://localhost:3000 lyraflow healthcheck
+# ready
+# exit 0
+```
+
+Everything below is the read-oriented surface.
 
 ## Running it
 
@@ -92,10 +102,24 @@ prints nothing at all, in either mode.
 | Code | Meaning |
 | --- | --- |
 | `0` | Success |
-| `1` | The request reached the API and was rejected, or (for `persons delete` specifically) the deletion was declined |
+| `1` | The command failed |
 | `2` | Usage error — nothing was ever sent to the API |
 
-An agent can branch on these without parsing any output.
+An agent can branch on these without parsing any output. **Exit `1` covers
+more than "the API answered and rejected the request" — do not assume it
+implies the server was reached.** It is every `ApiError` (`client.ts`),
+which includes:
+
+- the server answered a non-2xx status (a rejected key, a `400`, a `503`, …);
+- the request **never reached anything** — an unreachable host, a DNS
+  failure, a malformed `--host`. `code` is `no_response` or `invalid_url` in
+  that case, and the message never claims otherwise;
+- for `persons export` specifically, a stream that ended without its
+  terminating `{"type":"end",…}` line — the data received is real but
+  incomplete, `code` is `export_incomplete`;
+- for `persons delete` specifically, a declined or failed confirmation
+  prompt — the deletion did not happen, which is a different fact from
+  success.
 
 ```sh
 lyraflow events --limit 99999 --json
@@ -104,7 +128,11 @@ lyraflow events --limit 99999 --json
 
 lyraflow events --server-key sk_wrong --json
 # {"error":"the server key was rejected","code":"invalid_server_key"}
-# exit 1 — sent, rejected
+# exit 1 — reached the server, rejected
+
+lyraflow events --host http://127.0.0.1:1 --json
+# {"error":"could not reach http://127.0.0.1:1","code":"no_response"}
+# exit 1 too — reached nothing at all
 ```
 
 **Piping into something that exits early is still success.** `lyraflow events
@@ -133,14 +161,28 @@ what that wants. Verified against a live server:
 ```sh
 lyraflow events --since 1h --limit 2 --json
 ```
+
+Captured whole — **stdout and stderr both** — because this particular window
+has more than 2 events in it, so this small `--limit` genuinely fills the
+page and triggers the truncation warning covered in the next section. Shown
+here in full rather than trimmed to stdout alone, so the first example a
+reader copies doesn't leave out something the command actually printed:
+
+stdout:
 ```json
-{"event_id":"22222222-2222-2222-2222-222222222223","timestamp":"2026-08-09T03:17:34.357Z","event_name":"signup","anonymous_id":"visitor-3","user_id":"","properties":{"plan":"trial"},"properties_num":{},"url":"","path":"","referrer":"","utm_source":"","utm_medium":"","utm_campaign":"","utm_term":"","utm_content":"","device_type":"desktop","os":"macos","browser":"chrome","country":"","region":"","city":""}
-{"event_id":"22222222-2222-2222-2222-222222222224","timestamp":"2026-08-09T03:17:34.364Z","event_name":"signup","anonymous_id":"visitor-4","user_id":"","properties":{"plan":"trial"},"properties_num":{},"url":"","path":"","referrer":"","utm_source":"","utm_medium":"","utm_campaign":"","utm_term":"","utm_content":"","device_type":"desktop","os":"macos","browser":"chrome","country":"","region":"","city":""}
+{"event_id":"77777777-7777-7777-7777-777777777772","timestamp":"2026-08-09T04:05:36.837Z","event_name":"pageview","anonymous_id":"flag-visitor-2","user_id":"","properties":{},"properties_num":{},"url":"","path":"","referrer":"","utm_source":"","utm_medium":"","utm_campaign":"","utm_term":"","utm_content":"","device_type":"desktop","os":"macos","browser":"chrome","country":"","region":"","city":""}
+{"event_id":"77777777-7777-7777-7777-777777777773","timestamp":"2026-08-09T04:05:36.844Z","event_name":"pageview","anonymous_id":"flag-visitor-3","user_id":"","properties":{},"properties_num":{},"url":"","path":"","referrer":"","utm_source":"","utm_medium":"","utm_campaign":"","utm_term":"","utm_content":"","device_type":"desktop","os":"macos","browser":"chrome","country":"","region":"","city":""}
 ```
 
-`--limit` is validated client-side against the server's own cap (500) before
-anything is sent — see *Exit codes* above for what an over-large `--limit`
-looks like.
+stderr:
+```json
+{"warning":"this page hit --limit 2; events older than 2026-08-09T04:05:36.837Z in this window may exist and were not shown — rerun with the same --since and --until 2026-08-09T04:05:36.837Z to see them, or increase --limit"}
+{"next_cursor":"WyIyMDI2LTA4LTA5IDA0OjA1OjM2Ljg0NCIsIjc3Nzc3Nzc3LTc3NzctNzc3Ny03Nzc3LTc3Nzc3Nzc3Nzc3MyJd"}
+```
+
+Both stderr lines are explained just below. `--limit` is validated
+client-side against the server's own cap (500) before anything is sent — see
+*Exit codes* above for what an over-large `--limit` looks like.
 
 ### stderr carries more than errors
 
@@ -198,8 +240,16 @@ precise about what this guarantees and what it does not:
   way to notice a row landing behind where it has already moved past. This is
   inherent to the paging scheme, not a bug this CLI works around.
 
-`--follow` exits `0` when interrupted cleanly (e.g. `Ctrl-C`), writing the
-resume cursor to stderr first, same as a normal non-`--follow` run.
+**`--follow` exits `0` on `SIGINT`/`SIGTERM` (e.g. `Ctrl-C`), writing the
+resume cursor to stderr first, same as a normal non-`--follow` run** —
+verified against the built binary, not only a test with a fake clock: the
+signal aborts the wait between polls, the loop's own catch for that runs, and
+the cursor is written before the process exits. If the signal instead arrives
+while a poll's own request is still in flight, the exit is bounded by that
+request finishing (this CLI cannot cancel an in-flight HTTP request today),
+not instant — and if nothing has happened within a couple of seconds, a
+second `Ctrl-C` falls back to an ordinary immediate kill, the same as any
+other command.
 
 ## `lyraflow stats`
 
@@ -217,13 +267,28 @@ lyraflow stats --by-event --json
 {"bucket":"2026-08-09T03:00:00.000Z","event_name":"signup","events":8}
 ```
 
-**When `--since` is omitted, this CLI computes a default scaled to
-`--interval`** — the same per-interval table the server itself defaults to
-(see *Reading events* in the main README: 1 hour at `1m`, 24 hours at `1h`,
-7 days at `1d`) — anchored to `--until` when you gave one, or to now
-otherwise. This is what lets a bare `lyraflow stats --interval 1m` succeed
-instead of colliding with the server's 1,000-bucket cap, which a flat 24-hour
-default would do:
+**When `--since` is omitted, the effective window is scaled to `--interval`**
+— the same per-interval table the server itself defaults to (see *Reading
+events* in the main README: 1 hour at `1m`, 24 hours at `1h`, 7 days at
+`1d`). *How* that happens differs by case, because it has to:
+
+- **`--until` given, `--since` not**: this CLI always computes `--since`
+  itself, anchored to *your* `--until` rather than the server's own clock —
+  the server's own default anchors to its own `now`, which would silently
+  mismatch a caller-supplied `--until` at any interval.
+- **Neither given, at the default interval (`1h`)**: this CLI still computes
+  and sends an explicit `--since` (`now - 24h`) itself, rather than leaving it
+  to the server — purely so the resolved value is visible in `--json` output
+  like every other parameter, not because the server would answer
+  differently without it.
+- **Neither given, at `1m` or `1d`**: this CLI sends no `--since` at all, and
+  the server's own identical per-interval default applies.
+
+The *observed* window is the same table above in every case; only the
+middle case bothers computing a value that was already going to match. This
+is what lets a bare `lyraflow stats --interval 1m` succeed instead of
+colliding with the server's 1,000-bucket cap, which a flat 24-hour default
+would do:
 
 ```sh
 lyraflow stats --interval 1m --json
@@ -379,11 +444,21 @@ lyraflow schema properties [--q <prefix>] [--event <name>] [--limit <n>] [--json
 `events`' own `--limit` is.
 
 ```sh
-lyraflow schema properties --event signup --json
+lyraflow schema events --json
+```
+```json
+{"event_name":"purchase"}
+```
+
+```sh
+lyraflow schema properties --event purchase --json
 ```
 ```json
 {"property_key":"plan","value_kind":"string"}
 ```
+
+Only events carrying at least one property are discoverable this way — see
+*Autocomplete: event and property names* in the main README for why.
 
 `--event` only applies to `properties`; passing it to `schema events` is
 rejected as an unexpected flag for that subcommand rather than silently

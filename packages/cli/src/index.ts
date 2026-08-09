@@ -172,6 +172,80 @@ export function createPrompt(
 }
 
 /**
+ * The real `CommandContext['sleep']` for `events --follow` — identical to a
+ * plain `setTimeout`-based sleep except that it also rejects the moment
+ * `signal` aborts. `events.ts`'s own `--follow` loop already has a catch
+ * block for a rejected sleep (see its module docstring: "a cancelled sleep
+ * ... ends the follow session cleanly ... still exits 0" and writes the
+ * resume cursor first) — that path existed and was tested since Task 8/9,
+ * but nothing in the real dispatch below ever rejected `sleep` to reach it.
+ * A real SIGINT during `--follow` fell through to Node's own default signal
+ * handling instead: an immediate, uncatchable kill with no exit code at all
+ * (a shell reports 130) and the resume cursor never written — confirmed
+ * against the built binary before this existed. This function, plus the
+ * `AbortController` wired to SIGINT/SIGTERM below, is what makes the
+ * already-tested catch path reachable for real.
+ *
+ * KNOWN GAP, not fixed here: if the signal arrives while a poll's own HTTP
+ * request is still in flight — rather than during the sleep between polls —
+ * this cannot cancel that request; `Client` (client.ts) takes no
+ * `AbortSignal` today. The loop only notices the abort once that request
+ * settles and it reaches the next `ctx.sleep` call, so the exit is bounded
+ * by that request's latency, not instant. Cancelling an in-flight request is
+ * a change to the whole HTTP client, not to signal wiring, and is out of
+ * scope here.
+ */
+export function abortableSleep(signal: AbortSignal): (ms: number) => Promise<void> {
+  return (ms: number) =>
+    new Promise<void>((resolve, reject) => {
+      if (signal.aborted) {
+        reject(new Error('interrupted'))
+        return
+      }
+      const onAbort = () => {
+        clearTimeout(timer)
+        reject(new Error('interrupted'))
+      }
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort)
+        resolve()
+      }, ms)
+      signal.addEventListener('abort', onAbort, { once: true })
+    })
+}
+
+/**
+ * Wires SIGINT/SIGTERM to `controller` — but ONLY for `events --follow`,
+ * never for any other command or for `events` without `--follow`. `sleep`
+ * (`CommandContext`) is read only by that one loop (see its own docstring);
+ * a handler that merely aborts a controller nothing else ever checks would
+ * be a silent no-op for every other command while still disabling Node's
+ * own default SIGINT/SIGTERM handling for it — trading one hang for
+ * another. Gated on a raw pre-scan of `argv` (`hasRawFlag`, the same
+ * convention `extractOverride`/the `--json` pre-scans below already use),
+ * not on `runEvents`'s own parsed flags, because the wiring has to exist
+ * BEFORE that parse runs.
+ *
+ * `process.once`, not `process.on`: the FIRST signal aborts the controller
+ * and gives the follow loop a chance to unwind cleanly through its own
+ * `ctx.sleep` catch (see `abortableSleep`'s docstring for the one case that
+ * can delay it — an in-flight request). A SECOND signal, if the first one
+ * hasn't ended the process yet, finds no listener left for that event and
+ * falls through to Node's own default kill — the same escape hatch a hung
+ * process always has, deliberately not replaced with a bespoke force-exit
+ * timer that would need its own timeout tuned against production latency.
+ */
+function wireFollowInterrupt(argv: string[]): AbortController {
+  const controller = new AbortController()
+  if (hasRawFlag(argv, 'follow')) {
+    const onSignal = () => controller.abort()
+    process.once('SIGINT', onSignal)
+    process.once('SIGTERM', onSignal)
+  }
+  return controller
+}
+
+/**
  * `lyraflow --version` — how an agent learns which JSON contract it is
  * talking to before trusting any field name. Reports two numbers that move
  * for different reasons: `version` (CLI_VERSION) moves with every release;
@@ -305,6 +379,13 @@ async function main(): Promise<void> {
         break
       }
 
+      // Only 'events' ever defines --follow, and wireFollowInterrupt is
+      // itself a no-op (no signal listeners installed) unless --follow is
+      // actually present in argv — see its own docstring for why this must
+      // not run for the other five commands, or for a plain `events` call
+      // with no --follow.
+      const followAbort = command === 'events' ? wireFollowInterrupt(args) : new AbortController()
+
       const ctx: CommandContext = {
         client: new Client({ host, serverKey }),
         isTty,
@@ -312,7 +393,7 @@ async function main(): Promise<void> {
         write,
         writeErr,
         now: () => new Date(),
-        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        sleep: abortableSleep(followAbort.signal),
         // Built once per invocation, real stdin/stderr — only `persons
         // delete` (via runPersons) ever actually calls this; every other
         // command here never reaches it, the same way `stats` never reads
