@@ -555,6 +555,8 @@ describe('runSchema > usage', () => {
       ['events', 'a', secret],
       [secret, secret],
       [`--${secret}`, 'events'],
+      ['events', '--limit', secret], // --limit's own value, formerly carved out
+      ['events', `--limit=${secret}`],
       // --q/--event ARE legitimately echoed to the outgoing query by
       // design (never into CLI-authored text) — not exercised here, same
       // reasoning events.test.ts's own sweep gives for --event's value.

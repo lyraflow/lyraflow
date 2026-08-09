@@ -608,10 +608,14 @@ describe('runEvents', () => {
     // clean run). `--event`'s own value is never echoed anywhere (it only
     // ever reaches the outgoing HTTP query, never CLI text output), so
     // using it as a carrier for the "flag's own value" shapes below is
-    // safe and does not depend on --event never being validated — unlike
-    // --since/--until/--limit, whose validators legitimately echo back
-    // what they were given for a non-secret typo, which is expected
-    // behaviour this sweep is not testing.
+    // safe and does not depend on --event never being validated.
+    //
+    // --limit USED to be a carve-out here: its validator echoed whatever it
+    // was handed, for a non-secret typo. It was the last leaking slot of the
+    // 144 this sweep and its siblings cover, and "the shape is narrow" was
+    // the argument the three previous times this class shipped — so the
+    // carve-out is gone and the shapes below include it. --since/--until
+    // remain carve-outs: see the separate assertion after this loop.
     const secret = 'sk_live_SENTINEL_never_here'
     const shapes: string[][] = [
       [secret], // bare positional, first
@@ -628,6 +632,8 @@ describe('runEvents', () => {
       // this sweep itself missed until Task 8's review found it in
       // node:util's own ERR_PARSE_ARGS_UNKNOWN_OPTION message (fixed in
       // args.ts, shared by every command group including this one).
+      ['--limit', secret], // --limit's own value, formerly carved out
+      [`--limit=${secret}`],
     ]
 
     for (const argv of shapes) {
@@ -637,6 +643,24 @@ describe('runEvents', () => {
       expect(out.join('')).not.toContain(secret)
       expect(errOut.join('')).not.toContain(secret)
     }
+  })
+
+  it('still says something useful about a bad --limit without repeating what was typed', async () => {
+    // Redacting the value must not cost the diagnostic: a genuine typo still
+    // needs to know which flag was wrong and what was expected. Only the
+    // over-cap branch echoes a number, and it is reachable only after the
+    // digits-only regex has already passed.
+    const { client, calls } = makeClient([EMPTY_PAGE])
+    const { ctx, errOut } = makeCtx(client)
+    expect(await runEvents(['--limit', 'twelve'], ctx)).toBe(2)
+    expect(calls).toHaveLength(0)
+    expect(errOut.join('')).toContain('--limit')
+    expect(errOut.join('')).toContain('positive integer')
+    expect(errOut.join('')).not.toContain('twelve')
+
+    const second = makeCtx(client)
+    expect(await runEvents(['--limit', '9999'], second.ctx)).toBe(2)
+    expect(second.errOut.join('')).toContain('9999')
   })
 
   it('honours a --json that did parse when an unrelated flag fails to, rather than defaulting from isTty', async () => {

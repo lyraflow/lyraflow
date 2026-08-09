@@ -151,11 +151,13 @@ export const EVENTS_MAX_LIMIT = 500
  */
 function parseLimit(raw: string): number {
   if (!/^[1-9]\d*$/.test(raw)) {
-    throw new UsageError(`--limit must be a positive integer, got "${raw}"`)
+    throw new UsageError('--limit must be a positive integer')
   }
   const n = Number(raw)
   if (n > EVENTS_MAX_LIMIT) {
-    throw new UsageError(`--limit must be at most ${EVENTS_MAX_LIMIT}, got "${raw}"`)
+    // Safe to echo: the regex above has already established `raw` is digits,
+    // so nothing a caller typed anywhere else can reach this branch.
+    throw new UsageError(`--limit must be at most ${EVENTS_MAX_LIMIT}, got ${raw}`)
   }
   return n
 }
