@@ -32,6 +32,9 @@ importers:
       '@lyraflow/db':
         specifier: workspace:*
         version: link:../db
+      '@lyraflow/sdk-browser':
+        specifier: workspace:*
+        version: link:../sdk-browser
     devDependencies:
       '@lyraflow/server':
         specifier: workspace:*

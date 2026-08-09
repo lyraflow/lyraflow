@@ -11,6 +11,7 @@ import { runDeletions, runSchema, runSegments } from './api/commands/catalog.js'
 import { reportParseFailure } from './api/commands/command-support.js'
 import { runEvents } from './api/commands/events.js'
 import { runPersons } from './api/commands/persons.js'
+import { runSnippet } from './api/commands/snippet.js'
 import { runStats } from './api/commands/stats.js'
 import type { CommandContext } from './api/context.js'
 import {
@@ -555,7 +556,8 @@ async function main(): Promise<void> {
     case 'persons':
     case 'deletions':
     case 'segments':
-    case 'schema': {
+    case 'schema':
+    case 'snippet': {
       const isTty = process.stdout.isTTY ?? false
       const stdinIsTty = process.stdin.isTTY ?? false
 
@@ -622,6 +624,11 @@ async function main(): Promise<void> {
 
       const ctx: CommandContext = {
         client: new Client({ host, serverKey }),
+        // The exact value `Client` above was just built from — see
+        // `CommandContext['host']`'s own docstring for why this is
+        // threaded through separately rather than read back off `Client`
+        // itself (its `#host` is private, deliberately).
+        host,
         isTty,
         stdinIsTty,
         write,
@@ -654,13 +661,16 @@ async function main(): Promise<void> {
         case 'schema':
           process.exitCode = await runSchema(args, ctx)
           break
+        case 'snippet':
+          process.exitCode = await runSnippet(args, ctx)
+          break
       }
       break
     }
 
     default:
       console.error(
-        'Usage: lyraflow <--version|migrate|create-project|healthcheck|events|stats|persons|deletions|segments|schema>',
+        'Usage: lyraflow <--version|migrate|create-project|healthcheck|events|stats|persons|deletions|segments|schema|snippet>',
       )
       process.exit(2)
   }

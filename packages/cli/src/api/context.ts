@@ -128,4 +128,28 @@ export interface CommandContext {
    * `createPrompt` for how all of these are closed.
    */
   prompt: (question: string) => Promise<boolean>
+  /**
+   * The resolved API host this session is configured to talk to — the same
+   * value `ctx.client` itself was built from (`--host`, or `LYRAFLOW_HOST`).
+   * Threaded through separately because `Client` keeps its own `#host`
+   * private by design (see client.ts's `ApiError` docstring on why nothing
+   * this client is configured with is ever readable off it) — every other
+   * command only ever needs `host` to DIAL the server, never to print it,
+   * so no earlier task had a reason to surface it here.
+   *
+   * `lyraflow snippet` is the first command that needs to PRINT the host —
+   * it is half of what makes the install snippet paste-ready — so this
+   * field exists for it to read rather than re-deriving `--host`/
+   * `LYRAFLOW_HOST` a second time in a command module (the one place that
+   * resolution is allowed to happen is index.ts's dispatch, which already
+   * computes this exact value to build `ctx.client`; a second copy is
+   * exactly the kind of duplicate this codebase's other modules keep
+   * finding drifts apart).
+   *
+   * Optional so every EXISTING `ctx: CommandContext` object literal —
+   * `--version`'s placeholder context, and every other command's own
+   * tests — was not forced to grow a field it has no use for. Real
+   * dispatch always sets it for every command that has a real `Client`.
+   */
+  host?: string
 }
