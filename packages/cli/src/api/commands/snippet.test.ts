@@ -218,7 +218,24 @@ describe('runSnippet', () => {
     const text = out.join('')
     expect(text).toContain('signup')
     expect(text).toContain('243')
-    expect(text).toContain('7d')
+    // The RESOLVED window, not the raw flag value — see below for why the
+    // raw value cannot be in this sentence.
+    expect(text).toContain('Event counts for 2026-08-01T12:00:00.000Z to 2026-08-08T12:00:00.000Z')
+  })
+
+  it('names the window the same way for an ISO --since as for a duration', async () => {
+    // The sentence used to read `Event counts since ${sinceRaw} ago`, and
+    // `resolveInstant` (args.ts) accepts an absolute ISO instant as readily
+    // as a duration — so this exact invocation printed "Event counts since
+    // 2026-01-01T00:00:00.000Z ago", which is not a thing. args.ts had
+    // already reasoned its way to the same rule for its own messages: a
+    // flag value does not belong in output. The resolved window says what
+    // was asked, in one form for both spellings.
+    const { ctx, out } = makeCtx(fakeClient)
+    expect(await runSnippet(['--since', '2026-01-01T00:00:00.000Z'], ctx)).toBe(0)
+    const text = out.join('')
+    expect(text).not.toContain('ago')
+    expect(text).toContain('Event counts for 2026-01-01T00:00:00.000Z to 2026-08-08T12:00:00.000Z')
   })
 
   it('shows an event recorded historically but absent from the window, with a zero', async () => {
@@ -677,38 +694,100 @@ describe('runSnippet', () => {
     })
   })
 
-  describe('schema/events and events/stats are informational', () => {
-    it('still renders the snippet when schema/events fails', async () => {
+  describe('schema/events and events/stats are informational, and degrade INDEPENDENTLY', () => {
+    // The message a REAL `Client` produces for a 400. `#toApiError`
+    // (client.ts) sets `message` to the body's `error` field — the bare
+    // code — and discards the server's own `detail`. Every fixture here
+    // uses that, because the previous version of this suite asserted
+    // against a message the client cannot produce (`'this window at 1d
+    // resolution would produce 1500 buckets…'`, which is the server's
+    // `detail`), and a test written against an impossible value proves
+    // nothing about the real path.
+    const WINDOW_TOO_LARGE = new ApiError(400, 'window_too_large', 'window_too_large')
+
+    it('keeps the all-time schema names when events/stats fails, instead of losing both', async () => {
+      // The Important the whole-branch review found. One `try` around both
+      // requests meant a `window_too_large` from `events/stats` — which the
+      // README's own remedy ("widen the window") walks a caller straight
+      // into past ~1000 days — discarded the ALL-TIME, un-windowed
+      // `schema/events` result that had already succeeded. `--since 999d`
+      // printed four names; `--since 1001d` printed an error and nothing
+      // else. The old test could not see it: its fixture set `schemaEvents:
+      // { events: [] }`, so there was no successful half to lose.
+      const client = fakeGetClient({
+        project: PROJECT,
+        schemaEvents: {
+          events: [{ event_name: 'legacy_import' }, { event_name: 'signup' }],
+        },
+        stats: WINDOW_TOO_LARGE,
+      })
+      const { ctx, out } = makeCtx(client)
+      expect(await runSnippet(['--since', '1500d'], ctx)).toBe(0)
+      const text = out.join('')
+      expect(text).toContain('wk_test_key')
+      // The names survive — this is the whole point.
+      expect(text).toContain('legacy_import')
+      expect(text).toContain('signup')
+      // And what happened is still said, without the stutter (M3): the
+      // client's message for a 400 IS the code, so `${message} (${code})`
+      // printed `window_too_large (window_too_large)`.
+      expect(text).toContain('Event counts unavailable: (window_too_large)')
+      expect(text).not.toContain('window_too_large (window_too_large)')
+      // Counts are UNKNOWN, not zero: `0` would assert "it fired before
+      // this window", which nothing here established.
+      expect(text).toMatch(/legacy_import\s+-/)
+      expect(text).not.toMatch(/legacy_import\s+0/)
+    })
+
+    it('reports the same degradation in --json, with null counts and a named source', async () => {
+      const client = fakeGetClient({
+        project: PROJECT,
+        schemaEvents: { events: [{ event_name: 'legacy_import' }] },
+        stats: WINDOW_TOO_LARGE,
+      })
+      const { ctx, out } = makeCtx(client)
+      await runSnippet(['--json', '--since', '1500d'], ctx)
+      const parsed = JSON.parse(out.join(''))
+      expect(Object.keys(parsed).sort()).toEqual(
+        ['events', 'host', 'methods', 'sdk_version', 'snippet', 'write_key'].sort(),
+      )
+      expect(parsed.events.counts).toEqual([{ event_name: 'legacy_import', count: null }])
+      expect(parsed.events.partial).toEqual({
+        source: 'events/stats',
+        code: 'window_too_large',
+        message: 'window_too_large',
+      })
+      // Not the both-failed shape: a consumer checking `.events.error`
+      // first (as the README tells it to) must not see one here.
+      expect(parsed.events.error).toBeUndefined()
+    })
+
+    it('keeps the windowed counts when schema/events fails, instead of losing both', async () => {
+      // The same defect mirrored. `events/stats` alone is a complete,
+      // useful answer for the window — losing it to a 503 on the ALL-TIME
+      // list is the identical wrong trade.
       const client = fakeGetClient({
         project: PROJECT,
         schemaEvents: new ApiError(503, 'draining', 'the server is saturated or shutting down'),
-        stats: { buckets: [] },
+        stats: {
+          buckets: [{ bucket: '2026-08-02T00:00:00.000Z', event_name: 'signup', events: 12 }],
+        },
       })
       const { ctx, out } = makeCtx(client)
-      const code = await runSnippet([], ctx)
-      expect(code).toBe(0)
+      expect(await runSnippet([], ctx)).toBe(0)
       const text = out.join('')
       expect(text).toContain('wk_test_key')
-      expect(text).toContain('Event counts unavailable')
+      expect(text).toMatch(/signup\s+12/)
+      expect(text).toContain('All-time event names unavailable')
+      // A real message, distinct from the code, still renders in full.
+      expect(text).toContain('the server is saturated or shutting down (draining)')
     })
 
-    it('still renders the snippet when events/stats fails', async () => {
-      const client = fakeGetClient({
-        project: PROJECT,
-        schemaEvents: { events: [] },
-        stats: new ApiError(400, 'window_too_large', 'this window would produce too many buckets'),
-      })
-      const { ctx, out } = makeCtx(client)
-      const code = await runSnippet([], ctx)
-      expect(code).toBe(0)
-      expect(out.join('')).toContain('wk_test_key')
-    })
-
-    it('degrades gracefully in --json too, keeping the same top-level key set', async () => {
+    it('degrades to the both-failed shape only when BOTH requests fail', async () => {
       const client = fakeGetClient({
         project: PROJECT,
         schemaEvents: new ApiError(503, 'draining', 'retry'),
-        stats: { buckets: [] },
+        stats: new ApiError(503, 'draining', 'retry'),
       })
       const { ctx, out } = makeCtx(client)
       await runSnippet(['--json'], ctx)
@@ -717,22 +796,28 @@ describe('runSnippet', () => {
         ['events', 'host', 'methods', 'sdk_version', 'snippet', 'write_key'].sort(),
       )
       expect(parsed.events.error.code).toBe('draining')
+      expect(parsed.events.counts).toBeUndefined()
     })
 
-    it('a --since wide enough to exceed the server-side bucket ceiling degrades rather than failing the command', async () => {
-      const client = fakeGetClient({
-        project: PROJECT,
-        schemaEvents: { events: [] },
-        stats: new ApiError(
-          400,
-          'window_too_large',
-          'this window at 1d resolution would produce 1500 buckets, above the limit of 1000',
-        ),
-      })
-      const { ctx, out } = makeCtx(client)
-      const code = await runSnippet(['--since', '1500d'], ctx)
-      expect(code).toBe(0)
-      expect(out.join('')).toContain('Event counts unavailable')
+    it('still prints the snippet in every degraded shape, with exit 0', async () => {
+      const shapes: Responses[] = [
+        { project: PROJECT, schemaEvents: { events: [] }, stats: WINDOW_TOO_LARGE },
+        {
+          project: PROJECT,
+          schemaEvents: new ApiError(503, 'draining', 'retry'),
+          stats: { buckets: [] },
+        },
+        {
+          project: PROJECT,
+          schemaEvents: new ApiError(503, 'draining', 'retry'),
+          stats: WINDOW_TOO_LARGE,
+        },
+      ]
+      for (const shape of shapes) {
+        const { ctx, out } = makeCtx(fakeGetClient(shape))
+        expect(await runSnippet([], ctx)).toBe(0)
+        expect(out.join('')).toContain('wk_test_key')
+      }
     })
   })
 

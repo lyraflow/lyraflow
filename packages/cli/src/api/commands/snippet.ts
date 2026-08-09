@@ -71,16 +71,30 @@
  * (2) and (3) are INFORMATIONAL — the snippet itself (host, write key,
  * methods) needs neither — so a failure in either degrades gracefully
  * (see `fetchEventsSection`) rather than costing the caller the thing they
- * actually came for. A failure in (1) is not informational; it is the
- * whole command's only reason to have anything to print, so it still fails
- * the command outright.
+ * actually came for. They degrade INDEPENDENTLY: one failing never
+ * discards the other's answer, and the output names which one is missing,
+ * because what the list means depends on which it was. A failure in (1) is
+ * not informational; it is the whole command's only reason to have anything
+ * to print, so it still fails the command outright.
  *
  * `interval: '1d'` is sent on every stats request, unconditionally — this
  * command only ever wants ONE total per event name across the window, so
- * the coarsest interval keeps the request comfortably inside the server's
- * own `STATS_MAX_BUCKETS` guard (events/routes.ts) for any `--since` a
- * caller is likely to pass, and every matching bucket's count is summed
- * client-side into that one total (see `mergeEventCounts` below).
+ * the coarsest interval is also the one that survives the widest window,
+ * and every matching bucket's count is summed client-side into that one
+ * total (see `mergeEventCounts` below).
+ *
+ * IT DOES NOT MAKE THE REQUEST UNCONDITIONALLY SAFE, and this docstring
+ * claimed it did ("comfortably inside the server's own `STATS_MAX_BUCKETS`
+ * guard for any `--since` a caller is likely to pass") until the
+ * whole-branch review checked it. One bucket per day against
+ * `STATS_MAX_BUCKETS = 1000` (events/routes.ts) means (3) is rejected with
+ * `400 window_too_large` for any `--since` beyond about 1000 days — call it
+ * two years and nine months. That is not an exotic value: this command's
+ * own documented remedy for a name neither request can see is to WIDEN the
+ * window, and 30d → 90d → 365d → "all time" walks straight at it. The
+ * ceiling costs the counts and nothing else now — (2) is all-time and
+ * un-windowed, so it answers regardless — which is precisely what one
+ * `try` around both requests used to throw away.
  */
 
 // VALUE imports, not type-only — `SNIPPET_METHODS` is what the stub's
@@ -131,10 +145,18 @@ interface StatsResponse {
   buckets: StatsBucket[]
 }
 
-/** One event name paired with its windowed count. */
+/**
+ * One event name paired with its windowed count — or with `null`, which
+ * means "this name is real, its count is UNKNOWN". `null` appears only when
+ * `events/stats` itself failed (see `EventsSectionOk.partial`): every name
+ * then comes from `schema/events`, which reports names and no counts at
+ * all. Rendering those as `0` would say "it fired before this window",
+ * which is a specific, checkable claim this command would have no evidence
+ * for — the human table prints `-` for them instead.
+ */
 interface EventCount {
   event_name: string
-  count: number
+  count: number | null
 }
 
 /**
@@ -153,18 +175,37 @@ interface EventCount {
  * `events/stats` half of the union, which is not paginated the same way.
  * Present in BOTH modes (not just human text) so a caller parsing `--json`
  * can detect it programmatically instead of trusting the human sentence to
- * have been read.
+ * have been read. Always `false` when `schema/events` is the request that
+ * failed: there is no page to have been cut.
+ *
+ * `partial` is ABSENT on the ordinary path and present exactly when ONE of
+ * the two informational requests failed and the other did not. Both halves
+ * are informational, but they are not interchangeable, and which one is
+ * missing changes what the rows below actually mean — so it names the
+ * request rather than saying "something failed":
+ *   - `events/stats` missing: the names are the all-time, property-bearing
+ *     list, NOT windowed, and every `count` is `null` (unknown).
+ *   - `schema/events` missing: the names are exactly what fired inside the
+ *     window, with real counts; an all-time name that fired outside it is
+ *     gone from the list entirely.
+ * OPTIONAL, so the fully-successful shape is unchanged — a consumer pinning
+ * the exact key set of `events` on the success path sees the same four keys
+ * it always did.
  */
 interface EventsSectionOk {
   since: string
   until: string
   counts: EventCount[]
   truncated: boolean
+  partial?: { source: 'schema/events' | 'events/stats'; code: string; message: string }
 }
 
-/** The `events` field's shape when either informational request failed —
+/** The `events` field's shape when BOTH informational requests failed —
  * see the module docstring on why this degrades instead of failing the
- * whole command. */
+ * whole command, and `fetchEventsSection` on why one failure alone no
+ * longer reaches this shape. Carries `schema/events`' error: it is the
+ * first request sent, and a cause common to both (an unreachable host, a
+ * rejected key) surfaces there first. */
 interface EventsSectionError {
   error: { code: string; message: string }
 }
@@ -324,8 +365,19 @@ function buildSnippet(originHost: string, writeKey: string): string {
  * `ORDER BY event_name ASC` — but a name added by the `stats` half of the
  * union has no such guarantee), so the combined list has one deterministic
  * order regardless of which source contributed a given name.
+ *
+ * `countsKnown: false` is the degraded call (`events/stats` failed, see
+ * `fetchEventsSection`): `stats` is then an empty bucket list, so the
+ * "absent from totals" branch would otherwise hand every name a `0` — a
+ * claim that the event fired historically and has since stopped, which is
+ * exactly the wrong thing to assert when the request that would have known
+ * never answered. Those names get `null` instead.
  */
-function mergeEventCounts(schema: SchemaEventsResponse, stats: StatsResponse): EventCount[] {
+function mergeEventCounts(
+  schema: SchemaEventsResponse,
+  stats: StatsResponse,
+  countsKnown = true,
+): EventCount[] {
   const totals = new Map<string, number>()
   for (const bucket of stats.buckets) {
     if (bucket.event_name === undefined) continue
@@ -335,43 +387,101 @@ function mergeEventCounts(schema: SchemaEventsResponse, stats: StatsResponse): E
   for (const name of totals.keys()) names.add(name)
   return [...names].sort().map((event_name) => ({
     event_name,
-    count: totals.get(event_name) ?? 0,
+    count: countsKnown ? (totals.get(event_name) ?? 0) : null,
   }))
 }
 
 /**
- * The two informational requests, wrapped so a failure in EITHER degrades
- * to `{ error }` instead of failing the whole command — the snippet
- * itself (host, write key, methods) needs neither, so losing the thing the
- * caller actually came for (a working snippet) over an events list that
- * merely couldn't be fetched is the wrong trade. Only an `ApiError`
- * degrades this way; anything else (a real bug) still crashes loudly, same
- * as every other command in this CLI.
+ * Runs one informational request and reports failure as a value rather than
+ * an exception, so the caller can decide what a single failure costs.
+ * Only an `ApiError` is caught; anything else (a real bug) still crashes
+ * loudly, same as every other command in this CLI.
+ */
+async function attempt<T>(run: () => Promise<T>): Promise<{ value: T } | { error: ApiError }> {
+  try {
+    return { value: await run() }
+  } catch (err) {
+    if (!(err instanceof ApiError)) throw err
+    return { error: err }
+  }
+}
+
+/**
+ * The two informational requests, each wrapped SEPARATELY so a failure in
+ * one cannot discard the other's result — the snippet itself (host, write
+ * key, methods) needs neither, so losing the thing the caller actually came
+ * for over an events list that merely couldn't be fetched is the wrong
+ * trade, and so is losing the half that DID answer.
+ *
+ * ONE `try` AROUND BOTH WAS A REAL DEFECT, not a tidiness point, and the
+ * remedy this command's own documentation gives is what walked into it.
+ * `events/stats` is sent with `interval: '1d'` against a server cap of
+ * `STATS_MAX_BUCKETS = 1000` (events/routes.ts), so any `--since` past
+ * about 1000 days is rejected with `400 window_too_large` — while
+ * `schema/events` is ALL-TIME and un-windowed, so it is exactly the request
+ * that would still have answered. Under a single `try`, `--since 999d`
+ * printed four event names and `--since 1001d` printed an error: widening
+ * the window, the documented way to find an event neither request has seen,
+ * crossed a cliff where the caller got LESS than before. Verified live
+ * against a project whose `schema/events` genuinely had rows.
+ *
+ * Which shape comes back:
+ *   - both succeeded — the ordinary union, no `partial`.
+ *   - one failed — the surviving half, plus `partial` naming the request
+ *     that did not answer, because which one is missing changes what the
+ *     list means (see `EventsSectionOk`). A stats failure additionally
+ *     makes every `count` `null`: unknown, not zero.
+ *   - both failed — `{ error }`, the pre-existing shape, carrying
+ *     `schema/events`' error as the first one sent.
  */
 async function fetchEventsSection(
   ctx: CommandContext,
   since: Date,
   until: Date,
 ): Promise<EventsSection> {
-  try {
-    const schema = await ctx.client.get<SchemaEventsResponse>('/v1/schema/events', {
-      limit: SCHEMA_MAX_LIMIT,
-    })
-    const stats = await ctx.client.get<StatsResponse>('/v1/events/stats', {
+  const schema = await attempt(() =>
+    ctx.client.get<SchemaEventsResponse>('/v1/schema/events', { limit: SCHEMA_MAX_LIMIT }),
+  )
+  const stats = await attempt(() =>
+    ctx.client.get<StatsResponse>('/v1/events/stats', {
       since: since.toISOString(),
       until: until.toISOString(),
       interval: '1d',
       group_by: 'event_name',
-    })
+    }),
+  )
+
+  const window = { since: since.toISOString(), until: until.toISOString() }
+
+  if ('error' in schema && 'error' in stats) {
+    return { error: { code: schema.error.code, message: schema.error.message } }
+  }
+  if ('error' in schema) {
+    // `truncated: false` — `schema/events`' page ceiling is the only thing
+    // that field ever described, and that request never answered.
     return {
-      since: since.toISOString(),
-      until: until.toISOString(),
-      counts: mergeEventCounts(schema, stats),
-      truncated: schema.events.length === SCHEMA_MAX_LIMIT,
+      ...window,
+      counts: mergeEventCounts({ events: [] }, (stats as { value: StatsResponse }).value),
+      truncated: false,
+      partial: {
+        source: 'schema/events',
+        code: schema.error.code,
+        message: schema.error.message,
+      },
     }
-  } catch (err) {
-    if (!(err instanceof ApiError)) throw err
-    return { error: { code: err.code, message: err.message } }
+  }
+  if ('error' in stats) {
+    return {
+      ...window,
+      counts: mergeEventCounts(schema.value, { buckets: [] }, false),
+      truncated: schema.value.events.length === SCHEMA_MAX_LIMIT,
+      partial: { source: 'events/stats', code: stats.error.code, message: stats.error.message },
+    }
+  }
+  return {
+    ...window,
+    counts: mergeEventCounts(schema.value, stats.value),
+    truncated: schema.value.events.length === SCHEMA_MAX_LIMIT,
   }
 }
 
@@ -407,9 +517,38 @@ async function fetchEventsSection(
  * below explains why the SNIPPET must not be sanitised; that reasoning was
  * read as covering this table too, and it never did. */
 function renderEventsTable(counts: EventCount[]): string {
-  const rows = counts.map((c) => ({ name: sanitizeForLine(c.event_name), count: c.count }))
+  const rows = counts.map((c) => ({
+    name: sanitizeForLine(c.event_name),
+    // `null` is "this name is real, its count is unknown" (see `EventCount`)
+    // — printed as `-` rather than `0`, which would assert something this
+    // command has no evidence for, or as `null`, which reads like a value.
+    count: c.count === null ? '-' : String(c.count),
+  }))
   const width = Math.max(...rows.map((r) => r.name.length))
   return rows.map((r) => `  ${r.name.padEnd(width)}  ${r.count}`).join('\n')
+}
+
+/**
+ * Renders a failed request's `code`/`message` pair for a human sentence,
+ * without the stutter the pair produces on the exact status this command
+ * degrades on most often. `Client#toApiError` (client.ts) sets `message` to
+ * the body's `error` field for 400/422 — which IS the code — so the obvious
+ * `${message} (${code})` printed `window_too_large (window_too_large)`.
+ *
+ * Fixed HERE, in the renderer, rather than by carrying the server's own
+ * `detail` through `ApiError`: `detail` would be a better message, but
+ * `ApiError.message` is what every command in this CLI renders and what
+ * `--json`'s documented `{error, code}` line carries, so changing what
+ * fills it is a CLI-wide output-contract change — the wrong size of change
+ * for a stuttering sentence, and one that belongs to its own round with its
+ * own review of what a server may put in `detail`.
+ *
+ * Both halves go through `sanitizeForLine`: `code` is echoed from the
+ * response body, so it is server text like any other.
+ */
+function describeFailure(code: string, message: string): string {
+  const safeCode = sanitizeForLine(code)
+  return message === code ? `(${safeCode})` : `${sanitizeForLine(message)} (${safeCode})`
 }
 
 /**
@@ -439,37 +578,71 @@ function renderEventsTable(counts: EventCount[]): string {
  * "Rendered by hand" is not "rendered without the shared helper". The
  * exemption is one value wide.
  */
-function renderHuman(snippet: string, events: EventsSection, sinceRaw: string): string {
+function renderHuman(snippet: string, events: EventsSection): string {
   const lines = [snippet, '']
   if ('error' in events) {
     lines.push(
-      `Event counts unavailable: ${sanitizeForLine(events.error.message)} (${sanitizeForLine(events.error.code)}).`,
+      `Event counts unavailable: ${describeFailure(events.error.code, events.error.message)}.`,
     )
-  } else if (events.counts.length === 0) {
+    return `${lines.join('\n')}\n`
+  }
+
+  // `truncated` is a HEURISTIC ("the list came back exactly at the page
+  // ceiling"), not a fact from the server — which returns no total count to
+  // check against. A project with EXACTLY SCHEMA_MAX_LIMIT distinct
+  // property-bearing names would trip this heuristic despite the list
+  // already being complete, so the sentence hedges ("may have") rather than
+  // asserting more names exist, the same over-claim this whole field was
+  // added to stop making. It only qualifies the property-bearing, all-time
+  // half of the list (`schema/events`' own ceiling) — the window-only half
+  // added by the union has no ceiling of its own here, only
+  // `events/stats`' separate bucket limit.
+  const completeness = events.truncated
+    ? `showing the first ${SCHEMA_MAX_LIMIT} all-time, property-bearing event names, plus every other name that fired in this window — this project may have more than that`
+    : 'every event name that fired in this window, plus every all-time name that has ever carried a property (an all-time, property-less name that fired outside this window will not appear)'
+
+  // NO FLAG VALUE IS ECHOED HERE. This sentence read "Event counts since
+  // ${sinceRaw} ago", which `resolveInstant` (args.ts) makes wrong as often
+  // as it makes it right: `--since` accepts an absolute ISO instant too, so
+  // the line printed "Event counts since 2026-01-01T00:00:00.000Z ago". The
+  // resolved window below already says exactly what was asked, in one form
+  // for both spellings — and not repeating the raw value keeps this command
+  // aligned with args.ts's own rule that a flag value never reaches output.
+  const window = `${events.since} to ${events.until}`
+
+  if (events.partial?.source === 'events/stats') {
+    // The window was never queried. Saying anything about "this window"
+    // here would be a claim about a request that did not answer.
+    lines.push(
+      `Event counts unavailable: ${describeFailure(events.partial.code, events.partial.message)} — listing names from the all-time schema instead, with counts shown as -.`,
+    )
+    lines.push(
+      events.counts.length === 0
+        ? 'No event names have ever carried a property, so there are none to list from that source alone. Re-run to retry the counts.'
+        : `${events.truncated ? `The first ${SCHEMA_MAX_LIMIT} all-time` : 'Every all-time'} event name that has ever carried a property (a property-less name is invisible to this source, whenever it fired):`,
+    )
+    if (events.counts.length > 0) lines.push(renderEventsTable(events.counts))
+    return `${lines.join('\n')}\n`
+  }
+
+  if (events.partial?.source === 'schema/events') {
+    lines.push(
+      `All-time event names unavailable: ${describeFailure(events.partial.code, events.partial.message)} — showing this window's own counts only.`,
+    )
+    lines.push(
+      events.counts.length === 0
+        ? `No events fired between ${window}.`
+        : `Event counts for ${window}, every event name that fired in this window (a name that fired only outside it is missing here, where the all-time list would have shown it):`,
+    )
+    if (events.counts.length > 0) lines.push(renderEventsTable(events.counts))
+    return `${lines.join('\n')}\n`
+  }
+
+  if (events.counts.length === 0) {
     lines.push('No events recorded yet.')
   } else {
-    // `sinceRaw` is echoed verbatim here — safe, unlike an ordinary flag
-    // value: `resolveInstant` below has already thrown a UsageError for
-    // anything that is not a duration like "7d" or a real ISO instant
-    // BEFORE this function is ever reached, so nothing that survives to
-    // here can be a secret typed into the wrong slot (the same reasoning
-    // `schema`'s `parseSchemaLimit`, catalog.ts, gives for echoing
-    // `--limit` only after its own regex has proven it is plain digits).
-    // `truncated` is a HEURISTIC ("the list came back exactly at the page
-    // ceiling"), not a fact from the server — which returns no total count
-    // to check against. A project with EXACTLY SCHEMA_MAX_LIMIT distinct
-    // property-bearing names would trip this heuristic despite the list
-    // already being complete, so the sentence hedges ("may have") rather
-    // than asserting more names exist, the same over-claim this whole field
-    // was added to stop making. It only qualifies the property-bearing,
-    // all-time half of the list (`schema/events`' own ceiling) — the
-    // window-only half added by the union below has no ceiling of its own
-    // here, only `events/stats`' separate bucket limit.
-    const completeness = events.truncated
-      ? `showing the first ${SCHEMA_MAX_LIMIT} all-time, property-bearing event names, plus every other name that fired in this window — this project may have more than that`
-      : 'every event name that fired in this window, plus every all-time name that has ever carried a property (an all-time, property-less name that fired outside this window will not appear)'
     lines.push(
-      `Event counts since ${sinceRaw} ago (${events.since} to ${events.until}), ${completeness}. A zero count means it fired before this window, not that it is broken:`,
+      `Event counts for ${window}, ${completeness}. A zero count means it fired before this window, not that it is broken:`,
     )
     lines.push(renderEventsTable(events.counts))
   }
@@ -575,7 +748,7 @@ export async function runSnippet(argv: string[], ctx: CommandContext): Promise<n
         ctx.write,
       )
     } else {
-      ctx.write(renderHuman(snippet, eventsSection, sinceRaw))
+      ctx.write(renderHuman(snippet, eventsSection))
     }
     return 0
   } catch (err) {

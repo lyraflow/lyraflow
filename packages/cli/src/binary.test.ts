@@ -553,6 +553,24 @@ describe('the built CLI against a real, in-process server', () => {
     expect(parsed.write_key).toBe(WRITE_KEY)
     expect(parsed.snippet).toContain(WRITE_KEY)
     expect(stdout).not.toContain(SERVER_KEY)
+
+    // THE `src` THIS SNIPPET PRINTS IS A URL THIS SERVER ACTUALLY SERVES.
+    // Nothing asserted that before: `snippet-bundle.test.ts` resolves the
+    // printed `src` against the LOCAL dist directory (a file on disk, not a
+    // route), and this file had a real server but never fetched it. Renaming
+    // the route in `packages/server/src/sdk/routes.ts` would leave both
+    // suites green and every emitted snippet broken — a 404 on the one tag
+    // whose whole job is to load the SDK. One real GET closes it.
+    const srcMatch = /<script async src="([^"]+)"><\/script>/.exec(parsed.snippet as string)
+    expect(srcMatch, 'the emitted snippet has no bundle-loading <script src=…> tag').not.toBeNull()
+    const src = (srcMatch as RegExpExecArray)[1] as string
+    expect(src).toBe(`${HOST}/lyraflow.js`)
+    const bundleRes = await fetch(src)
+    expect(bundleRes.status, `${src} did not answer 200`).toBe(200)
+    const body = await bundleRes.text()
+    // Not merely "something answered": the body has to be the SDK bundle.
+    expect(body.length).toBeGreaterThan(1000)
+    expect(body).toContain('lyraflow')
   })
 
   it('surfaces a property-less event via events/stats when schema/events cannot see it, against real ClickHouse materialized views', async () => {
@@ -576,6 +594,20 @@ describe('the built CLI against a real, in-process server', () => {
     const { stdout, code } = await run(['snippet', '--json'])
     expect(code).toBe(0)
     const parsed = JSON.parse(stdout.trim())
+    // `.events` is a UNION and this command exits 0 on the degraded arm
+    // (see the CLI README's own warning to check `.events.error` first).
+    // Reading `.counts` straight off it turned a degraded section into
+    // `TypeError: Cannot read properties of undefined` — a failure that
+    // says nothing about what actually went wrong, in place of the
+    // carefully-worded assertion below.
+    expect(
+      parsed.events.error,
+      'the events section degraded, so this test never reached the claim it exists to make',
+    ).toBeUndefined()
+    expect(
+      parsed.events.partial,
+      'one informational request failed, so the union this test checks was never formed from both sources',
+    ).toBeUndefined()
     const baseline = (parsed.events.counts as { event_name: string; count: number }[]).find(
       (c) => c.event_name === 'cb-baseline',
     )

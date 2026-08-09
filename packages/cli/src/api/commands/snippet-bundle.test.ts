@@ -232,10 +232,46 @@ function snippetParts(
   return { bundle: readFileSync(bundlePath, 'utf8'), stub, initCall }
 }
 
+/** The install snippet exactly as the main README publishes it — the block
+ * `packages/sdk-browser/src/snippet.test.ts` already parses and drives, read
+ * here from the same file by the same anchor so the two suites cannot drift
+ * apart about what "the README's snippet" is. */
+const README_PATH = join(import.meta.dirname, '..', '..', '..', '..', '..', 'README.md')
+const README_HOST = 'https://analytics.example.com'
+const README_WRITE_KEY = 'wk_live_…'
+
+function readmeSnippet(): string {
+  const readme = readFileSync(README_PATH, 'utf8')
+  const block = /Paste this before `<\/head>`:\s*```html\n([\s\S]*?)```/.exec(readme)
+  if (block === null) throw new Error('the README no longer contains the install snippet')
+  return (block[1] as string).trimEnd()
+}
+
 describe('the snippet runSnippet emits, against the built bundle', () => {
   it('points its src at the printed host', async () => {
     const snippet = await emittedSnippet()
     expect(parseSnippet(snippet).src).toBe(`${HOST}/lyraflow.js`)
+  })
+
+  it('is byte-for-byte the block the main README documents, once the placeholders are filled in', async () => {
+    // `packages/cli/README.md` promises this command emits "the exact block
+    // documented under *Sending events from a browser* in the main README".
+    // Two suites pinned the two copies — `sdk-browser/src/snippet.test.ts`
+    // the README's, `snippet-bundle.test.ts` the CLI's — and NOTHING
+    // compared them, so either could be edited into disagreement with the
+    // documentation still claiming they are identical. This is the same
+    // drift class Task 1 exists to prevent for `SNIPPET_METHODS`, closed the
+    // same way: one source, compared, not two copies trusted.
+    //
+    // The only permitted difference is the two placeholder values the
+    // command substitutes for real — substituted here, then compared
+    // exactly. A whitespace change, a reordered attribute, an added
+    // comment: all fail.
+    const emitted = await emittedSnippet()
+    const expected = readmeSnippet()
+      .replaceAll(README_HOST, HOST)
+      .replaceAll(README_WRITE_KEY, WRITE_KEY)
+    expect(emitted).toBe(expected)
   })
 
   it('initialises the SDK and delivers events queued before the script loaded', async () => {

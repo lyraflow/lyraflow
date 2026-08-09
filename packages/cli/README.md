@@ -561,9 +561,19 @@ an event that has **never** carried a property and did not fire within
 `--since` is invisible to both requests — **widen** the window (e.g.
 `--since 30d`) to find it. Narrowing cannot: shrinking `--since` only ever
 removes names from the `events/stats` half of the union, it never adds one.
-Both requests are informational: a failure in either still prints the
-snippet, with the events section degraded instead — the snippet itself needs
-neither of them.
+
+**Widening has a ceiling, at about 1000 days.** `events/stats` is requested
+at one bucket per day, and the server refuses a request needing more than
+1000 buckets — so a `--since` past roughly two years and nine months comes
+back `window_too_large`. It costs the **counts only**: `schema/events` is
+all-time and un-windowed, so the event *names* still print, with `-` in
+place of every count, and the output says which request went missing. Ask
+for a narrower window to get counts back.
+
+Both requests are informational, and they degrade **independently**: a
+failure in one still prints the snippet *and* whatever the other returned —
+the snippet itself needs neither of them, and neither request needs the
+other.
 
 Captured against a live server (host and write key replaced with the
 placeholders used elsewhere in this doc; the wording, the counts, and which
@@ -584,7 +594,7 @@ lyraflow snippet --human
   lyraflow.init({ host: "https://analytics.example.com", writeKey: "wk_live_…" })
 </script>
 
-Event counts since 7d ago (2026-08-02T11:16:47.229Z to 2026-08-09T11:16:47.256Z), every event name that fired in this window, plus every all-time name that has ever carried a property (an all-time, property-less name that fired outside this window will not appear). A zero count means it fired before this window, not that it is broken:
+Event counts for 2026-08-02T12:22:49.443Z to 2026-08-09T12:22:49.469Z, every event name that fired in this window, plus every all-time name that has ever carried a property (an all-time, property-less name that fired outside this window will not appear). A zero count means it fired before this window, not that it is broken:
   legacy_import  0
   mid_window     1
   page_view      1
@@ -602,7 +612,7 @@ like, from the same live server, immediately after:
 lyraflow snippet --since 1h --json
 ```
 ```json
-{"host":"https://analytics.example.com","write_key":"wk_live_…","methods":["init","track","page","identify","consent","reset","flush"],"events":{"since":"2026-08-09T10:16:47.422Z","until":"2026-08-09T11:16:47.445Z","counts":[{"event_name":"legacy_import","count":0},{"event_name":"mid_window","count":0},{"event_name":"page_view","count":1},{"event_name":"raw_click","count":1},{"event_name":"signup","count":2}],"truncated":false},"sdk_version":"0.1.0","snippet":"<script>\n  !function(){var l=window.lyraflow=window.lyraflow||{};l.q=l.q||[];\n  [\"init\",\"track\",\"page\",\"identify\",\"consent\",\"reset\",\"flush\"].forEach(function(m){\n    l[m]=l[m]||function(){l.q.push([m].concat([].slice.call(arguments)))}});\n  }();\n</script>\n<script async src=\"https://analytics.example.com/lyraflow.js\"></script>\n<script>\n  lyraflow.init({ host: \"https://analytics.example.com\", writeKey: \"wk_live_…\" })\n</script>"}
+{"host":"https://analytics.example.com","write_key":"wk_live_…","methods":["init","track","page","identify","consent","reset","flush"],"events":{"since":"2026-08-09T11:22:49.621Z","until":"2026-08-09T12:22:49.643Z","counts":[{"event_name":"legacy_import","count":0},{"event_name":"mid_window","count":0},{"event_name":"page_view","count":1},{"event_name":"raw_click","count":1},{"event_name":"signup","count":2}],"truncated":false},"sdk_version":"0.1.0","snippet":"<script>\n  !function(){var l=window.lyraflow=window.lyraflow||{};l.q=l.q||[];\n  [\"init\",\"track\",\"page\",\"identify\",\"consent\",\"reset\",\"flush\"].forEach(function(m){\n    l[m]=l[m]||function(){l.q.push([m].concat([].slice.call(arguments)))}});\n  }();\n</script>\n<script async src=\"https://analytics.example.com/lyraflow.js\"></script>\n<script>\n  lyraflow.init({ host: \"https://analytics.example.com\", writeKey: \"wk_live_…\" })\n</script>"}
 ```
 
 `mid_window` drops from `1` to `0` — narrowing `--since` genuinely changes
@@ -627,14 +637,30 @@ only holds within each arm:
   property-less, in-window names can both be true at once (verified live: a
   fixture with 130 property-bearing names and one property-less in-window
   name produced `truncated: true` alongside `counts.length === 131`).
-- On failure (`schema/events` or `events/stats` returned an error): `{"error":
-  {"code", "message"}}` instead — with **no `counts` field at all**. The
-  command still exits `0`: see *Exit codes* above for why — the snippet
-  itself (host, write key, methods) needs neither request, so losing it over
-  an events list that merely could not be fetched would be the wrong trade.
-  A consumer that reads `.events.counts` unconditionally gets `undefined` on
-  this successful exit, with nothing on stderr to explain it — check for
-  `.events.error` first.
+- When **one** of the two requests failed: the same success shape, plus a
+  `"partial": {"source", "code", "message"}` — `source` is the literal
+  `"schema/events"` or `"events/stats"`, naming the request that did *not*
+  answer. `partial` is **absent** whenever both succeeded, so the exact key
+  set above is unchanged on the ordinary path. Which one is missing changes
+  what `counts` means, which is why the field names it rather than saying
+  "something failed":
+  - `"source": "events/stats"` — the names are the all-time,
+    property-bearing list and are **not windowed**, and every `count` is
+    **`null`**: unknown, not zero. (`null`, not `0`, precisely so a
+    consumer cannot mistake "we could not ask" for "it fired before this
+    window". The human table prints `-`.) `truncated` still applies.
+  - `"source": "schema/events"` — `counts` is exactly what fired inside the
+    window, with real counts; an all-time name that fired only outside it is
+    absent. `truncated` is always `false` here: there was no page to cut.
+- When **both** failed: `{"error": {"code", "message"}}` instead — with **no
+  `counts` field at all**, carrying `schema/events`' error as the first
+  request sent. The command still exits `0`: see *Exit codes* above for why
+  — the snippet itself (host, write key, methods) needs neither request, so
+  losing it over an events list that merely could not be fetched would be
+  the wrong trade. A consumer that reads `.events.counts` unconditionally
+  gets `undefined` on this successful exit, with nothing on stderr to
+  explain it — check for `.events.error` first, and for `.events.partial`
+  before trusting a count.
 
 `methods` is always `["init","track","page","identify","consent","reset","flush"]`
 — the exact list the printed stub's own method array is built from, not a
