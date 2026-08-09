@@ -7,9 +7,10 @@ import type { Readiness } from '../health.js'
 import type { PersonAliases } from '../identity/aliases.js'
 import type { IdentityBindings } from '../identity/bindings.js'
 import type { IngestBuffer } from './buffer.js'
-import type { IngestCounters } from './counters.js'
+import { type IngestCounters, currentMonth } from './counters.js'
 import type { GeoResolver } from './geo.js'
 import { type CardinalityTracker, checkLimits } from './limits.js'
+import { isOverQuota } from './quota.js'
 import { type EventRow, chDateTime, parseChDateTime, toEventRow } from './row.js'
 
 export interface IngestDeps {
@@ -85,6 +86,36 @@ export function makeAuthenticator(
     return project
   }
 }
+
+/**
+ * How long a project's *persisted* accepted-event total is reused before it
+ * is re-read from Postgres.
+ *
+ * The quota check runs on the hottest path in the product — once per event,
+ * on an endpoint whose key ships in the browser bundle — so reading
+ * `ingest_counters` per event would put a Postgres round trip in front of
+ * every `/v1/track` against a `max: 10` pool. It is cached per project
+ * instead, and the free in-memory `pendingAccepted` is added on every single
+ * check, so the figure the check acts on still moves with each event this
+ * process accepts.
+ *
+ * 5s, against the 10s counter flush interval in index.ts: the cached figure
+ * is only ever wrong by the events flushed to Postgres since it was read, so
+ * the window in which a project can exceed its quota is bounded by roughly
+ * one TTL plus one flush interval of that project's traffic. Halving the TTL
+ * relative to the flush interval keeps that window close to the flush
+ * interval itself — which is the floor no cache TTL can get under — while
+ * costing at most twelve queries per project per minute, against the one per
+ * event it replaces.
+ *
+ * That remaining overshoot is DESIGNED SLACK, not a bug and not a rounding
+ * error: pending tallies live in this process's memory, so a quota is a
+ * budget enforced within a bounded lag, never an exact ceiling on the
+ * event that crosses it. A second server process has its own pending tally
+ * and its own cache, which widens the same window rather than introducing a
+ * different kind of error.
+ */
+export const QUOTA_USAGE_TTL_MS = 5_000
 
 interface DeadLetterRow {
   project_id: number
@@ -183,15 +214,90 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
   )
 
   interface AcceptResult {
-    outcome: 'accepted' | 'rejected' | 'overloaded'
+    outcome: 'accepted' | 'rejected' | 'overloaded' | 'over_quota'
     deadLetter?: DeadLetterRow
+  }
+
+  /**
+   * Per-project persisted-usage cache; see QUOTA_USAGE_TTL_MS. Scoped to this
+   * registration rather than module scope so two apps in one process (every
+   * test file that builds a second app, and the shutdown path) cannot see
+   * each other's figures.
+   *
+   * Only projects that actually have a quota ever get an entry: the `null`
+   * short-circuit in `projectOverQuota` returns before this is touched, and
+   * an unknown write key is answered 401 before `accept` runs at all — so
+   * neither an unlimited project nor a key scanner can grow this map. Its
+   * size is bounded by the number of real, quota-carrying projects sending
+   * events.
+   */
+  const usage = new Map<number, { month: string; persisted: number; fetchedAt: number }>()
+  // Single-flight per project: without this, the first N concurrent events
+  // arriving on a cold or just-expired entry would each start their own
+  // Postgres read — reinstating the per-event round trip precisely under the
+  // load that makes it expensive.
+  const usageInflight = new Map<number, Promise<number>>()
+
+  async function persistedAcceptedCached(projectId: number): Promise<number> {
+    const month = currentMonth()
+    const entry = usage.get(projectId)
+    // The month test is not decoration: at a month boundary the persisted
+    // total resets to zero for the new month, and a figure cached under the
+    // old one would keep a project refused into a month it has spent nothing
+    // of.
+    if (entry && entry.month === month && Date.now() - entry.fetchedAt < QUOTA_USAGE_TTL_MS) {
+      return entry.persisted
+    }
+
+    let inflight = usageInflight.get(projectId)
+    if (!inflight) {
+      inflight = counters
+        .persistedAccepted(projectId)
+        .then((persisted) => {
+          usage.set(projectId, { month, persisted, fetchedAt: Date.now() })
+          return persisted
+        })
+        .finally(() => {
+          usageInflight.delete(projectId)
+        })
+      usageInflight.set(projectId, inflight)
+    }
+
+    try {
+      return await inflight
+    } catch (err) {
+      // Stale beats unavailable, and unknown beats refusing — the same rule
+      // ProjectCache follows for the same reason. A Postgres blip must not
+      // turn into a project-wide refusal of events that would otherwise have
+      // been well inside its quota; the failure is loud in the log, and the
+      // pending tally still counts this process's own accepted events
+      // against the limit in the meantime.
+      app.log.error({ err, projectId }, 'quota usage read failed')
+      return entry?.month === month ? entry.persisted : 0
+    }
+  }
+
+  async function projectOverQuota(project: Project): Promise<boolean> {
+    const quota = project.monthlyEventQuota
+    // Short-circuits BEFORE any usage read. `null` is unlimited and is what
+    // every project carries after migration 011, so a usage read here would
+    // hand a Postgres round trip per project per TTL to every deployment
+    // that has never set a quota — in exchange for a decision isOverQuota
+    // makes from `quota` alone.
+    if (quota === null) return false
+    return isOverQuota(
+      await persistedAcceptedCached(project.id),
+      counters.pendingAccepted(project.id),
+      quota,
+    )
   }
 
   async function accept(
     req: FastifyRequest,
-    projectId: number,
+    project: Project,
     raw: unknown,
   ): Promise<AcceptResult> {
+    const projectId = project.id
     const ua = req.headers['user-agent']
     if (isBot(ua)) {
       counters.record(projectId, 'rejected')
@@ -214,6 +320,23 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
         outcome: 'rejected',
         deadLetter: buildDeadLetterRow(projectId, limit.reason, limit.detail, raw),
       }
+    }
+
+    // AFTER validation and the cardinality check, so a malformed or
+    // throttled event is counted as `rejected`/`throttled` and never as
+    // `over_quota` — the security property the whole design turns on is that
+    // only *accepted* events move a project toward its limit (quota.ts), and
+    // a check placed earlier would let a flood of nonsense exhaust a
+    // project's quota without storing a byte. BEFORE buffer.add and before
+    // cardinality.observe, so a refused event occupies neither buffer memory
+    // nor a slot in the project's tracked cardinality.
+    if (await projectOverQuota(project)) {
+      counters.record(projectId, 'over_quota')
+      // No dead letter: the event is well-formed and within every limit but
+      // this one. events_dead_letter is the record of data that could not be
+      // parsed, and filling it with valid events refused by policy would
+      // bury the bad-data signal it exists to carry.
+      return { outcome: 'over_quota' }
     }
 
     const row = toEventRow({
@@ -271,11 +394,23 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
       if (!project) return
 
       const body = { ...(req.body as Record<string, unknown>), type }
-      const result = await accept(req, project.id, body)
+      const result = await accept(req, project, body)
       if (result.deadLetter) await writeDeadLetters(ch, [result.deadLetter], onDeadLetterError)
 
       if (result.outcome === 'overloaded') {
         return reply.code(503).header('retry-after', '5').send({ error: 'overloaded' })
+      }
+      if (result.outcome === 'over_quota') {
+        // 429, and deliberately WITHOUT retry-after. 503 above means "the
+        // buffer is full, come back shortly" and carries the header to say
+        // when; a quota refusal holds until the month rolls over or an
+        // operator raises the limit, so advertising a retry time would
+        // invite exactly the retry storm this refusal exists to stop. It is
+        // also the one ingest response that is not 202: unlike bad data,
+        // this is a condition the caller's operator can act on, and silently
+        // swallowing it would make a project's events vanish with the only
+        // evidence buried in a counter.
+        return reply.code(429).send({ error: 'quota_exceeded' })
       }
       // Bad data still returns 202: a tracking endpoint that errors breaks the
       // customer's site, and that loses trust permanently.
@@ -377,16 +512,17 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
         [buildDeadLetterRow(project.id, 'validation_failed', parsed.error.message, req.body)],
         onDeadLetterError,
       )
-      return reply.code(202).send({ accepted: 0, rejected: 1, throttled: 0 })
+      return reply.code(202).send({ accepted: 0, rejected: 1, throttled: 0, over_quota: 0 })
     }
 
     const batch = parsed.data.batch
     let accepted = 0
     let rejected = 0
+    let overQuota = 0
     const deadLetters: DeadLetterRow[] = []
 
     for (let i = 0; i < batch.length; i++) {
-      const result = await accept(req, project.id, batch[i])
+      const result = await accept(req, project, batch[i])
       if (result.deadLetter) deadLetters.push(result.deadLetter)
 
       if (result.outcome === 'overloaded') {
@@ -421,17 +557,28 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
         // into IngestCounters' pending tally and no-ops through to Postgres.
         counters.record(project.id, 'throttled', batch.length - i - 1)
         const throttled = batch.length - i
-        return reply.code(503).header('retry-after', '5').send({ accepted, rejected, throttled })
+        return reply
+          .code(503)
+          .header('retry-after', '5')
+          .send({ accepted, rejected, throttled, over_quota: overQuota })
       }
 
       if (result.outcome === 'accepted') accepted++
+      // Counted apart from `rejected`, and the loop keeps going. Apart,
+      // because `rejected` means bad data the sender should fix, while these
+      // events were perfectly good and would be stored next month unchanged.
+      // Keeps going, because /v1/batch's contract is a 202 carrying the tally
+      // — unlike the `overloaded` branch above, which stops because the
+      // server is saturated and the remaining items are worth retrying.
+      else if (result.outcome === 'over_quota') overQuota++
       else rejected++
     }
 
     await writeDeadLetters(ch, deadLetters, onDeadLetterError)
-    // throttled is always present, even at 0: an SDK parsing a stable shape
-    // shouldn't need to special-case the field's absence versus its value.
-    return reply.code(202).send({ accepted, rejected, throttled: 0 })
+    // throttled and over_quota are always present, even at 0: an SDK parsing
+    // a stable shape shouldn't need to special-case a field's absence versus
+    // its value.
+    return reply.code(202).send({ accepted, rejected, throttled: 0, over_quota: overQuota })
   })
 
   interface AliasBody {

@@ -9,6 +9,18 @@ interface Tally {
   over_quota: number
 }
 
+/**
+ * The 'YYYY-MM-01' key every counter write and every counter read is scoped
+ * by. Exported because the quota check in ingest/routes.ts caches a
+ * project's persisted total and has to know when that cached figure belongs
+ * to a month that has since rolled over — a second, private copy of this
+ * expression there is exactly the drift that would make the cache and the
+ * rows it summarises disagree for one TTL every month.
+ */
+export function currentMonth(): string {
+  return `${new Date().toISOString().slice(0, 7)}-01`
+}
+
 /** The project-month whose write failed, and the counts that were re-buffered for retry. */
 export interface CounterFailure {
   projectId: number
@@ -38,7 +50,7 @@ export class IngestCounters {
   ) {}
 
   record(projectId: number, kind: Kind, n = 1): void {
-    const month = `${new Date().toISOString().slice(0, 7)}-01`
+    const month = currentMonth()
     this.#getOrCreate(projectId, month)[kind] += n
     this.#totals[kind] += n
   }
@@ -59,7 +71,7 @@ export class IngestCounters {
    * left to the caller.
    */
   async persistedAccepted(projectId: number): Promise<number> {
-    const month = `${new Date().toISOString().slice(0, 7)}-01`
+    const month = currentMonth()
     const result = await this.pool.query<{ events_accepted: string }>(
       'SELECT events_accepted FROM ingest_counters WHERE project_id = $1 AND month = $2',
       [projectId, month],
@@ -79,7 +91,7 @@ export class IngestCounters {
    * without storing anything.
    */
   pendingAccepted(projectId: number): number {
-    const month = `${new Date().toISOString().slice(0, 7)}-01`
+    const month = currentMonth()
     return this.#tallies.get(`${projectId}:${month}`)?.tally.accepted ?? 0
   }
 

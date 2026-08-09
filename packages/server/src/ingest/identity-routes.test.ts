@@ -188,7 +188,7 @@ describe('POST /v1/identify writes a binding', () => {
       },
     ])
     expect(res.statusCode).toBe(202)
-    expect(res.json()).toEqual({ accepted: 1, rejected: 0, throttled: 0 })
+    expect(res.json()).toEqual({ accepted: 1, rejected: 0, throttled: 0, over_quota: 0 })
 
     const r = await pg.query<{ person_id: string }>(
       'SELECT person_id FROM identity_bindings WHERE project_id = $1 AND anonymous_id = $2',

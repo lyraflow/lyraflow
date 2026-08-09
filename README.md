@@ -183,12 +183,29 @@ within 24 hours of server time.
   discarded. `/metrics` reports the accepted/rejected/throttled totals, so a
   `202` that stored nothing is still visible there.
 - `401` — missing or unknown write key.
+- `429` with `{"error":"quota_exceeded"}` — the project has used its monthly
+  event quota. **No `retry-after`, deliberately**: unlike a `503`, this does not
+  clear on its own shortly. It holds until the month rolls over or an operator
+  raises the limit, so retrying is pointless. Projects have no quota unless an
+  operator sets one (`projects.monthly_event_quota`; `NULL` means unlimited),
+  and only *accepted* events count toward it — malformed or throttled events
+  never do.
 - `503` with `retry-after: 5` — the server is saturated or shutting down. Retry.
 - `400` / `413` — malformed JSON, or a body over 1 MiB. Retrying will not help.
 
-`/v1/batch` always answers with counts: `{"accepted":n,"rejected":n,"throttled":n}`.
-It returns `503` if the buffer saturates part-way through, with the counts
-describing how far it got; retry the whole batch.
+`/v1/batch` always answers with counts:
+`{"accepted":n,"rejected":n,"throttled":n,"over_quota":n}`. It returns `503` if
+the buffer saturates part-way through, with the counts describing how far it
+got; retry the whole batch. It never returns `429`: a batch answers `202` with
+`over_quota` counting the events refused, because its contract is a body
+carrying the tally rather than a wholesale failure over one event. Those events
+are not worth retrying either.
+
+A quota is enforced within a bounded lag, not to the exact event. Each server
+process holds its recent counts in memory and folds them into Postgres
+periodically, so a project can overshoot its quota by roughly one flush
+interval of its own traffic (more if several server processes are running)
+before refusals begin.
 
 ### Retries
 

@@ -9,12 +9,13 @@ import {
   migrate,
 } from '@lyraflow/db'
 import Fastify, { type FastifyInstance } from 'fastify'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { buildApp } from '../app.js'
-import type { Project } from '../auth/project-cache.js'
+import { type Project, ProjectCache } from '../auth/project-cache.js'
 import { type Config, loadConfig } from '../config.js'
 import { Readiness } from '../health.js'
 import { IngestBuffer } from './buffer.js'
+import { monthStart, readCounterRow, seedCounterRow } from './counter-fixtures.js'
 import { IngestCounters } from './counters.js'
 import { NullGeoResolver } from './geo.js'
 import { CardinalityTracker } from './limits.js'
@@ -224,7 +225,7 @@ describe('ingest routes', () => {
     expect(res.statusCode).toBe(202)
     // throttled is always present (even at 0) so an SDK parsing a stable
     // shape never has to special-case its absence.
-    expect(res.json()).toEqual({ accepted: 1, rejected: 1, throttled: 0 })
+    expect(res.json()).toEqual({ accepted: 1, rejected: 1, throttled: 0, over_quota: 0 })
   })
 
   it('refuses new events with 503 once draining', async () => {
@@ -466,7 +467,7 @@ describe('ingest routes (mocked deps)', () => {
     })
 
     expect(res.statusCode).toBe(202)
-    expect(res.json()).toEqual({ accepted: 0, rejected: 3, throttled: 0 })
+    expect(res.json()).toEqual({ accepted: 0, rejected: 3, throttled: 0, over_quota: 0 })
     expect(insertCalls).toHaveLength(1)
     expect(insertCalls[0]?.values).toHaveLength(3)
     await mockedApp.close()
@@ -495,7 +496,7 @@ describe('ingest routes (mocked deps)', () => {
     })
 
     expect(res.statusCode).toBe(202)
-    expect(res.json()).toEqual({ accepted: 0, rejected: 1, throttled: 0 })
+    expect(res.json()).toEqual({ accepted: 0, rejected: 1, throttled: 0, over_quota: 0 })
     expect(insertCalls).toHaveLength(1)
     expect(insertCalls[0]?.values).toHaveLength(1)
     await mockedApp.close()
@@ -528,7 +529,7 @@ describe('ingest routes (mocked deps)', () => {
     // Item 1 was accepted before saturation hit; items 2 and 3 were never
     // attempted (throttled), and none is folded into `rejected` — a
     // retry-able condition must stay distinguishable from bad data.
-    expect(res.json()).toEqual({ accepted: 1, rejected: 0, throttled: 2 })
+    expect(res.json()).toEqual({ accepted: 1, rejected: 0, throttled: 2, over_quota: 0 })
     await mockedApp.close()
   })
 
@@ -565,5 +566,346 @@ describe('ingest routes (mocked deps)', () => {
     expect(counters.totals().throttled).toBe(body.throttled)
     expect(body.throttled).toBe(2)
     await mockedApp.close()
+  })
+})
+
+/**
+ * Quota enforcement, driven through the real HTTP path against live
+ * Postgres — a real ProjectCache, a real IngestCounters, a real
+ * CardinalityTracker — with only ClickHouse faked, since none of these
+ * assertions is about what was stored there.
+ *
+ * DEFEATING THE PROJECT CACHE. buildApp's ProjectCache holds a positive
+ * entry for 60 seconds, so `setQuota` followed by a request would otherwise
+ * be answered from a project loaded before the quota existed, and every test
+ * here would pass or fail on whether the cache happened to be cold. This
+ * block therefore builds its own app around `new ProjectCache(pg, 0)`: a
+ * zero TTL makes `#read` report every entry as stale, so each request
+ * re-reads the project and sees the quota the test just set. That is a
+ * deliberate, visible construction rather than a lucky one — the tests do
+ * not touch cache internals, and they do not depend on ordering.
+ *
+ * A FRESH APP PER TEST for the same class of reason: the persisted-usage
+ * cache and the pending tallies both live for the lifetime of one
+ * registration, and sharing either across tests would make each test's
+ * result depend on the ones before it.
+ */
+describe('ingest quota enforcement', () => {
+  const SLUG = 'routes-quota-test'
+  const WRITE_KEY = 'wk_routes_quota'
+
+  let projectId: number
+  let quotaApp: FastifyInstance
+  let counters: IngestCounters
+  let buffer: IngestBuffer<EventRow>
+  let stored: EventRow[]
+  let deadLetterInserts: number
+  let usageReads: number
+
+  // Counts only the quota's own usage SELECT (IngestCounters.persistedAccepted)
+  // and forwards everything to the real pool. flush()'s `INSERT INTO
+  // ingest_counters` deliberately does not match. This is what lets a test
+  // assert the difference between "one read per project per TTL" and "one
+  // read per event", which no assertion on status codes can see.
+  const countingPg = {
+    query: (text: string, values?: unknown[]) => {
+      if (text.includes('FROM ingest_counters')) usageReads++
+      return pg.query(text, values)
+    },
+  } as unknown as Pool
+
+  const bindings = { bind: async () => 'noop' as const } as unknown as IngestDeps['bindings']
+  const aliases = { alias: async () => 'noop' as const } as unknown as IngestDeps['aliases']
+
+  function validEvent(): Record<string, unknown> {
+    return { message_id: randomUUID(), anonymous_id: 'a-quota', event: 'quota' }
+  }
+
+  function post(url: string, payload: unknown) {
+    return quotaApp.inject({
+      method: 'POST',
+      url,
+      headers: { 'x-lyraflow-write-key': WRITE_KEY, 'user-agent': UA },
+      payload: payload as Record<string, unknown>,
+    })
+  }
+
+  async function setQuota(quota: number | null): Promise<void> {
+    await pg.query('UPDATE projects SET monthly_event_quota = $2 WHERE id = $1', [projectId, quota])
+  }
+
+  beforeAll(async () => {
+    await pg.query('DELETE FROM projects WHERE slug = $1', [SLUG])
+    const r = await pg.query<{ id: string }>(
+      `INSERT INTO projects (name, slug, write_key, server_key_hash)
+       VALUES ('Routes Quota', $1, $2, 'h') RETURNING id`,
+      [SLUG, WRITE_KEY],
+    )
+    projectId = Number(r.rows[0]?.id)
+  })
+
+  afterAll(async () => {
+    await pg.query('DELETE FROM ingest_counters WHERE project_id = $1', [projectId])
+    await pg.query('DELETE FROM projects WHERE slug = $1', [SLUG])
+  })
+
+  beforeEach(async () => {
+    await pg.query('DELETE FROM ingest_counters WHERE project_id = $1', [projectId])
+    await setQuota(null)
+    usageReads = 0
+    deadLetterInserts = 0
+    stored = []
+    counters = new IngestCounters(countingPg)
+    buffer = new IngestBuffer<EventRow>({
+      flushRows: 1000,
+      flushIntervalMs: 60_000,
+      maxRows: 1000,
+      insert: async (rows) => {
+        stored.push(...rows)
+      },
+    })
+    const readiness = new Readiness()
+    readiness.markReady()
+    quotaApp = Fastify({ logger: false })
+    registerIngestRoutes(quotaApp, {
+      buffer,
+      projects: new ProjectCache(pg, 0),
+      counters,
+      cardinality: new CardinalityTracker(),
+      geo: new NullGeoResolver(),
+      readiness,
+      ch: {
+        insert: async () => {
+          deadLetterInserts++
+        },
+      } as unknown as ClickHouseClient,
+      bindings,
+      aliases,
+    })
+    await quotaApp.ready()
+  })
+
+  afterEach(async () => {
+    await quotaApp.close()
+  })
+
+  it('answers 429 with quota_exceeded once the project is over', async () => {
+    await setQuota(2)
+    await post('/v1/track', validEvent()) // 1
+    await post('/v1/track', validEvent()) // 2
+    const res = await post('/v1/track', validEvent())
+    expect(res.statusCode).toBe(429)
+    expect(res.json()).toEqual({ error: 'quota_exceeded' })
+  })
+
+  it('sends no retry-after on a quota refusal', async () => {
+    // 503 means "the buffer is full, come back shortly" and carries
+    // retry-after. A quota refusal holds until the month rolls over, so the
+    // header's presence would invite exactly the retry this design prevents.
+    await setQuota(1)
+    await post('/v1/track', validEvent())
+    const res = await post('/v1/track', validEvent())
+    expect(res.statusCode).toBe(429)
+    expect(res.headers['retry-after']).toBeUndefined()
+  })
+
+  it('never counts a refusal toward the quota it reports', async () => {
+    // Otherwise the hole deepens as it is reported, and events_accepted
+    // diverges from what was actually stored.
+    await setQuota(1)
+    await post('/v1/track', validEvent())
+    await post('/v1/track', validEvent())
+    await post('/v1/track', validEvent())
+    await counters.flush()
+    const row = await readCounterRow(pg, projectId)
+    expect(row.events_accepted).toBe('1')
+    expect(row.events_over_quota).toBe('2')
+  })
+
+  it('a flood of INVALID events never exhausts the quota', async () => {
+    // THE attack this design turns on. Rejected events store nothing, so
+    // counting them would let an attacker burn a project's quota for free --
+    // cheaper than the flood the quota exists to stop.
+    await setQuota(3)
+    for (let i = 0; i < 50; i++) await post('/v1/track', { nonsense: true })
+    const res = await post('/v1/track', validEvent())
+    expect(res.statusCode).toBe(202)
+  })
+
+  it('lets an unlimited project through without reading usage', async () => {
+    await setQuota(null)
+    for (let i = 0; i < 20; i++) {
+      expect((await post('/v1/track', validEvent())).statusCode).toBe(202)
+    }
+    // The brief's title asserted "without reading usage" and nothing checked
+    // it. A quota of null is decided from the project row alone, so the
+    // usage table must never be touched: on a deployment that has set no
+    // quota -- which, after migration 011, is every deployment -- this is
+    // the difference between zero Postgres round trips on the hot path and
+    // one per project per TTL forever.
+    expect(usageReads).toBe(0)
+  })
+
+  it('a batch entirely over quota still answers 202, reporting the counts', async () => {
+    // /v1/batch never fails wholesale over one event -- its contract is a 202
+    // carrying the tally. The SDK's own reporting path reads that body.
+    await setQuota(1)
+    await post('/v1/track', validEvent())
+    const res = await post('/v1/batch', {
+      batch: [
+        { type: 'track', ...validEvent() },
+        { type: 'track', ...validEvent() },
+      ],
+    })
+    expect(res.statusCode).toBe(202)
+    expect(res.json()).toMatchObject({ accepted: 0, over_quota: 2 })
+    // Not folded into `rejected`: these events are well-formed, and an SDK
+    // told they were rejected would warn the developer about bad data that
+    // does not exist.
+    expect(res.json()).toEqual({ accepted: 0, rejected: 0, throttled: 0, over_quota: 2 })
+  })
+
+  // --- Not in the brief. ---
+
+  it('refuses on the PERSISTED total alone, before this process has accepted anything', async () => {
+    // Every prescribed test above drives the count entirely through this
+    // process's pending tally, so an implementation that ignored
+    // persistedAccepted and compared `pending >= quota` would pass all six
+    // -- and would reset every project's usage to zero on each restart,
+    // which is a quota that can be cleared by rebooting the server.
+    await seedCounterRow(pg, projectId, monthStart(0), { accepted: 5 })
+    await setQuota(5)
+    const res = await post('/v1/track', validEvent())
+    expect(res.statusCode).toBe(429)
+    expect(usageReads).toBe(1)
+  })
+
+  it('counts only the current month of persisted usage', async () => {
+    // The mirror of the test above: a previous month's spend must not follow
+    // a project into the new one, or every quota becomes permanent after the
+    // first month that exhausts it.
+    await seedCounterRow(pg, projectId, monthStart(-1), { accepted: 999 })
+    await setQuota(5)
+    expect((await post('/v1/track', validEvent())).statusCode).toBe(202)
+  })
+
+  it('still counts a MALFORMED event from an over-quota project as rejected, not over_quota', async () => {
+    // The reason the check sits after validation, asserted directly. Moving
+    // it earlier does NOT fail the invalid-flood test above -- that test is
+    // protected by pendingAccepted summing only `accepted`, not by where the
+    // check sits -- so nothing else here can see the difference. What moves
+    // is the answer and the bookkeeping: a malformed event would come back
+    // 429 instead of 202, breaking the rule that bad data never errors a
+    // customer's site, and would land in events_over_quota with no dead
+    // letter, leaving both counters unable to say what actually happened.
+    await setQuota(1)
+    expect((await post('/v1/track', validEvent())).statusCode).toBe(202)
+    const res = await post('/v1/track', { nonsense: true })
+    expect(res.statusCode).toBe(202)
+    expect(deadLetterInserts).toBe(1)
+
+    await counters.flush()
+    const row = await readCounterRow(pg, projectId)
+    expect(row.events_rejected).toBe('1')
+    expect(row.events_over_quota).toBe('0')
+  })
+
+  it('reads persisted usage once per project, not once per event', async () => {
+    // The hot-path property, and nothing in the brief's six tests can see
+    // it: all of them pass identically against a Postgres round trip per
+    // event. Ten injected requests complete in milliseconds, far inside
+    // QUOTA_USAGE_TTL_MS, so exactly one read is expected -- and a
+    // per-event implementation produces ten.
+    await setQuota(100)
+    for (let i = 0; i < 10; i++) {
+      expect((await post('/v1/track', validEvent())).statusCode).toBe(202)
+    }
+    expect(usageReads).toBe(1)
+  })
+
+  it('a refused event occupies neither the buffer nor the dead-letter table', async () => {
+    // Placement, asserted rather than described: before buffer.add, so a
+    // refusal costs no buffer memory (the resource IngestBuffer's maxRows
+    // bound exists to protect), and with no dead letter, because the event
+    // is valid and events_dead_letter is the record of data that could not
+    // be parsed.
+    await setQuota(1)
+    expect((await post('/v1/track', validEvent())).statusCode).toBe(202)
+    expect((await post('/v1/track', validEvent())).statusCode).toBe(429)
+    await buffer.flush()
+    expect(stored).toHaveLength(1)
+    expect(deadLetterInserts).toBe(0)
+  })
+
+  it('keeps accepting events when the usage read itself fails, and says so in the log', async () => {
+    // The quota check put a Postgres read on the hot path, so it also put
+    // Postgres's availability there. A blip must not turn into a
+    // project-wide refusal of events that were nowhere near the limit --
+    // the same "stale beats unavailable" rule ProjectCache follows, and the
+    // same priority the spec sets: keep collecting events. Failing closed
+    // here would be an outage of the customer's analytics caused by an
+    // outage of ours, and nothing else in this file would notice.
+    //
+    // It must not be silent either: a permanently failing usage read means
+    // the quota is no longer being enforced from persisted state at all.
+    const failingPg = {
+      query: (text: string, values?: unknown[]) =>
+        text.includes('FROM ingest_counters')
+          ? Promise.reject(new Error('connection reset'))
+          : pg.query(text, values),
+    } as unknown as Pool
+
+    const lines: string[] = []
+    const app = Fastify({
+      logger: {
+        level: 'error',
+        stream: {
+          write: (line: string) => {
+            lines.push(line)
+          },
+        },
+      },
+    })
+    const readiness = new Readiness()
+    readiness.markReady()
+    registerIngestRoutes(app, {
+      buffer: new IngestBuffer<EventRow>({
+        flushRows: 1000,
+        flushIntervalMs: 60_000,
+        maxRows: 1000,
+        insert: async () => {},
+      }),
+      projects: new ProjectCache(pg, 0),
+      counters: new IngestCounters(failingPg),
+      cardinality: new CardinalityTracker(),
+      geo: new NullGeoResolver(),
+      readiness,
+      ch: { insert: async () => {} } as unknown as ClickHouseClient,
+      bindings,
+      aliases,
+    })
+    await app.ready()
+    await setQuota(5)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': WRITE_KEY, 'user-agent': UA },
+      payload: validEvent(),
+    })
+    expect(res.statusCode).toBe(202)
+    expect(lines.join('')).toContain('quota usage read failed')
+    await app.close()
+  })
+
+  it('accepts exactly the quota and refuses the event after it', async () => {
+    // Pins `>=` against `>`: with a quota of 3 the third event is the last
+    // one inside the budget, and the fourth is the first outside it. A `>`
+    // comparison lets every project store quota + 1.
+    await setQuota(3)
+    for (let i = 0; i < 3; i++) {
+      expect((await post('/v1/track', validEvent())).statusCode).toBe(202)
+    }
+    expect((await post('/v1/track', validEvent())).statusCode).toBe(429)
   })
 })

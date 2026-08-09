@@ -1,6 +1,7 @@
 import { join } from 'node:path'
 import { type Pool, createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { monthStart, readCounterRow, seedCounterRow } from './counter-fixtures.js'
 import { IngestCounters } from './counters.js'
 
 const pg = createPgPool('postgres://lyraflow:lyraflow@localhost:5433/lyraflow_test')
@@ -128,63 +129,9 @@ describe('IngestCounters persisted/pending reads', () => {
   let projectId: number
   let unusedProjectId: number
 
-  async function readCounterRow(pid: number): Promise<{
-    events_accepted: string
-    events_rejected: string
-    events_throttled: string
-    events_over_quota: string
-  }> {
-    const month = `${new Date().toISOString().slice(0, 7)}-01`
-    const r = await pg.query<{
-      events_accepted: string
-      events_rejected: string
-      events_throttled: string
-      events_over_quota: string
-    }>(
-      `SELECT events_accepted, events_rejected, events_throttled, events_over_quota
-       FROM ingest_counters WHERE project_id = $1 AND month = $2`,
-      [pid, month],
-    )
-    const row = r.rows[0]
-    if (!row) throw new Error(`no counter row for project ${pid}, month ${month}`)
-    return row
-  }
-
-  // Overwrites (not adds to) the row for project+month, so a test can pin an
-  // exact starting total regardless of what an earlier test in this file did.
-  async function seedCounterRow(
-    pid: number,
-    month: string,
-    counts: { accepted?: number; rejected?: number; throttled?: number; over_quota?: number },
-  ): Promise<void> {
-    await pg.query(
-      `INSERT INTO ingest_counters
-         (project_id, month, events_accepted, events_rejected, events_throttled, events_over_quota)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (project_id, month) DO UPDATE SET
-         events_accepted   = EXCLUDED.events_accepted,
-         events_rejected   = EXCLUDED.events_rejected,
-         events_throttled  = EXCLUDED.events_throttled,
-         events_over_quota = EXCLUDED.events_over_quota`,
-      [
-        pid,
-        month,
-        counts.accepted ?? 0,
-        counts.rejected ?? 0,
-        counts.throttled ?? 0,
-        counts.over_quota ?? 0,
-      ],
-    )
-  }
-
-  // offset 0 is the current month, -1 the one before it, both expressed as
-  // the same 'YYYY-MM-01' shape `record()` and the readers key on.
-  function monthStart(offset: number): string {
-    const now = new Date()
-    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + offset, 1))
-      .toISOString()
-      .slice(0, 10)
-  }
+  // readCounterRow/seedCounterRow/monthStart moved to counter-fixtures.ts
+  // when ingest/routes.test.ts's quota tests needed them too — see that
+  // file's header for why a second copy there was the wrong answer.
 
   beforeAll(async () => {
     await pg.query('DELETE FROM projects WHERE slug = ANY($1)', [
@@ -220,15 +167,15 @@ describe('IngestCounters persisted/pending reads', () => {
     counters.record(projectId, 'over_quota')
     counters.record(projectId, 'throttled', 2)
     await counters.flush()
-    const row = await readCounterRow(projectId)
+    const row = await readCounterRow(pg, projectId)
     expect(row.events_over_quota).toBe('1')
     expect(row.events_throttled).toBe('2')
   })
 
   it('reads the persisted accepted total for the current month only', async () => {
     const counters = new IngestCounters(pg)
-    await seedCounterRow(projectId, monthStart(0), { accepted: 40 })
-    await seedCounterRow(projectId, monthStart(-1), { accepted: 999 })
+    await seedCounterRow(pg, projectId, monthStart(0), { accepted: 40 })
+    await seedCounterRow(pg, projectId, monthStart(-1), { accepted: 999 })
     expect(await counters.persistedAccepted(projectId)).toBe(40)
   })
 
@@ -282,7 +229,7 @@ describe('IngestCounters persisted/pending reads', () => {
     counters.record(projectId, 'over_quota', 3)
     await counters.flush() // fails; over_quota must be re-buffered, not dropped
     await counters.flush() // retries against the real pool
-    const row = await readCounterRow(projectId)
+    const row = await readCounterRow(pg, projectId)
     expect(row.events_over_quota).toBe('3')
   })
 
@@ -298,7 +245,7 @@ describe('IngestCounters persisted/pending reads', () => {
     await counters.flush()
     counters.record(projectId, 'over_quota', 3)
     await counters.flush()
-    const row = await readCounterRow(projectId)
+    const row = await readCounterRow(pg, projectId)
     expect(row.events_over_quota).toBe('7')
   })
 

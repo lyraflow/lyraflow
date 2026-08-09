@@ -323,7 +323,12 @@ describe('the SDK against the real app and ClickHouse', () => {
     expect(sdkSend?.body).toBeTruthy()
     const body = sdkSend?.body
     if (!body) throw new Error('unreachable')
-    expect(sdkSend?.response.json()).toEqual({ accepted: 1, rejected: 0, throttled: 0 })
+    expect(sdkSend?.response.json()).toEqual({
+      accepted: 1,
+      rejected: 0,
+      throttled: 0,
+      over_quota: 0,
+    })
 
     // A retry or a two-tab race sends this unchanged, a second time. The
     // design relies on this being safe: the SDK has no cross-tab lock, no
@@ -341,7 +346,7 @@ describe('the SDK against the real app and ClickHouse', () => {
       },
       payload: body,
     })
-    expect(replay.json()).toEqual({ accepted: 1, rejected: 0, throttled: 0 })
+    expect(replay.json()).toEqual({ accepted: 1, rejected: 0, throttled: 0, over_quota: 0 })
     await app.deps.buffer.flush()
 
     const rs = await ch.query({

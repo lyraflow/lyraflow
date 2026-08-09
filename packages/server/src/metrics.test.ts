@@ -7,7 +7,7 @@ describe('metrics', () => {
     const app = Fastify()
     registerMetrics(app, {
       bufferDepth: () => 42,
-      totals: () => ({ accepted: 10, rejected: 2, throttled: 1 }),
+      totals: () => ({ accepted: 10, rejected: 2, throttled: 1, over_quota: 3 }),
       retention: () => ({ lastRunAt: null, partitionsDropped: 0 }),
     })
     const res = await app.inject({ method: 'GET', url: '/metrics' })
@@ -30,6 +30,7 @@ describe('metrics', () => {
         'lyraflow_ingest_events_total{outcome="accepted"} 10',
         'lyraflow_ingest_events_total{outcome="rejected"} 2',
         'lyraflow_ingest_events_total{outcome="throttled"} 1',
+        'lyraflow_ingest_events_total{outcome="over_quota"} 3',
         "# HELP lyraflow_retention_last_run_timestamp_seconds Unix time of the retention worker's last completed run; 0 before the first one. A worker that has silently stopped is indistinguishable from one with nothing to drop, so alert on this going stale rather than on its value.",
         '# TYPE lyraflow_retention_last_run_timestamp_seconds gauge',
         'lyraflow_retention_last_run_timestamp_seconds 0',
@@ -48,7 +49,7 @@ describe('metrics', () => {
     const lastRunAt = Date.UTC(2026, 7, 9, 12, 0, 0)
     registerMetrics(app, {
       bufferDepth: () => 0,
-      totals: () => ({ accepted: 0, rejected: 0, throttled: 0 }),
+      totals: () => ({ accepted: 0, rejected: 0, throttled: 0, over_quota: 0 }),
       retention: () => ({ lastRunAt, partitionsDropped: 7 }),
     })
     const res = await app.inject({ method: 'GET', url: '/metrics' })
