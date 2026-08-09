@@ -1191,6 +1191,140 @@ describe('the built CLI against a real, in-process server', () => {
     }
   }, 30_000)
 
+  /**
+   * A stub host whose SECOND poll answers part-way through the flush grace,
+   * with a different cursor — the one window in which the follow loop can
+   * still advance its own state after a signal has already been handled.
+   * Every other stub in this file either answers immediately or never, and
+   * neither can produce it.
+   */
+  async function answersSecondPollDuringGrace(opts: {
+    firstPollEvents: number
+    secondPollAfterMs: number
+  }): Promise<{ url: string; secondPollInFlight: Promise<void>; close: () => Promise<void> }> {
+    let polls = 0
+    let arrived: () => void = () => {}
+    const secondPollInFlight = new Promise<void>((resolve) => {
+      arrived = resolve
+    })
+    const timers: ReturnType<typeof setTimeout>[] = []
+    const padded = (id: string) => ({
+      event_id: id,
+      timestamp: '2026-08-09T00:00:00.000Z',
+      anonymous_id: 'a'.repeat(400),
+      url: 'u'.repeat(400),
+    })
+    const server: Server = createServer((_req, res) => {
+      polls += 1
+      if (polls === 1) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(
+          JSON.stringify({
+            events: Array.from({ length: opts.firstPollEvents }, (_, i) =>
+              padded(`first-${String(i).padStart(6, '0')}`),
+            ),
+            next_cursor: 'CURSOR-AT-SIGNAL-TIME',
+          }),
+        )
+        return
+      }
+      if (polls === 2) {
+        arrived()
+        timers.push(
+          setTimeout(() => {
+            res.writeHead(200, { 'content-type': 'application/json' })
+            res.end(
+              JSON.stringify({
+                events: [padded('during-grace-000000')],
+                next_cursor: 'CURSOR-ADVANCED-DURING-GRACE',
+              }),
+            )
+          }, opts.secondPollAfterMs),
+        )
+        return
+      }
+      // Anything after that: accepted, never answered.
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+    const address = server.address()
+    if (address === null || typeof address === 'string') throw new Error('stub host has no port')
+    return {
+      url: `http://127.0.0.1:${address.port}`,
+      secondPollInFlight,
+      close: () =>
+        new Promise<void>((resolve) => {
+          for (const timer of timers) clearTimeout(timer)
+          server.close(() => resolve())
+        }),
+    }
+  }
+
+  it('reports the cursor as it stood at the signal, not one the loop advanced to during the grace', async () => {
+    // The snapshot half of the interrupt fix, which had no guard: mutating
+    // the handlers to read at EXIT time instead of at signal time passed all
+    // 23 tests, because every other stub in this file either answers a poll
+    // immediately or never answers at all. Neither can put a response INSIDE
+    // the flush grace, which is the only window where the loop can still
+    // advance its own cursor after a signal has been handled.
+    //
+    // What goes wrong without it: the second poll's records are not written
+    // (output belongs to the interrupt from the instant of the signal) and
+    // would not have been flushed even if they were — the reader here never
+    // reads — yet `cursor` in the loop has already moved past them. A
+    // cursor read at exit time therefore says "resume after a record that
+    // was never delivered", and `--after` skips it permanently. That is the
+    // bare-cursor defect in a third disguise, which is why it is pinned
+    // here rather than left to the argument in the docstring.
+    const host = await answersSecondPollDuringGrace({
+      firstPollEvents: 500,
+      secondPollAfterMs: 800, // comfortably inside the 2s grace
+    })
+    const child = spawn(
+      process.execPath,
+      [CLI_ENTRY, 'events', '--follow', '--since', '15m', '--limit', '500', '--json'],
+      {
+        env: { ...process.env, LYRAFLOW_HOST: host.url, LYRAFLOW_SERVER_KEY: 'sk_stub' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    )
+    let stderr = ''
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString()
+    })
+    const exited = new Promise<{ code: number | null }>((resolve) => {
+      child.on('exit', (code) => resolve({ code }))
+    })
+
+    try {
+      // stdout is deliberately never read: that is what creates the backlog,
+      // and the backlog is what creates a grace window long enough for the
+      // second poll to land inside it.
+      await host.secondPollInFlight
+      const sentAt = Date.now()
+      child.kill('SIGINT')
+      const { code } = await exited
+      const elapsed = Date.now() - sentAt
+
+      expect(code).toBe(0)
+      // The grace really did run — otherwise the window this test exists to
+      // cover never opened and the assertions below would pass vacuously.
+      expect(elapsed).toBeGreaterThanOrEqual(1500)
+      expect(stderr).toContain('may not have reached the reader')
+
+      const cursorLines = stderr
+        .split('\n')
+        .filter((line) => line.trimStart().startsWith('{"next_cursor"'))
+      expect(cursorLines).toHaveLength(1)
+      expect(JSON.parse(cursorLines[0] as string)).toEqual({
+        next_cursor: 'CURSOR-AT-SIGNAL-TIME',
+      })
+      expect(stderr).not.toContain('CURSOR-ADVANCED-DURING-GRACE')
+    } finally {
+      child.kill('SIGKILL')
+      await host.close()
+    }
+  }, 30_000)
+
   for (const sig of ['SIGINT', 'SIGTERM'] as const) {
     it(`a non-follow command still dies on ${sig} the ordinary way, not held open by the follow fix`, async () => {
       // The other half of the same review finding: wireFollowInterrupt

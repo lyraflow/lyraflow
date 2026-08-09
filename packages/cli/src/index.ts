@@ -372,7 +372,8 @@ function wireFollowInterrupt(argv: string[]): FollowInterrupt {
 
       // Snapshotted NOW, at the instant of the signal — see the docstring
       // for the two things that go wrong if this is read at exit time
-      // instead.
+      // instead, and binary.test.ts's "reports the cursor as it stood at
+      // the signal" for the one that is reachable in practice.
       const pending: string[] = []
       for (const handler of handlers) {
         try {
