@@ -485,7 +485,17 @@ describe('backup.sh', () => {
       // and every line after it is silently discarded — which would blind all
       // three static rules below at once while they still report cleanly.
       expect(terminator, `unterminated heredoc swallowed the rest of ${f}`).toBeNull()
-      return out.join('\n')
+      const stripped = out.join('\n')
+      // The null check above only catches an UNterminated heredoc. A stray
+      // `<< EOF` is closed by usage()'s own EOF, so the terminator ends null
+      // while everything between them silently vanishes. Landmarks at both ends
+      // of each file prove the region survived.
+      for (const landmark of f === 'backup.sh'
+        ? ['usage()', 'cleanup()', 'trap cleanup EXIT']
+        : ['say()', 'artefact_write()', 'write_manifest()']) {
+        expect(stripped, `${landmark} vanished from ${f} — a heredoc ate it`).toContain(landmark)
+      }
+      return stripped
     }
 
     // Ban the BEHAVIOUR, not one spelling of it. Banning `chmod` alone is
@@ -543,6 +553,49 @@ describe('backup.sh', () => {
     for (const f of ['backup.sh', 'backup-lib.sh']) {
       expect(code(f), `${f} must not use docker cp`).not.toMatch(/docker\s+(compose\s+)?cp\b/)
     }
+
+    // …and that ban only matches the unquoted spelling, so it is not the
+    // mechanism — `docker compose "cp"` walks through it. The mechanism is the
+    // invocation count in the runtime audit, plus this: `docker` may only be
+    // invoked from an explicit set of places. A `docker "cp"` smuggled into
+    // sha256_of's macOS branch — a path no audit run executes — fails here
+    // whatever it is called, because sha256_of is not allowed to talk to docker
+    // at all.
+    const DOCKER_CALLERS = [
+      'ch_query',
+      'pg_query',
+      'pg_dump_to',
+      'copy_ch_artefact_to',
+      'service_running',
+      'service_image',
+      'wait_until_healthy',
+      'start_app_if_stopped',
+      'remove_in_container_artefact',
+    ]
+    const libLines = code('backup-lib.sh').split('\n')
+    let currentFn = ''
+    for (const line of libLines) {
+      const def = /^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{/.exec(line)
+      if (def) currentFn = def[1] as string
+      if (!/(^|[^A-Za-z_])docker\s/.test(line)) continue
+      expect(
+        DOCKER_CALLERS,
+        `docker is invoked from ${currentFn || '(top level)'}, which is not one of the functions allowed to`,
+      ).toContain(currentFn)
+    }
+
+    // The two copy functions must each invoke docker exactly once, so a
+    // fallback cannot be added beside the chokepoint call.
+    for (const fn of ['copy_ch_artefact_to', 'pg_dump_to']) {
+      const at = code('backup-lib.sh').indexOf(`${fn}() {`)
+      expect(at, `${fn} not found`).toBeGreaterThan(-1)
+      const body = code('backup-lib.sh').slice(at, code('backup-lib.sh').indexOf('\n}', at))
+      expect(
+        (body.match(/(^|[^A-Za-z_])docker\s/g) ?? []).length,
+        `${fn} must call docker once`,
+      ).toBe(1)
+      expect((body.match(/artefact_write/g) ?? []).length, `${fn} must write once`).toBe(1)
+    }
   })
 
   it('runs no command that could create a file outside the chokepoint', async () => {
@@ -595,6 +648,10 @@ describe('backup.sh', () => {
       'rm',
       'rmdir',
       'sort',
+      // Added for the durability fix: `sync` before the backup is declared
+      // complete. Third time this list has caught an addition of mine before a
+      // reviewer did.
+      'sync',
       // the three interchangeable hashers — see sha256_of
       'sha256sum',
       'shasum',
@@ -645,6 +702,7 @@ describe('backup.sh', () => {
         env: { ...SCRIPT_ENV, ...env },
       })
       expect(res.status === 0, `run mustFail=${mustFail}`).toBe(!mustFail)
+      const written: string[] = []
       for (const line of readFileSync(trace, 'utf8').split('\n')) {
         const m = /^\++ (\S+)/.exec(line)
         if (!m) continue
@@ -652,6 +710,32 @@ describe('backup.sh', () => {
         if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue // an assignment
         observed.add(word.replace(/^'|'$/g, ''))
         if (word === 'docker') dockerCalls.push(line)
+        const aw = /^\++ artefact_write (\S+)/.exec(line)
+        if (aw) written.push(aw[1] as string)
+      }
+
+      // THE INVOCATION COUNT. Every file in the destination must correspond to
+      // exactly one artefact_write call, and vice versa.
+      //
+      // This is what ends the spelling war, and it is why the `docker cp` ban
+      // below is now belt-and-braces rather than the mechanism. The ban matched
+      // only the unquoted form, so `docker compose "cp"` and `sub=cp; docker
+      // compose "$sub"` walked straight through it. Counting invocations does
+      // not care how the evasion is spelled: a file that appears without a
+      // corresponding artefact_write call fails, whether it was made by `cp`,
+      // `install`, `tee`, or `sort -o` — which is E3, previously documented as
+      // open and now closed on every traced path.
+      // Only on the run that succeeds: a failed run has its whole directory
+      // removed, so there is nothing left to correspond to.
+      if (!mustFail) {
+        const produced = written
+          .map((f) => f.replace(/\.tmp$/, '')) // MANIFEST.tmp is renamed into place
+          .map((f) => f.slice(f.lastIndexOf('/') + 1))
+          .sort()
+        const stamps = readdirSync(dest)
+        const onDisk =
+          stamps.length === 1 ? readdirSync(join(dest, stamps[0] as string)).sort() : []
+        expect(produced, 'artefact_write calls must match the files produced').toEqual(onDisk)
       }
     }
 
@@ -952,6 +1036,35 @@ describe('backup.sh', () => {
     // Swallowing the writes must not mean spraying bash's own write-error
     // diagnostics instead — five of them appeared on the first attempt at this.
     expect(res.stderr).not.toMatch(/write error|Broken pipe/)
+  }, 300_000)
+
+  it('completes the backup when BOTH streams are closed, not just stdout', async () => {
+    // `trap "" PIPE` and say/note protect this shell's writes; they do nothing
+    // for the `docker` children, which inherit fd 2 and die on their own. A log
+    // -capping wrapper writes `2>&1 | ...`, so this is the same operator action
+    // the stdout test covers — and before the `2>&1` on the stop it produced no
+    // backup at all:
+    //
+    //   PIPESTATUS=1 0   container: healthy   dest: (empty)
+    //   trace: rc=255  compose stop lyraflow
+    //
+    // Honest (non-zero, app healthy, nothing reported as written) but not what
+    // the usage text promises about a capped log.
+    const dest = mkdtempSync(join(tmpdir(), 'lyraflow-backup-'))
+    spawnSync('bash', ['-c', './backup.sh "$1" 2>&1 | head -1', '_', dest], {
+      encoding: 'utf8',
+      env: SCRIPT_ENV,
+    })
+    await waitReady(120_000)
+    expect(await readyStatus()).toBe(200)
+
+    const stamps = readdirSync(dest)
+    expect(stamps, 'a capped log must not cost the backup').toHaveLength(1)
+    expect(readdirSync(join(dest, stamps[0] as string)).sort()).toEqual([
+      'MANIFEST',
+      'clickhouse.zip',
+      'postgres.dump',
+    ])
   }, 300_000)
 
   it('keeps the app up if either cleanup guard alone is removed', async () => {

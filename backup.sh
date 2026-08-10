@@ -43,19 +43,29 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=backup-lib.sh
 . "$SCRIPT_DIR/backup-lib.sh"
 
-# A reader that goes away must not be able to kill this script.
+# A reader that goes away must not be able to cut the backup short.
 #
-# `./backup.sh DEST | head -1` closes stdout as soon as head has its line, and
-# the next write raises SIGPIPE. The default disposition is death -- and a
-# shell killed by a signal does not run its EXIT trap at all, so the app stays
-# stopped and nothing whatsoever is printed. Ignoring PIPE converts that into
-# an ordinary write error, which `set -e` turns into a normal exit WITH the
-# trap running; `say`/`note` then swallow the error, so a wrapper capping its
-# log does not abandon an otherwise healthy backup. See say() in
-# backup-lib.sh for the measurement.
+# `./backup.sh DEST | head -1` closes stdout once head has its line, and the
+# next write raises SIGPIPE, whose default disposition is death.
 #
-# This has to be set before the quiesce, not merely inside cleanup: the signal
-# is just as fatal in the main body, and there it takes the trap with it.
+# WHAT THIS DOES AND DOES NOT BUY, because the first version of this comment got
+# it backwards. bash DOES run the EXIT trap when it dies of SIGPIPE -- measured
+# on 5.2.21 and 5.3.9, exit 141 with the trap running. So this is NOT what keeps
+# the app alive; that is start_app_if_stopped doing the restart before its first
+# write. What ignoring PIPE buys is that the run CONTINUES: the write becomes an
+# ordinary error instead of death, and say/note swallow it, so a wrapper capping
+# its log gets a shorter log rather than a backup abandoned at the first
+# message. Measured with only this line removed: the app came back fine and the
+# destination was empty.
+#
+# A closed STDOUT therefore completes the backup. A closed STDERR is a weaker
+# guarantee and cannot be made as strong: `trap "" PIPE` and say/note protect
+# this shell's own writes, but every `docker` child inherits fd 2 and dies on
+# its own. Silencing the noisiest of them (see the `2>&1` on the stop below) is
+# enough that `2>&1 | head` now completes a healthy run -- measured -- but a
+# store that writes a real diagnostic will still take its child down, and that
+# is deliberate: those messages are the only 4am diagnostic there is. The run
+# then aborts cleanly, app restored, non-zero, never reporting success.
 trap "" PIPE
 
 usage() {
@@ -69,6 +79,16 @@ SDK queues and retries, so events are delayed rather than lost.
 Writes <destination>/<timestamp>/{clickhouse.zip,postgres.dump,MANIFEST},
 owner-readable only. The archive contains database credentials -- keep the
 destination directory private and encrypt it before copying it off the host.
+
+If you pipe this anywhere, test PIPESTATUS[0], not $? -- $? is the reader's
+status, and a reader that exits happily will report success for a backup that
+did not finish.
+
+Closing stdout (a log cap, `| head`, `| less` then q) does not cancel the
+backup. Closing stderr too (`2>&1 | ...`) is safe on a healthy run, but if
+ClickHouse or Postgres writes a diagnostic, that child dies on the closed
+stream and the run aborts -- cleanly, with the app restarted and a non-zero
+status, never with a backup reported as written.
 EOF
 }
 
@@ -210,7 +230,15 @@ say "Stopping the app so the ingest buffer drains (about 30 seconds)..."
 # early costs nothing: `docker compose start` against a container that is still
 # running is a no-op that does not even move StartedAt.
 APP_STOPPED=1
-docker compose stop "$APP_SERVICE" >/dev/null ||
+# `2>&1` and not just `>/dev/null`: `docker compose stop` writes its progress to
+# stderr, so with stderr closed -- which is what `2>&1 | head` does, and a log-
+# capping wrapper writes exactly that -- the child dies of SIGPIPE (rc=255) and
+# the quiesce fails before anything is backed up. Measured: destination empty,
+# app healthy, exit 1. This is the first and most damaging step, and the only
+# one where the child's output is pure noise. It is deliberately NOT applied to
+# ch_query or pg_dump_to, whose stderr carries the store's own error message and
+# is the only diagnostic an operator gets at 4am.
+docker compose stop "$APP_SERVICE" >/dev/null 2>&1 ||
   fail "quiesce" \
     "docker compose stop $APP_SERVICE exited non-zero." \
     "The app may or may not have stopped; it is being started again either way."
@@ -246,6 +274,20 @@ write_manifest "$OUT" ||
     "Could not write the manifest for $OUT." \
     "The partial backup is being deleted rather than left looking complete." \
     "Run the backup again."
+
+# Get the bytes onto the disk before claiming they are there.
+#
+# "Backup written to ..." and a matching SHA-256 are otherwise statements about
+# the page cache: a host power loss after a green run can leave a truncated
+# artefact whose manifest disagrees with it, which is the one failure this
+# script's checksums exist to make impossible. Chosen over documenting the gap
+# because a backup tool whose success message is conditional on the next few
+# seconds is not one an operator can act on.
+#
+# Plain `sync`, not `sync FILE`: the argument form is GNU-only and this runs on
+# macOS too. It flushes more than these three files, which on a host that has
+# just written a whole backup is mostly the write we already wanted.
+sync 2>/dev/null || note "WARNING: sync failed; the artefacts may not yet be on disk."
 
 # From here the directory holds a complete, described backup, so the trap must
 # stop treating it as debris. Nothing below may fail in a way that invalidates

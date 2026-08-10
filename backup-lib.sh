@@ -59,19 +59,24 @@ CH_ARTEFACT_CREATED=0
 # NEITHER CAN FAIL, and that is the whole point of them existing.
 #
 # `./backup.sh DEST | head -1` closes this script's stdout as soon as the
-# reader has what it wants. A plain `echo` then dies of SIGPIPE, which killed
-# the shell *inside the EXIT trap* -- before `docker compose start` -- leaving
-# the app stopped, stderr completely silent, and the pipeline's status 0
-# because that is `head`'s. Measured before the fix:
+# reader has what it wants, and a plain `echo` then dies of SIGPIPE. Measured
+# before the fix:
 #
 #   PIPESTATUS=141 head=0        <- 141 = 128 + SIGPIPE
 #   lyraflow-ci-lyraflow-1  exited  Exited (0)
 #   --- full stderr of that run ---   (nothing but docker's own two lines)
 #
-# `trap '' PIPE` in backup.sh turns the signal into a write error; the
-# `|| true` here turns the write error into nothing at all. Both are needed:
-# the trap alone leaves `echo` returning non-zero, which `set -e` turns into
-# the same aborted-cleanup outcome by a different route.
+# The app was stopped there because start_app_if_stopped's FIRST STATEMENT was
+# a write, so the signal landed before `docker compose start`. It was not, as
+# an earlier version of this comment claimed, because the EXIT trap failed to
+# run -- bash runs the EXIT trap on SIGPIPE death, measured on 5.2.21 and
+# 5.3.9. Ordering is what keeps the app up.
+#
+# What these two buy is that the run continues rather than ending at its first
+# message: `trap '' PIPE` in backup.sh turns the signal into a write error, and
+# the `|| true` here turns the write error into nothing. Both are needed -- the
+# trap alone leaves `echo` returning non-zero, which `set -e` turns into an
+# aborted run by a different route.
 #
 # Reachable by `| less` and pressing q, by `| head -n N` in a wrapper capping a
 # log, by `| grep -m1`, and by `| mail` or `| logger` where the reader dies.
