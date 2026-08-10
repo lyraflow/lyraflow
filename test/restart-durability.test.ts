@@ -58,7 +58,12 @@ beforeAll(async () => {
   // exit non-zero on the duplicate slug and the write key would never be
   // parsed. Start from nothing every time.
   compose('down', '-v')
-  compose('up', '-d', '--wait')
+  // `--build` for the same reason clickhouse-backup.test.ts passes it: this
+  // stack's image is named, so Compose reuses a stale tag indefinitely and
+  // the suite quietly asserts durability about an old build. Both files must
+  // pass it — they share one image tag, so whichever ran last would decide
+  // what the other tested.
+  compose('up', '-d', '--build', '--wait')
   await waitReady()
   const out = compose(
     'exec',

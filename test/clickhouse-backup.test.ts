@@ -54,7 +54,14 @@ beforeAll(async () => {
   // makes BACKUP fail with BACKUP_ALREADY_EXISTS for reasons that have nothing
   // to do with what is being tested.
   compose('down', '-v')
-  compose('up', '-d', '--wait')
+  // `--build`, not a bare `up`. docker-compose.ci.yml names its image, so
+  // Compose reuses whatever is already tagged and never notices that the
+  // working tree has moved on — a stack that was silently running an image
+  // three days and five migrations behind this checkout. A durability test
+  // that boots a different build than the one under review is not testing
+  // this branch. It costs one image build on the first run and is cached
+  // afterwards.
+  compose('up', '-d', '--build', '--wait')
   await waitReady()
   const out = compose(
     'exec',
@@ -274,12 +281,31 @@ describe('ClickHouse BACKUP and RESTORE', () => {
     // not — a flake that would read as "RESTORE invented rows".
     compose('stop', 'lyraflow')
 
+    // The historical baseline: what a restored deployment must still hold
+    // about events ingested BEFORE the backup. Captured for all four tables,
+    // by total and by pre-backup key. Totals are safe to compare exactly here
+    // because this fixture is deliberately duplicate-free — every row in every
+    // one of these tables has a distinct sorting key, so no background merge
+    // can collapse two of them and move a count on its own.
     const beforeEvents = await countRows('events')
     const beforeIndex = await countRows('device_index')
     const beforeSchema = await countRows('event_schema')
+    const beforeTraits = await countRows('person_traits')
     expect(beforeEvents).toBeGreaterThan(0)
     expect(beforeIndex).toBeGreaterThan(0)
     expect(beforeSchema).toBeGreaterThan(0)
+    expect(beforeTraits).toBeGreaterThan(0)
+
+    const beforeIndexKeyed = await derivedRowsFor('device_index', ANON_BEFORE)
+    const beforeTraitsKeyed = await derivedRowsFor('person_traits', ANON_BEFORE)
+    const beforeSchemaKeyed = await schemaRowsFor(EVENT_BEFORE)
+    const beforeTraitKeys = await traitKeysFor(ANON_BEFORE)
+    const beforeSchemaKinds = await schemaKindsFor(EVENT_BEFORE)
+    expect(beforeIndexKeyed).toBeGreaterThan(0)
+    expect(beforeTraitsKeyed).toBeGreaterThan(0)
+    expect(beforeSchemaKeyed).toBeGreaterThan(0)
+    expect(beforeTraitKeys).toEqual(['mrr', 'tier'])
+    expect(beforeSchemaKinds).toEqual(['number', 'string'])
 
     await ch.command({ query: `BACKUP DATABASE lyraflow TO Disk('backups', 'probe.zip')` })
     await chAdmin.command({ query: 'DROP DATABASE lyraflow SYNC' })
@@ -287,8 +313,27 @@ describe('ClickHouse BACKUP and RESTORE', () => {
     compose('start', 'lyraflow')
     await waitReady()
 
+    // Every historical row must come back, for all four tables. Pinning only
+    // `events` and `device_index` — as this test first did — leaves a restore
+    // that recovers the events and the views but loses the historical
+    // contents of event_schema and person_traits completely undetected: every
+    // other assertion in this test probes a key created AFTER the restore, so
+    // nothing else in the file looks at the old rows at all. Verified with
+    // `TRUNCATE TABLE person_traits; TRUNCATE TABLE event_schema` injected
+    // straight after the RESTORE, which passed before these four lines.
     expect(await countRows('events')).toBe(beforeEvents)
     expect(await countRows('device_index')).toBe(beforeIndex)
+    expect(await countRows('event_schema')).toBe(beforeSchema)
+    expect(await countRows('person_traits')).toBe(beforeTraits)
+
+    // And the same baseline by key, not just by total: a restore that brought
+    // back the right NUMBER of derived rows for the wrong identities would
+    // satisfy the counts above.
+    expect(await derivedRowsFor('device_index', ANON_BEFORE)).toBe(beforeIndexKeyed)
+    expect(await derivedRowsFor('person_traits', ANON_BEFORE)).toBe(beforeTraitsKeyed)
+    expect(await schemaRowsFor(EVENT_BEFORE)).toBe(beforeSchemaKeyed)
+    expect(await traitKeysFor(ANON_BEFORE)).toEqual(beforeTraitKeys)
+    expect(await schemaKindsFor(EVENT_BEFORE)).toEqual(beforeSchemaKinds)
 
     // The structural half of the answer: the view objects themselves, not just
     // the tables they write into, are named by `system.tables` after RESTORE.
@@ -326,7 +371,11 @@ describe('ClickHouse BACKUP and RESTORE', () => {
 
   it('names the missing configuration when the backups disk is not declared', async () => {
     // Guards the mount itself. If a future compose edit drops the bind, every
-    // backup fails at 4am with a ClickHouse error code and no context.
+    // backup fails at 4am with a ClickHouse error code and no context — so
+    // the failure message below, not just the assertion, is the point of this
+    // test. Without it the only output is `expected [ 'default' ] to include
+    // 'backups'`, which names neither the file that went missing nor what to
+    // do about it, and the test's own title would be a lie.
     //
     // Asked through chAdmin, not ch: system.disks is global, and the test
     // above leaves `lyraflow` dropped if it fails between its DROP and its
@@ -337,6 +386,14 @@ describe('ClickHouse BACKUP and RESTORE', () => {
       query: 'SELECT name FROM system.disks',
       format: 'JSONEachRow',
     })
-    expect((await disks.json()).map((r: { name: string }) => r.name)).toContain('backups')
+    const names = (await disks.json()).map((r: { name: string }) => r.name)
+    const diagnostic = [
+      `ClickHouse declares no disk named 'backups' (it has: ${names.join(', ')}).`,
+      'The clickhouse service is missing its bind of docker/clickhouse/backup-disk.xml',
+      'to /etc/clickhouse-server/config.d/backup-disk.xml, so backups.allowed_disk is',
+      "unset and every BACKUP will fail with \"The 'backups.allowed_disk' configuration",
+      'parameter is not set" (code 318, INVALID_CONFIG_PARAMETER).',
+    ].join(' ')
+    expect(names, diagnostic).toContain('backups')
   })
 })
