@@ -1,0 +1,705 @@
+#!/usr/bin/env bash
+# Put both Lyraflow data stores back from a backup taken by ./backup.sh.
+#
+# This is the only script in the repository that destroys live data, and it
+# destroys ALL of it: the ClickHouse database is dropped and the Postgres
+# `public` schema is dropped, both before their replacements are read in.
+# Everything written since the backup was taken is gone. Three guards run
+# before any of that happens -- the artefact checksums, the schema version,
+# and a typed confirmation -- and every one of them is positioned so that a
+# refusal leaves the running system exactly as it was.
+#
+# bash rather than sh, for the same two reasons backup.sh gives: `set -o
+# pipefail`, and traps, which are how this script guarantees it never leaves
+# the app stopped. Targets bash 3.2, the version macOS still ships.
+#
+# Runs plain `docker compose` with no -f, so COMPOSE_FILE and
+# COMPOSE_PROJECT_NAME work the way an operator (and the round-trip tests)
+# expect.
+#
+# ONE STORE IS NEVER PUT BACK ON ITS OWN, and there is deliberately no flag
+# that would let you. The two stores are not independent: `suppressed_persons`
+# lives in Postgres and the events it hides live in ClickHouse. Consider a
+# restore that dies half way.
+#
+#   ClickHouse back, Postgres untouched -- ClickHouse holds a deleted person's
+#   events again, but Postgres is current and still carries their suppression
+#   row, so they stay hidden. Safe.
+#
+#   Postgres back, ClickHouse untouched -- Postgres has lost every suppression
+#   row written since the backup while ClickHouse is fully current, so those
+#   people's future events become visible again. A privacy regression, and a
+#   silent one.
+#
+# That asymmetry is the whole reason the order below is ClickHouse first and
+# Postgres second, and the intuition points the other way: the store that
+# feels safe to do first is the small metadata one. It is not.
+#
+# `-o pipefail` is part of that line and is not decoration here even though
+# this script writes nothing to disk of its own. Anything that feeds a store
+# through a pipe -- and backup-lib.sh's copy helpers are pipes now -- reports
+# the consumer's exit status without it, so a producer that died half way
+# looks like a success. Same class of bug backup.sh sets it for.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=backup-lib.sh
+. "$SCRIPT_DIR/backup-lib.sh"
+
+# See backup.sh's own comment for the full reasoning. In short: a reader that
+# goes away (`| head`, `| less` then q, a wrapper capping its log) must not be
+# able to kill this script mid-restore. `say`/`note` from backup-lib.sh cannot
+# fail, and this turns the signal into an ordinary write error for anything
+# else. It matters more here than in a backup: a run abandoned between the
+# two stores is the exact half-restored state described above.
+trap "" PIPE
+
+# How long the confirmation prompt waits for an answer. Matches the two
+# minutes the deletion CLI's prompt uses (packages/cli/src/index.ts), and for
+# the same reason: generous for a human who is reading the warning, short
+# enough that an unattended caller which will never answer does not hang for
+# ever. A timeout is a refusal, and a refusal here costs nothing -- nothing
+# has been touched yet.
+CONFIRM_TIMEOUT=120
+
+# What has actually happened to the operator's data at this point in the run,
+# in words. Read by `abort` below, which is the only thing that prints it.
+#
+# A single fixed sentence is what backup-lib.sh's `fail` can afford, because a
+# backup only ever reads. This script passes through four genuinely different
+# states and an operator at 4am needs to be told which one they are in -- "your
+# data is intact", "ClickHouse is empty", and "both stores are back" call for
+# three completely different next actions.
+DATA_STATE="nothing has been changed: both stores still hold exactly what they held before this ran"
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: ./restore.sh <backup-directory>
+
+Replaces the contents of BOTH data stores with the backup in that directory,
+which must be one of the timestamped directories ./backup.sh wrote (the one
+containing MANIFEST, clickhouse.zip and postgres.dump).
+
+THIS DESTROYS LIVE DATA. Everything recorded since the backup was taken is
+lost. The app is stopped for the duration and started again afterwards.
+
+Before anything is destroyed this checks the artefacts against the manifest's
+checksums, refuses a backup newer than the running image, and asks you to type
+the backup's timestamp. Any of those refusing leaves your system untouched.
+
+Both stores are always restored together. There is no way to ask for one of
+them: Postgres holds the suppression list and ClickHouse holds the events it
+hides, so a Postgres older than its ClickHouse partner makes deleted people
+visible again.
+EOF
+}
+
+SRC="${1:-}"
+case "$SRC" in
+  -h | --help)
+    usage
+    exit 0
+    ;;
+esac
+if [ -z "$SRC" ]; then
+  usage
+  exit 2
+fi
+
+# ---------------------------------------------------------------------------
+# Failure reporting
+# ---------------------------------------------------------------------------
+
+# refuse <reason…> -- a guard declining before anything has been touched.
+#
+# Separate from `abort` so that the two can never be confused at a call site:
+# this one is only correct while DATA_STATE is still its initial value, and it
+# says so unconditionally rather than reading a variable that a later edit
+# could leave stale.
+refuse() {
+  local line
+  note ""
+  note "REFUSING TO RESTORE."
+  for line in "$@"; do
+    note "  ${line}"
+  done
+  note ""
+  note "Nothing has been changed. Your live data and this backup are both intact."
+  exit 1
+}
+
+# abort <step> <detail…> -- a failure after the destruction has begun.
+#
+# backup-lib.sh's `fail` cannot be reused here: its closing claim is "no data
+# was changed", which is true of every path in backup.sh and false of almost
+# every path below this line. Printing it from a restore that has already
+# dropped the ClickHouse database would be the single most misleading thing
+# this script could say.
+abort() {
+  local step="$1"
+  shift
+  local line
+  note ""
+  note "ERROR: the restore failed during the ${step} step."
+  for line in "$@"; do
+    note "  ${line}"
+  done
+  note ""
+  note "STATE OF YOUR DATA: ${DATA_STATE}"
+  note "The backup directory has not been modified and can be used again."
+  exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Manifest reading
+# ---------------------------------------------------------------------------
+
+# manifest_get <dir> <key>
+#
+# SPLITS ON THE FIRST `=` AND TAKES THE WHOLE REMAINDER, which write_manifest
+# in backup-lib.sh requires of any parser: keys never contain an `=` but values
+# can. `rowexpr.*` values contain spaces and parentheses, and a `rowttl.*`
+# value is an arbitrary ClickHouse expression -- a `TTL … GROUP BY … SET x =
+# max(y)` contains an `=` -- so anything that splits on every `=` truncates it
+# silently. `${line#*=}` removes up to the FIRST one, which is exactly right;
+# the `case` above it is what proves the key matched in full.
+manifest_get() {
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$2="*)
+        printf '%s\n' "${line#*=}"
+        return 0
+        ;;
+    esac
+  done < "$1/MANIFEST"
+  return 1
+}
+
+# manifest_keys <dir> <prefix> -- every key with that prefix, one per line.
+# `%%=*` strips the longest trailing `=…`, i.e. everything from the first `=`.
+manifest_keys() {
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$2"*) printf '%s\n' "${line%%=*}" ;;
+    esac
+  done < "$1/MANIFEST"
+}
+
+# A table name out of the manifest is interpolated into SQL, so it is checked
+# rather than trusted. A backup directory is not a trust boundary in any
+# meaningful sense -- an attacker who can rewrite your MANIFEST can rewrite
+# postgres.dump, whose contents are executed verbatim -- but a name with a quote
+# would produce a baffling syntax error at the worst possible moment, which is
+# reason enough on its own.
+safe_identifier() {
+  case "$1" in
+    '' | *[!A-Za-z0-9_]*) return 1 ;;
+  esac
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# The app image's schema version
+# ---------------------------------------------------------------------------
+
+# Read from the RUNNING CONTAINER, never from this checkout. An operator
+# restoring at 2am is standing in whatever working tree they happen to have
+# cloned, which is routinely not the image the stack is running -- and it is
+# the image that will boot against the restored database and either understand
+# it or refuse to.
+#
+# The import is tried as a package specifier first and falls back to the path
+# inside the image, because the production install does not link the workspace
+# packages at the root of /app (measured: `node_modules/@lyraflow` contains
+# only `db`). Either way this is the constant the image was built with.
+#
+# A failure here is a refusal, not a shrug: a guard that cannot read the number
+# it guards on has not passed, and skipping it would turn the one check that
+# stands between an operator and an unbootable app into a no-op.
+image_schema_version() {
+  docker compose exec -T "$APP_SERVICE" node -e \
+    'import("@lyraflow/core").catch(() => import("./packages/core/dist/index.js")).then((m) => console.log(m.SCHEMA_VERSION))' \
+    < /dev/null
+}
+
+# ---------------------------------------------------------------------------
+# Verification, run while the app is still stopped
+# ---------------------------------------------------------------------------
+
+# Compares every row count in the manifest against the restored databases and
+# exits non-zero on any mismatch, listing all of them rather than the first.
+#
+# CALLED BEFORE THE APP IS STARTED AGAIN, which is not where the plan put it.
+# Two things go wrong if it runs after: the SDK's queued events start arriving
+# the moment the app answers, so `rows.clickhouse.events` legitimately grows
+# while this is reading it; and an image newer than the backup applies the
+# missing migrations on boot, which appends to `schema_migrations` and makes
+# `rows.postgres.schema_migrations` disagree by exactly the number of versions
+# the operator upgraded through. Both would be reported as data loss, and both
+# are races this cannot win by widening a tolerance. Verified here, the numbers
+# describe the restore and nothing else.
+#
+# EVERY CLICKHOUSE COUNT USES THE MANIFEST'S OWN `rowexpr.clickhouse.<table>`,
+# never a bare `count()`. A merging engine's `count()` is not stable across a
+# RESTORE -- the collapse is done by the background merges that follow it, not
+# by the RESTORE -- so a bare count read seconds after a restore can be right
+# and the same query minutes later wrong, or the reverse. Measured on this
+# branch with merges frozen so the window does not close:
+#
+#   before backup    device_index count()=5  FINAL=3   (manifest records 3)
+#   after RESTORE    device_index count()=5  FINAL=3   at +0s and at +25s
+#
+# and with merges left alone, `count()` fell from 5 to 3 within five seconds of
+# the RESTORE. `count() FINAL` was 3 at every single sample.
+#
+# The expression is read rather than re-derived because it is not uniform:
+# `SELECT count() FROM events_dead_letter FINAL` is rejected outright with
+# `Code: 181 … Storage MergeTree doesn't support FINAL (ILLEGAL_FINAL)`, so a
+# hardcoded FINAL fails every restore, and a hardcoded bare count silently
+# compares the wrong number for four of the five tables.
+#
+# `rowttl.clickhouse.<table>` present means a LOWER count is expected rather
+# than a failure: that table's rows are deleted by the same background merges
+# once they age past the window, so restoring a backup older than the retention
+# window -- ordinary disaster recovery -- would otherwise report catastrophic
+# loss that never happened. A HIGHER count is still a failure even there;
+# nothing about a TTL can invent rows.
+#
+# There are no `rowexpr.postgres.*` keys and there is no Postgres TTL: nothing
+# in Postgres collapses or expires rows on its own, so every Postgres table is
+# a plain `count(*)` and must match exactly.
+verify_row_counts() {
+  local key table expected actual expr suffix mismatches=0
+
+  while IFS= read -r key; do
+    table="${key#rows.clickhouse.}"
+    safe_identifier "$table" ||
+      abort "verification" "The manifest names a ClickHouse table this cannot quote: $table"
+    expected="$(manifest_get "$SRC" "$key")" || expected=''
+    expr="$(manifest_get "$SRC" "rowexpr.clickhouse.$table")" || expr=''
+    # Pre-flight already refused a manifest missing any of these, so reaching
+    # this is a bug rather than bad input -- and guessing an expression here
+    # is precisely the silent wrong comparison the pre-flight exists to stop.
+    [ -n "$expected" ] && [ -n "$expr" ] ||
+      abort "verification" "The manifest has no count or no expression for $table."
+    suffix=''
+    case "$expr" in *FINAL) suffix=' FINAL' ;; esac
+    # shellcheck disable=SC2016
+    actual="$(ch_query "$(printf 'SELECT count() FROM `%s`%s' "$table" "$suffix")")" || actual=''
+    if [ -z "$actual" ]; then
+      note "  clickhouse.$table: could not be counted after the restore (expected $expected)"
+      mismatches=$((mismatches + 1))
+      continue
+    fi
+    if [ "$actual" = "$expected" ]; then continue; fi
+    if manifest_get "$SRC" "rowttl.clickhouse.$table" > /dev/null && [ "$actual" -lt "$expected" ]; then
+      say "  clickhouse.$table: $actual rows, backup recorded $expected -- lower is expected, this table has a TTL"
+      continue
+    fi
+    note "  clickhouse.$table: $actual rows, the backup recorded $expected"
+    mismatches=$((mismatches + 1))
+  done < <(manifest_keys "$SRC" 'rows.clickhouse.')
+
+  while IFS= read -r key; do
+    table="${key#rows.postgres.}"
+    safe_identifier "$table" ||
+      abort "verification" "The manifest names a Postgres table this cannot quote: $table"
+    expected="$(manifest_get "$SRC" "$key")" || expected=''
+    [ -n "$expected" ] ||
+      abort "verification" "The manifest has no count for postgres.$table."
+    actual="$(pg_query "SELECT count(*) FROM public.\"$table\"")" || actual=''
+    if [ -z "$actual" ]; then
+      note "  postgres.$table: could not be counted after the restore (expected $expected)"
+      mismatches=$((mismatches + 1))
+      continue
+    fi
+    if [ "$actual" = "$expected" ]; then continue; fi
+    note "  postgres.$table: $actual rows, the backup recorded $expected"
+    mismatches=$((mismatches + 1))
+  done < <(manifest_keys "$SRC" 'rows.postgres.')
+
+  [ "$mismatches" = "0" ] || return 1
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# The EXIT trap. Same shape, and the same three reasons, as backup.sh's.
+# ---------------------------------------------------------------------------
+
+# THE RESTART COMES FIRST and nothing above it may be able to abort this
+# function. See backup.sh's cleanup() for the three review rounds that
+# established the shape; the failure it prevents -- the app left stopped with
+# nothing announcing it -- is identical here and, after a restore, worse: the
+# operator's attention is on whether their data came back, not on whether the
+# site did.
+cleanup() {
+  local restart_ok=1
+  start_app_if_stopped || restart_ok=0
+
+  remove_in_container_artefact || true
+
+  if [ "$restart_ok" = "0" ]; then
+    note ""
+    note "ERROR: the app is stopped and this script could not start it."
+    note "  Run: docker compose start $APP_SERVICE"
+    note "STATE OF YOUR DATA: ${DATA_STATE}"
+    exit 1
+  fi
+}
+trap cleanup EXIT
+
+# ---------------------------------------------------------------------------
+# Pre-flight. Everything that can be checked without touching anything, and
+# all of it, because from the quiesce onwards a refusal costs downtime and
+# from the DROP onwards it costs data.
+# ---------------------------------------------------------------------------
+
+[ -d "$SRC" ] ||
+  refuse "$SRC is not a directory."
+
+[ -f "$SRC/MANIFEST" ] ||
+  refuse "There is no MANIFEST in $SRC." \
+    "Point this at one of the timestamped directories ./backup.sh wrote, not at" \
+    "the destination you gave it."
+
+for artefact in clickhouse.zip postgres.dump; do
+  [ -f "$SRC/$artefact" ] ||
+    refuse "$SRC/$artefact is missing." \
+      "A backup directory holds MANIFEST, clickhouse.zip and postgres.dump."
+  [ -s "$SRC/$artefact" ] ||
+    refuse "$SRC/$artefact is empty."
+done
+
+have_sha256 ||
+  refuse "No SHA-256 tool found (looked for sha256sum, shasum and openssl)." \
+    "The manifest records a checksum per artefact and this refuses to restore" \
+    "one it cannot check."
+
+# --- the manifest describes a whole backup ---------------------------------
+#
+# Not paranoia about a hand-edited file: backup.sh used to be able to leave a
+# short manifest behind, and its own comment records what that looked like --
+# three files, correct checksums, `mode=quiesced`, a matching timestamp, and
+# the entire `rows.postgres.*` block missing. It writes atomically now, but a
+# restore that iterated an absent block and reported a flawless verification
+# would be the worst possible way to find out that changed back.
+BACKUP_VERSION="$(manifest_get "$SRC" lyraflow_backup_version)" || BACKUP_VERSION=''
+[ "$BACKUP_VERSION" = "1" ] ||
+  refuse "This is not a backup format this script understands." \
+    "lyraflow_backup_version is '${BACKUP_VERSION:-missing}', expected 1."
+
+STAMP="$(manifest_get "$SRC" timestamp)" || STAMP=''
+[ -n "$STAMP" ] ||
+  refuse "The manifest has no timestamp."
+
+MANIFEST_CH_SUM="$(manifest_get "$SRC" clickhouse_sha256)" || MANIFEST_CH_SUM=''
+MANIFEST_PG_SUM="$(manifest_get "$SRC" postgres_sha256)" || MANIFEST_PG_SUM=''
+[ -n "$MANIFEST_CH_SUM" ] && [ -n "$MANIFEST_PG_SUM" ] ||
+  refuse "The manifest is missing a checksum, so the artefacts cannot be verified."
+
+MANIFEST_SCHEMA="$(manifest_get "$SRC" schema_version)" || MANIFEST_SCHEMA=''
+case "$MANIFEST_SCHEMA" in
+  '' | *[!0-9]*)
+    refuse "The manifest's schema_version is '${MANIFEST_SCHEMA:-missing}', which is not a number."
+    ;;
+esac
+
+CH_KEYS="$(manifest_keys "$SRC" 'rows.clickhouse.')"
+PG_KEYS="$(manifest_keys "$SRC" 'rows.postgres.')"
+[ -n "$CH_KEYS" ] ||
+  refuse "The manifest records no ClickHouse row counts at all." \
+    "A restore cannot be verified against it, so it is refused rather than" \
+    "reported as a flawless restore of nothing."
+[ -n "$PG_KEYS" ] ||
+  refuse "The manifest records no Postgres row counts at all." \
+    "A restore cannot be verified against it, so it is refused rather than" \
+    "reported as a flawless restore of nothing."
+
+# Every count must name the expression it was taken with. Checked here, not at
+# verification time, because verification runs after the data is already gone
+# and there is nothing useful to do about a bad manifest at that point.
+while IFS= read -r key; do
+  [ -n "$key" ] || continue
+  table="${key#rows.clickhouse.}"
+  manifest_get "$SRC" "rowexpr.clickhouse.$table" > /dev/null ||
+    refuse "The manifest counts clickhouse.$table but does not say with which expression." \
+      "Comparing a merging engine's rows without that is a coin flip; see the" \
+      "rowexpr keys backup.sh writes."
+done <<EOF
+$CH_KEYS
+EOF
+
+# --- the stack is up -------------------------------------------------------
+#
+# All three, and the app in particular. It has to be stoppable (nothing may
+# write while the stores are being replaced) and it has to be readable: the
+# schema-version guard below asks the running image which version it
+# understands, and an image that is not running cannot be asked. Finding any
+# of this out after the ClickHouse database has been dropped would be the
+# worst possible time.
+for service in "$APP_SERVICE" "$CH_SERVICE" "$PG_SERVICE"; do
+  service_running "$service" ||
+    refuse "The '$service' service is not running." \
+      "Start the stack first: docker compose up -d"
+done
+
+# ---------------------------------------------------------------------------
+# GUARD 1 -- the artefacts are the ones the manifest describes.
+#
+# First of the three, because it is the one that catches a backup that is not
+# a backup: a copy interrupted half way, a truncated download, a disk that
+# went bad under an archive nobody has read since it was written. Every one of
+# those is only recoverable while the live data still exists.
+# ---------------------------------------------------------------------------
+
+say "Checking the artefacts against the manifest..."
+ACTUAL_CH_SUM="$(sha256_of "$SRC/clickhouse.zip")" || ACTUAL_CH_SUM=''
+ACTUAL_PG_SUM="$(sha256_of "$SRC/postgres.dump")" || ACTUAL_PG_SUM=''
+[ "$ACTUAL_CH_SUM" = "$MANIFEST_CH_SUM" ] ||
+  refuse "clickhouse.zip does not match the checksum in the manifest." \
+    "  manifest: $MANIFEST_CH_SUM" \
+    "  on disk:  ${ACTUAL_CH_SUM:-could not be computed}" \
+    "This backup is damaged. Do not restore it; find another copy."
+[ "$ACTUAL_PG_SUM" = "$MANIFEST_PG_SUM" ] ||
+  refuse "postgres.dump does not match the checksum in the manifest." \
+    "  manifest: $MANIFEST_PG_SUM" \
+    "  on disk:  ${ACTUAL_PG_SUM:-could not be computed}" \
+    "This backup is damaged. Do not restore it; find another copy."
+
+# ---------------------------------------------------------------------------
+# GUARD 2 -- the running image can understand this backup's schema.
+#
+# The same condition the app already raises at boot as SchemaTooNewError
+# ("Database schema version N is newer than this build understands (M)"), but
+# reached before the data is gone instead of after. That is the difference
+# between an error message and an outage: restore a schema-12 backup into a
+# schema-11 image and the app refuses to start, with the database it would
+# have refused to start against now being the only copy you have.
+# ---------------------------------------------------------------------------
+
+say "Checking the backup against the running image..."
+IMAGE_SCHEMA="$(image_schema_version)" || IMAGE_SCHEMA=''
+case "$IMAGE_SCHEMA" in
+  '' | *[!0-9]*)
+    refuse "Could not read the schema version the running app image understands." \
+      "Asked the '$APP_SERVICE' container and got '${IMAGE_SCHEMA:-nothing}'." \
+      "This guard is what stops a backup newer than your image being restored" \
+      "into it, so a restore is refused rather than run without it."
+    ;;
+esac
+
+# `-gt`, not `-lt` and not `-ne`. An OLDER backup is the ordinary case -- it is
+# what disaster recovery IS -- and the app migrates it forward on boot. Only a
+# backup from a build the running image has never heard of is unrestorable.
+if [ "$MANIFEST_SCHEMA" -gt "$IMAGE_SCHEMA" ]; then
+  refuse "This backup is newer than the running image." \
+    "Database schema version $MANIFEST_SCHEMA is newer than this build understands ($IMAGE_SCHEMA)." \
+    "Restoring it would leave you with a database the app refuses to start" \
+    "against. Upgrade the image first, then restore."
+fi
+
+# ---------------------------------------------------------------------------
+# GUARD 3 -- a human types the backup's timestamp.
+#
+# Last of the three on purpose: everything a machine can check has been
+# checked, so the one thing an operator is asked to do is the one thing only
+# they can decide. Asking first and then refusing on a checksum wastes the
+# only irreplaceable input in the process, which is their attention.
+#
+# The timestamp rather than "yes": the deletion CLI asks a yes/no question
+# because it names one person and the risk is that you meant a different
+# person. Here the risk is that you meant a different BACKUP, and typing the
+# stamp is what makes an operator look at which directory they actually
+# passed. It has the same fail-closed property that CLI's prompt has -- a
+# closed stdin, an empty line or a timeout are all refusals, and there is no
+# flag to skip it. A non-interactive caller that wants one is a separate
+# decision with its own review.
+# ---------------------------------------------------------------------------
+
+note ""
+note "About to REPLACE the contents of both data stores from:"
+note "  $SRC"
+note "Backup taken:    $STAMP"
+note "Schema version:  $MANIFEST_SCHEMA (running image understands $IMAGE_SCHEMA)"
+note ""
+note "Everything recorded since then will be lost, in both stores."
+note ""
+# The expected answer is NOT repeated on the prompt line. It is on the
+# "Backup taken" line above, where reading it is part of reading which backup
+# this is about; putting it here as well would turn a transcription into a
+# copy-paste and lose the only thing the question is for. Same instinct as the
+# deletion CLI, which deliberately keeps the person's id out of its question.
+note "Type that timestamp to confirm, or anything else to abandon:"
+CONFIRMATION=''
+if ! IFS= read -r -t "$CONFIRM_TIMEOUT" CONFIRMATION; then
+  CONFIRMATION=''
+fi
+[ "$CONFIRMATION" = "$STAMP" ] ||
+  refuse "That is not the backup's timestamp." \
+    "Expected: $STAMP" \
+    "Nothing was restored."
+
+# ---------------------------------------------------------------------------
+# FROM HERE ON, LIVE DATA IS AT RISK.
+# ---------------------------------------------------------------------------
+
+# Named from the manifest's own timestamp, not from the clock: a restore that
+# is interrupted and retried then reuses one path on the backups disk instead
+# of accumulating a copy per attempt, and ClickHouse's own error message on a
+# failed restore names an archive the operator can recognise.
+CH_FILE="lyraflow-$STAMP.zip"
+
+say "Stopping the app..."
+# Flag first, command second. `docker compose stop` can stop the container and
+# still exit non-zero -- Ctrl-C during the 30-second drain exits 130 with the
+# container already down -- and under `set -e` that kills this script before
+# any assignment placed after it could run, leaving the EXIT trap with nothing
+# to restore. Four review rounds on backup.sh were this one ordering; see
+# APP_STOPPED in backup-lib.sh for the measurement.
+APP_STOPPED=1
+docker compose stop "$APP_SERVICE" > /dev/null 2>&1 ||
+  abort "quiesce" \
+    "docker compose stop $APP_SERVICE exited non-zero." \
+    "The app may or may not have stopped; it is being started again either way."
+
+wait_until_stopped "$APP_SERVICE" 60 ||
+  abort "quiesce" \
+    "The app did not stop within 60s; refusing to replace the stores underneath it."
+
+# --- ClickHouse ------------------------------------------------------------
+
+say "Restoring ClickHouse..."
+
+# `docker compose exec` writing through a redirect, and NOT `docker compose
+# cp`, for a reason specific to this direction: `cp` reproduces the HOST
+# file's mode inside the container, and backup.sh deliberately writes its
+# artefacts 0600 owned by the operator. Copied in that way the archive lands
+# unreadable by the `clickhouse` user the server runs as, and RESTORE fails on
+# a file that is sitting right there. Through a redirect it is created by the
+# container's own umask -- measured as 0644 root:clickhouse, which the server
+# reads without complaint.
+docker compose exec -T "$CH_SERVICE" sh -c 'cat > "$1"' _ "$CH_BACKUP_DIR/$CH_FILE" \
+  < "$SRC/clickhouse.zip" ||
+  abort "ClickHouse" \
+    "Could not copy the archive into the $CH_SERVICE container."
+
+# Set immediately, and this is not the same trade-off backup.sh makes. There
+# the flag goes up only after BACKUP succeeds, so a run that loses a
+# same-second race cannot delete the winner's archive. Here the archive was
+# put on the disk by this run, by name, one statement ago: it is ours from the
+# moment the copy starts, and a partial copy left behind is exactly the volume
+# growth remove_in_container_artefact exists to prevent. The flag defaults to
+# 0 in backup-lib.sh, so forgetting this line makes that function a silent
+# no-op rather than an error.
+CH_ARTEFACT_CREATED=1
+
+# Bound to `default`, not to the application database. A ClickHouse session
+# sets its current database on connect and naming one that does not exist is
+# itself an error -- Code 81, UNKNOWN_DATABASE, measured -- which is precisely
+# the state between the DROP below and the RESTORE after it. The second
+# argument to ch_query exists for this.
+ch_query "DROP DATABASE IF EXISTS $CH_DATABASE SYNC" default > /dev/null ||
+  abort "ClickHouse" \
+    "Could not drop the $CH_DATABASE database; the ClickHouse error is above."
+
+# The window this comment describes is real but not avoidable: from here until
+# the RESTORE returns there is no ClickHouse database at all. SYNC is what
+# keeps it as short as it can be -- without it the DROP returns while the
+# tables are still being detached and the RESTORE races it.
+DATA_STATE="the ClickHouse database has been dropped and not yet restored, and Postgres is untouched. Run this script again with the same backup."
+
+ch_query "RESTORE DATABASE $CH_DATABASE FROM Disk('backups', '$CH_FILE')" default > /dev/null ||
+  abort "ClickHouse" \
+    "RESTORE DATABASE $CH_DATABASE failed; the ClickHouse error is above." \
+    "The archive is still on the backups disk inside the container and the" \
+    "backup directory is untouched, so this can simply be run again."
+
+DATA_STATE="ClickHouse has been restored from the backup; Postgres has NOT been touched and is still current. Deleted people stay hidden, which is the safe half. Run this script again with the same backup to finish."
+
+# --- Postgres --------------------------------------------------------------
+
+say "Restoring Postgres..."
+
+# The schema is dropped and recreated first, and `--clean --if-exists` alone
+# is not a substitute. MEASURED, all four on this branch:
+#
+#   --clean --if-exists onto the live schema     rc=0, no output, and a table
+#                                                that exists live but is not in
+#                                                the dump SURVIVES the restore
+#   --clean, no --if-exists, onto an empty one   rc=1 and 123 error lines
+#   --clean --if-exists onto an empty one        rc=0 and ZERO error lines
+#   DROP SCHEMA with no CREATE after it          rc=1 and 544 error lines
+#
+# The first line is the one that matters. `--clean` only drops what is IN the
+# dump, so restoring an older backup leaves every object a later migration
+# added still standing, holding rows from an era the restored
+# `schema_migrations` says never happened -- and the next boot re-runs those
+# migrations against tables that already exist. Dropping the schema makes this
+# a replacement rather than an overlay, which is what the ClickHouse half
+# already does and what the word restore ought to mean.
+#
+# The fourth line is why the CREATE is not optional: pg_dump's archive
+# contains no SCHEMA entry at all (checked with `pg_restore -l`), so a dropped
+# `public` is never recreated for you and the whole restore fails object by
+# object.
+#
+# `--clean --if-exists` is kept anyway even though the schema is empty by
+# then. It costs nothing measurable and it is the layer that still replaces
+# objects if the drop above is ever weakened; the third line is the
+# measurement that it is silent, which is why the noise the plan warned about
+# does not appear.
+#
+# `client_min_messages=warning` only to keep the output readable: CASCADE
+# announces every one of the fifteen objects it is taking with it, on stderr,
+# in the middle of the one part of this script where a real diagnostic must not
+# be scrolled past. Which objects are dropped is not news -- all of them are.
+docker compose exec -T "$PG_SERVICE" sh -c \
+  'PGPASSWORD="$POSTGRES_PASSWORD" PGOPTIONS="-c client_min_messages=warning" \
+     psql -U "$0" -d "$1" -v ON_ERROR_STOP=1 -q \
+     -c "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public"' \
+  "$PG_USER" "$PG_DATABASE" < /dev/null > /dev/null ||
+  abort "Postgres" \
+    "Could not drop and recreate the public schema; the Postgres error is above."
+
+DATA_STATE="ClickHouse has been restored and the Postgres schema has been dropped but not yet refilled. Postgres is EMPTY. Run this script again with the same backup."
+
+# `--single-transaction` so the dump lands whole or not at all: a half-applied
+# Postgres is the state with real teeth, because a partial `suppressed_persons`
+# is a partial suppression list and nothing announces which rows are missing.
+# It implies --exit-on-error, so the first genuine failure stops the run
+# instead of being counted up and reported at the end.
+#
+# The one thing it does not cover is the drop above, which is its own
+# statement and cannot be inside this transaction -- hence the state message
+# on the line before, which names the only intermediate state that exists.
+docker compose exec -T "$PG_SERVICE" sh -c \
+  'PGPASSWORD="$POSTGRES_PASSWORD" pg_restore -U "$0" -d "$1" \
+     --clean --if-exists --no-owner --single-transaction' \
+  "$PG_USER" "$PG_DATABASE" < "$SRC/postgres.dump" ||
+  abort "Postgres" \
+    "pg_restore failed; its error is above." \
+    "Nothing of the dump was applied -- it ran in a single transaction -- so" \
+    "the public schema is empty and this can be run again."
+
+DATA_STATE="both stores have been restored from the backup"
+
+# --- Verification, with the app still stopped ------------------------------
+
+say "Verifying row counts..."
+verify_row_counts ||
+  abort "verification" \
+    "The restored row counts do not match the manifest; each difference is listed above." \
+    "The data that was restored is what the backup contained -- this is a" \
+    "mismatch between that and what the backup SAYS it contained, so treat the" \
+    "backup as suspect rather than the restore."
+
+remove_in_container_artefact
+# `|| true` because the EXIT trap retries and owns the decision: a restart that
+# fails here must not stop the operator being told the restore succeeded, and
+# must not be reported as success either. The trap does both.
+start_app_if_stopped || true
+
+say "Restored from $SRC"
+say "Both stores now match the backup taken at $STAMP."

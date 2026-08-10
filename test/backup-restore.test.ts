@@ -1,8 +1,11 @@
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
+  closeSync,
   existsSync,
+  ftruncateSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   statSync,
@@ -45,11 +48,22 @@ const SCRIPT_ENV = { ...process.env, COMPOSE_FILE: 'docker-compose.ci.yml' }
  */
 let shimDir: string
 
-function runScript(script: string, args: string[], env: NodeJS.ProcessEnv = {}): string {
+function runScript(
+  script: string,
+  args: string[],
+  env: NodeJS.ProcessEnv = {},
+  input?: string,
+): string {
   return execFileSync(script, args, {
     encoding: 'utf8',
     stdio: 'pipe',
     env: { ...SCRIPT_ENV, ...env },
+    // `input: undefined` is NOT the same as omitting it: execFileSync treats
+    // the presence of the key as "use a pipe for stdin and close it", which is
+    // what backup.sh already gets. Spelled out because restore.sh's
+    // confirmation reads stdin, and a test that meant to type nothing and a
+    // test that meant to inherit the runner's stdin must not look alike.
+    ...(input === undefined ? {} : { input }),
   })
 }
 
@@ -62,9 +76,10 @@ function runScriptExpectingFailure(
   script: string,
   args: string[],
   env: NodeJS.ProcessEnv = {},
+  input?: string,
 ): string {
   try {
-    runScript(script, args, env)
+    runScript(script, args, env, input)
   } catch (e) {
     const err = e as { stderr?: Buffer | string }
     return String(err.stderr ?? '')
@@ -78,16 +93,35 @@ const withShim = (vars: NodeJS.ProcessEnv): NodeJS.ProcessEnv => ({
   ...vars,
 })
 
-/** A single scalar from ClickHouse over HTTP — no build artefacts required. */
+/**
+ * A single scalar from ClickHouse over HTTP — no build artefacts required.
+ *
+ * Retries a CONNECTION failure and nothing else, for the same reason
+ * readyStatus() does: undici keeps sockets alive between requests, a restore
+ * takes the best part of a minute, and the first query after one reuses a
+ * socket ClickHouse's own keep-alive timeout has already closed. That surfaces
+ * as UND_ERR_SOCKET before a request is ever sent, which is a property of the
+ * HTTP client. An HTTP error — the store answering with a complaint — is not
+ * retried, because that is a real answer.
+ */
 async function chScalar(sql: string): Promise<string> {
-  const res = await fetch('http://localhost:8123/?database=lyraflow', {
-    method: 'POST',
-    headers: { 'x-clickhouse-user': 'lyraflow', 'x-clickhouse-key': 'lyraflow' },
-    body: sql,
-  })
-  const text = await res.text()
-  if (!res.ok) throw new Error(`ClickHouse ${res.status}: ${text}`)
-  return text.trim()
+  for (let attempt = 0; ; attempt++) {
+    let res: Response
+    try {
+      res = await fetch('http://localhost:8123/?database=lyraflow', {
+        method: 'POST',
+        headers: { 'x-clickhouse-user': 'lyraflow', 'x-clickhouse-key': 'lyraflow' },
+        body: sql,
+      })
+    } catch (e) {
+      if (attempt >= 2) throw e
+      await new Promise((r) => setTimeout(r, 500))
+      continue
+    }
+    const text = await res.text()
+    if (!res.ok) throw new Error(`ClickHouse ${res.status}: ${text}`)
+    return text.trim()
+  }
 }
 
 const pgScalar = (sql: string): string =>
@@ -129,6 +163,77 @@ function takeBackup(): string {
   expect(stamps).toHaveLength(1)
   return join(dest, stamps[0] as string)
 }
+
+const manifestTimestamp = (out: string): string =>
+  parseManifest(join(out, 'MANIFEST')).timestamp as string
+
+/** The confirmation restore.sh asks for, as it arrives on stdin. */
+const confirmation = (out: string): string => `${manifestTimestamp(out)}\n`
+
+/**
+ * Rewrites one manifest key in place. Safe to use for guard tests because the
+ * manifest is not itself checksummed — only clickhouse.zip and postgres.dump
+ * are — so a rewritten key reaches the guard it is aimed at rather than being
+ * caught by the checksum guard first.
+ */
+function rewriteManifestKey(path: string, key: string, value: string): void {
+  const lines = readFileSync(path, 'utf8').split('\n')
+  let found = false
+  const next = lines.map((line) => {
+    if (!line.startsWith(`${key}=`)) return line
+    found = true
+    return `${key}=${value}`
+  })
+  expect(found, `no ${key} in ${path}`).toBe(true)
+  writeFileSync(path, next.join('\n'))
+}
+
+/** Removes every manifest line whose key starts with `prefix`. */
+function dropManifestKeys(path: string, prefix: string): void {
+  const lines = readFileSync(path, 'utf8').split('\n')
+  const next = lines.filter((line) => !line.startsWith(prefix))
+  expect(next.length, `no ${prefix}* lines in ${path}`).toBeLessThan(lines.length)
+  writeFileSync(path, next.join('\n'))
+}
+
+function truncateFile(path: string, bytes: number): void {
+  const fd = openSync(path, 'r+')
+  try {
+    ftruncateSync(fd, bytes)
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/**
+ * Name, size, mode and checksum of everything in a backup directory.
+ *
+ * A restore reads a backup and must not write to it — an operator's only copy
+ * of their data is not scratch space, and a restore that scribbles in it turns
+ * one bad restore into no more attempts.
+ */
+const fingerprint = (dir: string): string[] =>
+  readdirSync(dir)
+    .sort()
+    .map((f) => {
+      const p = join(dir, f)
+      return `${f} ${statSync(p).size} ${mode(p).toString(8)} ${sha256OfFile(p)}`
+    })
+
+/**
+ * The app container's start time.
+ *
+ * `/ready` answering 200 is NOT evidence a guard refused before stopping the
+ * app: both scripts restart it on the way out and wait for health first, so a
+ * guard that ran too late looks identical from outside. This does not — it
+ * moves if and only if the container was actually restarted.
+ */
+const appStartedAt = (): string =>
+  execFileSync(
+    'docker',
+    ['inspect', '--format', '{{.State.StartedAt}}', compose('ps', '-aq', 'lyraflow').trim()],
+    { encoding: 'utf8' },
+  ).trim()
 
 /** The same stamp format backup.sh computes with `date -u +%Y-%m-%dT%H%M%SZ`. */
 function utcStamp(d: Date): string {
@@ -1264,4 +1369,706 @@ describe('backup.sh', () => {
       await waitReady()
     }
   }, 300_000)
+})
+
+/**
+ * Every count a restore is allowed to change, in one snapshot.
+ *
+ * `events` is read with FINAL because a merging engine's plain `count()`
+ * moves on its own between two reads that are seconds apart — see
+ * ch_count_expression in backup-lib.sh — which would make "nothing was
+ * destroyed" flap for reasons that have nothing to do with restore.sh.
+ */
+async function liveState(): Promise<Record<string, string>> {
+  return {
+    events: await chScalar('SELECT count() FROM events FINAL'),
+    deadLetter: await chScalar('SELECT count() FROM events_dead_letter'),
+    deviceIndex: await chScalar('SELECT count() FROM device_index FINAL'),
+    projects: pgScalar('SELECT count(*) FROM public.projects'),
+    apiKeys: pgScalar('SELECT count(*) FROM public.api_keys'),
+    suppressed: pgScalar('SELECT count(*) FROM public.suppressed_persons'),
+  }
+}
+
+/**
+ * Runs a restore that must be refused, and proves the refusal cost nothing.
+ *
+ * Three assertions, and all three are the point rather than belt-and-braces.
+ * The rows prove no data was destroyed. The container's start time proves the
+ * app was never even stopped — `/ready` cannot show that, because a script
+ * that stopped the app and put it back looks identical from outside, and that
+ * is exactly the difference between a guard that runs before the quiesce and
+ * one that runs after it. The fingerprint proves the operator's only copy of
+ * their data was not written to while it was being read.
+ */
+async function expectRefusal(out: string, input: string): Promise<string> {
+  const before = await liveState()
+  const startedAt = appStartedAt()
+  const backupBefore = fingerprint(out)
+
+  const err = runScriptExpectingFailure('./restore.sh', [out], {}, input)
+
+  expect(await liveState(), 'a refusal must not destroy anything').toEqual(before)
+  expect(appStartedAt(), 'a refusal must not even stop the app').toBe(startedAt)
+  expect(fingerprint(out), 'a restore must not modify the backup').toEqual(backupBefore)
+  return err
+}
+
+/** Ingests one event and returns once it has been flushed to ClickHouse. */
+async function ingestOneEvent(anonymousId: string): Promise<void> {
+  await fetch(`${BASE}/v1/track`, {
+    method: 'POST',
+    headers: ingestHeaders(),
+    body: JSON.stringify({
+      message_id: randomUUID(),
+      anonymous_id: anonymousId,
+      event: 'after_the_backup',
+      properties: { plan: 'pro' },
+    }),
+  })
+  await new Promise((r) => setTimeout(r, 5000))
+}
+
+/**
+ * Puts rows in `events_dead_letter`, which is the only table carrying a TTL
+ * and therefore the only one whose row verification is allowed any latitude.
+ *
+ * Nothing the rest of this file does produces one: the fixtures all send valid
+ * payloads. A payload that fails validation is answered 202 and recorded
+ * verbatim in the dead-letter table — it is the only record that data arrived
+ * and could not be stored — and that write is not buffered, so there is no
+ * flush to wait for.
+ */
+async function seedDeadLetters(count: number): Promise<void> {
+  for (let i = 0; i < count; i++) {
+    await fetch(`${BASE}/v1/track`, {
+      method: 'POST',
+      headers: ingestHeaders(),
+      // No `event`, which is required: validation_failed.
+      body: JSON.stringify({ message_id: randomUUID(), anonymous_id: `dead-${i}` }),
+    })
+  }
+  await new Promise((r) => setTimeout(r, 2000))
+}
+
+/** restore.sh with comment lines and here-document bodies removed. */
+function restoreCode(): string {
+  const out: string[] = []
+  let terminator: string | null = null
+  for (const line of readFileSync('restore.sh', 'utf8').split('\n')) {
+    if (terminator !== null) {
+      if (line.trim() === terminator) terminator = null
+      continue
+    }
+    if (/^\s*#/.test(line)) continue
+    const here = /<<-?\s*'?([A-Za-z_][A-Za-z0-9_]*)'?/.exec(line)
+    if (here) terminator = here[1] as string
+    out.push(line)
+  }
+  expect(terminator, 'unterminated heredoc swallowed the rest of restore.sh').toBeNull()
+  const stripped = out.join('\n')
+  for (const landmark of ['usage()', 'cleanup()', 'trap cleanup EXIT', 'verify_row_counts()']) {
+    expect(stripped, `${landmark} vanished from restore.sh — a heredoc ate it`).toContain(landmark)
+  }
+  return stripped
+}
+
+describe('restore.sh guards', () => {
+  // GUARD 1, half a. A truncated archive must be caught while the live data
+  // still exists — which is the entire reason backup.sh checksums the bytes
+  // on disk rather than the copy inside the container.
+  it('refuses a corrupted clickhouse.zip with the live data intact', async () => {
+    const out = takeBackup()
+    truncateFile(join(out, 'clickhouse.zip'), 128)
+    const err = await expectRefusal(out, confirmation(out))
+    expect(err).toMatch(/checksum/i)
+    expect(err).toMatch(/clickhouse\.zip/)
+  }, 300_000)
+
+  // GUARD 1, half b, and it is a separate test on purpose. Checking only the
+  // ClickHouse artefact passes the test above while leaving a truncated
+  // Postgres dump — the half that carries the suppression list — completely
+  // unchecked. Each half of a guard needs its own pin, or the half nothing
+  // covers is the one the next edit deletes.
+  it('refuses a corrupted postgres.dump with the live data intact', async () => {
+    const out = takeBackup()
+    truncateFile(join(out, 'postgres.dump'), 128)
+    const err = await expectRefusal(out, confirmation(out))
+    expect(err).toMatch(/checksum/i)
+    expect(err).toMatch(/postgres\.dump/)
+  }, 300_000)
+
+  // GUARD 2. The same condition the app raises at boot as SchemaTooNewError,
+  // but reached before the data is gone rather than after — the difference
+  // between an error message and an outage.
+  it('refuses a backup newer than the running image, before destroying anything', async () => {
+    const out = takeBackup()
+    rewriteManifestKey(join(out, 'MANIFEST'), 'schema_version', '9999')
+    const err = await expectRefusal(out, confirmation(out))
+    expect(err).toMatch(/newer than this build|schema_version|newer than the running image/i)
+  }, 300_000)
+
+  // GUARD 3. A non-empty answer that is not the timestamp: the mutation this
+  // pins is "accept anything the operator typed", which `yes` walks straight
+  // through.
+  it('refuses when the typed confirmation does not match the timestamp', async () => {
+    const out = takeBackup()
+    const err = await expectRefusal(out, 'yes\n')
+    expect(err).toMatch(/timestamp/i)
+  }, 300_000)
+
+  // …and fails CLOSED when there is nobody to answer. An empty stdin is what
+  // cron, a CI job and an agent all present, and the failure mode a
+  // confirmation must never have is "unattended callers are waved through".
+  it('refuses a restore nobody confirmed', async () => {
+    const out = takeBackup()
+    const err = await expectRefusal(out, '')
+    expect(err).toMatch(/timestamp/i)
+  }, 300_000)
+
+  // The manifest's own completeness, checked before anything is destroyed.
+  //
+  // backup.sh's write_manifest comment records what a short manifest looked
+  // like when it could still happen: three files, correct checksums,
+  // `mode=quiesced`, a matching timestamp, and the entire `rows.postgres.*`
+  // block missing. It writes atomically now — so this is not a live defect —
+  // but a restore that iterated an absent block would report a flawless
+  // Postgres verification, which is the worst possible way to find out that
+  // changed back.
+  it('refuses a manifest that records no Postgres row counts', async () => {
+    const out = takeBackup()
+    dropManifestKeys(join(out, 'MANIFEST'), 'rows.postgres.')
+    const err = await expectRefusal(out, confirmation(out))
+    expect(err).toMatch(/no Postgres row counts/i)
+  }, 300_000)
+
+  it('refuses a manifest that records no ClickHouse row counts', async () => {
+    const out = takeBackup()
+    dropManifestKeys(join(out, 'MANIFEST'), 'rows.clickhouse.')
+    const err = await expectRefusal(out, confirmation(out))
+    expect(err).toMatch(/no ClickHouse row counts/i)
+  }, 300_000)
+
+  // A count with no expression cannot be compared: `count()` and `count()
+  // FINAL` answer differently for four of the five ClickHouse tables and only
+  // one of them is right. Caught here rather than at verification time, which
+  // runs after the data is already gone.
+  it('refuses a ClickHouse count the manifest gives no expression for', async () => {
+    const out = takeBackup()
+    dropManifestKeys(join(out, 'MANIFEST'), 'rowexpr.clickhouse.events=')
+    const err = await expectRefusal(out, confirmation(out))
+    expect(err).toMatch(/expression/i)
+    expect(err).toMatch(/events/)
+  }, 300_000)
+
+  it('refuses a directory that is not a backup', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lyraflow-notabackup-'))
+    const before = await liveState()
+    const startedAt = appStartedAt()
+    const err = runScriptExpectingFailure('./restore.sh', [dir], {}, 'anything\n')
+    expect(err).toMatch(/MANIFEST/)
+    expect(await liveState()).toEqual(before)
+    expect(appStartedAt()).toBe(startedAt)
+  }, 300_000)
+
+  it('refuses a backup that is missing an artefact', async () => {
+    const out = takeBackup()
+    execFileSync('rm', [join(out, 'postgres.dump')])
+    const before = await liveState()
+    const startedAt = appStartedAt()
+    const err = runScriptExpectingFailure('./restore.sh', [out], {}, confirmation(out))
+    expect(err).toMatch(/postgres\.dump/)
+    expect(await liveState()).toEqual(before)
+    expect(appStartedAt()).toBe(startedAt)
+  }, 300_000)
+
+  it('has no flag that restores only one store', () => {
+    // The unsafe operation, and the one an operator under pressure reaches
+    // for: a Postgres older than its ClickHouse partner has lost suppression
+    // rows, and the people they hide become visible again.
+    const src = readFileSync('restore.sh', 'utf8')
+    expect(src).not.toMatch(/--postgres-only|--clickhouse-only|--only/)
+  })
+
+  it('restores ClickHouse before Postgres', () => {
+    // A TRIPWIRE, NOT A PROOF. It is a source-text assertion: it fails loudly
+    // on a reordering and says nothing about what the script does. The
+    // behavioural pin is in the audit test below, which reads the order out of
+    // an execution trace of a real restore, and Task 4's round trip is what
+    // exercises the consequence.
+    const src = readFileSync('restore.sh', 'utf8')
+    expect(src.indexOf('RESTORE DATABASE')).toBeLessThan(src.indexOf('pg_restore'))
+  })
+
+  it('runs the three guards before anything is destroyed', () => {
+    // The ordering rule the two tests above cannot see, pinned in the source
+    // for the same reason backup.sh pins the umask's position: moving a guard
+    // below the quiesce is a one-line edit, and each of the runtime tests
+    // above only fails for the ONE guard it is aimed at. This says all three
+    // are on the safe side of the line at once.
+    const code = restoreCode()
+    const destruction = code.indexOf('docker compose stop')
+    expect(destruction, 'restore.sh must stop the app').toBeGreaterThan(-1)
+    for (const guard of ['sha256_of "$SRC/clickhouse.zip"', 'image_schema_version', 'read -r']) {
+      const at = code.indexOf(guard)
+      expect(at, `${guard} not found in restore.sh`).toBeGreaterThan(-1)
+      expect(at, `${guard} must run before the app is stopped`).toBeLessThan(destruction)
+    }
+    // …and the flag the EXIT trap reads is set BEFORE the stop, not after it.
+    // Four review rounds on backup.sh were this one ordering: `docker compose
+    // stop` can stop the container and still exit non-zero, and under `set -e`
+    // an assignment placed after it never runs.
+    const flag = code.indexOf('APP_STOPPED=1')
+    expect(flag, 'restore.sh must record that it stopped the app').toBeGreaterThan(-1)
+    expect(flag, 'APP_STOPPED=1 must precede the stop it describes').toBeLessThan(destruction)
+  })
+})
+
+describe('restore.sh', () => {
+  it('puts both stores back, and loses what was written after the backup', async () => {
+    const out = takeBackup()
+    const m = parseManifest(join(out, 'MANIFEST'))
+    const backupBefore = fingerprint(out)
+
+    // Diverge BOTH stores from the backup, so a restore that quietly did only
+    // one of them cannot pass.
+    const created = compose(
+      'exec',
+      '-T',
+      'lyraflow',
+      'node',
+      'packages/cli/dist/index.js',
+      'create-project',
+      'AfterTheBackup',
+    )
+    expect(created).toMatch(/wk_[a-f0-9]+/)
+    await ingestOneEvent('after-backup-anon')
+
+    const diverged = await liveState()
+    expect(diverged.projects).not.toBe(m['rows.postgres.projects'])
+    expect(diverged.events).not.toBe(m['rows.clickhouse.events'])
+
+    const stdout = runScript('./restore.sh', [out], {}, confirmation(out))
+    expect(stdout).toMatch(/Restored from/)
+
+    // Both stores are back at the backup's numbers, table by table, using the
+    // expression the manifest itself names.
+    for (const [key, value] of Object.entries(m)) {
+      if (key.startsWith('rows.clickhouse.')) {
+        const table = key.slice('rows.clickhouse.'.length)
+        const expr = m[`rowexpr.clickhouse.${table}`] as string
+        const final = expr.endsWith('FINAL') ? ' FINAL' : ''
+        expect(await chScalar(`SELECT count() FROM \`${table}\`${final}`), table).toBe(value)
+      }
+      if (key.startsWith('rows.postgres.')) {
+        const table = key.slice('rows.postgres.'.length)
+        expect(pgScalar(`SELECT count(*) FROM public."${table}"`), table).toBe(value)
+      }
+    }
+
+    // The app is back, healthy, and answering.
+    expect(await readyStatus()).toBe(200)
+
+    // The scratch archive this restore copied INTO the container is gone. The
+    // backups disk lives inside the ClickHouse data volume, so an archive left
+    // there survives `docker compose down` and grows the volume by one whole
+    // backup per restore. CH_ARTEFACT_CREATED defaults to 0 in backup-lib.sh,
+    // which makes forgetting to set it a silent no-op rather than an error.
+    expect(backupsDirListing().trim()).toBe('')
+
+    // And the backup itself is untouched — same bytes, same modes.
+    expect(fingerprint(out)).toEqual(backupBefore)
+  }, 600_000)
+
+  it('restores a backup OLDER than the running image', async () => {
+    // Pins `>` rather than `!=` or `<` in the schema guard. An older backup is
+    // not an error, it is what disaster recovery IS: the app migrates it
+    // forward on the next boot. A guard written with the comparison the wrong
+    // way round refuses every real restore and passes the newer-backup test.
+    const out = takeBackup()
+    const image = Number(parseManifest(join(out, 'MANIFEST')).schema_version)
+    expect(image).toBeGreaterThan(1)
+    rewriteManifestKey(join(out, 'MANIFEST'), 'schema_version', '1')
+
+    const stdout = runScript('./restore.sh', [out], {}, confirmation(out))
+    expect(stdout).toMatch(/Restored from/)
+    expect(await readyStatus()).toBe(200)
+  }, 600_000)
+
+  it('fails the restore when the restored rows disagree with the manifest', async () => {
+    // The mutation this exists for is "log a warning and carry on". Nothing in
+    // the guard tests can catch it: they all refuse before the restore runs,
+    // and verification is the only check that happens after the data has
+    // already been replaced — so it is the only one where a warning instead of
+    // a non-zero exit is invisible.
+    const out = takeBackup()
+    const events = parseManifest(join(out, 'MANIFEST'))['rows.clickhouse.events'] as string
+    rewriteManifestKey(join(out, 'MANIFEST'), 'rows.clickhouse.events', String(Number(events) + 7))
+
+    const err = runScriptExpectingFailure('./restore.sh', [out], {}, confirmation(out))
+    expect(err).toMatch(/verification/i)
+    expect(err).toMatch(/clickhouse\.events/)
+    expect(err).toContain(String(Number(events) + 7))
+
+    // A failed verification still has to leave the app running: the data has
+    // been replaced either way, and a site that is dark on top of it is worse.
+    await waitReady(120_000)
+    expect(await readyStatus()).toBe(200)
+    expect(backupsDirListing().trim()).toBe('')
+  }, 600_000)
+
+  it('treats a lower count as expected only where the manifest records a TTL', async () => {
+    // `events_dead_letter` carries a table-level TTL, so its rows are deleted
+    // by the same background merges that collapse the others — restoring a
+    // backup older than the retention window is ordinary disaster recovery and
+    // must not read as catastrophic loss. Every other table gets no such
+    // latitude, and no table gets it in the other direction: nothing about a
+    // TTL can invent rows.
+    await seedDeadLetters(3)
+    const out = takeBackup()
+    const m = parseManifest(join(out, 'MANIFEST'))
+    expect(m['rowttl.clickhouse.events_dead_letter']).toBeTruthy()
+    expect(m['rowttl.clickhouse.events']).toBeUndefined()
+    const dead = Number(m['rows.clickhouse.events_dead_letter'])
+    expect(dead).toBeGreaterThan(0)
+
+    // Manifest HIGHER than the restored count, on the table with a TTL: fine.
+    rewriteManifestKey(
+      join(out, 'MANIFEST'),
+      'rows.clickhouse.events_dead_letter',
+      String(dead + 5),
+    )
+    const stdout = runScript('./restore.sh', [out], {}, confirmation(out))
+    expect(stdout).toMatch(/Restored from/)
+    expect(stdout).toMatch(/lower is expected/i)
+
+    // Manifest LOWER than the restored count, same table: still a failure. A
+    // TTL only ever removes rows.
+    rewriteManifestKey(
+      join(out, 'MANIFEST'),
+      'rows.clickhouse.events_dead_letter',
+      String(dead - 1),
+    )
+    const err = runScriptExpectingFailure('./restore.sh', [out], {}, confirmation(out))
+    expect(err).toMatch(/verification/i)
+    expect(err).toMatch(/events_dead_letter/)
+    await waitReady(120_000)
+    expect(await readyStatus()).toBe(200)
+  }, 900_000)
+
+  it('counts ClickHouse rows with the expression the manifest names', async () => {
+    // The contract that has no natural fixture: `count()` and `count() FINAL`
+    // agree on a table whose parts have merged, and every table's parts have
+    // merged within seconds. Measured on this branch — device_index went from
+    // count()=5 to count()=3 within five seconds of a RESTORE while FINAL was
+    // 3 at every sample — so a test that just restores and looks would pass
+    // against a bare `count()` most of the time and fail some of the time,
+    // which is worse than not having one.
+    //
+    // So the window is held open instead of raced: the table's own merge
+    // settings are frozen, and because they are table settings they are
+    // carried in the archive and come back with the RESTORE. Measured: count()
+    // stayed 5 against FINAL 3 for the whole 25s after a restore.
+    const freeze =
+      'ALTER TABLE device_index MODIFY SETTING' +
+      ' max_bytes_to_merge_at_max_space_in_pool = 1, max_bytes_to_merge_at_min_space_in_pool = 1'
+    const thaw =
+      'ALTER TABLE device_index RESET SETTING' +
+      ' max_bytes_to_merge_at_max_space_in_pool, max_bytes_to_merge_at_min_space_in_pool'
+    await chScalar(freeze)
+    try {
+      // One anonymous_id, four flush batches: four device_index rows sharing a
+      // sorting key, in four parts that will now never merge.
+      for (let i = 0; i < 4; i++) {
+        await fetch(`${BASE}/v1/identify`, {
+          method: 'POST',
+          headers: ingestHeaders(),
+          body: JSON.stringify({
+            message_id: randomUUID(),
+            anonymous_id: 'frozen-anon',
+            user_id: 'frozen-person',
+            traits: { n: i },
+          }),
+        })
+        await new Promise((r) => setTimeout(r, 4000))
+      }
+      await new Promise((r) => setTimeout(r, 5000))
+
+      const raw = await chScalar('SELECT count() FROM device_index')
+      const merged = await chScalar('SELECT count() FROM device_index FINAL')
+      expect(
+        Number(raw),
+        'the fixture did not diverge — this test would pass vacuously',
+      ).toBeGreaterThan(Number(merged))
+
+      const out = takeBackup()
+      const m = parseManifest(join(out, 'MANIFEST'))
+      expect(m['rowexpr.clickhouse.device_index']).toBe('count() FINAL')
+      expect(m['rows.clickhouse.device_index']).toBe(merged)
+
+      const stdout = runScript('./restore.sh', [out], {}, confirmation(out))
+      expect(stdout).toMatch(/Restored from/)
+
+      // The divergence survived the restore, so a bare `count()` really did
+      // have a wrong answer available to it throughout.
+      expect(Number(await chScalar('SELECT count() FROM device_index'))).toBeGreaterThan(
+        Number(await chScalar('SELECT count() FROM device_index FINAL')),
+      )
+    } finally {
+      await chScalar(thaw)
+    }
+  }, 900_000)
+
+  it('restarts the app and names the state when the Postgres step fails', async () => {
+    // The half-restored state, and the only one an operator can be left in:
+    // ClickHouse replaced, Postgres still current. It is the SAFE half — a
+    // deleted person's events are back but their suppression row is still
+    // there, so they stay hidden — and the message has to say so, because the
+    // obvious reading of "the restore failed" is that nothing happened.
+    const out = takeBackup()
+    const err = runScriptExpectingFailure(
+      './restore.sh',
+      [out],
+      withShim({ SHIM_FAIL_BEFORE: 'DROP SCHEMA IF EXISTS public' }),
+      confirmation(out),
+    )
+    expect(err).toMatch(/Postgres/)
+    expect(err).toMatch(/STATE OF YOUR DATA/)
+    // It must name which half happened, not just that something failed.
+    expect(err).toMatch(/ClickHouse has been restored/i)
+    expect(err).toMatch(/Postgres has NOT been touched/i)
+
+    await waitReady(120_000)
+    expect(await readyStatus()).toBe(200)
+    // The scratch archive is cleaned up from the failure path too.
+    expect(backupsDirListing().trim()).toBe('')
+
+    // Leave the stack consistent for whatever runs next.
+    runScript('./restore.sh', [out], {}, confirmation(out))
+  }, 900_000)
+
+  it('reads a manifest value that contains an `=`', async () => {
+    // write_manifest's contract, in backup-lib.sh: a parser must split on the
+    // FIRST `=` and take the whole remainder. Keys never contain one, values
+    // can — a `rowttl` value is an arbitrary ClickHouse expression, and a
+    // `TTL … GROUP BY … SET x = max(y)` contains spaces, parentheses AND an
+    // `=`. A parser that splits on every `=`, or takes the last one, truncates
+    // it silently.
+    //
+    // No value Lyraflow writes today contains one, so nothing else in this
+    // suite could tell the two parsers apart — which is exactly how a rule
+    // with no test survives until the migration that adds such a TTL. The
+    // `timestamp` is used verbatim, for the confirmation and for the
+    // in-container archive name, so bending it is the one way to make the rule
+    // observable: a last-`=` parser would ask the operator to type `y`.
+    const out = takeBackup()
+    const bent = `${manifestTimestamp(out)}=x=y`
+    rewriteManifestKey(join(out, 'MANIFEST'), 'timestamp', bent)
+
+    const stdout = runScript('./restore.sh', [out], {}, `${bent}\n`)
+    expect(stdout).toContain(bent)
+    expect(await readyStatus()).toBe(200)
+    expect(backupsDirListing().trim()).toBe('')
+  }, 900_000)
+
+  it('restarts the app when `docker compose stop` stops it and then reports failure', async () => {
+    // The Critical backup.sh spent four review rounds on, and the reason
+    // APP_STOPPED is set BEFORE the stop rather than after it. `docker compose
+    // stop` can stop the container and still exit non-zero — Ctrl-C during the
+    // 30-second drain exits 130 with the container already down — and under
+    // `set -e` that kills the script at the `stop` line, before any assignment
+    // placed after it could run. The EXIT trap then reads a flag that was
+    // never set and leaves the app stopped with nothing announcing it.
+    //
+    // The source-position rule in the guards block above pins the ordering in
+    // the file. This pins the consequence, which is what actually matters, and
+    // it is the one assertion that would have caught the original defect.
+    const out = takeBackup()
+    const err = runScriptExpectingFailure(
+      './restore.sh',
+      [out],
+      withShim({ SHIM_FAIL_AFTER: 'compose stop lyraflow' }),
+      confirmation(out),
+    )
+    // It must announce itself rather than dying silently under `set -e`…
+    expect(err).toMatch(/quiesce/i)
+    // …and say the data is untouched, because at that point it is: the stop
+    // is the last step before anything is destroyed.
+    expect(err).toMatch(/nothing has been changed/i)
+
+    await waitReady(120_000)
+    expect(await readyStatus()).toBe(200)
+  }, 900_000)
+
+  it('replaces the Postgres schema rather than layering the dump over it', async () => {
+    // MEASURED, and the reason the schema is dropped and recreated instead of
+    // relying on `--clean --if-exists` alone: `--clean` only drops what is IN
+    // the dump. Restoring onto a live schema exits 0 with no output and leaves
+    // every object the dump does not mention still standing.
+    //
+    // That is not a hypothetical shape. Restore a backup from schema version 9
+    // into a version-11 database and the tables migrations 10 and 11 created
+    // survive, holding rows from an era the restored `schema_migrations` says
+    // never happened — and the next boot re-runs those two migrations against
+    // tables that already exist.
+    //
+    // `left_over_table` stands in for exactly that. Nothing else in this file
+    // would notice it: every other assertion iterates the manifest, and a
+    // table the manifest has never heard of is invisible to all of them.
+    const out = takeBackup()
+    pgScalar('CREATE TABLE public.left_over_table (id int)')
+    expect(
+      pgScalar(
+        "SELECT count(*) FROM information_schema.tables WHERE table_name = 'left_over_table'",
+      ),
+    ).toBe('1')
+
+    runScript('./restore.sh', [out], {}, confirmation(out))
+
+    expect(
+      pgScalar(
+        "SELECT count(*) FROM information_schema.tables WHERE table_name = 'left_over_table'",
+      ),
+      'a restore must replace the schema, not overlay the dump on it',
+    ).toBe('0')
+    expect(await readyStatus()).toBe(200)
+  }, 900_000)
+
+  it('runs no command that could create a file, and restores in the right order', async () => {
+    // The runtime half of two separate claims, both from a single trace of a
+    // real restore.
+    //
+    // ONE: restore.sh creates nothing on the host. backup.sh funnels every
+    // file it writes through one `artefact_write`; this script writes no host
+    // file at all, so the corresponding assertion is that it calls that
+    // function zero times and that the backup directory is byte-identical
+    // afterwards. The one file it does create lives INSIDE the ClickHouse
+    // container, and `docker compose cp` is specifically not how it gets there
+    // — `cp` reproduces the host file's 0600 and the server, running as
+    // `clickhouse`, then cannot read the archive it is being asked to restore.
+    //
+    // TWO: the order. The source tripwire above proves the two statements
+    // appear in the right order in the file; this proves the two commands RAN
+    // in that order, which is what the privacy argument actually rests on.
+    const ALLOWED = new Set([
+      // shell builtins and keywords bash reports
+      '[',
+      '.',
+      'case',
+      'cd',
+      'command',
+      'continue',
+      'echo',
+      'exit',
+      'for',
+      'local',
+      'printf',
+      'pwd',
+      'read',
+      'return',
+      'set',
+      'shift',
+      'sleep',
+      'trap',
+      // external programs
+      'awk',
+      'cat',
+      'dirname',
+      'docker',
+      'grep',
+      'head',
+      'rm',
+      'sha256sum',
+      'shasum',
+      'openssl',
+      // functions defined by restore.sh and backup-lib.sh
+      'abort',
+      'ch_query',
+      'cleanup',
+      'have_sha256',
+      'image_schema_version',
+      'manifest_get',
+      'manifest_keys',
+      'note',
+      'pg_query',
+      'refuse',
+      'remove_in_container_artefact',
+      'safe_identifier',
+      'say',
+      'service_image',
+      'service_running',
+      'sha256_of',
+      'start_app_if_stopped',
+      'usage',
+      'verify_row_counts',
+      'wait_until_healthy',
+      'wait_until_stopped',
+    ])
+
+    const out = takeBackup()
+    const backupBefore = fingerprint(out)
+    const trace = join(mkdtempSync(join(tmpdir(), 'lyraflow-trace-')), 'x')
+    const res = spawnSync('bash', ['-c', `bash -x ./restore.sh "$1" 2>"$2"`, '_', out, trace], {
+      encoding: 'utf8',
+      env: SCRIPT_ENV,
+      input: confirmation(out),
+    })
+    expect(res.status, `restore failed: ${readFileSync(trace, 'utf8').slice(-2000)}`).toBe(0)
+
+    const observed = new Set<string>()
+    const dockerCalls: string[] = []
+    let artefactWrites = 0
+    let chRestoreAt = -1
+    let pgRestoreAt = -1
+    const lines = readFileSync(trace, 'utf8').split('\n')
+    lines.forEach((line, i) => {
+      const m = /^\++ (\S+)/.exec(line)
+      if (!m) return
+      const word = m[1] as string
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) return // an assignment
+      observed.add(word.replace(/^'|'$/g, ''))
+      if (word === 'docker') dockerCalls.push(line)
+      if (word === 'artefact_write') artefactWrites++
+      if (chRestoreAt === -1 && line.includes('RESTORE DATABASE lyraflow')) chRestoreAt = i
+      if (pgRestoreAt === -1 && line.includes('pg_restore')) pgRestoreAt = i
+    })
+
+    expect(
+      observed.size,
+      'xtrace produced nothing — the audit would pass vacuously',
+    ).toBeGreaterThan(20)
+    expect(
+      [...observed].filter((c) => !ALLOWED.has(c)).sort(),
+      'a command outside the allow-list ran; if it is legitimate, add it here deliberately',
+    ).toEqual([])
+
+    // ONE.
+    expect(artefactWrites, 'restore.sh must write no host file').toBe(0)
+    expect(fingerprint(out), 'a restore must not modify the backup').toEqual(backupBefore)
+
+    const DOCKER_SUBCOMMANDS = new Set([
+      'compose ps',
+      'compose exec',
+      'compose start',
+      'compose stop',
+      'inspect',
+    ])
+    const seenSub = new Set<string>()
+    for (const line of dockerCalls) {
+      const argv = line.replace(/^\++ /, '').split(/\s+/)
+      seenSub.add(argv[1] === 'compose' ? `compose ${argv[2]}` : (argv[1] as string))
+    }
+    expect(
+      [...seenSub].filter((c) => !DOCKER_SUBCOMMANDS.has(c)).sort(),
+      'an unaudited docker sub-command ran; `cp` would land the archive unreadable',
+    ).toEqual([])
+    expect(seenSub.size).toBeGreaterThan(2)
+
+    // TWO.
+    expect(chRestoreAt, 'no ClickHouse RESTORE in the trace').toBeGreaterThan(-1)
+    expect(pgRestoreAt, 'no pg_restore in the trace').toBeGreaterThan(-1)
+    expect(chRestoreAt, 'ClickHouse must be restored before Postgres').toBeLessThan(pgRestoreAt)
+
+    expect(await readyStatus()).toBe(200)
+  }, 900_000)
 })

@@ -19,12 +19,18 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: pnpm }
       - run: pnpm install --frozen-lockfile
-      # Biome does not read shell, and backup.sh is the script standing between
-      # an operator and their only copy of their data. `restore.sh` joins this
-      # list when it exists. shellcheck is preinstalled on the GitHub runners,
-      # so this adds a dependency to CI only, not to the product.
+      # Biome does not read shell, and these are the scripts standing between an
+      # operator and their only copy of their data -- restore.sh is also the
+      # only thing in the repository that deletes any of it. shellcheck is
+      # preinstalled on the GitHub runners, so this adds a dependency to CI
+      # only, not to the product.
+      #
+      # All four in ONE invocation, deliberately: backup.sh and restore.sh both
+      # source backup-lib.sh, and shellcheck only follows that source when the
+      # sourced file is part of the same input set. Split into separate runs it
+      # still passes, but blind to every use of a helper.
       - name: Lint shell scripts
-        run: shellcheck backup.sh backup-lib.sh install.sh
+        run: shellcheck backup.sh backup-lib.sh restore.sh install.sh
       - run: pnpm lint
       - run: pnpm typecheck
       # `pnpm typecheck` (tsc -b) emits every package's TypeScript output, which
