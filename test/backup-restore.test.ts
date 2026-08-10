@@ -1,6 +1,13 @@
 import { execFileSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -260,6 +267,17 @@ beforeAll(async () => {
       'if [ -n "${SHIM_FAIL_BEFORE:-}" ]; then',
       '  case "$*" in *"$SHIM_FAIL_BEFORE"*) exit 1 ;; esac',
       'fi',
+      // SHIM_FAIL_ONCE fails the first matching invocation and lets every later
+      // one through, which is the shape of a transient failure — a deferred
+      // signal landing on one command — and therefore the shape a retry can
+      // actually recover from.
+      'if [ -n "${SHIM_FAIL_ONCE:-}" ]; then',
+      '  case "$*" in',
+      '    *"$SHIM_FAIL_ONCE"*)',
+      '      if [ ! -f "$SHIM_MARKER" ]; then : > "$SHIM_MARKER"; exit 1; fi',
+      '      ;;',
+      '  esac',
+      'fi',
       'if [ -n "${SHIM_FAIL_AFTER:-}" ]; then',
       `  case "$*" in *"$SHIM_FAIL_AFTER"*) ${realDocker} "$@"; exit 1 ;; esac`,
       'fi',
@@ -351,16 +369,40 @@ describe('backup.sh', () => {
     const out = takeBackup()
     const m = parseManifest(join(out, 'MANIFEST'))
 
+    // The SET of tables, derived from the databases rather than written down
+    // here. A table quietly missing from the manifest used to survive the whole
+    // suite: adding `AND table_name NOT IN (…)` to pg_row_counts passed 14/14,
+    // because only four named Postgres tables were ever checked and never their
+    // membership. That is reachable without a code change —
+    // information_schema.tables only shows relations the connecting role holds
+    // a privilege on — and `suppressed_persons` silently vanishing is the one
+    // that matters.
     const chTables = Object.keys(m)
       .filter((k) => k.startsWith('rows.clickhouse.'))
       .map((k) => k.slice('rows.clickhouse.'.length))
-    expect(chTables.sort()).toEqual([
-      'device_index',
-      'event_schema',
-      'events',
-      'events_dead_letter',
-      'person_traits',
-    ])
+    const chExpected = (
+      await chScalar(
+        "SELECT name FROM system.tables WHERE database = 'lyraflow'" +
+          " AND engine NOT IN ('MaterializedView','View','Dictionary') ORDER BY name",
+      )
+    ).split('\n')
+    expect(chTables.sort()).toEqual(chExpected)
+
+    const pgTables = Object.keys(m)
+      .filter((k) => k.startsWith('rows.postgres.'))
+      .map((k) => k.slice('rows.postgres.'.length))
+    const pgExpected = pgScalar(
+      "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'" +
+        " AND table_type = 'BASE TABLE' ORDER BY table_name",
+    ).split('\n')
+    expect(pgTables.sort()).toEqual(pgExpected)
+
+    // Two canaries no fixture in this file touches, named explicitly so the
+    // derived comparisons above cannot both drift into agreeing on an empty
+    // set.
+    expect(chExpected).toContain('events_dead_letter')
+    expect(pgExpected).toContain('suppressed_persons')
+
     for (const t of chTables) {
       const expr = m[`rowexpr.clickhouse.${t}`] as string
       const final = expr.endsWith('FINAL') ? ' FINAL' : ''
@@ -415,14 +457,32 @@ describe('backup.sh', () => {
         .filter((l) => !/^\s*#/.test(l))
         .join('\n')
 
-    const script = readFileSync('backup.sh', 'utf8')
-    expect(script).toMatch(/^umask 077$/m)
+    // Ban the BEHAVIOUR, not one spelling of it. Banning `chmod` alone is
+    // defeatable, and both of these were proven to pass a full 14-test run:
+    //   `docker compose cp` + `install -m 600` — leaves the copy at 0640,
+    //      holding all three PASSWORD clauses, for the length of the copy;
+    //   umask relaxed inside a subshell, mode restored with `install` — leaves
+    //      postgres.dump world-readable for the entire dump.
+    // The first is exactly the refactor the source comment warns about:
+    // someone prefers `cp`, sees this test go red, and silences it.
+    const LATE_MODE_CHANGE = /\b(chmod|chown|setfacl|install)\b|--preserve|\bcp\s+-\w*p/
     for (const f of ['backup.sh', 'backup-lib.sh']) {
-      expect(code(f), `${f} must not chmod its way to the right modes`).not.toMatch(/\bchmod\b/)
+      expect(code(f), `${f} must not fix modes up after the fact`).not.toMatch(LATE_MODE_CHANGE)
     }
-    // …and the umask must precede everything that can create a file, which
-    // starts with sourcing the library.
-    expect(script.indexOf('umask 077')).toBeLessThan(script.indexOf('backup-lib.sh'))
+
+    // Exactly one umask, and it is the strict one — so it cannot be relaxed
+    // for a subshell and restored afterwards.
+    const script = code('backup.sh')
+    const umasks = script.match(/umask\s+\S+/g) ?? []
+    expect(umasks).toEqual(['umask 077'])
+    expect(code('backup-lib.sh')).not.toMatch(/umask/)
+
+    // And it must precede the first thing that can CREATE something — a
+    // redirect or a mkdir — rather than merely preceding the `source` line,
+    // which proves nothing about where files appear.
+    const creator = script.search(/(^|\s)(mkdir\b|>)/m)
+    expect(creator, 'no redirect or mkdir found in backup.sh').toBeGreaterThan(-1)
+    expect(script.indexOf('umask 077')).toBeLessThan(creator)
   })
 
   it('records checksums that match the artefacts it wrote', async () => {
@@ -546,6 +606,95 @@ describe('backup.sh', () => {
     await waitReady(120_000)
     expect(await readyStatus()).toBe(200)
     expect(readdirSync(dest)).toHaveLength(0)
+  }, 300_000)
+
+  it('exits non-zero and does not claim success when the restart fails outright', async () => {
+    // The mirror image of the flag-ordering bug, and worse than it. The flag
+    // used to be cleared BEFORE `docker compose start` was attempted, so a
+    // failed start was never retried by the trap; and a failed start was only a
+    // warning, so the script printed "Backup written to …" and exited 0 with
+    // the app down. A cron wrapper testing $? saw success.
+    //
+    // The shape every test asserting the app came back had in common: all of
+    // them ran a backup in which `docker compose start` succeeded. The suite
+    // already owned a shim that could fail exactly that command and had never
+    // been pointed at it.
+    const dest = mkdtempSync(join(tmpdir(), 'lyraflow-backup-'))
+    let err: string
+    try {
+      err = runScriptExpectingFailure(
+        './backup.sh',
+        [dest],
+        withShim({ SHIM_FAIL_BEFORE: 'compose start lyraflow' }),
+      )
+    } finally {
+      // Whatever the assertions do, put the app back for the tests that follow.
+      compose('start', 'lyraflow')
+      await waitReady()
+    }
+    // It must say the app is down and point at the fix…
+    expect(err).toMatch(/could not start it|still stopped|is stopped/i)
+    expect(err).toMatch(/docker compose start lyraflow/)
+    // …and the backup itself is complete, so it must not be thrown away or
+    // hidden: the operator needs both facts.
+    const stamps = readdirSync(dest)
+    expect(stamps).toHaveLength(1)
+    expect(readdirSync(join(dest, stamps[0] as string)).sort()).toEqual([
+      'MANIFEST',
+      'clickhouse.zip',
+      'postgres.dump',
+    ])
+  }, 300_000)
+
+  it('retries the restart, recovering a transient failure', async () => {
+    // The Ctrl-C case, deterministically. bash defers SIGINT while a foreground
+    // `docker compose` child runs, so the signal is delivered to a LATER
+    // invocation — and when that is the restart, the restart dies with 130
+    // while every other command in the run succeeded. A manual start seconds
+    // later works, so a single retry from the EXIT trap recovers it, which is
+    // what leaving APP_STOPPED set until the app is actually healthy buys.
+    const dest = mkdtempSync(join(tmpdir(), 'lyraflow-backup-'))
+    const marker = join(shimDir, `marker-${Date.now()}`)
+    const out = runScript(
+      './backup.sh',
+      [dest],
+      withShim({ SHIM_FAIL_ONCE: 'compose start lyraflow', SHIM_MARKER: marker }),
+    )
+    // Exit 0 and a complete backup: the run recovered rather than merely
+    // survived.
+    expect(out).toMatch(/Backup written to/)
+    expect(readdirSync(dest)).toHaveLength(1)
+    // The first attempt really did fail — without this the test passes
+    // vacuously if the shim never matched.
+    expect(existsSync(marker), 'the shim never failed a restart').toBe(true)
+    expect(await readyStatus()).toBe(200)
+  }, 300_000)
+
+  it('leaves nothing behind when an artefact step fails part-way', async () => {
+    // "A failed run leaves nothing" was true only for the manifest step. The
+    // three artefacts appear one at a time, and a failure between them left a
+    // directory that reads as a backup to anyone running `ls`:
+    //
+    //   pg_dump fails  -> postgres.dump 0 bytes + clickhouse.zip 8390 bytes
+    //   copy-out fails -> clickhouse.zip 0 bytes
+    //
+    // restore.sh refuses a directory with no MANIFEST, so neither is as
+    // dangerous as a short manifest — but the invariant is either true or it is
+    // not, and this is the third of the script no test covered.
+    for (const [what, match] of [
+      ['the Postgres dump', 'pg_dump'],
+      ['the ClickHouse copy-out', `cat ${CH_BACKUP_DIR}`],
+    ] as const) {
+      const dest = mkdtempSync(join(tmpdir(), 'lyraflow-backup-'))
+      const err = runScriptExpectingFailure(
+        './backup.sh',
+        [dest],
+        withShim({ SHIM_FAIL_BEFORE: match }),
+      )
+      expect(err, what).toMatch(/no data (was )?(changed|modified|lost)/i)
+      expect(readdirSync(dest), `${what} must leave nothing behind`).toHaveLength(0)
+      expect(await readyStatus()).toBe(200)
+    }
   }, 300_000)
 
   it('leaves nothing behind when the manifest step fails', async () => {

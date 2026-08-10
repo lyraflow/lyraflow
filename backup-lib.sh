@@ -225,24 +225,90 @@ wait_until_healthy() {
   return 1
 }
 
-# Idempotent on purpose: called on the happy path AND from the EXIT trap, and
-# exactly one of them must do the work.
+# Brings the app back, and reports whether it is actually back.
+#
+# Returns 0 only when the app is running AND healthy. APP_STOPPED is cleared at
+# that point and not one statement earlier, which is the whole design: the EXIT
+# trap calls this too, so leaving the flag set is what makes a failed attempt
+# get RETRIED rather than silently abandoned.
+#
+# Clearing the flag first — as this did — produced the exact mirror image of the
+# bug that put it before `docker compose stop`. A failed `start` cleared the
+# flag, warned, and returned 0; the trap then saw 0 and did nothing; and the
+# script printed "Backup written to …" and exited 0 with the app down. Measured
+# with a shim failing only `compose start lyraflow`:
+#
+#   Starting the app again...
+#   WARNING: could not restart the app. …
+#   Backup written to /tmp/probe-…/2026-08-10T150922Z
+#   backup.sh EXIT CODE = 0
+#   lyraflow    exited  Exited (0) 2 seconds ago
+#
+# That is worse than the bug it mirrors, which at least exited non-zero: a cron
+# wrapper testing $? saw success while the site went uninstrumented.
+#
+# It is reachable by the operator action this script's own comments name. bash
+# DEFERS SIGINT while a foreground `docker compose` child is running, so Ctrl-C
+# during the drain does not interrupt the stop — it is delivered to a later
+# `docker compose` invocation. When that is the restart, the restart dies with
+# 130 while every other command in the run succeeded. Reproduced here with a
+# logging shim, where the deferred signal landed on a manifest query instead:
+#
+#   rc=0    compose exec -T postgres … pg_dump …
+#   rc=130  compose exec -T clickhouse … SELECT count() FROM `events` FINAL
+#   rc=0    compose start lyraflow
+#
+# A manual `docker compose start` seconds later returns 0, so one retry from the
+# trap recovers it — which is exactly what leaving the flag set now buys.
 start_app_if_stopped() {
   [ "$APP_STOPPED" = "1" ] || return 0
-  APP_STOPPED=0
   echo "Starting the app again..."
   if ! docker compose start "$APP_SERVICE" >/dev/null 2>&1; then
-    echo "WARNING: could not restart the app. Run: docker compose start $APP_SERVICE" >&2
-    return 0
+    echo "WARNING: 'docker compose start $APP_SERVICE' failed; it will be retried." >&2
+    return 1
   fi
   # `start` returns as soon as the container is running, which is not the same
   # as the app answering requests. Anything an operator runs straight after
   # this script — a smoke test, a monitoring probe, the round-trip test — would
   # otherwise hit a still-booting server and read it as a failed backup.
+  #
+  # A health timeout is also a failure, not a warning: "the container is up but
+  # the app never came back" is the same outcome for the site as "the container
+  # never started", and the caller must not report success for either. The cost
+  # is that a genuinely slow boot can be waited for twice, once here and once
+  # from the trap's retry.
   if ! wait_until_healthy "$APP_SERVICE" 180; then
     echo "WARNING: the app was started but has not become healthy." >&2
     echo "Check: docker compose logs $APP_SERVICE" >&2
+    return 1
   fi
+  APP_STOPPED=0
+}
+
+# Removes the timestamped output directory unless a complete backup landed in
+# it.
+#
+# Validation creates the directory before the quiesce, and the three artefacts
+# appear one at a time, so every failure from validation onwards used to leave
+# something behind that reads as a backup to anyone running `ls`. Measured, one
+# injected failure per step:
+#
+#   pg_dump fails    -> postgres.dump 0 bytes + clickhouse.zip 8390 bytes
+#   copy-out fails   -> clickhouse.zip 0 bytes
+#   manifest fails   -> three files, only rows.postgres.* missing
+#
+# Only the last of those was handled. `restore.sh` refuses a directory with no
+# MANIFEST, so none of them is as dangerous as a manifest that is present and
+# short — but "a failed run leaves nothing" is either true or it is not, and it
+# is far easier to keep true than to document the exceptions.
+#
+# Guarded on OUT_CREATED so it can only ever remove a directory this run
+# created: validation refuses to start when the directory already exists, and
+# creates it with a non-recursive `mkdir` that exactly one racing run can win.
+remove_incomplete_output() {
+  [ "${OUT_CREATED:-0}" = "1" ] || return 0
+  if [ "${BACKUP_COMPLETE:-0}" = "1" ]; then return 0; fi
+  rm -rf "$OUT"
 }
 
 # The backups disk lives inside the ClickHouse data volume, so the scratch
@@ -262,18 +328,12 @@ start_app_if_stopped() {
 # part-way is not cleaned up. That is the right trade: a stale archive is
 # visible, bounded and removable, while deleting a concurrent run's archive
 # corrupts a backup that was otherwise going to succeed.
-# Removes the timestamped output directory if it is still empty.
 #
-# Validation creates it before the quiesce, so anything that fails between
-# there and the first artefact would otherwise leave an empty directory named
-# like a backup. `rmdir`, never `rm -r`: it succeeds only while the directory
-# is empty, so it can never take a real backup with it, and on the happy path
-# it simply fails and is ignored.
-remove_empty_output() {
-  [ "${OUT_CREATED:-0}" = "1" ] || return 0
-  rmdir "$OUT" 2>/dev/null || true
-}
-
+# NOTE FOR restore.sh: this function is shared, and the flag defaults to 0, so
+# calling it without setting the flag is a silent no-op. A restore copies an
+# archive INTO the container and must therefore set CH_ARTEFACT_CREATED=1 once
+# that copy has succeeded — otherwise the restored archive stays on the backups
+# disk forever, which is precisely the volume growth this exists to prevent.
 remove_in_container_artefact() {
   [ "${CH_ARTEFACT_CREATED:-0}" = "1" ] || return 0
   [ -n "${CH_FILE:-}" ] || return 0
@@ -385,6 +445,14 @@ ch_count_expression() {
 # BY, ORDER BY, TTL and SETTINGS and nothing else. Column-level TTLs live in
 # the column definitions in `create_table_query` and correctly do not appear
 # here, since they expire values rather than rows.
+#
+# KNOWN LIMITATION, and one restore.sh must not paper over. This records ANY
+# table-level TTL, including `TTL … TO DISK 'x'` and `TO VOLUME 'y'`, which
+# MOVE rows between storage tiers rather than deleting them. A table whose only
+# TTL is a move would be marked "lower is expected" and have its row
+# verification effectively disabled forever, silently. Lyraflow has no such TTL
+# today (`events_dead_letter`'s is a plain delete). If one is ever added, this
+# must learn to distinguish the two rather than restore.sh loosening further.
 ch_row_counts() {
   local tables name engine ttl expr suffix count
   tables="$(ch_query "
@@ -468,8 +536,14 @@ pg_row_counts() {
 # write_manifest <out-dir>
 #
 # Plain `key=value` lines, sorted, so `diff` between two manifests reads
-# cleanly. Values are never quoted; a parser splits on the first `=` (the
-# `rowexpr.*` values contain spaces and parentheses, nothing else does).
+# cleanly. Values are never quoted.
+#
+# A PARSER MUST SPLIT ON THE FIRST `=` AND TAKE THE WHOLE REMAINDER, not split
+# on every `=`. Keys never contain one; values can. `rowexpr.*` values contain
+# spaces and parentheses, and a `rowttl.*` value is an arbitrary ClickHouse
+# expression — a `TTL … GROUP BY … SET x = max(y)` produces one containing
+# spaces, parentheses AND an `=`. Anything that assumes two fields will
+# silently truncate it.
 #
 # Both checksums are taken from the bytes in <out-dir>, never from the
 # in-container archive: restore.sh has to be able to catch an artefact that was

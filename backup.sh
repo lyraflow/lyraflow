@@ -66,11 +66,28 @@ STAMP="$(date -u +%Y-%m-%dT%H%M%SZ)"
 OUT="$DEST/$STAMP"
 CH_FILE="lyraflow-$STAMP.zip"
 OUT_CREATED=0
+BACKUP_COMPLETE=0
 
 cleanup() {
   remove_in_container_artefact
-  remove_empty_output
-  start_app_if_stopped
+  remove_incomplete_output
+  # The RETRY. start_app_if_stopped leaves APP_STOPPED set when it fails, so a
+  # restart that failed on the happy path is attempted once more here -- which
+  # is what recovers the case where a deferred Ctrl-C lands on the restart and
+  # nothing else. It is a no-op when the app is already back.
+  #
+  # And if it is still not back, this script must NOT report success. Exiting
+  # from the EXIT trap overrides a zero status (verified), which is the only
+  # way to turn "the backup worked but the site is dark" into something a cron
+  # wrapper testing $? can see.
+  if ! start_app_if_stopped; then
+    echo "" >&2
+    echo "ERROR: the app is stopped and this script could not start it." >&2
+    echo "  Run: docker compose start $APP_SERVICE" >&2
+    echo "Any backup reported above is complete and valid -- the problem is the app," >&2
+    echo "which is down and will stay down until someone starts it." >&2
+    exit 1
+  fi
 }
 trap cleanup EXIT
 
@@ -79,6 +96,25 @@ trap cleanup EXIT
 # downtime. Discovering a typo in the destination after the app is down turns
 # a mistake into an outage.
 # --------------------------------------------------------------------------
+
+# All three services, not just the app. The consistency claim rests on THIS
+# script being the one that stopped the writer: an app that is already down for
+# some other reason is not a quiesced system, it is an unknown one, and the
+# manifest would still say mode=quiesced. ClickHouse and Postgres are checked
+# for the duller reason that finding them missing after the quiesce would be
+# pure downtime.
+#
+# FIRST of the checks, because everything below talks to one of these
+# containers and would otherwise report a confusing second-order symptom. With
+# the stack down, the Postgres probe below reports "could not run the
+# row-count query ... needs query_to_xml", which sends an operator hunting for
+# a libxml problem they do not have.
+for service in "$APP_SERVICE" "$CH_SERVICE" "$PG_SERVICE"; do
+  service_running "$service" ||
+    fail "validation" \
+      "The '$service' service is not running; there is nothing to back up consistently." \
+      "Start the stack first: docker compose up -d"
+done
 
 pg_can_count_rows ||
   fail "validation" \
@@ -93,31 +129,23 @@ have_sha256 ||
     "The manifest records a checksum per artefact so restore.sh can refuse a" \
     "truncated one; without a hasher there is nothing to record."
 
-# All three services, not just the app. The consistency claim rests on THIS
-# script being the one that stopped the writer: an app that is already down for
-# some other reason is not a quiesced system, it is an unknown one, and the
-# manifest would still say mode=quiesced. ClickHouse and Postgres are checked
-# for the duller reason that finding them missing after the quiesce would be
-# pure downtime.
-for service in "$APP_SERVICE" "$CH_SERVICE" "$PG_SERVICE"; do
-  service_running "$service" ||
-    fail "validation" \
-      "The '$service' service is not running; there is nothing to back up consistently." \
-      "Start the stack first: docker compose up -d"
-done
-
 # Last, so a failure above leaves nothing behind on disk.
-if [ -e "$OUT" ]; then
+mkdir -p "$DEST" 2>/dev/null ||
   fail "destination" \
-    "The destination directory already exists: $OUT" \
-    "Another backup started in the same second, or a previous run left it behind." \
-    "Move it aside and try again."
-fi
-
-mkdir -p "$OUT" 2>/dev/null ||
-  fail "destination" \
-    "Could not create the destination directory: $OUT" \
+    "Could not create the destination directory: $DEST" \
     "Check that the path exists, is a directory, and is writable."
+
+# A non-recursive `mkdir`, deliberately: it is atomic, and it fails when the
+# directory already exists. A `[ -e ]` test followed by `mkdir -p` is neither,
+# and two runs launched inside that window would both believe they had created
+# the directory -- so the one that lost would delete the winner's backup on its
+# way out. Exactly the same shape as the archive-name race, and fixed the same
+# way: exactly one run can win, and only the winner sets OUT_CREATED.
+mkdir "$OUT" 2>/dev/null ||
+  fail "destination" \
+    "Could not create $OUT" \
+    "Either it already exists -- another backup started in the same second, or a" \
+    "previous run left it behind -- or the destination is not writable."
 OUT_CREATED=1
 
 [ -w "$OUT" ] ||
@@ -172,21 +200,21 @@ pg_dump_to "$OUT/postgres.dump" ||
     "pg_dump failed; its error is above."
 
 echo "Writing the manifest..."
-if ! write_manifest "$OUT"; then
-  # Remove the whole directory rather than leave two artefacts and no manifest.
-  # An undescribed backup is not merely useless: it is a directory that looks
-  # like a backup to anyone reading `ls`, and it is the only thing standing
-  # between them and the discovery that it cannot be restored. This can only
-  # ever remove a directory this run created -- validation refused to start if
-  # "$OUT" already existed.
-  rm -rf "$OUT"
+write_manifest "$OUT" ||
   fail "manifest" \
     "Could not write the manifest for $OUT." \
-    "The partial backup has been deleted rather than left looking complete." \
+    "The partial backup is being deleted rather than left looking complete." \
     "Run the backup again."
-fi
+
+# From here the directory holds a complete, described backup, so the trap must
+# stop treating it as debris. Nothing below may fail in a way that invalidates
+# the artefacts -- restarting the app does not.
+BACKUP_COMPLETE=1
 
 remove_in_container_artefact
-start_app_if_stopped
+# `|| true` because the EXIT trap retries and owns the decision: a restart that
+# fails here must not abort before the operator is told where their backup is,
+# and must not be reported as success either. The trap does both.
+start_app_if_stopped || true
 
 echo "Backup written to $OUT"
