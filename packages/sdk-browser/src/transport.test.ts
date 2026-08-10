@@ -245,18 +245,16 @@ describe('Transport', () => {
     }
   })
 
-  // --- Quota refusals ---------------------------------------------------
-  // Two shapes, and only one of them is what the real server sends.
+  // --- Quota refusals, and the status code that is NOT one --------------
   //
-  // `/v1/batch` — the only URL this transport ever posts to — never answers
-  // 429. Its contract is a 202 carrying a tally, and a batch entirely over
-  // quota comes back {accepted:0, rejected:0, throttled:0, over_quota:n}.
-  // That is the path covered under "202 body" below.
+  // `/v1/batch` is the ONLY URL this transport posts to (see #attempt), and
+  // it never answers 429: its contract is a 202 carrying a tally, with quota
+  // refusals counted in the body's `over_quota` field. The ingest's only 429
+  // lives on the single-event routes, which nothing in this package calls.
   //
-  // The 429 handling is for whatever sits in FRONT of the ingest: a reverse
-  // proxy, a CDN, a gateway with its own rate limiting. It is still worth
-  // having, because an unhandled 429 falls through to #backoff + 'retry' and
-  // then retries the same batch forever, whatever emitted it.
+  // So the quota reaches the browser through a 202 BODY, never through a
+  // status code. The first test below pins what a 429 therefore means here —
+  // a middlebox, retried — and everything after it works the body channel.
 
   it('the quota notice says what the condition is and when it clears', () => {
     // Every other quota assertion in this file matches on QUOTA_NOTICE itself,
@@ -269,52 +267,20 @@ describe('Transport', () => {
     expect(QUOTA_NOTICE).toMatch(/until the month rolls over/i)
   })
 
-  it('drops a 429 rather than retrying it, and says why', async () => {
-    // A quota refusal is not transient: it holds until the month rolls over,
-    // so a retry cannot succeed. The events are lost either way — the only
-    // question is whether the client also burns the user's battery and the
-    // operator's bandwidth discovering that.
-    const { queue, transport, warn } = make(
-      vi.fn(async () => reply(429)) as unknown as typeof fetch,
-    )
-    queue.add(event('m1'))
-    queue.add(event('m2'))
-    expect(await transport.flush()).toBe('dropped')
-    expect(queue.size()).toBe(0)
-    // Names the condition, not the status code: "rejected with 429" is not
-    // something a developer can act on; "over its monthly event quota" is.
-    expect(warn.mock.calls.join(' ')).toContain(QUOTA_NOTICE)
-    expect(warn.mock.calls.join(' ')).not.toMatch(/429/)
-  })
-
-  it('does not back off on a 429, because there is nothing to come back to', async () => {
-    // There is no accessor for the next-attempt instant — `#nextAttemptAt` is
-    // a private field and adding a getter would cost bundle bytes for a test.
-    // The observable used instead is the one that matters anyway: whether the
-    // NEXT flush reaches the network at all. If the 429 branch also called
-    // #backoff, this second flush would be short-circuited to 'retry' with no
-    // fetch, exactly as the 503 tests above demonstrate.
-    const fetchImpl = vi.fn(async () => reply(429)) as unknown as typeof fetch
-    const { queue, transport } = make(fetchImpl)
-    queue.add(event('m1'))
-    expect(await transport.flush()).toBe('dropped')
-    expect(fetchImpl).toHaveBeenCalledTimes(1)
-
-    queue.add(event('m2'))
-    expect(await transport.flush()).toBe('dropped')
-    expect(fetchImpl).toHaveBeenCalledTimes(2)
-  })
-
-  // --- 429 is two different conditions, told apart by retry-after --------
-  // Found on review of this task: dropping EVERY 429 was wrong. A reverse
-  // proxy, CDN or gateway in front of the server returns 429 too, and that
-  // one is transient — normally with retry-after saying when. Dropping those
-  // discards good events a retry moments later would have delivered, and
-  // tells the developer their project is over a monthly quota it is nowhere
-  // near. The ingest's own refusal deliberately carries NO retry-after, so
-  // the header is the discriminator the server's design already provides.
-
-  it('retries a 429 that carries retry-after, because that one is not the quota', async () => {
+  it('retries a 429 and keeps the batch, because only a middlebox can send one', async () => {
+    // Load-bearing since the 429 drop branch was removed. This transport
+    // posts to /v1/batch alone, and /v1/batch never answers 429 — the ingest's
+    // only 429 is on the single-event routes, which nothing here calls. A 429
+    // reaching this client is therefore always something in FRONT of the
+    // server rate limiting the browser, which is transient and must be
+    // retried.
+    //
+    // A revision of this file dropped it instead and blamed the project's
+    // monthly quota. Both halves were wrong, and the damage was not
+    // hypothetical: twelve flush cycles against a persistent 429 destroyed
+    // twenty-four events and warned twelve times about a limit the project
+    // was nowhere near, at full cadence, because the drop path returns before
+    // reaching a backoff.
     const fetchImpl = vi.fn(async () =>
       reply(429, { 'retry-after': '5' }),
     ) as unknown as typeof fetch
@@ -323,153 +289,15 @@ describe('Transport', () => {
     queue.add(event('m2'))
 
     expect(await transport.flush()).toBe('retry')
-    // Kept, not dropped: these events are still deliverable.
+    // Kept. These events are still deliverable once the limit lifts.
     expect(queue.size()).toBe(2)
-    // And NOT diagnosed as a quota problem — that message would send a
-    // developer to look at a limit that has nothing to do with it.
+    // And not blamed on a quota this project may be nowhere near.
     expect(warn).not.toHaveBeenCalled()
 
-    // A backoff was armed, exactly as for a 503.
+    // A backoff was armed, exactly as for a 503 — the second half of the
+    // damage a drop caused was that nothing throttled the retry cadence.
     expect(await transport.flush()).toBe('retry')
     expect(fetchImpl).toHaveBeenCalledTimes(1)
-  })
-
-  it('honours the advised delay on a proxy 429 rather than its own exponential', async () => {
-    vi.useFakeTimers()
-    try {
-      const fetchImpl = vi.fn(async () =>
-        reply(429, { 'retry-after': '30' }),
-      ) as unknown as typeof fetch
-      const { queue, transport } = make(fetchImpl)
-      queue.add(event('m1'))
-      expect(await transport.flush()).toBe('retry')
-
-      // The first failure's own exponential would be ~1s. The advice is 30s
-      // and it wins, so 1.3s is nowhere near enough.
-      vi.advanceTimersByTime(1_300)
-      expect(await transport.flush()).toBe('retry')
-      expect(fetchImpl).toHaveBeenCalledTimes(1)
-
-      vi.advanceTimersByTime(30_000)
-      await transport.flush()
-      expect(fetchImpl).toHaveBeenCalledTimes(2)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('floors an advised retry-after of 0 on a 429, as it does on a 503', async () => {
-    // The header now decides WHETHER to retry as well as how long, which is
-    // a new job for a value the server controls. The floor documented in
-    // transport.ts must still hold on this path: `retry-after: 0` from
-    // something in front of the ingest must not switch the client's own
-    // throttle off and turn a rate limit into a hot loop.
-    vi.useFakeTimers()
-    try {
-      const fetchImpl = vi.fn(async () =>
-        reply(429, { 'retry-after': '0' }),
-      ) as unknown as typeof fetch
-      const { queue, transport } = make(fetchImpl)
-      queue.add(event('m1'))
-      expect(await transport.flush()).toBe('retry')
-      expect(queue.size()).toBe(1)
-
-      expect(await transport.flush()).toBe('retry')
-      expect(fetchImpl).toHaveBeenCalledTimes(1)
-
-      // BACKOFF_BASE_MS, the floor.
-      vi.advanceTimersByTime(1_000)
-      await transport.flush()
-      expect(fetchImpl).toHaveBeenCalledTimes(2)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('treats a negative retry-after on a 429 as present, and floors it', async () => {
-    vi.useFakeTimers()
-    try {
-      const fetchImpl = vi.fn(async () =>
-        reply(429, { 'retry-after': '-5' }),
-      ) as unknown as typeof fetch
-      const { queue, transport, warn } = make(fetchImpl)
-      queue.add(event('m1'))
-      // Present is present: a nonsensical VALUE does not make this the
-      // ingest's quota refusal, so the batch is kept rather than dropped.
-      expect(await transport.flush()).toBe('retry')
-      expect(queue.size()).toBe(1)
-      expect(warn).not.toHaveBeenCalled()
-
-      expect(await transport.flush()).toBe('retry')
-      expect(fetchImpl).toHaveBeenCalledTimes(1)
-      vi.advanceTimersByTime(1_000)
-      await transport.flush()
-      expect(fetchImpl).toHaveBeenCalledTimes(2)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('treats an unparseable retry-after on a 429 as present, and backs off exponentially', async () => {
-    const fetchImpl = vi.fn(async () =>
-      reply(429, { 'retry-after': 'soon' }),
-    ) as unknown as typeof fetch
-    const { queue, transport, warn } = make(fetchImpl)
-    queue.add(event('m1'))
-    expect(await transport.flush()).toBe('retry')
-    expect(queue.size()).toBe(1)
-    expect(warn).not.toHaveBeenCalled()
-  })
-
-  it('treats an EMPTY retry-after on a 429 as present, not as the ingest', async () => {
-    // A deliberate call at the boundary. `Headers.get` returns `''` for a
-    // header that was sent with an empty value and `null` for one that was
-    // not sent at all — and the ingest never sends it at all. So an empty
-    // value can only have come from something in front of the server, which
-    // makes "present" the right reading and a retry the right response.
-    const fetchImpl = vi.fn(async () =>
-      reply(429, { 'retry-after': '' }),
-    ) as unknown as typeof fetch
-    const { queue, transport, warn } = make(fetchImpl)
-    queue.add(event('m1'))
-    expect(await transport.flush()).toBe('retry')
-    expect(queue.size()).toBe(1)
-    expect(warn).not.toHaveBeenCalled()
-  })
-
-  it('drops a 429 whose headers cannot be read at all, treating unreadable as absent', async () => {
-    // The best-effort rule that governs #reportBody applies here too: a
-    // hostile or impoverished response must not throw out of the send path.
-    // The DIRECTION of the guess is deliberate — see #retryAfter's docstring.
-    // This transport posts to one URL, and the only thing behind it that
-    // answers 429 without the header is the ingest's quota refusal, so
-    // guessing "transient" here would restore the retry-forever bug outright,
-    // while guessing "quota" costs one batch.
-    const hostile = {
-      status: 429,
-      headers: {
-        get() {
-          throw new Error('boom')
-        },
-      },
-    } as unknown as Response
-    const { queue, transport, warn } = make(vi.fn(async () => hostile) as unknown as typeof fetch)
-    queue.add(event('m1'))
-    expect(await transport.flush()).toBe('dropped')
-    expect(queue.size()).toBe(0)
-    expect(warn.mock.calls.join(' ')).toContain(QUOTA_NOTICE)
-  })
-
-  it('drops a 429 from a response with no headers object at all', async () => {
-    // The impoverished shim: a browser extension or test double handing back
-    // `{status, json}` and nothing else. `res.headers.get` throws a
-    // TypeError on undefined, which #retryAfter absorbs.
-    const bare = { status: 429 } as unknown as Response
-    const { queue, transport, warn } = make(vi.fn(async () => bare) as unknown as typeof fetch)
-    queue.add(event('m1'))
-    expect(await transport.flush()).toBe('dropped')
-    expect(queue.size()).toBe(0)
-    expect(warn.mock.calls.join(' ')).toContain(QUOTA_NOTICE)
   })
 
   it('warns when a 202 body says events were over quota, and still drains them', async () => {
@@ -799,11 +627,18 @@ describe('Transport', () => {
     expect(queue.size()).toBe(1)
   })
 
-  it('backs off a 503 whose headers cannot be read, rather than crashing', async () => {
-    // #retryAfter is shared by the 429 discriminator and this fall-through
-    // path, so its guard has to hold for both callers. Only the 401 case was
-    // covered before; a hostile headers object on a retryable status reached
-    // the read through a different route and nothing pinned it.
+  it('backs off a 503 whose headers cannot be read, rather than hot-looping', async () => {
+    // The retry-after read has its own try/catch, and only the 401 case
+    // pinned it — a hostile headers object on a RETRYABLE status reaches that
+    // read by a different route and nothing covered it.
+    //
+    // The first version of this test was dead against its own mutation.
+    // Deleting the try/catch still returns 'retry' with the batch intact,
+    // because #run's outer catch absorbs the throw — identical to the two
+    // obvious assertions. What differs is invisible from the return value:
+    // the outer catch never reaches #backoff, so NO backoff is armed and the
+    // client hammers a saturated server at full cadence. The third assertion
+    // below is the whole test.
     const hostile = {
       status: 503,
       headers: {
@@ -812,10 +647,16 @@ describe('Transport', () => {
         },
       },
     } as unknown as Response
-    const { queue, transport } = make(vi.fn(async () => hostile) as unknown as typeof fetch)
+    const fetchImpl = vi.fn(async () => hostile) as unknown as typeof fetch
+    const { queue, transport } = make(fetchImpl)
     queue.add(event('m1'))
     expect(await transport.flush()).toBe('retry')
     expect(queue.size()).toBe(1)
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+
+    // Held off. Without the guard this second flush reaches the network.
+    expect(await transport.flush()).toBe('retry')
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
   })
 
   it('treats a status it has no rule for as a transient failure, not a crash', async () => {
@@ -852,6 +693,33 @@ describe('Transport', () => {
       vi.advanceTimersByTime(5 * 60_000 + 1)
       await transport.flush()
       expect(fetchImpl).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('caps an absurd retry-after on a 429 too, not only on a 503', async () => {
+    // The floor is pinned on both statuses; the ceiling was pinned only on
+    // 503. They reach #backoff by the same call now, but "the same call now"
+    // is exactly the kind of thing a later change quietly separates — and a
+    // middlebox is a far more likely source of a hostile retry-after than the
+    // ingest, which only ever sends `5`. A single rate limiter answering
+    // `retry-after: 999999999` would otherwise switch this client off for
+    // eleven days.
+    vi.useFakeTimers()
+    try {
+      const fetchImpl = vi.fn(async () =>
+        reply(429, { 'retry-after': '999999999' }),
+      ) as unknown as typeof fetch
+      const { queue, transport } = make(fetchImpl)
+      queue.add(event('m1'))
+      expect(await transport.flush()).toBe('retry')
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+
+      vi.advanceTimersByTime(5 * 60_000 + 1)
+      await transport.flush()
+      expect(fetchImpl).toHaveBeenCalledTimes(2)
+      expect(queue.size()).toBe(1)
     } finally {
       vi.useRealTimers()
     }

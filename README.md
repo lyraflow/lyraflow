@@ -1380,20 +1380,16 @@ Set a quota you can afford to exceed by a few seconds of peak traffic.
 
 Once a project is over, `/v1/track`, `/v1/identify` and `/v1/page` answer
 `429 {"error":"quota_exceeded"}` with no `retry-after`, and `/v1/batch` answers
-`202` with the refused events counted in `over_quota` (see *Responses*). The
-browser SDK handles both by **dropping** the events and warning on the console
-rather than retrying — a quota refusal does not clear on its own, so retrying
-it would keep every instrumented browser hammering the server for the rest of
-the month while the client-side queue grew for the life of the tab.
+`202` with the refused events counted in `over_quota` (see *Responses*).
 
-**The missing `retry-after` is load-bearing, so keep it that way.** It is what
-lets a client tell a quota refusal from an ordinary rate limit, and the two
-need opposite handling. If you put a reverse proxy, CDN or API gateway in
-front of Lyraflow, make sure it does not add a `retry-after` to the server's
-own `429` — a client that sees one will treat the refusal as transient and
-retry it all month. Rate limiting of your own is fine and works as expected:
-the SDK treats a `429` that *does* carry `retry-after` as temporary, keeps the
-batch, and backs off.
+**The browser SDK learns about the quota from the `202` body, never from a
+status code.** It posts only to `/v1/batch`, so the `429` above is not a
+response it can receive at all. When a batch comes back with `over_quota`
+above zero, the SDK drops those events — a quota refusal does not clear on its
+own, so holding them would only wedge the queue behind events the server will
+refuse all month — and warns on the console naming the quota, which is the
+only signal a developer gets. A `429` reaching the SDK from anywhere else is
+treated as an ordinary rate limit: the batch is kept and retried with backoff.
 
 **A refusal is recorded in two places, and they answer different questions.**
 `lyraflow_ingest_events_total{outcome="over_quota"}` on `/metrics` counts

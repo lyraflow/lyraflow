@@ -245,39 +245,24 @@ export class Transport {
       this.#opts.warn('the write key was rejected; no further events will be sent')
       return 'stopped'
     }
-    // Two different conditions share this status code, and they want
-    // opposite handling. `retry-after` tells them apart.
+    // `429` is deliberately NOT handled here, and that is a decision rather
+    // than an omission. This transport posts to exactly one URL — `/v1/batch`
+    // (see `#attempt` above) — and `/v1/batch` never answers `429`: its
+    // contract is `202` carrying a tally, with quota refusals counted in the
+    // body's `over_quota` field, which `#reportBody` reports. The ingest's
+    // only `429` lives on the single-event routes (`/v1/track`,
+    // `/v1/identify`, `/v1/page`), which nothing in this package calls.
     //
-    // The ingest's own quota refusal carries NO `retry-after`, deliberately:
-    // it holds until the month rolls over or an operator raises the limit, so
-    // advertising a retry time "would invite exactly the retry this design
-    // exists to prevent" (packages/server/src/ingest/routes.ts). Retrying it
-    // is futile — the queue never drains and `localStorage` grows for the
-    // life of the tab — so it is dropped, and the developer is told the one
-    // thing they can act on.
+    // So a `429` arriving here is always something in FRONT of the server —
+    // a reverse proxy, CDN or API gateway rate limiting the browser — and
+    // that is transient. It falls through to the backoff below and is
+    // retried, which is the correct response to a rate limit.
     //
-    // A reverse proxy, CDN or API gateway in front of the server also returns
-    // `429`, and that one IS transient — normally with `retry-after` saying
-    // when. Dropping those would discard perfectly good events that a retry
-    // moments later would have delivered, and would tell the developer their
-    // project is over a monthly quota it is nowhere near. So a `429` bearing
-    // the header is treated exactly like a `503`: honour the advice, back
-    // off, keep the batch.
-    //
-    // Using the header this way follows the ingest's own reasoning rather
-    // than departing from it: its absence is not an accident of the response,
-    // it is the design's deliberate signal that this refusal does not clear
-    // on its own.
-    if (status === 429) {
-      const advice = this.#retryAfter(res)
-      if (advice !== null) {
-        this.#backoff(advice)
-        return 'retry'
-      }
-      this.#opts.queue.remove(batch.map((e) => e.message_id))
-      this.#opts.warn(QUOTA_NOTICE)
-      return 'dropped'
-    }
+    // An earlier revision of this file dropped `429` and blamed the project's
+    // monthly quota for it. That was wrong on both halves: the diagnosis
+    // named a limit the project was nowhere near, and the drop destroyed
+    // every batch of a client that was merely being throttled — with no
+    // backoff, because the drop path returns before reaching one.
     if (status === 400 || status === 413) {
       this.#opts.queue.remove(batch.map((e) => e.message_id))
       this.#opts.warn(
@@ -292,36 +277,23 @@ export class Transport {
     // into the same try as the status read would turn a perfectly good 401
     // into a mis-classified 'retry' whenever the headers object is
     // hostile — exactly the response shape a network intermediary or a
-    // broken fetch polyfill can hand back. (`429` is the one status that
-    // genuinely needs the header to reach its verdict, and it reads it
-    // through the same never-throwing helper.)
-    this.#backoff(this.#retryAfter(res))
-    return 'retry'
-  }
-
-  /**
-   * The `retry-after` header, or `null` when this response cannot produce
-   * one. NEVER THROWS: a shimmed `fetch` handing back a plain object, a
-   * `Response` whose `headers` is undefined, or a hostile `headers.get` all
-   * read as absent.
-   *
-   * **Unreadable is treated as absent, and for `429` that means dropping.**
-   * The alternative — treating an unreadable header as "present, so retry" —
-   * fails in the direction that matters more. This transport posts to exactly
-   * one URL, and the ingest behind it is the only thing that answers `429`
-   * without the header, so the impoverished-shim case is overwhelmingly the
-   * quota refusal rather than a proxy's rate limit. Guessing "transient"
-   * there would restore the exact bug this branch exists to remove: a browser
-   * retrying a month-long refusal until the tab closes. Guessing "quota"
-   * instead costs one batch of events that a proxy might have taken later,
-   * which is the smaller and self-limiting error.
-   */
-  #retryAfter(res: Response): string | null {
+    // broken fetch polyfill can hand back.
+    //
+    // The catch is not decoration, and "the outer catch in #run would have
+    // caught it anyway" is not a substitute: that catch returns 'retry'
+    // WITHOUT arming a backoff, so a hostile headers object on a saturated
+    // server would put this client into a hot retry loop. The two outcomes
+    // are indistinguishable from the return value alone, which is why the
+    // test for this asserts the next flush is held off rather than merely
+    // that the call resolved.
+    let retryAfter: string | null = null
     try {
-      return res.headers.get('retry-after')
+      retryAfter = res.headers.get('retry-after')
     } catch {
-      return null
+      retryAfter = null
     }
+    this.#backoff(retryAfter)
+    return 'retry'
   }
 
   /**

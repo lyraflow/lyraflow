@@ -230,8 +230,11 @@ describe('the README snippet, against the built bundle', () => {
  * shipped a snippet that could not initialise the SDK at all through twelve
  * reviews for exactly this reason.
  *
- * The `202` + `over_quota` case comes first because it is the one the server
- * actually produces: `/v1/batch` never answers `429`.
+ * The `202` + `over_quota` case comes first because it is the ONLY one the
+ * server produces. `/v1/batch` never answers `429`, and it is the only URL
+ * this bundle posts to — so the second test here pins the opposite: a `429`
+ * is always a middlebox, and must survive as a retry rather than being read
+ * as a quota refusal and destroyed.
  */
 describe('a quota refusal, against the built bundle', () => {
   it('reports an over-quota 202 to the console and does not keep the events queued', async () => {
@@ -267,48 +270,20 @@ describe('a quota refusal, against the built bundle', () => {
     expect(queued()).toEqual([])
   })
 
-  it('drops a 429 from something in front of the ingest instead of retrying it forever', async () => {
-    // NO `retry-after`, matching what the ingest's single-event routes send —
-    // and that absence is now what makes this a drop rather than a retry. The
-    // companion test below sends the same status WITH the header and gets the
-    // opposite handling.
-    const { api, sent, warnings, queued } = bootedPage(() => ({
-      status: 429,
-      headers: { get: () => null },
-      json: async () => ({ error: 'quota_exceeded' }),
-    }))
-
-    api().track('checkout_completed')
-    await api().flush()
-
-    expect(sent).toHaveLength(1)
-    expect(warnings.join(' ')).toMatch(/quota/i)
-    expect(queued()).toEqual([])
-
-    // No backoff was armed: the very next flush reaches the network. A 429
-    // that fell through to the transport's retry path would instead sit out
-    // an exponential backoff here, having kept the batch — the queue never
-    // draining, every instrumented browser retrying for the rest of the
-    // month.
-    api().track('second_event')
-    await api().flush()
-    expect(sent).toHaveLength(2)
-    expect(queued()).toEqual([])
-  })
-
-  it('keeps the batch when a 429 carries retry-after, because that one is a proxy rate limit', async () => {
-    // The other half of the discriminator, through the shipped bundle. The
-    // same status code, one header apart, and the opposite handling: these
-    // events are still deliverable, so they must stay in the queue and the
-    // developer must NOT be told about a quota they are nowhere near.
+  it('retries a 429 and keeps the batch, since only a middlebox can send one', async () => {
+    // `headers.get` returns null here, and that is the NORMAL cross-origin
+    // case rather than an edge one: `retry-after` is not CORS-safelisted, and
+    // a proxy answering 429 itself short-circuits before the server's CORS
+    // headers are ever added, so the browser exposes no headers at all.
     //
-    // Worth having here and not only in transport.test.ts because the
-    // discriminator reads a header off the response — the one part of the
-    // response shape a bundler cannot verify and a shimmed `fetch` in a real
-    // page is most likely to get wrong.
+    // A revision of this file read that null as "the ingest's quota refusal"
+    // and destroyed the batch. It could not: this bundle posts to /v1/batch
+    // alone, and /v1/batch never answers 429 — the quota arrives in a 202
+    // body, which the test above covers. So this is a rate limit, it is
+    // transient, and the events must survive it.
     const { sent, api, warnings, queued } = bootedPage(() => ({
       status: 429,
-      headers: { get: (name: string) => (name === 'retry-after' ? '5' : null) },
+      headers: { get: () => null },
       json: async () => ({ error: 'rate_limited' }),
     }))
 
@@ -316,10 +291,13 @@ describe('a quota refusal, against the built bundle', () => {
     await api().flush()
 
     expect(sent).toHaveLength(1)
+    // Kept, not destroyed.
     expect(queued()).toHaveLength(1)
+    // And not blamed on a quota.
     expect(warnings).toEqual([])
 
-    // And a backoff was armed: the next flush does not hit the network.
+    // A backoff was armed: the next flush does not hit the network, so a
+    // throttled client does not hammer whatever is throttling it.
     await api().flush()
     expect(sent).toHaveLength(1)
     expect(queued()).toHaveLength(1)
