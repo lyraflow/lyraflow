@@ -26,7 +26,7 @@ const MAX_HONOURED_RETRY_AFTER_MS = 5 * 60_000
  * whereas this tells them their operator has to raise
  * `projects.monthly_event_quota` or wait for the month to roll over.
  */
-const QUOTA_NOTICE =
+export const QUOTA_NOTICE =
   'this project is over its monthly event quota; events will be refused until the month rolls over'
 
 export type SendOutcome = 'sent' | 'retry' | 'dropped' | 'stopped'
@@ -300,31 +300,60 @@ export class Transport {
    * was removed. Its own operator has to act (raise the quota, or wait for the
    * month), and nothing else in the browser can tell them to.
    *
+   * A batch can be BOTH partly rejected and partly over quota — the ingest
+   * counts each item as it walks the batch, so the batch that crosses the
+   * limit comes back with `accepted`, `over_quota` and possibly `rejected` all
+   * non-zero. Each is reported on its own terms, and neither report may cost
+   * the other: they are separate `if`s (not an `if/else`), and each `warn`
+   * goes through `#warnGuarded` so a host callback that throws on the first
+   * message cannot silence the second.
+   *
    * Reported AFTER the removal, never instead of it: neither `rejected` nor
    * `over_quota` will be taken on a retry either, so keeping them would only
    * wedge the queue. The developer gets told; the queue drains.
    *
-   * Everything here is best-effort. A response with no JSON body, a `json()`
-   * that throws, a shimmed `fetch` handing back a plain object — none of that
-   * may turn a successful send into a failure. That includes a `warn` the host
-   * supplied that throws: the catch below swallows it, exactly as the outer
-   * catch in `#run` does for the other warn call sites.
+   * The mechanism, rather than a promise: both field reads happen inside one
+   * `try`, so a body that is absent, not JSON, already consumed, or hostile on
+   * property access ends this method with nothing reported and the send still
+   * counted as `'sent'`. What that try CANNOT cover is a `json()` that never
+   * settles — the `await` below simply never returns, `#inFlight` is never
+   * cleared, and this transport stops sending for the life of the page. No
+   * browser `fetch` is known to behave that way and there is no timeout here;
+   * it is stated so the guard is not read as broader than it is.
    */
   async #reportBody(res: Response): Promise<void> {
     try {
       const body = (await res.json()) as { rejected?: unknown; over_quota?: unknown } | null
+      // Both read BEFORE either warn: a report must be decided from the body
+      // alone, never from how the host reacted to the previous one.
       const rejected = body?.rejected
+      const overQuota = body?.over_quota
       if (typeof rejected === 'number' && rejected > 0) {
-        this.#opts.warn(
+        this.#warnGuarded(
           `the server rejected ${rejected} event(s) in a batch it accepted; retrying would not help, so they were dropped`,
         )
       }
-      const overQuota = body?.over_quota
       if (typeof overQuota === 'number' && overQuota > 0) {
-        this.#opts.warn(`${overQuota} event(s) were dropped: ${QUOTA_NOTICE}`)
+        this.#warnGuarded(`${overQuota} event(s) were dropped: ${QUOTA_NOTICE}`)
       }
     } catch {
       // No body, not JSON, or already consumed. Nothing to report.
+    }
+  }
+
+  /**
+   * Used ONLY by `#reportBody`, which delivers two independent reports about
+   * one response. Elsewhere a throwing `warn` may legitimately abort the
+   * branch it sits in — the outer catch in `#run` turns it into `'retry'`, and
+   * tests pin that. Here it must not: the rejection report and the quota
+   * report are about different events, and a host whose console handler throws
+   * on the first would otherwise never hear about the second.
+   */
+  #warnGuarded(message: string): void {
+    try {
+      this.#opts.warn(message)
+    } catch {
+      // A broken host callback silences itself, never the next report.
     }
   }
 

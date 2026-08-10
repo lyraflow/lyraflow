@@ -1386,15 +1386,22 @@ rather than retrying — a quota refusal does not clear on its own, so retrying
 it would keep every instrumented browser hammering the server for the rest of
 the month while the client-side queue grew for the life of the tab.
 
-The metric to watch is
-`lyraflow_ingest_events_total{outcome="over_quota"}` on `/metrics`. It is a
-process-lifetime counter of individual events refused, and it is the only
-place a refusal is visible server-side — over-quota events are deliberately
-*not* written to `events_dead_letter`, which records data that could not be
-parsed rather than valid data refused by policy. There is nothing that warns
-you as a project approaches its limit, and no command that reports current
-consumption; until there is, alert on this counter leaving zero, and read
-`ingest_counters` in Postgres for the month's totals.
+**A refusal is recorded in two places, and they answer different questions.**
+`lyraflow_ingest_events_total{outcome="over_quota"}` on `/metrics` counts
+individual events refused **since process start**, across every project — it
+carries no project label and it resets on restart, so it tells you that
+refusals are happening, not who they belong to. That makes it the thing to
+alert on. The durable record is `ingest_counters.events_over_quota` in
+Postgres, one row per project per month, which each server process folds its
+tally into every 10 seconds; query that to find out which project ran out and
+by how much. Neither is `events_dead_letter`: over-quota events are
+deliberately kept out of it, because that table records data that could not be
+parsed, and filling it with valid events refused by policy would bury the
+bad-data signal it exists to carry.
+
+There is nothing that warns you as a project approaches its limit, and no
+command that reports current consumption. Until there is, alert on the counter
+leaving zero and read `ingest_counters` for the month's totals.
 
 **If Postgres is unreachable, the quota is not enforced from persisted state.**
 The usage read falls back to the last known figure for the current month, or

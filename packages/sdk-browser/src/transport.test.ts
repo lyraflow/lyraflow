@@ -2,7 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { QueuedEvent } from './payload.js'
 import { EventQueue } from './queue.js'
-import { Transport } from './transport.js'
+import { QUOTA_NOTICE, Transport } from './transport.js'
 
 const event = (id: string): QueuedEvent => ({
   type: 'track',
@@ -159,6 +159,92 @@ describe('Transport', () => {
     expect(queue.size()).toBe(0)
   })
 
+  // --- A success clears the backoff -------------------------------------
+  // Found on review of this task: `transport.ts`'s 202 branch resets both
+  // `#failures` and `#nextAttemptAt`, and NOTHING in the package pinned
+  // either. Every backoff test above arms a backoff and asserts that it
+  // BLOCKS; none asserted that it ever stops blocking. Deleting both resets
+  // passed the entire suite — and the consequence is not subtle: a single
+  // 503 during a blip would leave the SDK in a permanent 1s -> 30s cadence
+  // for the life of the tab, recovering never, with the suite green.
+
+  it('resets the failure count on a success, so the next failure starts the backoff over', async () => {
+    // #failures drives the exponential, so a lost reset shows up not on the
+    // successful send but on the NEXT failure after it: a client that has
+    // recovered would still be backing off as though it never had.
+    vi.useFakeTimers()
+    try {
+      let status = 503
+      const fetchImpl = vi.fn(async () => reply(status)) as unknown as typeof fetch
+      const { queue, transport } = make(fetchImpl)
+
+      // Five failures: the exponential reaches min(1000 * 2^4, 30000) = 16s.
+      for (let i = 0; i < 5; i += 1) {
+        queue.add(event(`f${i}`))
+        expect(await transport.flush()).toBe('retry')
+        // Comfortably past the longest possible delay plus its 20% jitter.
+        vi.advanceTimersByTime(40_000)
+      }
+      expect(fetchImpl).toHaveBeenCalledTimes(5)
+
+      // One success. This is the call that must put #failures back to zero.
+      status = 202
+      expect(await transport.flush()).toBe('sent')
+
+      // Then one more failure. With the reset, this is failure #1 again and
+      // the delay is BACKOFF_BASE_MS plus up to 20% jitter — under 1200ms.
+      // Without it, it is failure #6: min(1000 * 2^5, 30000) = 30s, and the
+      // 1300ms advance below is nowhere near enough to unblock it.
+      status = 503
+      queue.add(event('after'))
+      expect(await transport.flush()).toBe('retry')
+      expect(fetchImpl).toHaveBeenCalledTimes(7)
+
+      vi.advanceTimersByTime(1_300)
+      queue.add(event('recovered'))
+      await transport.flush()
+      expect(fetchImpl).toHaveBeenCalledTimes(8)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('clears an armed backoff when a pagehide flush succeeds through it', async () => {
+    // The other half of the reset, and the only path that reaches it with a
+    // backoff window still in the FUTURE: an ordinary flush cannot succeed
+    // during a backoff because the backoff short-circuits it, but a pagehide
+    // flush bypasses that check by design. If `#nextAttemptAt = 0` were
+    // dropped, this transport would have just delivered a batch successfully
+    // and would still refuse to send anything for the remaining 30 seconds.
+    let status = 503
+    const fetchImpl = vi.fn(async () =>
+      reply(status, { 'retry-after': '30' }),
+    ) as unknown as typeof fetch
+    const { queue, transport } = make(fetchImpl)
+    queue.add(event('m1'))
+    transport.start()
+    try {
+      expect(await transport.flush()).toBe('retry')
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+
+      // The unload flush bypasses the 30s window and succeeds.
+      status = 202
+      dispatchEvent(new Event('pagehide'))
+      expect(fetchImpl).toHaveBeenCalledTimes(2)
+      // Let that fire-and-forget run settle, including its body read.
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(queue.size()).toBe(0)
+
+      // An ORDINARY flush now reaches the network: the window the 503 armed
+      // was cleared by the success, not merely bypassed once.
+      queue.add(event('m2'))
+      expect(await transport.flush()).toBe('sent')
+      expect(fetchImpl).toHaveBeenCalledTimes(3)
+    } finally {
+      transport.stop()
+    }
+  })
+
   // --- Quota refusals ---------------------------------------------------
   // Two shapes, and only one of them is what the real server sends.
   //
@@ -171,6 +257,17 @@ describe('Transport', () => {
   // proxy, a CDN, a gateway with its own rate limiting. It is still worth
   // having, because an unhandled 429 falls through to #backoff + 'retry' and
   // then retries the same batch forever, whatever emitted it.
+
+  it('the quota notice says what the condition is and when it clears', () => {
+    // Every other quota assertion in this file matches on QUOTA_NOTICE itself,
+    // so without this one the whole set is satisfied by the constant being the
+    // literal string 'quota' — the message could be reduced to a word and the
+    // package would stay green. What the message must actually carry is the
+    // two facts a developer can act on: WHICH limit was hit, and that it will
+    // not clear on a retry.
+    expect(QUOTA_NOTICE).toMatch(/monthly event quota/i)
+    expect(QUOTA_NOTICE).toMatch(/until the month rolls over/i)
+  })
 
   it('drops a 429 rather than retrying it, and says why', async () => {
     // A quota refusal is not transient: it holds until the month rolls over,
@@ -186,7 +283,7 @@ describe('Transport', () => {
     expect(queue.size()).toBe(0)
     // Names the condition, not the status code: "rejected with 429" is not
     // something a developer can act on; "over its monthly event quota" is.
-    expect(warn.mock.calls.join(' ')).toMatch(/quota/i)
+    expect(warn.mock.calls.join(' ')).toContain(QUOTA_NOTICE)
     expect(warn.mock.calls.join(' ')).not.toMatch(/429/)
   })
 
@@ -221,11 +318,51 @@ describe('Transport', () => {
     queue.add(event('m1'))
     queue.add(event('m2'))
     expect(await transport.flush()).toBe('sent')
-    expect(warn.mock.calls.join(' ')).toMatch(/quota/i)
+    expect(warn.mock.calls.join(' ')).toContain(QUOTA_NOTICE)
     // The count, so a developer can tell "2 of 20" from "20 of 20".
     expect(warn.mock.calls.join(' ')).toContain('2 event(s)')
     // Still removed: next month is not a retry window this queue can wait
     // out, and holding them would wedge every healthy event behind them.
+    expect(queue.size()).toBe(0)
+  })
+
+  it('reports over_quota on the batch that CROSSES the limit, where accepted is not zero', async () => {
+    // THE shape a project is guaranteed to meet, and the one every other
+    // fixture here misses. `routes.ts` walks a batch item by item and checks
+    // the quota per item, so the batch that crosses the limit stores the
+    // events before the crossing point and refuses the ones after it: it
+    // comes back with `accepted` AND `over_quota` both non-zero. Every batch
+    // afterwards is the all-refused shape, but this one comes first, and a
+    // guard of `over_quota > 0 && accepted === 0` — which every other test in
+    // this file would accept — would stay silent on precisely the response
+    // that announces the project has run out.
+    const body = JSON.stringify({ accepted: 3, rejected: 0, throttled: 0, over_quota: 2 })
+    const { queue, transport, warn } = make(
+      vi.fn(async () => new Response(body, { status: 202 })) as unknown as typeof fetch,
+    )
+    for (let i = 0; i < 5; i += 1) queue.add(event(`m${i}`))
+    expect(await transport.flush()).toBe('sent')
+    expect(warn.mock.calls.join(' ')).toContain(QUOTA_NOTICE)
+    expect(warn.mock.calls.join(' ')).toContain('2 event(s)')
+    // The three that were stored are gone too — the whole batch leaves the
+    // queue on a 202, and the report is about what happened to it, not a
+    // partial retry instruction.
+    expect(queue.size()).toBe(0)
+  })
+
+  it('reports a batch that is partly accepted, partly rejected and partly over quota', async () => {
+    // All three at once, which the ingest can produce in a single pass: a
+    // malformed event, a good one stored, and a good one refused for the
+    // quota. Both reports fire, and neither swallows the other.
+    const body = JSON.stringify({ accepted: 1, rejected: 1, throttled: 0, over_quota: 1 })
+    const { queue, transport, warn } = make(
+      vi.fn(async () => new Response(body, { status: 202 })) as unknown as typeof fetch,
+    )
+    for (let i = 0; i < 3; i += 1) queue.add(event(`m${i}`))
+    expect(await transport.flush()).toBe('sent')
+    expect(warn).toHaveBeenCalledTimes(2)
+    expect(warn.mock.calls.join(' ')).toContain('rejected 1')
+    expect(warn.mock.calls.join(' ')).toContain(QUOTA_NOTICE)
     expect(queue.size()).toBe(0)
   })
 
@@ -258,7 +395,32 @@ describe('Transport', () => {
     expect(await transport.flush()).toBe('sent')
     expect(warn).toHaveBeenCalledTimes(2)
     expect(warn.mock.calls.join(' ')).toContain('rejected 1')
-    expect(warn.mock.calls.join(' ')).toMatch(/quota/i)
+    expect(warn.mock.calls.join(' ')).toContain(QUOTA_NOTICE)
+    expect(queue.size()).toBe(0)
+  })
+
+  it('still reports over_quota when the host warn throws on the rejection report', async () => {
+    // The two reports are about different events and must be independent in
+    // BOTH directions. Sharing one try/catch made them serially dependent:
+    // a host console handler that throws on the first message — an
+    // over-eager wrapper, a logger that rejects unknown formats — took the
+    // quota notice down with it, and the developer never learned the one
+    // thing only their operator can fix.
+    const body = JSON.stringify({ accepted: 0, rejected: 1, throttled: 0, over_quota: 1 })
+    const seen: string[] = []
+    const throwsOnFirst = vi.fn((message: string) => {
+      seen.push(message)
+      if (seen.length === 1) throw new Error('console handler blew up')
+    })
+    const { queue, transport } = make(
+      vi.fn(async () => new Response(body, { status: 202 })) as unknown as typeof fetch,
+      throwsOnFirst,
+    )
+    queue.add(event('m1'))
+    queue.add(event('m2'))
+    expect(await transport.flush()).toBe('sent')
+    expect(seen).toHaveLength(2)
+    expect(seen.join(' ')).toContain(QUOTA_NOTICE)
     expect(queue.size()).toBe(0)
   })
 

@@ -235,14 +235,27 @@ describe('the README snippet, against the built bundle', () => {
  */
 describe('a quota refusal, against the built bundle', () => {
   it('reports an over-quota 202 to the console and does not keep the events queued', async () => {
+    // The batch that CROSSES the quota, not one long past it: the ingest
+    // checks per item, so this response stores the first event and refuses
+    // the second — `accepted` and `over_quota` both non-zero. It is the first
+    // response a project ever sees on running out, and a guard that only
+    // looked at `over_quota` when nothing was accepted would say nothing
+    // about it. (transport.test.ts pins the same shape at the module level;
+    // this is the one that proves it survives into the shipped bundle.)
     const { sent, api, warnings, queued } = bootedPage((count) => ({
       status: 202,
       headers: { get: () => null },
-      json: async () => ({ accepted: 0, rejected: 0, throttled: 0, over_quota: count }),
+      json: async () => ({
+        accepted: 1,
+        rejected: 0,
+        throttled: 0,
+        over_quota: count - 1,
+      }),
     }))
 
     api().track('checkout_completed')
-    expect(queued()).toHaveLength(1)
+    api().track('checkout_completed_again')
+    expect(queued()).toHaveLength(2)
     await api().flush()
 
     expect(sent).toHaveLength(1)
