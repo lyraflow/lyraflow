@@ -3,6 +3,6 @@ import { SCHEMA_VERSION } from './index.js'
 
 describe('core', () => {
   it('exposes the app schema version', () => {
-    expect(SCHEMA_VERSION).toBe(10)
+    expect(SCHEMA_VERSION).toBe(11)
   })
 })

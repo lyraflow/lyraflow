@@ -6,8 +6,9 @@ const BACKOFF_BASE_MS = 1_000
 const BACKOFF_MAX_MS = 30_000
 /**
  * A ceiling on a server-advised `retry-after`. The real ingest only ever
- * sends `5` — both its draining and batch-overload paths
- * (packages/server/src/ingest/routes.ts) hardcode `retry-after: 5`. This
+ * sends `5` — all three of its paths that send the header at all (draining,
+ * single-event overload, and batch overload, in
+ * packages/server/src/ingest/routes.ts) hardcode `retry-after: 5`. This
  * exists so a malformed or hostile header (a stray extra digit, something
  * between the SDK and the ingest rewriting it) cannot switch retrying off
  * for days by being merely a very large, otherwise-well-formed number — the
@@ -15,6 +16,20 @@ const BACKOFF_MAX_MS = 30_000
  * bites a well-behaved server.
  */
 const MAX_HONOURED_RETRY_AFTER_MS = 5 * 60_000
+/**
+ * The one signal a developer gets that a quota refused their events: the
+ * `over_quota` tally `/v1/batch` reports inside its `202`. That is the only
+ * use of this constant, and the only quota path this SDK has — a `429`
+ * reaching it is never the ingest's quota (see the status handling below),
+ * so nothing here may attribute one to this condition.
+ *
+ * It names the condition rather than a status code on purpose: "the server
+ * rejected a batch with 429" tells a developer nothing they can act on,
+ * whereas this tells them their operator has to raise
+ * `projects.monthly_event_quota` or wait for the month to roll over.
+ */
+export const QUOTA_NOTICE =
+  'this project is over its monthly event quota; events will be refused until the month rolls over'
 
 export type SendOutcome = 'sent' | 'retry' | 'dropped' | 'stopped'
 
@@ -221,7 +236,7 @@ export class Transport {
       this.#opts.queue.remove(batch.map((e) => e.message_id))
       this.#failures = 0
       this.#nextAttemptAt = 0
-      await this.#reportRejected(res)
+      await this.#reportBody(res)
       return 'sent'
     }
     if (status === 401) {
@@ -232,6 +247,24 @@ export class Transport {
       this.#opts.warn('the write key was rejected; no further events will be sent')
       return 'stopped'
     }
+    // `429` is deliberately NOT handled here, and that is a decision rather
+    // than an omission. This transport posts to exactly one URL — `/v1/batch`
+    // (see `#attempt` above) — and `/v1/batch` never answers `429`: its
+    // contract is `202` carrying a tally, with quota refusals counted in the
+    // body's `over_quota` field, which `#reportBody` reports. The ingest's
+    // only `429` lives on the single-event routes (`/v1/track`,
+    // `/v1/identify`, `/v1/page`), which nothing in this package calls.
+    //
+    // So a `429` arriving here is always something in FRONT of the server —
+    // a reverse proxy, CDN or API gateway rate limiting the browser — and
+    // that is transient. It falls through to the backoff below and is
+    // retried, which is the correct response to a rate limit.
+    //
+    // An earlier revision of this file dropped `429` and blamed the project's
+    // monthly quota for it. That was wrong on both halves: the diagnosis
+    // named a limit the project was nowhere near, and the drop destroyed
+    // every batch of a client that was merely being throttled — with no
+    // backoff, because the drop path returns before reaching one.
     if (status === 400 || status === 413) {
       this.#opts.queue.remove(batch.map((e) => e.message_id))
       this.#opts.warn(
@@ -247,6 +280,14 @@ export class Transport {
     // into a mis-classified 'retry' whenever the headers object is
     // hostile — exactly the response shape a network intermediary or a
     // broken fetch polyfill can hand back.
+    //
+    // The catch is not decoration, and "the outer catch in #run would have
+    // caught it anyway" is not a substitute: that catch returns 'retry'
+    // WITHOUT arming a backoff, so a hostile headers object on a saturated
+    // server would put this client into a hot retry loop. The two outcomes
+    // are indistinguishable from the return value alone, which is why the
+    // test for this asserts the next flush is held off rather than merely
+    // that the call resolved.
     let retryAfter: string | null = null
     try {
       retryAfter = res.headers.get('retry-after')
@@ -258,31 +299,74 @@ export class Transport {
   }
 
   /**
-   * `/v1/batch` answers `202` with `{accepted, rejected, throttled}` even when
-   * it stored nothing — the ingest never fails a batch over one bad event.
-   * This body is the SDK's ONLY feedback channel, and it was being thrown
-   * away: a batch that came back `{accepted: 0, rejected: 1}` was treated as
-   * fully delivered and every event in it removed, in silence.
+   * `/v1/batch` answers `202` with `{accepted, rejected, throttled, over_quota}`
+   * even when it stored nothing — the ingest never fails a batch over one bad
+   * event. This body is the SDK's ONLY feedback channel, and it was being
+   * thrown away: a batch that came back `{accepted: 0, rejected: 1}` was
+   * treated as fully delivered and every event in it removed, in silence.
    *
-   * Reported AFTER the removal, never instead of it: `rejected` means the
-   * server will not take those events on a retry either, so keeping them
-   * would only wedge the queue. The developer gets told; the queue drains.
+   * `over_quota` is the same bug one field over, and it is the one the server
+   * actually produces for a refused batch. `/v1/batch` never answers `429` —
+   * a batch entirely over quota comes back
+   * `202 {"accepted":0,"rejected":0,"throttled":0,"over_quota":2}`, so reading
+   * `rejected` alone left the developer told nothing at all while every event
+   * was removed. Its own operator has to act (raise the quota, or wait for the
+   * month), and nothing else in the browser can tell them to.
    *
-   * Everything here is best-effort. A response with no JSON body, a `json()`
-   * that throws, a shimmed `fetch` handing back a plain object — none of that
-   * may turn a successful send into a failure.
+   * A batch can be BOTH partly rejected and partly over quota — the ingest
+   * counts each item as it walks the batch, so the batch that crosses the
+   * limit comes back with `accepted`, `over_quota` and possibly `rejected` all
+   * non-zero. Each is reported on its own terms, and neither report may cost
+   * the other: they are separate `if`s (not an `if/else`), and each `warn`
+   * goes through `#warnGuarded` so a host callback that throws on the first
+   * message cannot silence the second.
+   *
+   * Reported AFTER the removal, never instead of it: neither `rejected` nor
+   * `over_quota` will be taken on a retry either, so keeping them would only
+   * wedge the queue. The developer gets told; the queue drains.
+   *
+   * The mechanism, rather than a promise: both field reads happen inside one
+   * `try`, so a body that is absent, not JSON, already consumed, or hostile on
+   * property access ends this method with nothing reported and the send still
+   * counted as `'sent'`. What that try CANNOT cover is a `json()` that never
+   * settles — the `await` below simply never returns, `#inFlight` is never
+   * cleared, and this transport stops sending for the life of the page. No
+   * browser `fetch` is known to behave that way and there is no timeout here;
+   * it is stated so the guard is not read as broader than it is.
    */
-  async #reportRejected(res: Response): Promise<void> {
+  async #reportBody(res: Response): Promise<void> {
     try {
-      const body = (await res.json()) as { rejected?: unknown } | null
+      const body = (await res.json()) as { rejected?: unknown; over_quota?: unknown } | null
+      // Both read BEFORE either warn: a report must be decided from the body
+      // alone, never from how the host reacted to the previous one.
       const rejected = body?.rejected
+      const overQuota = body?.over_quota
       if (typeof rejected === 'number' && rejected > 0) {
-        this.#opts.warn(
+        this.#warnGuarded(
           `the server rejected ${rejected} event(s) in a batch it accepted; retrying would not help, so they were dropped`,
         )
       }
+      if (typeof overQuota === 'number' && overQuota > 0) {
+        this.#warnGuarded(`${overQuota} event(s) were dropped: ${QUOTA_NOTICE}`)
+      }
     } catch {
       // No body, not JSON, or already consumed. Nothing to report.
+    }
+  }
+
+  /**
+   * Used ONLY by `#reportBody`, which delivers two independent reports about
+   * one response. Elsewhere a throwing `warn` may legitimately abort the
+   * branch it sits in — the outer catch in `#run` turns it into `'retry'`, and
+   * tests pin that. Here it must not: the rejection report and the quota
+   * report are about different events, and a host whose console handler throws
+   * on the first would otherwise never hear about the second.
+   */
+  #warnGuarded(message: string): void {
+    try {
+      this.#opts.warn(message)
+    } catch {
+      // A broken host callback silences itself, never the next report.
     }
   }
 

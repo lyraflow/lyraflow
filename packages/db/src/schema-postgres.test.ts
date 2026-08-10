@@ -53,10 +53,16 @@ describe('postgres schema', () => {
   // answerable) and packages/db/src/migrations/010.test.ts for the guarantee
   // that this only ever changed the default for a NEW project, never an
   // existing row's stored value.
-  it('defaults retention to 13 months and sets a monthly quota', async () => {
+  //
+  // 011_quota.sql dropped the monthly_event_quota DEFAULT entirely — see
+  // that migration for why (unlimited is the safe direction: it must not be
+  // possible for an upgrade to hand a project a cap it never opted into).
+  // A NEW project, the same as an existing one, is unlimited unless an
+  // operator sets a number.
+  it('defaults retention to 13 months and leaves the monthly quota unlimited', async () => {
     const r = await pg.query('SELECT retention_months, monthly_event_quota FROM projects LIMIT 1')
     expect(r.rows[0].retention_months).toBe(13)
-    expect(Number(r.rows[0].monthly_event_quota)).toBeGreaterThan(0)
+    expect(r.rows[0].monthly_event_quota).toBeNull()
   })
 
   it('rejects a retention outside the supported range', async () => {

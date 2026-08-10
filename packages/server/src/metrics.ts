@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify'
 
 export interface MetricsDeps {
   bufferDepth: () => number
-  totals: () => { accepted: number; rejected: number; throttled: number }
+  totals: () => { accepted: number; rejected: number; throttled: number; over_quota: number }
   retention: () => { lastRunAt: number | null; partitionsDropped: number }
 }
 
@@ -27,6 +27,13 @@ export function registerMetrics(app: FastifyInstance, deps: MetricsDeps): void {
       `lyraflow_ingest_events_total{outcome="accepted"} ${totals.accepted}`,
       `lyraflow_ingest_events_total{outcome="rejected"} ${totals.rejected}`,
       `lyraflow_ingest_events_total{outcome="throttled"} ${totals.throttled}`,
+      // A fourth label value on the existing series rather than a metric of
+      // its own: the HELP above already says "individual events by outcome",
+      // and over-quota is an outcome. Kept distinct from `throttled` because
+      // the two need opposite responses — throttled says the server is the
+      // constraint and the sender should retry, over_quota says the
+      // configuration is, and retrying is pointless until the month rolls.
+      `lyraflow_ingest_events_total{outcome="over_quota"} ${totals.over_quota}`,
       // A retention worker that has silently stopped — crashed, wedged,
       // never started — looks exactly like one that is running fine with
       // nothing left to expire: neither shows up as an error, a failed
