@@ -128,20 +128,41 @@ pg_query() {
     "$1" "$PG_USER" "$PG_DATABASE" < /dev/null
 }
 
-# pg_dump_to <file>
+# artefact_write <path> — THE ONLY PLACE IN EITHER SCRIPT THAT CREATES A FILE.
 #
-# A redirect, not a pipe, so the exit status is pg_dump's own. `set -o pipefail`
-# is set by the callers as a second line of defence, but the redirect is the
-# first: a failed dump piped into anything still writes a perfectly valid
-# archive of nothing.
+# Reads stdin, writes <path>. Every artefact goes through here, which is what
+# makes "created at 0600 by the process umask, never widened, never staged
+# through anything looser" a property of one auditable line instead of a claim
+# about the whole codebase.
 #
-# The redirect is what applies the caller's `umask 077` to the dump — see
-# backup.sh's umask comment.
+# This shape exists because two rounds of banning spellings lost. First `chmod`
+# was banned, so the next attempt used `install -m 600`; that was banned too, so
+# the next used `docker compose cp` into a scratch file and then `cat` that
+# scratch through the umask into the real destination -- no chmod, no install,
+# one correctly placed `umask 077`, both permission tests green, and a scratch
+# file holding the plaintext Postgres password sitting at 0640 for the length of
+# the copy. You cannot win a spelling war against file creation; you can only
+# reduce the number of places it happens to one and audit that.
+#
+# The test enforces the chokepoint rather than the vocabulary: exactly one data
+# redirect in either script and it is the one below, plus an allow-list of the
+# external commands these scripts may invoke at all, so a new way to make a file
+# cannot be introduced without failing a test whatever it is spelled.
+#
+# `cat` and not `cp`/`install`/`dd`: the caller supplies bytes on a pipe, so
+# there is no source file whose mode could be copied along with them.
+artefact_write() {
+  cat > "$1"
+}
+
 pg_dump_to() {
-  local out="$1"
+  # A pipe, not a redirect. `set -o pipefail` is what makes the exit status
+  # still pg_dump's -- verified by the tests that inject a pg_dump failure and
+  # require the run to fail and leave nothing behind. restore.sh must set
+  # pipefail too if it uses this.
   docker compose exec -T "$PG_SERVICE" sh -c \
     'PGPASSWORD="$POSTGRES_PASSWORD" pg_dump -U "$0" -d "$1" -Fc' \
-    "$PG_USER" "$PG_DATABASE" < /dev/null > "$out"
+    "$PG_USER" "$PG_DATABASE" < /dev/null | artefact_write "$1"
 }
 
 # copy_ch_artefact_to <file>
@@ -156,8 +177,8 @@ pg_dump_to() {
 #
 # A redirect, not a pipe, so the exit status is the copy's own.
 copy_ch_artefact_to() {
-  local out="$1"
-  docker compose exec -T "$CH_SERVICE" cat "$CH_BACKUP_DIR/$CH_FILE" < /dev/null > "$out"
+  docker compose exec -T "$CH_SERVICE" cat "$CH_BACKUP_DIR/$CH_FILE" < /dev/null |
+    artefact_write "$1"
 }
 
 # ---------------------------------------------------------------------------
@@ -305,10 +326,20 @@ start_app_if_stopped() {
 # Guarded on OUT_CREATED so it can only ever remove a directory this run
 # created: validation refuses to start when the directory already exists, and
 # creates it with a non-recursive `mkdir` that exactly one racing run can win.
+# Cannot fail. Called from the EXIT trap, where a non-zero return under `set -e`
+# would abort the trap -- and this used to end in a bare `rm -rf "$OUT"`, which
+# on a destination gone read-only aborted cleanup before the app was restarted.
+# The trap now runs the restart first and guards every call, so this is the
+# third of three independent reasons that cannot happen; it is here so that no
+# single one of them is load-bearing.
 remove_incomplete_output() {
   [ "${OUT_CREATED:-0}" = "1" ] || return 0
   if [ "${BACKUP_COMPLETE:-0}" = "1" ]; then return 0; fi
-  rm -rf "$OUT"
+  rm -rf "$OUT" 2>/dev/null || {
+    echo "WARNING: could not remove the incomplete backup at $OUT" >&2
+    echo "It has no manifest and cannot be restored; delete it by hand." >&2
+  }
+  return 0
 }
 
 # The backups disk lives inside the ClickHouse data volume, so the scratch
@@ -334,11 +365,13 @@ remove_incomplete_output() {
 # archive INTO the container and must therefore set CH_ARTEFACT_CREATED=1 once
 # that copy has succeeded — otherwise the restored archive stays on the backups
 # disk forever, which is precisely the volume growth this exists to prevent.
+# Cannot fail, for the same reason as remove_incomplete_output.
 remove_in_container_artefact() {
   [ "${CH_ARTEFACT_CREATED:-0}" = "1" ] || return 0
   [ -n "${CH_FILE:-}" ] || return 0
   docker compose exec -T "$CH_SERVICE" \
     rm -f "$CH_BACKUP_DIR/$CH_FILE" < /dev/null >/dev/null 2>&1 || true
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -584,9 +617,12 @@ write_manifest() {
     printf 'postgres_sha256=%s\n' "$pg_sum"
     ch_row_counts || exit 1
     pg_row_counts || exit 1
-  } | LC_ALL=C sort > "$tmp"; then
+  } | LC_ALL=C sort | artefact_write "$tmp"; then
     rm -f "$tmp"
     return 1
   fi
+  # `mv`, not a second write: the rename carries the mode artefact_write gave
+  # the temporary file, so MANIFEST cannot appear with any other mode, and it
+  # appears atomically or not at all.
   mv "$tmp" "$out/MANIFEST"
 }

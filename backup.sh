@@ -27,9 +27,16 @@ set -euo pipefail
 # So the answer is file permissions. umask before anything is created, not
 # chmod after: install.sh's .env comment has the reasoning -- a chmod afterwards
 # leaves a window in which the file already exists, already holds the secret,
-# and still has the default mode. Everything below is created by a redirect or
-# by mkdir under this umask, which is also why the archive is copied out with
-# `exec … cat >` rather than `docker compose cp` (see copy_ch_artefact_to).
+# and still has the default mode.
+#
+# This has to be a top-level statement, not a call, and it has to come before
+# the first `mkdir` and the first redirect. A `harden_file_mode() { umask 077; }`
+# defined here and called later satisfies a reading of "the umask comes first"
+# while `mkdir "$OUT"` has already run unprotected.
+#
+# Every file below is created by exactly one function, `artefact_write` in
+# backup-lib.sh, which is a single `cat > "$1"` under this umask. See its
+# comment for why one chokepoint replaced a list of banned spellings.
 umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -68,19 +75,38 @@ CH_FILE="lyraflow-$STAMP.zip"
 OUT_CREATED=0
 BACKUP_COMPLETE=0
 
+# THE RESTART COMES FIRST, and nothing above it may be able to abort this
+# function.
+#
+# Three review rounds found three different ways for the app to be left stopped,
+# all of them in this path, and the third was that `remove_incomplete_output`
+# ended in a bare `rm -rf "$OUT"`: on a destination that had gone read-only --
+# which is what ext4 does on an I/O error -- `set -e` aborted the trap before
+# the restart, with no retry, no exit-1 diagnostic and not even the "app is
+# stopped" text. Constructed and observed, exit code 1 with the container
+# `Exited (0)` and "Starting the app again..." never printed.
+#
+# Fixing them one at a time was losing. The invariant now is structural: the
+# restart is the first statement, so no tidy-up can pre-empt it; and every
+# tidy-up is individually incapable of returning non-zero anyway, so neither the
+# ordering nor the error handling is load-bearing on its own. Anything added to
+# this function must go BELOW the restart and must not be able to fail.
 cleanup() {
-  remove_in_container_artefact
-  remove_incomplete_output
+  local restart_ok=1
   # The RETRY. start_app_if_stopped leaves APP_STOPPED set when it fails, so a
   # restart that failed on the happy path is attempted once more here -- which
   # is what recovers the case where a deferred Ctrl-C lands on the restart and
   # nothing else. It is a no-op when the app is already back.
-  #
-  # And if it is still not back, this script must NOT report success. Exiting
+  start_app_if_stopped || restart_ok=0
+
+  remove_in_container_artefact || true
+  remove_incomplete_output || true
+
+  # If the app is still not back, this script must NOT report success. Exiting
   # from the EXIT trap overrides a zero status (verified), which is the only
   # way to turn "the backup worked but the site is dark" into something a cron
   # wrapper testing $? can see.
-  if ! start_app_if_stopped; then
+  if [ "$restart_ok" = "0" ]; then
     echo "" >&2
     echo "ERROR: the app is stopped and this script could not start it." >&2
     echo "  Run: docker compose start $APP_SERVICE" >&2

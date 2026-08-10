@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
   existsSync,
@@ -259,33 +259,48 @@ beforeAll(async () => {
   const realDocker = execFileSync('sh', ['-c', 'command -v docker'], {
     encoding: 'utf8',
   }).trim()
-  const shim = join(shimDir, 'docker')
-  writeFileSync(
-    shim,
-    [
-      '#!/bin/sh',
-      'if [ -n "${SHIM_FAIL_BEFORE:-}" ]; then',
-      '  case "$*" in *"$SHIM_FAIL_BEFORE"*) exit 1 ;; esac',
-      'fi',
-      // SHIM_FAIL_ONCE fails the first matching invocation and lets every later
-      // one through, which is the shape of a transient failure — a deferred
-      // signal landing on one command — and therefore the shape a retry can
-      // actually recover from.
-      'if [ -n "${SHIM_FAIL_ONCE:-}" ]; then',
-      '  case "$*" in',
-      '    *"$SHIM_FAIL_ONCE"*)',
-      '      if [ ! -f "$SHIM_MARKER" ]; then : > "$SHIM_MARKER"; exit 1; fi',
-      '      ;;',
-      '  esac',
-      'fi',
-      'if [ -n "${SHIM_FAIL_AFTER:-}" ]; then',
-      `  case "$*" in *"$SHIM_FAIL_AFTER"*) ${realDocker} "$@"; exit 1 ;; esac`,
-      'fi',
-      `exec ${realDocker} "$@"`,
-      '',
-    ].join('\n'),
-    { mode: 0o755 },
-  )
+  const shimBody = [
+    '#!/bin/sh',
+    // The match includes the program name, so one shim body serves both
+    // `docker` and `rm` and the existing docker match strings still hit.
+    'SELF=$(basename "$0")',
+    'if [ -n "${SHIM_FAIL_BEFORE:-}" ]; then',
+    '  case "$SELF $*" in *"$SHIM_FAIL_BEFORE"*) exit 1 ;; esac',
+    'fi',
+    'if [ -n "${SHIM_FAIL_BEFORE2:-}" ]; then',
+    '  case "$SELF $*" in *"$SHIM_FAIL_BEFORE2"*) exit 1 ;; esac',
+    'fi',
+    // SHIM_FAIL_ONCE fails the first matching invocation and lets every later
+    // one through, which is the shape of a transient failure — a deferred
+    // signal landing on one command — and therefore the shape a retry can
+    // actually recover from.
+    'if [ -n "${SHIM_FAIL_ONCE:-}" ]; then',
+    '  case "$SELF $*" in',
+    '    *"$SHIM_FAIL_ONCE"*)',
+    '      if [ ! -f "$SHIM_MARKER" ]; then : > "$SHIM_MARKER"; exit 1; fi',
+    '      ;;',
+    '  esac',
+    'fi',
+    'if [ -n "${SHIM_FAIL_AFTER:-}" ]; then',
+    `  case "$SELF $*" in *"$SHIM_FAIL_AFTER"*) "$REAL_BIN" "$@"; exit 1 ;; esac`,
+    'fi',
+    'exec "$REAL_BIN" "$@"',
+    '',
+  ]
+
+  // One shim body, installed as every binary the scripts call that a cleanup
+  // step depends on. `rm` is here so a cleanup step that is NOT a docker
+  // command can be made to fail too — see the cleanup-robustness test.
+  for (const [name, real] of [
+    ['docker', realDocker],
+    ['rm', execFileSync('sh', ['-c', 'command -v rm'], { encoding: 'utf8' }).trim()],
+  ] as const) {
+    writeFileSync(
+      join(shimDir, name),
+      shimBody.join('\n').replace('$REAL_BIN', real).replace('$REAL_BIN', real),
+      { mode: 0o755 },
+    )
+  }
 }, 600_000)
 
 afterAll(() => {
@@ -451,11 +466,23 @@ describe('backup.sh', () => {
     // there is a umask, and there is no chmod anywhere to undo it.
     // Comment lines are stripped first: both files *discuss* chmod at length,
     // and the prohibition is on running one.
-    const code = (f: string): string =>
-      readFileSync(f, 'utf8')
-        .split('\n')
-        .filter((l) => !/^\s*#/.test(l))
-        .join('\n')
+    // Comment lines AND here-document bodies are stripped: both are data. The
+    // usage text says "<destination-directory>", which is not a redirection.
+    const code = (f: string): string => {
+      const out: string[] = []
+      let terminator: string | null = null
+      for (const line of readFileSync(f, 'utf8').split('\n')) {
+        if (terminator !== null) {
+          if (line.trim() === terminator) terminator = null
+          continue
+        }
+        if (/^\s*#/.test(line)) continue
+        const here = /<<-?\s*'?([A-Za-z_][A-Za-z0-9_]*)'?/.exec(line)
+        if (here) terminator = here[1] as string
+        out.push(line)
+      }
+      return out.join('\n')
+    }
 
     // Ban the BEHAVIOUR, not one spelling of it. Banning `chmod` alone is
     // defeatable, and both of these were proven to pass a full 14-test run:
@@ -477,13 +504,154 @@ describe('backup.sh', () => {
     expect(umasks).toEqual(['umask 077'])
     expect(code('backup-lib.sh')).not.toMatch(/umask/)
 
-    // And it must precede the first thing that can CREATE something — a
-    // redirect or a mkdir — rather than merely preceding the `source` line,
-    // which proves nothing about where files appear.
+    // At the top level and before the first function definition, not merely
+    // before the first creator *textually*: `harden_file_mode() { umask 077; }`
+    // defined early and called late satisfies a position check while `mkdir
+    // "$OUT"` has already run unprotected.
+    const umaskLine = script.split('\n').findIndex((l) => l === 'umask 077')
+    expect(umaskLine, 'umask 077 must be an unindented top-level statement').toBeGreaterThan(-1)
+    const firstFunction = script.split('\n').findIndex((l) => /^\w[\w_]*\(\)\s*\{/.test(l))
+    expect(umaskLine).toBeLessThan(firstFunction)
+    // …and still before the first thing that can create something.
     const creator = script.search(/(^|\s)(mkdir\b|>)/m)
     expect(creator, 'no redirect or mkdir found in backup.sh').toBeGreaterThan(-1)
     expect(script.indexOf('umask 077')).toBeLessThan(creator)
+
+    // THE CHOKEPOINT. Exactly one redirect in either script writes data; every
+    // other `>` is a diagnostic (`>&2`) or a discard (`>/dev/null`). This is
+    // exhaustive over the shell's own way of creating a file, so it is not a
+    // vocabulary rule that the next refactor can step around — there is only
+    // one construct and it has one permitted instance.
+    const dataRedirects: string[] = []
+    for (const f of ['backup.sh', 'backup-lib.sh']) {
+      for (const line of code(f).split('\n')) {
+        const stripped = line.replace(/\d?>\s*&\s*\d/g, '').replace(/\d?>\s*\/dev\/null/g, '')
+        if (stripped.includes('>')) dataRedirects.push(`${f}: ${line.trim()}`)
+      }
+    }
+    expect(dataRedirects).toEqual(['backup-lib.sh: cat > "$1"'])
   })
+
+  it('runs no command that could create a file outside the chokepoint', async () => {
+    // The source rules above are exhaustive over shell redirection but say
+    // nothing about a *program* that creates a file: `install`, `touch`, `tee`,
+    // `dd`, and above all `docker compose cp`, which is how the last defeat
+    // staged the archive through a 0640 scratch file. Enumerating those was the
+    // losing game.
+    //
+    // So this inverts it, and does so behaviourally: bash's own xtrace reports
+    // every command it actually executes, with arguments expanded, and the set
+    // of them must be a subset of what these scripts are allowed to run. A new
+    // way to make a file cannot be introduced without appearing here, whatever
+    // it is called. `docker` is allowed, so its subcommand is audited too —
+    // `cp` is the one docker subcommand that writes to the host filesystem.
+    //
+    // Coverage is what a runtime audit costs: it sees only the paths taken. It
+    // is therefore run over both a successful backup and a failed one, which
+    // together cover every line that writes an artefact.
+    const ALLOWED = new Set([
+      // shell builtins and keywords
+      '[',
+      '.',
+      'case',
+      'cd',
+      'command',
+      'echo',
+      'exit',
+      'for',
+      'local',
+      'printf',
+      'pwd',
+      'read',
+      'return',
+      'set',
+      'shift',
+      'sleep',
+      'trap',
+      'umask',
+      // external programs
+      'awk',
+      'cat',
+      'date',
+      'dirname',
+      'docker',
+      'grep',
+      'head',
+      'mkdir',
+      'mv',
+      'rm',
+      'rmdir',
+      'sort',
+      // the three interchangeable hashers — see sha256_of
+      'sha256sum',
+      'shasum',
+      'openssl',
+      // functions defined by these two files
+      'artefact_write',
+      'ch_count_expression',
+      'ch_query',
+      'ch_row_counts',
+      'cleanup',
+      'copy_ch_artefact_to',
+      'fail',
+      'have_sha256',
+      'pg_can_count_rows',
+      'pg_dump_to',
+      'pg_query',
+      'pg_row_counts',
+      'remove_in_container_artefact',
+      'remove_incomplete_output',
+      'service_image',
+      'service_running',
+      'sha256_of',
+      'start_app_if_stopped',
+      'usage',
+      'wait_until_healthy',
+      'wait_until_stopped',
+      'write_manifest',
+    ])
+
+    const observed = new Set<string>()
+    const dockerCalls: string[] = []
+    const runs: { env: NodeJS.ProcessEnv; mustFail: boolean }[] = [
+      { env: {}, mustFail: false },
+      { env: withShim({ SHIM_FAIL_BEFORE: 'FROM public.%I' }), mustFail: true },
+    ]
+    for (const { env, mustFail } of runs) {
+      const dest = mkdtempSync(join(tmpdir(), 'lyraflow-backup-'))
+      const trace = join(mkdtempSync(join(tmpdir(), 'lyraflow-trace-')), 'x')
+      // `bash -x` on the shipped script: nothing about the script changes, it
+      // is simply narrating itself.
+      const res = spawnSync('bash', ['-c', `bash -x ./backup.sh "$1" 2>"$2"`, '_', dest, trace], {
+        encoding: 'utf8',
+        env: { ...SCRIPT_ENV, ...env },
+      })
+      expect(res.status === 0, `run mustFail=${mustFail}`).toBe(!mustFail)
+      for (const line of readFileSync(trace, 'utf8').split('\n')) {
+        const m = /^\++ (\S+)/.exec(line)
+        if (!m) continue
+        const word = m[1] as string
+        if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue // an assignment
+        observed.add(word.replace(/^'|'$/g, ''))
+        if (word === 'docker') dockerCalls.push(line)
+      }
+    }
+
+    const unexpected = [...observed].filter((c) => !ALLOWED.has(c)).sort()
+    expect(
+      unexpected,
+      'a command outside the allow-list ran; if it is legitimate, add it here deliberately',
+    ).toEqual([])
+    expect(
+      observed.size,
+      'xtrace produced nothing — the audit would pass vacuously',
+    ).toBeGreaterThan(20)
+
+    // `docker compose cp` is the one docker subcommand that materialises a file
+    // on the host, and the previous defeat used it.
+    const cpCalls = dockerCalls.filter((l) => /\bdocker\b.*\bcp\b/.test(l))
+    expect(cpCalls, 'docker cp writes to the host outside artefact_write').toEqual([])
+  }, 600_000)
 
   it('records checksums that match the artefacts it wrote', async () => {
     // A truncated artefact must be catchable by restore.sh while the live
@@ -668,6 +836,46 @@ describe('backup.sh', () => {
     // vacuously if the shim never matched.
     expect(existsSync(marker), 'the shim never failed a restart').toBe(true)
     expect(await readyStatus()).toBe(200)
+  }, 300_000)
+
+  it('brings the app back even when a cleanup step itself fails', async () => {
+    // Three review rounds found three different ways to leave the app stopped,
+    // all in this path. The third: `remove_incomplete_output` ended in a bare
+    // `rm -rf "$OUT"`, and on a destination that had gone read-only — which is
+    // what ext4 does on an I/O error — `set -e` aborted the trap BEFORE the
+    // restart. Constructed with a read-only bind mount: exit 1, container
+    // `Exited (0)`, and "Starting the app again..." never printed.
+    //
+    // So this is deliberately not one test per cleanup step. The invariant is
+    // that NO cleanup step can prevent the restart, and it is checked by
+    // failing each of them in turn — the restart is now the first statement in
+    // the trap and every step below it is individually incapable of returning
+    // non-zero, so neither property is load-bearing alone.
+    const cases = [
+      {
+        what: 'the in-container artefact removal (on a successful backup)',
+        env: { SHIM_FAIL_BEFORE: `docker compose exec -T clickhouse rm -f ${CH_BACKUP_DIR}` },
+        mustFail: false,
+      },
+      {
+        what: 'the incomplete-output removal (on a failed backup)',
+        env: { SHIM_FAIL_BEFORE: 'FROM public.%I', SHIM_FAIL_BEFORE2: 'rm -rf' },
+        mustFail: true,
+      },
+    ]
+    for (const { what, env, mustFail } of cases) {
+      const dest = mkdtempSync(join(tmpdir(), 'lyraflow-backup-'))
+      if (mustFail) {
+        runScriptExpectingFailure('./backup.sh', [dest], withShim(env))
+      } else {
+        runScript('./backup.sh', [dest], withShim(env))
+      }
+      // The only thing that matters: the app is back.
+      expect(await readyStatus(), `app must come back when ${what} fails`).toBe(200)
+    }
+    // Leave the backups disk clean for the volume-growth test's sake — the
+    // first case above deliberately prevented the script from tidying it.
+    compose('exec', '-T', 'clickhouse', 'sh', '-c', `rm -f ${CH_BACKUP_DIR}/*.zip`)
   }, 300_000)
 
   it('leaves nothing behind when an artefact step fails part-way', async () => {
