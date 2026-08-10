@@ -50,6 +50,42 @@ APP_STOPPED=0
 CH_ARTEFACT_CREATED=0
 
 # ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+
+# say <text…>   progress, on stdout
+# note <text…>  diagnostics, on stderr
+#
+# NEITHER CAN FAIL, and that is the whole point of them existing.
+#
+# `./backup.sh DEST | head -1` closes this script's stdout as soon as the
+# reader has what it wants. A plain `echo` then dies of SIGPIPE, which killed
+# the shell *inside the EXIT trap* -- before `docker compose start` -- leaving
+# the app stopped, stderr completely silent, and the pipeline's status 0
+# because that is `head`'s. Measured before the fix:
+#
+#   PIPESTATUS=141 head=0        <- 141 = 128 + SIGPIPE
+#   lyraflow-ci-lyraflow-1  exited  Exited (0)
+#   --- full stderr of that run ---   (nothing but docker's own two lines)
+#
+# `trap '' PIPE` in backup.sh turns the signal into a write error; the
+# `|| true` here turns the write error into nothing at all. Both are needed:
+# the trap alone leaves `echo` returning non-zero, which `set -e` turns into
+# the same aborted-cleanup outcome by a different route.
+#
+# Reachable by `| less` and pressing q, by `| head -n N` in a wrapper capping a
+# log, by `| grep -m1`, and by `| mail` or `| logger` where the reader dies.
+# Note a closed stdout does NOT abandon the backup: a wrapper that caps its log
+# asked for a shorter log, not for an unfinished backup.
+#
+# The `2>/dev/null` suppresses bash's own "echo: write error: Broken pipe"
+# diagnostic, which otherwise replaces the message the reader did not want with
+# a noisier one it also did not want. Redirections apply left to right, so
+# note()'s fd1 is the real stderr before fd2 is discarded.
+say() { echo "$@" 2>/dev/null || true; }
+note() { echo "$@" >&2 2>/dev/null || true; }
+
+# ---------------------------------------------------------------------------
 # Failure reporting
 # ---------------------------------------------------------------------------
 
@@ -70,15 +106,15 @@ CH_ARTEFACT_CREATED=0
 fail() {
   local step="$1"
   shift
-  echo "" >&2
-  echo "ERROR: the backup failed during the ${step} step." >&2
+  note ""
+  note "ERROR: the backup failed during the ${step} step."
   local line
   for line in "$@"; do
-    echo "  ${line}" >&2
+    note "  ${line}"
   done
-  echo "" >&2
-  echo "No data was changed: this script only reads from ClickHouse and Postgres," >&2
-  echo "so both stores still hold exactly what they held before it started." >&2
+  note ""
+  note "No data was changed: this script only reads from ClickHouse and Postgres,"
+  note "so both stores still hold exactly what they held before it started."
   exit 1
 }
 
@@ -128,12 +164,29 @@ pg_query() {
     "$1" "$PG_USER" "$PG_DATABASE" < /dev/null
 }
 
-# artefact_write <path> — THE ONLY PLACE IN EITHER SCRIPT THAT CREATES A FILE.
+# artefact_write <path> — THE ONLY PLACE IN EITHER SCRIPT THAT CREATES A FILE
+# BY WRITING TO IT.
+#
+# The qualifier is not pedantry. `mv "$tmp" "$out/MANIFEST"` also brings a path
+# into existence; it is safe because it renames a file this function already
+# created, carrying that mode with it, and it is deliberately the only other
+# way any path here appears. An absolute claim in this header would be false,
+# and E3 below is what a false absolute costs.
 #
 # Reads stdin, writes <path>. Every artefact goes through here, which is what
 # makes "created at 0600 by the process umask, never widened, never staged
 # through anything looser" a property of one auditable line instead of a claim
 # about the whole codebase.
+#
+# KNOWN LIMITATION (E3). The chokepoint is enforced by two audits — one static
+# rule that this is the only data redirect, one runtime allow-list of the
+# commands that actually run — and a *simplification* slips between them:
+# replacing `| artefact_write "$tmp"` with `sort -o "$tmp"` creates the file
+# with no redirect at all, using an already-allow-listed command, on a covered
+# path. The mode stays 0600 because the umask still applies, so there is no
+# security regression today; what is lost is the invariant, silently. Closing
+# it needs an assertion on how many times artefact_write is *invoked* per run,
+# which is left undone deliberately rather than unnoticed.
 #
 # This shape exists because two rounds of banning spellings lost. First `chmod`
 # was banned, so the next attempt used `install -m 600`; that was banned too, so
@@ -175,7 +228,8 @@ pg_dump_to() {
 # archive contains the identity dictionaries' Postgres password — see
 # backup.sh's umask comment. A redirect is the only form the umask applies to.
 #
-# A redirect, not a pipe, so the exit status is the copy's own.
+# A pipe into the chokepoint, as pg_dump_to is: `set -o pipefail` is what keeps
+# the exit status the copy's own, and restore.sh must set it too.
 copy_ch_artefact_to() {
   docker compose exec -T "$CH_SERVICE" cat "$CH_BACKUP_DIR/$CH_FILE" < /dev/null |
     artefact_write "$1"
@@ -283,11 +337,17 @@ wait_until_healthy() {
 # trap recovers it — which is exactly what leaving the flag set now buys.
 start_app_if_stopped() {
   [ "$APP_STOPPED" = "1" ] || return 0
-  echo "Starting the app again..."
+  # The start comes before ANY write, including the one announcing it. The
+  # announcement used to be the first statement, and on a closed stdout that
+  # single `echo` was enough to kill the shell inside the trap before the app
+  # was ever started -- the fourth consecutive round in which the ordering of
+  # this function was the defect. `say`/`note` cannot fail either, so neither
+  # the ordering nor the write-safety is load-bearing on its own.
   if ! docker compose start "$APP_SERVICE" >/dev/null 2>&1; then
-    echo "WARNING: 'docker compose start $APP_SERVICE' failed; it will be retried." >&2
+    note "WARNING: 'docker compose start $APP_SERVICE' failed; it will be retried."
     return 1
   fi
+  say "Starting the app again..."
   # `start` returns as soon as the container is running, which is not the same
   # as the app answering requests. Anything an operator runs straight after
   # this script — a smoke test, a monitoring probe, the round-trip test — would
@@ -299,8 +359,8 @@ start_app_if_stopped() {
   # is that a genuinely slow boot can be waited for twice, once here and once
   # from the trap's retry.
   if ! wait_until_healthy "$APP_SERVICE" 180; then
-    echo "WARNING: the app was started but has not become healthy." >&2
-    echo "Check: docker compose logs $APP_SERVICE" >&2
+    note "WARNING: the app was started but has not become healthy."
+    note "Check: docker compose logs $APP_SERVICE"
     return 1
   fi
   APP_STOPPED=0
@@ -336,8 +396,8 @@ remove_incomplete_output() {
   [ "${OUT_CREATED:-0}" = "1" ] || return 0
   if [ "${BACKUP_COMPLETE:-0}" = "1" ]; then return 0; fi
   rm -rf "$OUT" 2>/dev/null || {
-    echo "WARNING: could not remove the incomplete backup at $OUT" >&2
-    echo "It has no manifest and cannot be restored; delete it by hand." >&2
+    note "WARNING: could not remove the incomplete backup at $OUT"
+    note "It has no manifest and cannot be restored; delete it by hand."
   }
   return 0
 }

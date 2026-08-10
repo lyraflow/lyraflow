@@ -481,6 +481,10 @@ describe('backup.sh', () => {
         if (here) terminator = here[1] as string
         out.push(line)
       }
+      // A `<<` inside an ordinary string sets a terminator that is never found,
+      // and every line after it is silently discarded — which would blind all
+      // three static rules below at once while they still report cleanly.
+      expect(terminator, `unterminated heredoc swallowed the rest of ${f}`).toBeNull()
       return out.join('\n')
     }
 
@@ -530,6 +534,15 @@ describe('backup.sh', () => {
       }
     }
     expect(dataRedirects).toEqual(['backup-lib.sh: cat > "$1"'])
+
+    // …and the one docker subcommand that materialises a host file, banned
+    // statically as well as at runtime. The runtime audit only sees paths that
+    // execute, and a `docker compose cp` FALLBACK — reached only when the
+    // normal copy fails — produced clickhouse.zip at 0640 from code that
+    // otherwise passed every test.
+    for (const f of ['backup.sh', 'backup-lib.sh']) {
+      expect(code(f), `${f} must not use docker cp`).not.toMatch(/docker\s+(compose\s+)?cp\b/)
+    }
   })
 
   it('runs no command that could create a file outside the chokepoint', async () => {
@@ -595,6 +608,11 @@ describe('backup.sh', () => {
       'copy_ch_artefact_to',
       'fail',
       'have_sha256',
+      // The write helpers. Adding these two is exactly the audit gate doing its
+      // job: they were introduced for the SIGPIPE fix and this test failed
+      // until they were listed on purpose.
+      'say',
+      'note',
       'pg_can_count_rows',
       'pg_dump_to',
       'pg_query',
@@ -647,10 +665,28 @@ describe('backup.sh', () => {
       'xtrace produced nothing — the audit would pass vacuously',
     ).toBeGreaterThan(20)
 
-    // `docker compose cp` is the one docker subcommand that materialises a file
-    // on the host, and the previous defeat used it.
-    const cpCalls = dockerCalls.filter((l) => /\bdocker\b.*\bcp\b/.test(l))
-    expect(cpCalls, 'docker cp writes to the host outside artefact_write').toEqual([])
+    // `docker` is necessarily allow-listed, so the allow-list above says nothing
+    // about WHICH docker it ran — and `docker compose cp` writes to the host.
+    // Auditing the sub-command set rather than banning one name closes the whole
+    // family: the trace already carries full argv.
+    const DOCKER_SUBCOMMANDS = new Set([
+      'compose ps',
+      'compose exec',
+      'compose start',
+      'compose stop',
+      'inspect',
+    ])
+    const seenSub = new Set<string>()
+    for (const line of dockerCalls) {
+      const argv = line.replace(/^\++ /, '').split(/\s+/)
+      const sub = argv[1] === 'compose' ? `compose ${argv[2]}` : (argv[1] as string)
+      seenSub.add(sub)
+    }
+    expect(
+      [...seenSub].filter((c) => !DOCKER_SUBCOMMANDS.has(c)).sort(),
+      'an unaudited docker sub-command ran; `cp` writes to the host filesystem',
+    ).toEqual([])
+    expect(seenSub.size).toBeGreaterThan(2)
   }, 600_000)
 
   it('records checksums that match the artefacts it wrote', async () => {
@@ -876,6 +912,117 @@ describe('backup.sh', () => {
     // Leave the backups disk clean for the volume-growth test's sake — the
     // first case above deliberately prevented the script from tidying it.
     compose('exec', '-T', 'clickhouse', 'sh', '-c', `rm -f ${CH_BACKUP_DIR}/*.zip`)
+  }, 300_000)
+
+  it('brings the app back when its own output is closed mid-run', async () => {
+    // Every other test in this file invokes the script through execFileSync
+    // with piped stdio and drains both streams to completion, so not one of
+    // them ever closed the script's output. That gap hid a fourth way to leave
+    // the app stopped, and the worst of the four: a plain `echo` to a closed
+    // stdout dies of SIGPIPE, a shell killed by a signal does not run its EXIT
+    // trap at all, and the pipeline's status is the READER's — so the app was
+    // left down, stderr said nothing whatsoever, and `$?` was 0.
+    //
+    //   PIPESTATUS=141 head=0
+    //   lyraflow-ci-lyraflow-1  exited  Exited (0)
+    //
+    // `| head -1` is the shape of `| less` then q, of `| grep -m1`, and of a
+    // wrapper capping its log with `| head -n N`.
+    const dest = mkdtempSync(join(tmpdir(), 'lyraflow-backup-'))
+    const res = spawnSync('bash', ['-c', './backup.sh "$1" | head -1', '_', dest], {
+      encoding: 'utf8',
+      env: SCRIPT_ENV,
+    })
+
+    // The one thing that matters.
+    await waitReady(120_000)
+    expect(await readyStatus()).toBe(200)
+
+    // And the backup itself completed. A wrapper capping its log asked for a
+    // shorter log, not for an unfinished backup — so the correct outcome is a
+    // whole backup, not a tidy absence of one.
+    const stamps = readdirSync(dest)
+    expect(stamps).toHaveLength(1)
+    expect(readdirSync(join(dest, stamps[0] as string)).sort()).toEqual([
+      'MANIFEST',
+      'clickhouse.zip',
+      'postgres.dump',
+    ])
+
+    // Swallowing the writes must not mean spraying bash's own write-error
+    // diagnostics instead — five of them appeared on the first attempt at this.
+    expect(res.stderr).not.toMatch(/write error|Broken pipe/)
+  }, 300_000)
+
+  it('keeps the app up if either cleanup guard alone is removed', async () => {
+    // cleanup() has two independent reasons it cannot skip the restart: the
+    // restart is its first statement, and every step below it is incapable of
+    // failing. Mutating either alone leaves the suite green — which is correct,
+    // and also how rounds 1→2→3 happened: with nothing pinning each guard
+    // separately, one can be deleted silently and the next edit has nothing
+    // left to fall back on. So each is pinned on its own.
+
+    // GUARD 1 — the restart is first. With both streams merged, the restart
+    // message must precede the removal warning; if the removals ran first the
+    // order inverts. `rm -rf` is failed by the shim to make the warning appear
+    // at all, and the manifest is failed so the removal runs.
+    const dest = mkdtempSync(join(tmpdir(), 'lyraflow-backup-'))
+    const merged = spawnSync('bash', ['-c', './backup.sh "$1" 2>&1', '_', dest], {
+      encoding: 'utf8',
+      env: {
+        ...SCRIPT_ENV,
+        ...withShim({
+          SHIM_FAIL_BEFORE: 'FROM public.%I',
+          SHIM_FAIL_BEFORE2: 'rm -rf',
+        }),
+      },
+    })
+    const out = merged.stdout
+    const restartAt = out.indexOf('Starting the app again')
+    const warnAt = out.indexOf('could not remove the incomplete backup')
+    expect(restartAt, 'no restart message').toBeGreaterThan(-1)
+    expect(warnAt, 'no removal warning — the shim did not fire').toBeGreaterThan(-1)
+    expect(restartAt, 'the restart must happen before the tidy-up').toBeLessThan(warnAt)
+
+    // GUARD 2 — each cleanup step is incapable of returning non-zero. Called
+    // directly, with its `rm` failed: the shipped version returns 0, the
+    // bare-`rm -rf` version returns 1 and would abort the trap under `set -e`.
+    const probe = spawnSync(
+      'bash',
+      [
+        '-c',
+        '. ./backup-lib.sh; OUT_CREATED=1; BACKUP_COMPLETE=0; OUT="$1"; ' +
+          'remove_incomplete_output; echo "rc=$?"',
+        '_',
+        dest,
+      ],
+      { encoding: 'utf8', env: { ...SCRIPT_ENV, ...withShim({ SHIM_FAIL_BEFORE: 'rm -rf' }) } },
+    )
+    expect(probe.stdout).toContain('rc=0')
+    expect(probe.stderr).toMatch(/could not remove the incomplete backup/)
+
+    // GUARD 3 — inside start_app_if_stopped, the start precedes any write.
+    // The SIGPIPE defect was exactly this ordering: the announcement was the
+    // first statement, and on a closed stdout that one write killed the shell
+    // before the app was started. With the PIPE trap and non-fatal say/note in
+    // place the ordering is no longer independently observable at runtime — so
+    // it is pinned here, in the same spirit as the umask position rule, rather
+    // than left as the one layer nothing checks.
+    const libCode = readFileSync('backup-lib.sh', 'utf8')
+      .split('\n')
+      .filter((l) => !/^\s*#/.test(l))
+      .join('\n')
+    const fnAt = libCode.indexOf('start_app_if_stopped() {')
+    expect(fnAt).toBeGreaterThan(-1)
+    const body = libCode.slice(fnAt, libCode.indexOf('\n}', fnAt))
+    const startAt = body.indexOf('docker compose start')
+    const firstWrite = body.search(/\b(say|note|echo|printf)\b/)
+    expect(startAt, 'start_app_if_stopped must actually start the app').toBeGreaterThan(-1)
+    expect(firstWrite, 'expected a progress message in start_app_if_stopped').toBeGreaterThan(-1)
+    expect(startAt, 'the app must be started before anything is written').toBeLessThan(firstWrite)
+
+    await waitReady(120_000)
+    expect(await readyStatus()).toBe(200)
   }, 300_000)
 
   it('leaves nothing behind when an artefact step fails part-way', async () => {

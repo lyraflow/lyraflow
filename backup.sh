@@ -43,6 +43,21 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=backup-lib.sh
 . "$SCRIPT_DIR/backup-lib.sh"
 
+# A reader that goes away must not be able to kill this script.
+#
+# `./backup.sh DEST | head -1` closes stdout as soon as head has its line, and
+# the next write raises SIGPIPE. The default disposition is death -- and a
+# shell killed by a signal does not run its EXIT trap at all, so the app stays
+# stopped and nothing whatsoever is printed. Ignoring PIPE converts that into
+# an ordinary write error, which `set -e` turns into a normal exit WITH the
+# trap running; `say`/`note` then swallow the error, so a wrapper capping its
+# log does not abandon an otherwise healthy backup. See say() in
+# backup-lib.sh for the measurement.
+#
+# This has to be set before the quiesce, not merely inside cleanup: the signal
+# is just as fatal in the main body, and there it takes the trap with it.
+trap "" PIPE
+
 usage() {
   cat >&2 <<'EOF'
 Usage: ./backup.sh <destination-directory>
@@ -107,11 +122,11 @@ cleanup() {
   # way to turn "the backup worked but the site is dark" into something a cron
   # wrapper testing $? can see.
   if [ "$restart_ok" = "0" ]; then
-    echo "" >&2
-    echo "ERROR: the app is stopped and this script could not start it." >&2
-    echo "  Run: docker compose start $APP_SERVICE" >&2
-    echo "Any backup reported above is complete and valid -- the problem is the app," >&2
-    echo "which is down and will stay down until someone starts it." >&2
+    note ""
+    note "ERROR: the app is stopped and this script could not start it."
+    note "  Run: docker compose start $APP_SERVICE"
+    note "Any backup reported above is complete and valid -- the problem is the app,"
+    note "which is down and will stay down until someone starts it."
     exit 1
   fi
 }
@@ -186,7 +201,7 @@ OUT_CREATED=1
 # ClickHouse's cooperation.
 # --------------------------------------------------------------------------
 
-echo "Stopping the app so the ingest buffer drains (about 30 seconds)..."
+say "Stopping the app so the ingest buffer drains (about 30 seconds)..."
 # Flag first, command second. `docker compose stop` can stop the container and
 # still exit non-zero -- Ctrl-C during the drain exits 130 with the container
 # already down -- and under `set -e` that kills this script before any
@@ -204,7 +219,7 @@ wait_until_stopped "$APP_SERVICE" 60 ||
   fail "quiesce" \
     "The app did not stop within 60s; refusing to back up mid-write."
 
-echo "Backing up ClickHouse..."
+say "Backing up ClickHouse..."
 ch_query "BACKUP DATABASE $CH_DATABASE TO Disk('backups', '$CH_FILE')" >/dev/null ||
   fail "ClickHouse" \
     "BACKUP DATABASE $CH_DATABASE failed; the ClickHouse error is above." \
@@ -220,12 +235,12 @@ copy_ch_artefact_to "$OUT/clickhouse.zip" ||
   fail "ClickHouse" \
     "Could not copy the archive out of the container to $OUT/clickhouse.zip."
 
-echo "Backing up Postgres..."
+say "Backing up Postgres..."
 pg_dump_to "$OUT/postgres.dump" ||
   fail "Postgres" \
     "pg_dump failed; its error is above."
 
-echo "Writing the manifest..."
+say "Writing the manifest..."
 write_manifest "$OUT" ||
   fail "manifest" \
     "Could not write the manifest for $OUT." \
@@ -243,4 +258,4 @@ remove_in_container_artefact
 # and must not be reported as success either. The trap does both.
 start_app_if_stopped || true
 
-echo "Backup written to $OUT"
+say "Backup written to $OUT"
