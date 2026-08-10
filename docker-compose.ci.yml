@@ -39,7 +39,12 @@ services:
       CLICKHOUSE_USER: lyraflow
       CLICKHOUSE_PASSWORD: lyraflow
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
-    volumes: ["ci-clickhouse-data:/var/lib/clickhouse"]
+    volumes:
+      - "ci-clickhouse-data:/var/lib/clickhouse"
+      # Enables BACKUP/RESTORE. See the file's own comment for why it is
+      # required rather than optional, and backup.sh for the cleanup this
+      # implies.
+      - "./docker/clickhouse/backup-disk.xml:/etc/clickhouse-server/config.d/backup-disk.xml:ro"
     ports: ["8123:8123"]
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- \"http://$$(hostname):8123/ping\""]
