@@ -9,10 +9,21 @@
  * trip for a limit it does not have.
  *
  * ONLY ACCEPTED EVENTS ARE COUNTED, and that is a security property rather
- * than a nicety. If rejections counted, an attacker sending malformed
- * payloads would exhaust a project's quota without storing a single byte --
- * cheaper than the flood this exists to stop. `persisted` and `pending` must
- * both be accepted-event counts; see counters.ts's `persistedAccepted`.
+ * than a nicety. If rejections counted, anyone holding the write key --
+ * which ships in the browser bundle -- could exhaust a project's month with
+ * payloads that are never stored as events, which is cheaper than the flood
+ * this exists to stop. `persisted` and `pending` must both be accepted-event
+ * counts; see counters.ts's `persistedAccepted`.
+ *
+ * Being precise about that, because an earlier phrasing of it claimed a
+ * malformed event stores nothing at all and that is FALSE: each one writes
+ * an `events_dead_letter` row carrying up to 1000 bytes of detail and 8000
+ * of payload (ingest/routes.ts), bounded only by that table's own 30-day
+ * TTL and never by the quota. A flood of malformed payloads therefore does
+ * cost a project storage. What it does not do -- and what this function
+ * exists to keep true -- is store an *event* or move the project toward its
+ * limit, so it cannot silence a project's real analytics for the rest of
+ * the month.
  *
  * `persisted` and `pending` are trusted only as far as this function can
  * verify: each must be a finite, non-negative number. Zero is legal and is

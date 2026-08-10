@@ -1049,6 +1049,67 @@ describe('ingest quota enforcement', () => {
     }
   })
 
+  it('refuses correctly when a CONCURRENT burst all joins one usage read', async () => {
+    // The shape every other quota test in this file avoids, and the reason a
+    // Critical survived ten reviews: every one of them issues a single
+    // request at a time, and the only concurrent waves here run against a
+    // permanently FAILING pool with a quota chosen so it can never refuse.
+    // Nothing fired concurrent requests at a healthy pool near a boundary.
+    //
+    // The defect that shape hides: while the pending tally was read behind
+    // `await projectOverQuota(...)`, every request joining one in-flight
+    // usage read resumed in the same microtask drain, all read `pending`
+    // before any of them had recorded, and all were admitted. Against a
+    // quota of 10 this stored 200 events and counted `over_quota` zero
+    // times -- no refusal, no metric, nothing to notice it by. The window is
+    // the usage read's latency, and under the very flood a quota exists to
+    // stop, pool queueing IS that latency.
+    //
+    // Latency is injected rather than hoped for: 150ms is far longer than
+    // 200 in-process requests need to reach the check, so the whole burst
+    // provably decides from one read -- asserted below as attempts === 1.
+    const QUOTA = 10
+    const BURST = 200
+    let attempts = 0
+    const slowPg = {
+      query: async (text: string, values?: unknown[]) => {
+        if (text.includes('FROM ingest_counters')) {
+          attempts++
+          await new Promise((r) => setTimeout(r, 150))
+        }
+        return pg.query(text, values)
+      },
+    } as unknown as Pool
+
+    await setQuota(QUOTA)
+    // A real 60s cache, warmed before the burst, so 200 project lookups do
+    // not queue on the pool and stagger the requests apart -- the burst has
+    // to arrive at the quota check together for this to test anything.
+    const projects = new ProjectCache(pg, 60_000)
+    await projects.byWriteKey(WRITE_KEY)
+    const burstCounters = new IngestCounters(slowPg)
+
+    await quotaApp.close() // the beforeEach app; this test needs its own wiring
+    quotaApp = buildQuotaApp({ counters: burstCounters, projects })
+    await quotaApp.ready()
+
+    const results = await Promise.all(
+      Array.from({ length: BURST }, () => post('/v1/track', validEvent())),
+    )
+
+    // One read for the whole burst: this is the interleaving, not a detail.
+    expect(attempts).toBe(1)
+    expect(results.filter((r) => r.statusCode === 202)).toHaveLength(QUOTA)
+    expect(results.filter((r) => r.statusCode === 429)).toHaveLength(BURST - QUOTA)
+    // And the counters agree with the answers given, so a burst cannot pass
+    // silently: `over_quota` at zero was the loudest part of the defect.
+    expect(burstCounters.totals().accepted).toBe(QUOTA)
+    expect(burstCounters.totals().over_quota).toBe(BURST - QUOTA)
+    // Nothing beyond the quota reached the buffer either.
+    await buffer.flush()
+    expect(stored).toHaveLength(QUOTA)
+  })
+
   it('keeps refusing an over-quota project on the LAST KNOWN figure once the read starts failing', async () => {
     // Every other failure test here drives a pool that is permanently
     // healthy or permanently failing, so the fallback expression is only

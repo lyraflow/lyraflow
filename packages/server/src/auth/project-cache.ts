@@ -186,6 +186,14 @@ export class ProjectCache {
             // other direction, dropping the Number() and passing the string
             // through hands isOverQuota `'2'`, which is not an integer, and
             // it throws on that too.
+            //
+            // The only reason that throw is unreachable from stored data is
+            // `projects_quota_positive CHECK (monthly_event_quota > 0)` in
+            // 001_core.sql — the column can hold NULL or a positive integer
+            // and nothing else. There is still no API for setting a quota,
+            // so the README tells operators to UPDATE this column directly;
+            // whoever relaxes that constraint owns making this parse and
+            // isOverQuota agree with whatever it then admits.
             monthlyEventQuota:
               row.monthly_event_quota === null ? null : Number(row.monthly_event_quota),
             serverKeyHash: row.server_key_hash,

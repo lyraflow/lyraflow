@@ -1353,6 +1353,23 @@ The value must be positive (a check constraint enforces it); use `NULL`, not
 resets at `00:00 UTC` on the 1st, not on a rolling 30-day window and not in
 the server's local timezone.
 
+**Understand what you are turning on before you turn it on.** The write key
+ships in your browser bundle and is readable by anyone who visits an
+instrumented page. With no quota, the worst that key buys an abuser is your
+storage and your bandwidth. With a quota, it also buys them an **off switch
+for your own analytics**: valid events count, so a few minutes of scripted
+traffic can spend the month's budget, after which your real events are refused
+until the 1st — by design, since that is what a quota means. Nothing here
+distinguishes a customer's browser from a script; both hold the same key.
+
+So a quota protects a bill, not a service, and it does so by trading
+availability for cost. Set one where an unbounded bill is the greater risk —
+and size it well above any month you would actually want, since a quota that
+is merely generous still ends in a month of silence once it is spent. If you
+need protection against abuse rather than against cost, that belongs in front
+of the ingest (a rate limit at your proxy or CDN, per IP), which the quota
+does not attempt and cannot replace.
+
 **A change takes up to a minute to take effect.** Each server process caches
 the project row — quota included — for 60 seconds against the write key it
 arrived with, so events can still be refused for about that long after you
@@ -1364,8 +1381,14 @@ refused by the cardinality limits, bot traffic, and events dropped when the
 buffer saturates all leave it untouched. That is deliberate and it is a
 security property, not a convenience: if rejected traffic consumed the budget,
 anyone holding the write key — which ships in the browser bundle — could
-exhaust a project's month with nonsense payloads without a byte ever being
-stored.
+exhaust a project's month with payloads that are never stored as events, and
+silence its real analytics until the 1st.
+
+Malformed events are not free of *storage*, though: each one writes a row to
+`events_dead_letter` carrying up to 1 KB of detail and 8 KB of payload, kept
+for 30 days by that table's own TTL and bounded by nothing else. A flood of
+nonsense therefore costs disk whatever the quota says. What it cannot do is
+consume the budget.
 
 **Enforcement is a bound with known slack, not an exact cliff.** Each server
 process keeps its recent counts in memory, folds them into Postgres every 10
@@ -1377,6 +1400,11 @@ normal and expected, not a bug. Neither interval is configurable. Running
 several server processes widens the same window by roughly a factor of the
 process count, because each holds its own pending tally and its own cache.
 Set a quota you can afford to exceed by a few seconds of peak traffic.
+
+The slack is bounded by that project's own **rate** over those seconds, and
+not by how many requests arrive at once: a burst of simultaneous requests is
+decided one at a time, each seeing the one before it. So the number to plan
+against is a project's peak events per second, not its peak concurrency.
 
 Once a project is over, `/v1/track`, `/v1/identify` and `/v1/page` answer
 `429 {"error":"quota_exceeded"}` with no `retry-after`, and `/v1/batch` answers

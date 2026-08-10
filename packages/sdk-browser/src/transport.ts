@@ -6,8 +6,9 @@ const BACKOFF_BASE_MS = 1_000
 const BACKOFF_MAX_MS = 30_000
 /**
  * A ceiling on a server-advised `retry-after`. The real ingest only ever
- * sends `5` — both its draining and batch-overload paths
- * (packages/server/src/ingest/routes.ts) hardcode `retry-after: 5`. This
+ * sends `5` — all three of its paths that send the header at all (draining,
+ * single-event overload, and batch overload, in
+ * packages/server/src/ingest/routes.ts) hardcode `retry-after: 5`. This
  * exists so a malformed or hostile header (a stray extra digit, something
  * between the SDK and the ingest rewriting it) cannot switch retrying off
  * for days by being merely a very large, otherwise-well-formed number — the
@@ -16,12 +17,13 @@ const BACKOFF_MAX_MS = 30_000
  */
 const MAX_HONOURED_RETRY_AFTER_MS = 5 * 60_000
 /**
- * Shared by both quota paths — the `429` a proxy in front of the ingest may
- * return, and the `over_quota` tally `/v1/batch` reports inside its `202`.
- * One string, because the developer-facing fact is identical in both cases
- * and a second phrasing would cost bundle bytes to say the same thing twice.
+ * The one signal a developer gets that a quota refused their events: the
+ * `over_quota` tally `/v1/batch` reports inside its `202`. That is the only
+ * use of this constant, and the only quota path this SDK has — a `429`
+ * reaching it is never the ingest's quota (see the status handling below),
+ * so nothing here may attribute one to this condition.
  *
- * It names the condition rather than the status code on purpose: "the server
+ * It names the condition rather than a status code on purpose: "the server
  * rejected a batch with 429" tells a developer nothing they can act on,
  * whereas this tells them their operator has to raise
  * `projects.monthly_event_quota` or wait for the month to roll over.
