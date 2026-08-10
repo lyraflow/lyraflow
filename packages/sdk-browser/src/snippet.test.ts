@@ -68,7 +68,7 @@ afterEach(async () => {
 /** What the fake `fetch` hands back — Response-shaped only as far as the SDK reads it. */
 interface FakeResponse {
   status: number
-  headers: { get: () => null }
+  headers: { get: (name: string) => string | null }
   json: () => Promise<unknown>
 }
 
@@ -268,7 +268,10 @@ describe('a quota refusal, against the built bundle', () => {
   })
 
   it('drops a 429 from something in front of the ingest instead of retrying it forever', async () => {
-    // No `retry-after`, matching what the ingest's single-event routes send.
+    // NO `retry-after`, matching what the ingest's single-event routes send —
+    // and that absence is now what makes this a drop rather than a retry. The
+    // companion test below sends the same status WITH the header and gets the
+    // opposite handling.
     const { api, sent, warnings, queued } = bootedPage(() => ({
       status: 429,
       headers: { get: () => null },
@@ -291,5 +294,34 @@ describe('a quota refusal, against the built bundle', () => {
     await api().flush()
     expect(sent).toHaveLength(2)
     expect(queued()).toEqual([])
+  })
+
+  it('keeps the batch when a 429 carries retry-after, because that one is a proxy rate limit', async () => {
+    // The other half of the discriminator, through the shipped bundle. The
+    // same status code, one header apart, and the opposite handling: these
+    // events are still deliverable, so they must stay in the queue and the
+    // developer must NOT be told about a quota they are nowhere near.
+    //
+    // Worth having here and not only in transport.test.ts because the
+    // discriminator reads a header off the response — the one part of the
+    // response shape a bundler cannot verify and a shimmed `fetch` in a real
+    // page is most likely to get wrong.
+    const { sent, api, warnings, queued } = bootedPage(() => ({
+      status: 429,
+      headers: { get: (name: string) => (name === 'retry-after' ? '5' : null) },
+      json: async () => ({ error: 'rate_limited' }),
+    }))
+
+    api().track('checkout_completed')
+    await api().flush()
+
+    expect(sent).toHaveLength(1)
+    expect(queued()).toHaveLength(1)
+    expect(warnings).toEqual([])
+
+    // And a backoff was armed: the next flush does not hit the network.
+    await api().flush()
+    expect(sent).toHaveLength(1)
+    expect(queued()).toHaveLength(1)
   })
 })

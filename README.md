@@ -1386,6 +1386,15 @@ rather than retrying — a quota refusal does not clear on its own, so retrying
 it would keep every instrumented browser hammering the server for the rest of
 the month while the client-side queue grew for the life of the tab.
 
+**The missing `retry-after` is load-bearing, so keep it that way.** It is what
+lets a client tell a quota refusal from an ordinary rate limit, and the two
+need opposite handling. If you put a reverse proxy, CDN or API gateway in
+front of Lyraflow, make sure it does not add a `retry-after` to the server's
+own `429` — a client that sees one will treat the refusal as transient and
+retry it all month. Rate limiting of your own is fine and works as expected:
+the SDK treats a `429` that *does* carry `retry-after` as temporary, keeps the
+batch, and backs off.
+
 **A refusal is recorded in two places, and they answer different questions.**
 `lyraflow_ingest_events_total{outcome="over_quota"}` on `/metrics` counts
 individual events refused **since process start**, across every project — it
