@@ -1385,10 +1385,12 @@ exhaust a project's month with payloads that are never stored as events, and
 silence its real analytics until the 1st.
 
 Malformed events are not free of *storage*, though: each one writes a row to
-`events_dead_letter` carrying up to 1 KB of detail and 8 KB of payload, kept
-for 30 days by that table's own TTL and bounded by nothing else. A flood of
-nonsense therefore costs disk whatever the quota says. What it cannot do is
-consume the budget.
+`events_dead_letter`, kept for 30 days by that table's own TTL and bounded by
+nothing else. The row's detail and payload are capped at 1000 and 8000
+**characters**, which is not the same as bytes — a payload of non-Latin text
+weighs about three times its character count in UTF-8, so budget for roughly
+24 KB per row rather than 9 KB. A flood of nonsense therefore costs disk
+whatever the quota says. What it cannot do is consume the budget.
 
 **Enforcement is a bound with known slack, not an exact cliff.** Each server
 process keeps its recent counts in memory, folds them into Postgres every 10

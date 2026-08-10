@@ -3,6 +3,12 @@
  * that decides whether to refuse a customer's events is testable in
  * isolation -- and so the ingest route contains no arithmetic of its own.
  *
+ * SYNCHRONOUS BY CONTRACT, not merely by happenstance. Its caller runs it
+ * inside a stretch that must contain no `await` between reading a project's
+ * pending tally and recording against it (see accept() in ingest/routes.ts);
+ * making this function async would silently reopen a defect where every
+ * request in a concurrent burst decided against the same stale figure.
+ *
  * `null` means unlimited, which is the default after migration 011 and the
  * value every project carries on upgrade. Callers short-circuit on it before
  * reading usage at all: an unlimited project must not pay a Postgres round
@@ -17,10 +23,16 @@
  *
  * Being precise about that, because an earlier phrasing of it claimed a
  * malformed event stores nothing at all and that is FALSE: each one writes
- * an `events_dead_letter` row carrying up to 1000 bytes of detail and 8000
- * of payload (ingest/routes.ts), bounded only by that table's own 30-day
- * TTL and never by the quota. A flood of malformed payloads therefore does
- * cost a project storage. What it does not do -- and what this function
+ * an `events_dead_letter` row, bounded only by that table's own 30-day TTL
+ * and never by the quota. `buildDeadLetterRow` (ingest/routes.ts) caps
+ * `detail` at 1000 CHARACTERS and `payload` at 8000, and ClickHouse stores
+ * `String` as bytes -- so the real ceiling is what those characters weigh in
+ * UTF-8: measured at ~24 KB for a row whose payload is CJK, ~16 KB for
+ * emoji, against the ~9 KB the character counts suggest. The content is
+ * attacker-chosen through a public write key, and `detail` is no safer than
+ * `payload`: it is Zod's error message, which embeds the failing `path` and
+ * therefore the caller's own property keys. A flood of malformed payloads
+ * does cost a project storage. What it does not do -- and what this function
  * exists to keep true -- is store an *event* or move the project toward its
  * limit, so it cannot silence a project's real analytics for the rest of
  * the month.

@@ -448,10 +448,19 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
     // concurrent requests is decided one at a time, each seeing the record
     // the one before it made. Introduce an `await` anywhere in this stretch
     // — a lookup, a log flush, an enrichment — and the whole burst decides
-    // against the same figure again. Every call below is synchronous today
-    // (`toEventRow`, `GeoResolver.resolve`, `parseUserAgent`,
-    // `IngestBuffer.add`, `CardinalityTracker.observe`) and that is a
-    // requirement, not an accident.
+    // against the same figure again.
+    //
+    // Every call this block makes is synchronous today, and all of them are
+    // load-bearing, so here is the complete list rather than a sample:
+    // `IngestCounters.pendingAccepted` and `isOverQuota` (inside
+    // `overQuotaNow`), `IngestCounters.record` (all three calls below, not
+    // only the last), `toEventRow`, `GeoResolver.resolve`, `parseUserAgent`,
+    // `IngestBuffer.add`, and `CardinalityTracker.observe`. Making any one of
+    // them async reopens the defect. Two of those are realistic — a GeoIP
+    // lookup behind `resolve`, or a buffer that awaits — and both feed
+    // positions typed as non-promises, so the change would not typecheck
+    // without adding a visible `await` here. `overQuotaNow` is declared
+    // `function`, not `async`, so the decision half is compiler-enforced.
     // ─────────────────────────────────────────────────────────────────────
     if (overQuotaNow(project, persisted)) {
       counters.record(projectId, 'over_quota')

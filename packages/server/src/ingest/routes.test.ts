@@ -18,7 +18,7 @@ import { IngestBuffer } from './buffer.js'
 import { monthStart, readCounterRow, seedCounterRow } from './counter-fixtures.js'
 import { IngestCounters } from './counters.js'
 import { NullGeoResolver } from './geo.js'
-import { CardinalityTracker } from './limits.js'
+import { CardinalityTracker, MAX_PROPERTIES_PER_EVENT } from './limits.js'
 import { type IngestDeps, registerIngestRoutes } from './routes.js'
 import type { EventRow } from './row.js'
 
@@ -838,6 +838,68 @@ describe('ingest quota enforcement', () => {
     const row = await readCounterRow(pg, projectId)
     expect(row.events_rejected).toBe('1')
     expect(row.events_over_quota).toBe('0')
+  })
+
+  it('still counts a CARDINALITY-limited event from an over-quota project as throttled', async () => {
+    // The other half of the ordering property. The malformed-event test above
+    // covers only the safeParse branch, so hoisting the whole quota stretch
+    // above checkLimits passes every other test in this file -- and is not
+    // equivalent: a cardinality-limited event from an over-quota project
+    // would answer 429 instead of 202 (breaking the rule that bad data never
+    // errors the customer's site), land in over_quota instead of throttled,
+    // and write NO dead letter, losing the only record of the cardinality
+    // breach.
+    await setQuota(1)
+    expect((await post('/v1/track', validEvent())).statusCode).toBe(202)
+
+    const overWide = {
+      message_id: randomUUID(),
+      anonymous_id: 'a-quota',
+      event: 'quota',
+      properties: Object.fromEntries(
+        Array.from({ length: MAX_PROPERTIES_PER_EVENT + 1 }, (_, i) => [`k${i}`, i]),
+      ),
+    }
+    const res = await post('/v1/track', overWide)
+
+    expect(res.statusCode).toBe(202)
+    expect(deadLetterInserts).toBe(1)
+    // throttled, not over_quota, and not rejected either -- the last would
+    // mean the payload failed validation and this test stopped exercising
+    // the cardinality branch at all.
+    expect(counters.totals()).toMatchObject({
+      accepted: 1,
+      throttled: 1,
+      over_quota: 0,
+      rejected: 0,
+    })
+  })
+
+  it('an event dropped by buffer saturation never consumes quota', async () => {
+    // README: "events dropped when the buffer saturates leave it untouched".
+    // Nothing pinned it: hoisting record(..., 'accepted') above buffer.add
+    // passes every other test here, and turns backpressure into quota spend
+    // -- a project driven to 429 by events the server itself refused to
+    // store. That is the same class as counting rejections, arrived at from
+    // the opposite side.
+    const saturating = new IngestBuffer<EventRow>({
+      flushRows: 1000,
+      flushIntervalMs: 60_000,
+      maxRows: 2, // the first two events fit; every one after is 'overloaded'
+      insert: async () => {},
+    })
+    await quotaApp.close() // the beforeEach app; this test needs its own wiring
+    quotaApp = buildQuotaApp({ buffer: saturating })
+    await quotaApp.ready()
+    await setQuota(3)
+
+    const statuses: number[] = []
+    for (let i = 0; i < 5; i++) statuses.push((await post('/v1/track', validEvent())).statusCode)
+
+    // Never 429: only two events were ever stored, so the quota of three was
+    // never reached. Hoisting the record gives [202,202,503,429,429].
+    expect(statuses).toEqual([202, 202, 503, 503, 503])
+    expect(counters.totals()).toMatchObject({ accepted: 2, throttled: 3, over_quota: 0 })
   })
 
   it('reads persisted usage once per project, not once per event', async () => {
