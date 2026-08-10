@@ -30,9 +30,24 @@ PG_USER=lyraflow
 # inside the existing data volume and what that obliges this script to clean up.
 CH_BACKUP_DIR=/var/lib/clickhouse/backups
 
-# Set to 1 between `docker compose stop` and the restart. Read by
+# Set to 1 immediately BEFORE `docker compose stop`, not after it. Read by
 # start_app_if_stopped, which both the happy path and the EXIT trap call.
+#
+# Before, because `docker compose stop` can stop the container and still exit
+# non-zero — Ctrl-C during the 30-second drain exits 130 with the container
+# already down. Setting the flag afterwards means that path never sets it, the
+# trap sees 0, and the app is left stopped with nothing announcing it.
+# Measured, with a shim that really stopped the container and then reported
+# failure: `exited/unhealthy` immediately after the script and still
+# `exited/unhealthy` 50 seconds later. Setting it early is free — M2 in the
+# mutation set established that `docker compose start` against a running
+# container is a no-op that does not even move `StartedAt`.
 APP_STOPPED=0
+
+# Set to 1 only once `BACKUP` has reported success, so cleanup removes an
+# archive this run created and never one belonging to a concurrent run. See
+# remove_in_container_artefact.
+CH_ARTEFACT_CREATED=0
 
 # ---------------------------------------------------------------------------
 # Failure reporting
@@ -233,7 +248,34 @@ start_app_if_stopped() {
 # The backups disk lives inside the ClickHouse data volume, so the scratch
 # archive survives `docker compose down` and accumulates one full backup per
 # night until the volume fills. Removing it is load-bearing, not tidiness.
+#
+# Removes ONLY an archive this run created, which is why the flag exists rather
+# than a bare `rm -f "$CH_FILE"`. The archive name is derived from a UTC
+# *second*, so two backups launched 50ms apart compute the same name — and the
+# one that loses the BACKUP_ALREADY_EXISTS race would otherwise delete the
+# winner's archive on its way out. Measured: run A lost the race and ran the
+# unguarded cleanup, leaving B with its three files only because B had already
+# copied out; had A's cleanup landed between B's BACKUP and B's copy-out, both
+# runs would have failed.
+#
+# The cost of the flag is that an archive left behind by a BACKUP that failed
+# part-way is not cleaned up. That is the right trade: a stale archive is
+# visible, bounded and removable, while deleting a concurrent run's archive
+# corrupts a backup that was otherwise going to succeed.
+# Removes the timestamped output directory if it is still empty.
+#
+# Validation creates it before the quiesce, so anything that fails between
+# there and the first artefact would otherwise leave an empty directory named
+# like a backup. `rmdir`, never `rm -r`: it succeeds only while the directory
+# is empty, so it can never take a real backup with it, and on the happy path
+# it simply fails and is ignored.
+remove_empty_output() {
+  [ "${OUT_CREATED:-0}" = "1" ] || return 0
+  rmdir "$OUT" 2>/dev/null || true
+}
+
 remove_in_container_artefact() {
+  [ "${CH_ARTEFACT_CREATED:-0}" = "1" ] || return 0
   [ -n "${CH_FILE:-}" ] || return 0
   docker compose exec -T "$CH_SERVICE" \
     rm -f "$CH_BACKUP_DIR/$CH_FILE" < /dev/null >/dev/null 2>&1 || true
@@ -268,31 +310,35 @@ sha256_of() {
 
 # ch_count_expression <engine>
 #
-# MEASURED, not assumed: a plain `count()` is NOT stable across BACKUP and
-# RESTORE, and not because of a race. RESTORE writes the restored data as fresh
-# parts, and the merging engines collapse rows sharing a sorting key as it does
-# so. Reproduced twice on this branch, with the app stopped and nothing
-# ingesting:
+# MEASURED: a plain `count()` is not stable across BACKUP and RESTORE for a
+# merging engine. It is a race, and one that is always eventually lost — the
+# collapse is not done by RESTORE, it is done by the background merges that
+# follow it. Sampled across three rounds, four phases each:
 #
-#   device_index   count() 23 -> 7   (AggregatingMergeTree, 6 parts -> 2)
-#   person_traits  count() 12 -> 4   (AggregatingMergeTree)
-#   device_index   count() 12 -> 3   (second run)
-#   event_schema   count()  8 -> 4   (ReplacingMergeTree)
+#   BEFORE-RESTORE      device_index count=28 FINAL=16 parts=5
+#   IMMEDIATELY-AFTER   device_index count=28 FINAL=16 parts=5   <- unchanged
+#   +20s                device_index count=16 FINAL=16 parts=3   <- the merge
+#
+# So a verification run soon after a restore can read the pre-merge number and
+# pass, and the same check minutes later reads a smaller one and reports data
+# loss. `count()` moved on 6 of 12 samples; `count() … FINAL` was invariant on
+# all 12.
 #
 # `count() … FINAL` applies the engine's merge logic at read time, so it
 # reports the fully-merged count — a property of the data rather than of the
-# current part layout — and it matched on both sides of every BACKUP/RESTORE
-# measured. That is the merge-stable expression, recorded per table in the
-# manifest as `rowexpr.clickhouse.<table>` so restore.sh compares like with
-# like instead of applying a tolerance.
+# current part layout. That is the merge-stable expression, recorded per table
+# in the manifest as `rowexpr.clickhouse.<table>` so restore.sh compares like
+# with like instead of applying a tolerance. It is not free: at 20M rows,
+# `FINAL` cost 243ms and 263 MiB read against 1ms for a bare `count()`. That is
+# spent inside the quiesce, so it is downtime.
 #
 # FINAL is not usable everywhere: `SELECT count() FROM events_dead_letter
 # FINAL` is rejected with `Code: 181 … Storage MergeTree doesn't support FINAL
-# (ILLEGAL_FINAL)`. That is fine, because a plain MergeTree never collapses
-# rows on merge, so its `count()` is already stable — 30 -> 30 across every
-# restore measured. Hence the split below, by property rather than by table
-# name: anything ending in MergeTree that is not the plain or plain-replicated
-# engine collapses on merge and needs FINAL.
+# (ILLEGAL_FINAL)`. A plain MergeTree never collapses rows on merge, so its
+# `count()` is stable under merges — but see ch_row_counts on TTL, which is a
+# separate way for a plain MergeTree's count to fall. Hence the split below, by
+# property rather than by table name: anything ending in MergeTree that is not
+# the plain or plain-replicated engine collapses on merge and needs FINAL.
 ch_count_expression() {
   case "$1" in
     MergeTree | ReplicatedMergeTree) echo 'count()' ;;
@@ -301,7 +347,8 @@ ch_count_expression() {
   esac
 }
 
-# Emits `rows.clickhouse.<table>=<n>` and `rowexpr.clickhouse.<table>=<expr>`.
+# Emits `rows.clickhouse.<table>=<n>`, `rowexpr.clickhouse.<table>=<expr>`, and
+# `rowttl.clickhouse.<table>=<expr>` for the tables that carry a table-level TTL.
 #
 # The table list comes from system.tables rather than a hardcoded list, because
 # a hardcoded list is a list that a future migration silently falls off. The
@@ -314,17 +361,43 @@ ch_count_expression() {
 # double-count the same rows. Dictionaries are excluded because counting one
 # forces a load from Postgres, which is neither a property of the ClickHouse
 # backup nor something to trigger during a quiesce.
+#
+# TTL, and why the answer is to record it rather than to skip the table.
+# `events_dead_letter` carries `TTL toDateTime(received_at) + toIntervalDay(30)`.
+# Its rows are deleted by the same background merges discussed above, so its
+# count falls on its own — measured on a scale model with the TTL shortened:
+# manifest 10, count immediately after RESTORE 10, count after the first merge
+# 0. Restoring a backup older than the retention window is an ordinary
+# disaster-recovery case, and a naive comparison would report catastrophic data
+# loss that never happened. FINAL is not available as a fix here (Code 181).
+#
+# Dropping the table from the manifest would fix the false alarm and create a
+# worse problem: a table missing from `rows.clickhouse.*` is indistinguishable
+# from the stale-hardcoded-list failure the enumeration above exists to
+# prevent, and the count at backup time is a true fact worth recording.
+# So the table is counted like any other and its TTL is recorded alongside.
+# The contract for restore.sh: for a table with a `rowttl.clickhouse.*` key, a
+# restored count LOWER than the manifest is expected and must not be reported
+# as loss; for every other table, equality is required.
+#
+# system.tables has no TTL column in 24.8 — the table-level TTL is only
+# available inside `engine_full`, which carries the engine clause, PARTITION
+# BY, ORDER BY, TTL and SETTINGS and nothing else. Column-level TTLs live in
+# the column definitions in `create_table_query` and correctly do not appear
+# here, since they expire values rather than rows.
 ch_row_counts() {
-  local tables name engine expr suffix count
+  local tables name engine ttl expr suffix count
   tables="$(ch_query "
-    SELECT name || '|' || engine FROM system.tables
+    SELECT name, engine,
+           trim(replaceRegexpOne(extract(engine_full, ' TTL .*'), ' SETTINGS .*\$', ''))
+    FROM system.tables
     WHERE database = '$CH_DATABASE'
       AND engine NOT IN ('MaterializedView', 'View', 'Dictionary')
     ORDER BY name
   ")" || return 1
   [ -n "$tables" ] || return 1
 
-  printf '%s\n' "$tables" | while IFS='|' read -r name engine; do
+  printf '%s\n' "$tables" | while IFS="$(printf '\t')" read -r name engine ttl; do
     [ -n "$name" ] || continue
     expr="$(ch_count_expression "$engine")"
     suffix=''
@@ -337,7 +410,28 @@ ch_row_counts() {
     [ -n "$count" ] || exit 1
     printf 'rows.clickhouse.%s=%s\n' "$name" "$count"
     printf 'rowexpr.clickhouse.%s=%s\n' "$name" "$expr"
+    # Emitted only for the tables that have one, so its presence is the signal.
+    if [ -n "$ttl" ]; then
+      printf 'rowttl.clickhouse.%s=%s\n' "$name" "${ttl#TTL }"
+    fi
   done
+}
+
+# Proves the whole Postgres path works before anything is stopped.
+#
+# `pg_row_counts` below is the only thing in this file that needs more from
+# Postgres than a plain SELECT, and until this existed the first exercise of
+# any Postgres query at all happened AFTER the app was down — so a Postgres
+# built without libxml, or a psql that cannot authenticate, turned into
+# downtime plus a failed backup instead of a refusal. Same principle as
+# have_sha256: move the failure to the safe side of the quiesce. Measured at
+# ~0.13s, which is noise next to a 30-second drain.
+pg_can_count_rows() {
+  local probe
+  probe="$(pg_query \
+    "SELECT (xpath('/row/c/text()', query_to_xml('SELECT 1 AS c', false, true, '')))[1]::text")" ||
+    return 1
+  [ "$probe" = "1" ]
 }
 
 # Emits `rows.postgres.<table>=<n>`.
@@ -383,7 +477,8 @@ pg_row_counts() {
 # anything other than the file on disk cannot do that.
 write_manifest() {
   local out="$1"
-  local schema_version app_image ch_image pg_image ch_sum pg_sum
+  local schema_version app_image ch_image pg_image ch_sum pg_sum tmp
+  tmp="$out/MANIFEST.tmp"
 
   schema_version="$(pg_query 'SELECT max(version) FROM schema_migrations')" || return 1
   [ -n "$schema_version" ] || return 1
@@ -394,7 +489,16 @@ write_manifest() {
   pg_sum="$(sha256_of "$out/postgres.dump")" || return 1
   [ -n "$ch_sum" ] && [ -n "$pg_sum" ] || return 1
 
-  {
+  # Written to a temporary name and renamed, never straight to MANIFEST. The
+  # redirect creates its target BEFORE the pipeline runs, and `sort` writes
+  # whatever it received before the left-hand side died — so a failure part-way
+  # through leaves a short but perfectly well-formed manifest. Measured: forcing
+  # a failure inside pg_row_counts produced three files, correct checksums,
+  # `mode=quiesced` and a matching timestamp, missing only the entire
+  # `rows.postgres.*` block. That satisfies every assertion a caller is likely
+  # to make, and a restore.sh iterating those keys would find none and report a
+  # flawless Postgres verification.
+  if ! {
     printf 'lyraflow_backup_version=1\n'
     printf 'timestamp=%s\n' "$STAMP"
     printf 'mode=quiesced\n'
@@ -406,5 +510,9 @@ write_manifest() {
     printf 'postgres_sha256=%s\n' "$pg_sum"
     ch_row_counts || exit 1
     pg_row_counts || exit 1
-  } | LC_ALL=C sort > "$out/MANIFEST"
+  } | LC_ALL=C sort > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$out/MANIFEST"
 }

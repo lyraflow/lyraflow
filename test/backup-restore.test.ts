@@ -26,8 +26,24 @@ let unwritableDestination: string
 
 const SCRIPT_ENV = { ...process.env, COMPOSE_FILE: 'docker-compose.ci.yml' }
 
-function runScript(script: string, args: string[]): string {
-  return execFileSync(script, args, { encoding: 'utf8', stdio: 'pipe', env: SCRIPT_ENV })
+/**
+ * A directory containing a `docker` that forwards to the real one, used to
+ * reproduce failures that are genuinely reachable but cannot be arranged from
+ * outside the script.
+ *
+ * Deliberately a *test* fixture rather than an environment variable the script
+ * reads: production code that exists only so a test can steer it is code an
+ * operator can trip over. A PATH shim steers nothing — `backup.sh` is byte-for
+ * -byte the shipped script and simply happens to find a different `docker`.
+ */
+let shimDir: string
+
+function runScript(script: string, args: string[], env: NodeJS.ProcessEnv = {}): string {
+  return execFileSync(script, args, {
+    encoding: 'utf8',
+    stdio: 'pipe',
+    env: { ...SCRIPT_ENV, ...env },
+  })
 }
 
 /**
@@ -35,15 +51,52 @@ function runScript(script: string, args: string[]): string {
  * Fails loudly if it succeeds — a silently-passing "expected to throw" test is
  * exactly the shape that hides a regression here.
  */
-function runScriptExpectingFailure(script: string, args: string[]): string {
+function runScriptExpectingFailure(
+  script: string,
+  args: string[],
+  env: NodeJS.ProcessEnv = {},
+): string {
   try {
-    runScript(script, args)
+    runScript(script, args, env)
   } catch (e) {
     const err = e as { stderr?: Buffer | string }
     return String(err.stderr ?? '')
   }
   throw new Error(`${script} ${args.join(' ')} unexpectedly succeeded`)
 }
+
+/** Environment that makes the shimmed `docker` behave a particular way. */
+const withShim = (vars: NodeJS.ProcessEnv): NodeJS.ProcessEnv => ({
+  PATH: `${shimDir}:${process.env.PATH}`,
+  ...vars,
+})
+
+/** A single scalar from ClickHouse over HTTP — no build artefacts required. */
+async function chScalar(sql: string): Promise<string> {
+  const res = await fetch('http://localhost:8123/?database=lyraflow', {
+    method: 'POST',
+    headers: { 'x-clickhouse-user': 'lyraflow', 'x-clickhouse-key': 'lyraflow' },
+    body: sql,
+  })
+  const text = await res.text()
+  if (!res.ok) throw new Error(`ClickHouse ${res.status}: ${text}`)
+  return text.trim()
+}
+
+const pgScalar = (sql: string): string =>
+  compose(
+    'exec',
+    '-T',
+    'postgres',
+    'psql',
+    '-U',
+    'lyraflow',
+    '-d',
+    'lyraflow',
+    '-At',
+    '-c',
+    sql,
+  ).trim()
 
 function parseManifest(path: string): Record<string, string> {
   const out: Record<string, string> = {}
@@ -190,6 +243,31 @@ beforeAll(async () => {
   const dir = mkdtempSync(join(tmpdir(), 'lyraflow-unwritable-'))
   writeFileSync(join(dir, 'afile'), 'not a directory\n')
   unwritableDestination = join(dir, 'afile', 'backups')
+
+  // The `docker` shim. SHIM_FAIL_BEFORE makes a matching invocation fail
+  // without running; SHIM_FAIL_AFTER runs it for real and *then* reports
+  // failure — which is the shape of Ctrl-C during `docker compose stop`, where
+  // the container really does stop and the command still exits non-zero.
+  shimDir = mkdtempSync(join(tmpdir(), 'lyraflow-shim-'))
+  const realDocker = execFileSync('sh', ['-c', 'command -v docker'], {
+    encoding: 'utf8',
+  }).trim()
+  const shim = join(shimDir, 'docker')
+  writeFileSync(
+    shim,
+    [
+      '#!/bin/sh',
+      'if [ -n "${SHIM_FAIL_BEFORE:-}" ]; then',
+      '  case "$*" in *"$SHIM_FAIL_BEFORE"*) exit 1 ;; esac',
+      'fi',
+      'if [ -n "${SHIM_FAIL_AFTER:-}" ]; then',
+      `  case "$*" in *"$SHIM_FAIL_AFTER"*) ${realDocker} "$@"; exit 1 ;; esac`,
+      'fi',
+      `exec ${realDocker} "$@"`,
+      '',
+    ].join('\n'),
+    { mode: 0o755 },
+  )
 }, 600_000)
 
 afterAll(() => {
@@ -230,6 +308,18 @@ describe('backup.sh', () => {
     // of the wall clock.
     expect(m['rows.postgres.identity_bindings_dict_src']).toBeUndefined()
 
+    // A table-level TTL is recorded, because a TTL'd table's count falls on its
+    // own and a restore of a backup older than the retention window would
+    // otherwise read as data loss. Measured on a scale model with the window
+    // shortened to 20s: manifest 10, count immediately after RESTORE 10, count
+    // once the window passed 0. Only the tables that have one get the key, so
+    // its presence is the signal Task 3 reads.
+    expect(m['rowttl.clickhouse.events_dead_letter']).toBe(
+      'toDateTime(received_at) + toIntervalDay(30)',
+    )
+    expect(m['rowttl.clickhouse.events']).toBeUndefined()
+    expect(m['rowttl.clickhouse.device_index']).toBeUndefined()
+
     // Every count in the manifest must name the expression it was taken with,
     // because `count()` is not stable across BACKUP/RESTORE for the merging
     // engines — measured, see ch_count_expression. Without this, restore.sh
@@ -248,6 +338,49 @@ describe('backup.sh', () => {
     expect(keys).toEqual([...keys].sort())
   }, 300_000)
 
+  it('records row counts that match the databases, table by table', async () => {
+    // Until this existed, every row count in the manifest was asserted only as
+    // /^\d+$/ with a single `> 0` — so a manifest reporting every Postgres
+    // table as 0, or counting every ClickHouse table from `events`, passed the
+    // whole suite. Those numbers are the entire basis of Tasks 3 and 4's
+    // verification, which makes "it is a number" far too weak a claim.
+    //
+    // Each count is re-taken with the expression the manifest itself names, so
+    // this compares like with like rather than re-deriving the merge-stability
+    // rule here and drifting from it.
+    const out = takeBackup()
+    const m = parseManifest(join(out, 'MANIFEST'))
+
+    const chTables = Object.keys(m)
+      .filter((k) => k.startsWith('rows.clickhouse.'))
+      .map((k) => k.slice('rows.clickhouse.'.length))
+    expect(chTables.sort()).toEqual([
+      'device_index',
+      'event_schema',
+      'events',
+      'events_dead_letter',
+      'person_traits',
+    ])
+    for (const t of chTables) {
+      const expr = m[`rowexpr.clickhouse.${t}`] as string
+      const final = expr.endsWith('FINAL') ? ' FINAL' : ''
+      expect(await chScalar(`SELECT count() FROM \`${t}\`${final}`), t).toBe(
+        m[`rows.clickhouse.${t}`],
+      )
+    }
+
+    for (const t of ['projects', 'schema_migrations', 'identity_bindings', 'api_keys']) {
+      expect(pgScalar(`SELECT count(*) FROM public.${t}`), t).toBe(m[`rows.postgres.${t}`])
+    }
+
+    // Two counts that are non-zero and unequal, so neither "report everything
+    // as 0" nor "report every table's count as some other table's" can survive
+    // the comparisons above by coincidence.
+    expect(Number(m['rows.postgres.schema_migrations'])).toBeGreaterThan(0)
+    expect(Number(m['rows.clickhouse.events'])).toBeGreaterThan(0)
+    expect(m['rows.clickhouse.events']).not.toBe(m['rows.clickhouse.device_index'])
+  }, 300_000)
+
   it('creates the backup directory and every file owner-only', async () => {
     // Not tidiness. The ClickHouse archive embeds the Postgres password three
     // times, in the DDL of the identity dictionaries — `SHOW CREATE
@@ -261,6 +394,36 @@ describe('backup.sh', () => {
       expect(mode(join(out, f)), `${f} must be owner-only`).toBe(0o600)
     }
   }, 300_000)
+
+  it('gets those modes from a umask, not from a chmod afterwards', () => {
+    // The test above pins the end state. The requirement is about the *window*:
+    // `umask 022` plus a `chmod 600` after each write produces identical final
+    // modes while leaving an interval in which the file exists, already holds
+    // the Postgres password, and is still world-readable. That interval is not
+    // observable from outside without polling, and a poll can legitimately miss
+    // it — a test that passes while the defect is present is worse than no
+    // test. (A watcher polling stat() continuously through a real run never
+    // caught anything but the final modes on any of the four objects.)
+    //
+    // So the mechanism is pinned instead of the symptom, which is deterministic:
+    // there is a umask, and there is no chmod anywhere to undo it.
+    // Comment lines are stripped first: both files *discuss* chmod at length,
+    // and the prohibition is on running one.
+    const code = (f: string): string =>
+      readFileSync(f, 'utf8')
+        .split('\n')
+        .filter((l) => !/^\s*#/.test(l))
+        .join('\n')
+
+    const script = readFileSync('backup.sh', 'utf8')
+    expect(script).toMatch(/^umask 077$/m)
+    for (const f of ['backup.sh', 'backup-lib.sh']) {
+      expect(code(f), `${f} must not chmod its way to the right modes`).not.toMatch(/\bchmod\b/)
+    }
+    // …and the umask must precede everything that can create a file, which
+    // starts with sourcing the library.
+    expect(script.indexOf('umask 077')).toBeLessThan(script.indexOf('backup-lib.sh'))
+  })
 
   it('records checksums that match the artefacts it wrote', async () => {
     // A truncated artefact must be catchable by restore.sh while the live
@@ -335,6 +498,14 @@ describe('backup.sh', () => {
       expect(err).toMatch(/BACKUP_ALREADY_EXISTS|598/)
       await waitReady(60_000)
       expect(await readyStatus()).toBe(200)
+
+      // And it did not take the colliding archive with it. The name is derived
+      // from a UTC *second*, so two backups launched milliseconds apart compute
+      // the same one — the loser's cleanup must not delete the winner's
+      // archive. Every decoy is still here; the run cleans up only what it
+      // created.
+      const surviving = backupsDirListing().trim().split('\n').sort()
+      expect(surviving).toEqual([...decoys].sort())
     } finally {
       compose('exec', '-T', 'clickhouse', 'sh', '-c', `rm -f ${CH_BACKUP_DIR}/*.zip`)
     }
@@ -347,6 +518,83 @@ describe('backup.sh', () => {
     expect(backupsDirListing().trim()).toBe('')
     takeBackup()
     expect(backupsDirListing().trim()).toBe('')
+  }, 300_000)
+
+  it('restarts the app when `docker compose stop` stops it and then reports failure', async () => {
+    // The failure mode the EXIT trap was never actually tested against. Every
+    // other failure in this file reaches `exit 1` through fail(), by which
+    // point the flag the trap reads is already set — so a flag set *after* the
+    // stop looked correct everywhere.
+    //
+    // `docker compose stop` can stop the container and still exit non-zero:
+    // Ctrl-C during the 30-second drain exits 130 with the container already
+    // down, and the drain is the whole duration of the window. Under `set -e`
+    // that kills the script at the `stop` line, before any assignment after it
+    // — bypassing fail() entirely, so there is not even an error message.
+    // Measured before the fix: `exited/unhealthy` immediately afterwards, and
+    // still `exited/unhealthy` 50 seconds later.
+    const dest = mkdtempSync(join(tmpdir(), 'lyraflow-backup-'))
+    const err = runScriptExpectingFailure(
+      './backup.sh',
+      [dest],
+      withShim({ SHIM_FAIL_AFTER: 'compose stop lyraflow' }),
+    )
+    // It must announce itself rather than dying silently under `set -e`.
+    expect(err).toMatch(/quiesce/i)
+    expect(err).toMatch(/no data (was )?(changed|modified|lost)/i)
+
+    await waitReady(120_000)
+    expect(await readyStatus()).toBe(200)
+    expect(readdirSync(dest)).toHaveLength(0)
+  }, 300_000)
+
+  it('leaves nothing behind when the manifest step fails', async () => {
+    // A manifest written straight to its final name is a manifest that exists
+    // before it is complete: the redirect creates the file, and `sort` writes
+    // whatever it received before the left-hand side of the pipeline died.
+    // Measured before the fix — a failure inside the Postgres row counts left
+    // three files, correct checksums, `mode=quiesced` and a matching timestamp,
+    // missing only the entire `rows.postgres.*` block. That satisfies every
+    // other assertion in this file, and a restore.sh iterating those keys would
+    // find none and report a flawless Postgres verification.
+    //
+    // The failure is injected at the row-count query specifically, so
+    // schema_version and the ClickHouse counts both succeed first and the
+    // manifest dies part-written rather than never starting.
+    const dest = mkdtempSync(join(tmpdir(), 'lyraflow-backup-'))
+    const err = runScriptExpectingFailure(
+      './backup.sh',
+      [dest],
+      // Matches only the row-count query, not the identically-shaped
+      // validation probe that runs before the quiesce.
+      withShim({ SHIM_FAIL_BEFORE: 'FROM public.%I' }),
+    )
+    expect(err).toMatch(/manifest/i)
+    expect(err).toMatch(/no data (was )?(changed|modified|lost)/i)
+
+    // Nothing at all: not a partial manifest, and not two artefacts sitting in
+    // a directory that looks like a backup to anyone reading `ls`.
+    expect(readdirSync(dest)).toHaveLength(0)
+    expect(await readyStatus()).toBe(200)
+  }, 300_000)
+
+  it('refuses before the quiesce when Postgres cannot answer the row-count query', async () => {
+    // The whole Postgres path — query_to_xml, and psql authenticating at all —
+    // used to be exercised for the first time *after* the app was down, so a
+    // Postgres built without libxml turned into downtime plus a failed backup
+    // instead of a refusal. Same principle the script already applies to
+    // finding a SHA-256 tool.
+    const dest = mkdtempSync(join(tmpdir(), 'lyraflow-backup-'))
+    const err = runScriptExpectingFailure(
+      './backup.sh',
+      [dest],
+      // Matches only the validation probe, not the row-count query.
+      withShim({ SHIM_FAIL_BEFORE: "query_to_xml('SELECT 1 AS c'" }),
+    )
+    expect(err).toMatch(/validation/i)
+    expect(readdirSync(dest)).toHaveLength(0)
+    // Refused before anything was stopped.
+    expect(await readyStatus()).toBe(200)
   }, 300_000)
 
   it('names the failed step and the state of the data when it fails', async () => {

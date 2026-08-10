@@ -65,9 +65,11 @@ fi
 STAMP="$(date -u +%Y-%m-%dT%H%M%SZ)"
 OUT="$DEST/$STAMP"
 CH_FILE="lyraflow-$STAMP.zip"
+OUT_CREATED=0
 
 cleanup() {
   remove_in_container_artefact
+  remove_empty_output
   start_app_if_stopped
 }
 trap cleanup EXIT
@@ -77,6 +79,13 @@ trap cleanup EXIT
 # downtime. Discovering a typo in the destination after the app is down turns
 # a mistake into an outage.
 # --------------------------------------------------------------------------
+
+pg_can_count_rows ||
+  fail "validation" \
+    "Could not run the manifest's row-count query against Postgres." \
+    "It needs query_to_xml -- core Postgres, but only in a build with libxml --" \
+    "and a working psql login. Checked here rather than at manifest time, so" \
+    "this is a refusal instead of downtime followed by a failed backup."
 
 have_sha256 ||
   fail "validation" \
@@ -109,6 +118,7 @@ mkdir -p "$OUT" 2>/dev/null ||
   fail "destination" \
     "Could not create the destination directory: $OUT" \
     "Check that the path exists, is a directory, and is writable."
+OUT_CREATED=1
 
 [ -w "$OUT" ] ||
   fail "destination" \
@@ -123,8 +133,18 @@ mkdir -p "$OUT" 2>/dev/null ||
 # --------------------------------------------------------------------------
 
 echo "Stopping the app so the ingest buffer drains (about 30 seconds)..."
-docker compose stop "$APP_SERVICE" >/dev/null
+# Flag first, command second. `docker compose stop` can stop the container and
+# still exit non-zero -- Ctrl-C during the drain exits 130 with the container
+# already down -- and under `set -e` that kills this script before any
+# assignment placed after it could run, leaving the EXIT trap with nothing to
+# restore. See APP_STOPPED in backup-lib.sh for the measurement. Setting it
+# early costs nothing: `docker compose start` against a container that is still
+# running is a no-op that does not even move StartedAt.
 APP_STOPPED=1
+docker compose stop "$APP_SERVICE" >/dev/null ||
+  fail "quiesce" \
+    "docker compose stop $APP_SERVICE exited non-zero." \
+    "The app may or may not have stopped; it is being started again either way."
 
 wait_until_stopped "$APP_SERVICE" 60 ||
   fail "quiesce" \
@@ -138,6 +158,10 @@ ch_query "BACKUP DATABASE $CH_DATABASE TO Disk('backups', '$CH_FILE')" >/dev/nul
     "the backups disk -- from a run that died before it could clean up, or from" \
     "a second backup started in the same second."
 
+# Only now is the archive ours to delete. Marking it before the BACKUP would
+# make the run that loses a same-second race clean up the winner's archive.
+CH_ARTEFACT_CREATED=1
+
 copy_ch_artefact_to "$OUT/clickhouse.zip" ||
   fail "ClickHouse" \
     "Could not copy the archive out of the container to $OUT/clickhouse.zip."
@@ -148,11 +172,19 @@ pg_dump_to "$OUT/postgres.dump" ||
     "pg_dump failed; its error is above."
 
 echo "Writing the manifest..."
-write_manifest "$OUT" ||
+if ! write_manifest "$OUT"; then
+  # Remove the whole directory rather than leave two artefacts and no manifest.
+  # An undescribed backup is not merely useless: it is a directory that looks
+  # like a backup to anyone reading `ls`, and it is the only thing standing
+  # between them and the discovery that it cannot be restored. This can only
+  # ever remove a directory this run created -- validation refused to start if
+  # "$OUT" already existed.
+  rm -rf "$OUT"
   fail "manifest" \
-    "Could not write $OUT/MANIFEST." \
-    "The two artefacts were written but are not described, so restore.sh will" \
-    "refuse them. Delete $OUT and run the backup again."
+    "Could not write the manifest for $OUT." \
+    "The partial backup has been deleted rather than left looking complete." \
+    "Run the backup again."
+fi
 
 remove_in_container_artefact
 start_app_if_stopped
