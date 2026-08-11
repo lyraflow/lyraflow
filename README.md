@@ -1446,6 +1446,108 @@ that were well inside their budget. The server logs `quota usage read failed`
 once per project per cache TTL while that lasts, which is the only signal that
 enforcement has degraded.
 
+### Backup and restore
+
+Two scripts sit beside `install.sh`. `backup.sh` is the one you schedule;
+`restore.sh` is the one you run once, under pressure, and it is the only thing
+in this repository that deletes any of your data.
+
+#### Taking a backup
+
+```sh
+./backup.sh /var/backups/lyraflow
+```
+
+It stops **only** the app container, waits for its grace period so the ingest
+buffer drains, backs up ClickHouse and Postgres with nothing writing, restarts
+the app, and writes:
+
+```
+/var/backups/lyraflow/2026-08-10T041500Z/
+    clickhouse.zip     the ClickHouse database
+    postgres.dump      pg_dump custom format
+    MANIFEST           versions, per-table row counts, SHA-256 of each file
+```
+
+**Ingest is refused while it runs, and so are queries.** Events are delayed
+rather than lost: the browser SDK queues in `localStorage` and retries. What
+you get for that pause is a guarantee that fits in one sentence — *the backup
+is a point-in-time image of both stores with no writes in flight.*
+
+How long that pause is depends on how much data you hold. On a small
+deployment it is **about eight seconds** (8.3s, 8.6s and 8.3s on three
+consecutive runs of the stack this repository ships); most of it is the app's
+shutdown drain rather than the copying, so it grows with your data but not
+from a standing start. Measure your own before you decide what time of night
+to run it.
+
+A nightly cron entry:
+
+```
+17 4 * * *  cd /srv/lyraflow && ./backup.sh /var/backups/lyraflow >>/var/log/lyraflow-backup.log 2>&1 || docker compose ps
+```
+
+The trailing `|| docker compose ps` is not decoration. `backup.sh` restarts the
+app from an exit trap on every path it can control, but a `SIGKILL` — an OOM
+kill, a `docker kill`, a hard `systemctl stop` — runs no trap at all and leaves
+the app stopped. The `ps` puts the state in your log where you will see it.
+
+If you pipe the script anywhere, test `PIPESTATUS`, not `$?`.
+
+**Rotation, off-site copies and encryption are yours to choose.** `find -mtime`,
+`restic` and `rclone` all do these better than we would, and Lyraflow
+deliberately does none of them.
+
+#### The backup file is a credential
+
+Beyond your personal data and your projects' **write keys in plaintext**, the
+archive contains your **Postgres password**. Lyraflow's identity dictionaries
+live inside the ClickHouse database, and their definitions embed the credential
+they use to read Postgres — so three files inside `clickhouse.zip` carry it.
+
+`backup.sh` writes everything `0600` inside a `0700` directory. Treat a backup
+directory exactly as you would treat the database itself, and think about that
+before you sync it to a bucket.
+
+**What a restore cannot give you back is a server key.** Only its hash is
+stored, by design. If you have lost yours, no backup recovers it and the remedy
+is a new project.
+
+#### Restoring
+
+```sh
+./restore.sh /var/backups/lyraflow/2026-08-10T041500Z
+```
+
+You will be asked to type the backup's timestamp. There is no `--force`.
+
+Three things are checked **before anything is destroyed**: the artefacts match
+their checksums, the backup is not newer than the image you are running, and
+you confirmed. Any of them refusing leaves your running system untouched — not
+even stopped.
+
+Then the ClickHouse database is dropped and refilled, and the Postgres `public`
+schema is dropped and refilled. **Everything written since the backup is gone.**
+
+**Both stores are always restored together, and there is no flag to do one.**
+`suppressed_persons` — the record that a person exercised their right to
+erasure — lives in Postgres, while the events it hides live in ClickHouse. A
+Postgres older than its ClickHouse partner brings deleted people back into
+every query. ClickHouse is restored first so that an interrupted restore fails
+on the safe side.
+
+**If a restore is interrupted part-way, the app is deliberately left stopped.**
+The script tells you which store is in which state and asks you to run it again
+with the same backup, which is safe and idempotent. It does not restart the app
+for you, because a Lyraflow serving a half-restored database can be answering
+queries with no suppression rows at all — a down site is loud, and that is not.
+
+Two smaller things worth knowing. Restoring a backup older than a project's
+`retention_months` brings back events the policy has already expired; the next
+retention sweep drops them again, harmlessly. And `restore.sh` drops and
+recreates the `public` schema, which assumes the role Lyraflow connects with
+owns it — true of the stack this repository ships.
+
 ## Upgrading
 
 ```sh

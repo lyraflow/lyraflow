@@ -44,7 +44,12 @@ services:
       CLICKHOUSE_USER: lyraflow
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
-    volumes: ["clickhouse-data:/var/lib/clickhouse"]
+    volumes:
+      - "clickhouse-data:/var/lib/clickhouse"
+      # Enables BACKUP/RESTORE. See the file's own comment for why it is
+      # required rather than optional, and backup.sh for the cleanup this
+      # implies.
+      - "./docker/clickhouse/backup-disk.xml:/etc/clickhouse-server/config.d/backup-disk.xml:ro"
     ulimits:
       nofile: { soft: 262144, hard: 262144 }
     # Probe the container's own hostname, not loopback: these images run an

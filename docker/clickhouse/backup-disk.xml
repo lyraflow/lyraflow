@@ -1,0 +1,26 @@
+<clickhouse>
+    <!--
+      BACKUP ... TO Disk(...) refuses every disk, including `default`, until
+      `backups.allowed_disk` names one:
+
+        Code: 318. DB::Exception: The 'backups.allowed_disk' configuration
+        parameter is not set, cannot use 'Disk' backup engine.
+
+      The disk lives inside the existing clickhouse-data volume rather than a
+      volume of its own, so an operator who has already sized that volume does
+      not have to size a second one. The consequence is that backup.sh MUST
+      delete the in-container artefact after copying it out, or this volume
+      grows by one full backup every night.
+    -->
+    <storage_configuration>
+        <disks>
+            <backups>
+                <type>local</type>
+                <path>/var/lib/clickhouse/backups/</path>
+            </backups>
+        </disks>
+    </storage_configuration>
+    <backups>
+        <allowed_disk>backups</allowed_disk>
+    </backups>
+</clickhouse>
