@@ -454,8 +454,9 @@ verify_row_counts() {
     # Pre-flight already refused a manifest missing any of these, so reaching
     # this is a bug rather than bad input -- and guessing an expression here
     # is precisely the silent wrong comparison the pre-flight exists to stop.
-    [ -n "$expected" ] && [ -n "$expr" ] ||
+    if [ -z "$expected" ] || [ -z "$expr" ]; then
       abort "verification" "The manifest has no count or no expression for $table."
+    fi
     suffix=''
     case "$expr" in *FINAL) suffix=' FINAL' ;; esac
     # shellcheck disable=SC2016
@@ -658,8 +659,9 @@ STAMP="$(manifest_get "$SRC" timestamp)" || STAMP=''
 
 MANIFEST_CH_SUM="$(manifest_get "$SRC" clickhouse_sha256)" || MANIFEST_CH_SUM=''
 MANIFEST_PG_SUM="$(manifest_get "$SRC" postgres_sha256)" || MANIFEST_PG_SUM=''
-[ -n "$MANIFEST_CH_SUM" ] && [ -n "$MANIFEST_PG_SUM" ] ||
+if [ -z "$MANIFEST_CH_SUM" ] || [ -z "$MANIFEST_PG_SUM" ]; then
   refuse "The manifest is missing a checksum, so the artefacts cannot be verified."
+fi
 
 MANIFEST_SCHEMA="$(manifest_get "$SRC" schema_version)" || MANIFEST_SCHEMA=''
 case "$MANIFEST_SCHEMA" in

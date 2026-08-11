@@ -668,7 +668,7 @@ write_manifest() {
   pg_image="$(service_image "$PG_SERVICE")"
   ch_sum="$(sha256_of "$out/clickhouse.zip")" || return 1
   pg_sum="$(sha256_of "$out/postgres.dump")" || return 1
-  [ -n "$ch_sum" ] && [ -n "$pg_sum" ] || return 1
+  if [ -z "$ch_sum" ] || [ -z "$pg_sum" ]; then return 1; fi
 
   # Written to a temporary name and renamed, never straight to MANIFEST. The
   # redirect creates its target BEFORE the pipeline runs, and `sort` writes

@@ -29,8 +29,14 @@ jobs:
       # source backup-lib.sh, and shellcheck only follows that source when the
       # sourced file is part of the same input set. Split into separate runs it
       # still passes, but blind to every use of a helper.
+      #
+      # `pnpm exec`, not the runner's preinstalled `shellcheck`. The two are
+      # different versions and they disagree: a bare `shellcheck` passed on a
+      # developer machine running 0.11 and failed here on SC2015, which is a
+      # lint you cannot reproduce locally and therefore cannot fix with
+      # confidence. Pinning it in devDependencies makes the two identical.
       - name: Lint shell scripts
-        run: shellcheck backup.sh backup-lib.sh restore.sh install.sh
+        run: pnpm exec shellcheck backup.sh backup-lib.sh restore.sh install.sh
       - run: pnpm lint
       - run: pnpm typecheck
       # `pnpm typecheck` (tsc -b) emits every package's TypeScript output, which
