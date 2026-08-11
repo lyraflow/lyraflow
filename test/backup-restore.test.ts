@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
   closeSync,
@@ -31,6 +31,8 @@ const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/131.0 Safari/
 const CH_BACKUP_DIR = '/var/lib/clickhouse/backups'
 
 let writeKey: string
+/** The project's secret key — the deletion route is the only user of it here. */
+let serverKey: string
 /** A destination no user, including root, can create a directory under. */
 let unwritableDestination: string
 
@@ -64,6 +66,38 @@ function runScript(
     // confirmation reads stdin, and a test that meant to type nothing and a
     // test that meant to inherit the runner's stdin must not look alike.
     ...(input === undefined ? {} : { input }),
+  })
+}
+
+/**
+ * The same thing without blocking the event loop.
+ *
+ * `execFileSync`/`spawnSync` block Node entirely for the duration, so ANY test
+ * that needs to do something WHILE a script runs — put load on the app, watch
+ * for a state change — has to use this instead. That is not a style
+ * preference: a load generator written as an async loop beside an
+ * `execFileSync` call never issues a single request, and the test then passes
+ * against the defect it was written to catch.
+ */
+function runScriptAsync(
+  script: string,
+  args: string[],
+  input: string,
+  env: NodeJS.ProcessEnv = {},
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(script, args, { env: { ...SCRIPT_ENV, ...env } })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', (d) => {
+      stdout += String(d)
+    })
+    child.stderr.on('data', (d) => {
+      stderr += String(d)
+    })
+    child.on('error', reject)
+    child.on('close', (status) => resolve({ status, stdout, stderr }))
+    child.stdin.end(input)
   })
 }
 
@@ -316,6 +350,8 @@ beforeAll(async () => {
   )
   writeKey = /wk_[a-f0-9]+/.exec(out)?.[0] as string
   expect(writeKey).toBeTruthy()
+  serverKey = /sk_[a-f0-9]+/.exec(out)?.[0] as string
+  expect(serverKey).toBeTruthy()
 
   // A fixture with rows in it, so the manifest's counts describe something.
   // Repeated anonymous_ids on purpose: device_index and person_traits are
@@ -347,6 +383,46 @@ beforeAll(async () => {
   }
   // The ingest buffer flushes on a timer; give it room so the counts the
   // manifest records are not a race against LYRAFLOW_FLUSH_INTERVAL_MS.
+  await new Promise((r) => setTimeout(r, 5000))
+
+  // ONE PERSON EXERCISES THEIR RIGHT TO ERASURE, through the real route.
+  //
+  // Not decoration. `suppressed_persons` is the table the entire
+  // ClickHouse-before-Postgres argument exists to protect, and until this
+  // existed the fixture never wrote a row to it — so `liveState().suppressed`
+  // was the string '0' in every assertion in this file, and a mutation that
+  // dropped the whole table from verification could not be seen. A row here is
+  // never removed, including after the purge (005_suppression.sql), which is
+  // exactly what makes it survive into every backup this suite takes.
+  const erased = await fetch(`${BASE}/v1/persons/backup-person-1`, {
+    method: 'DELETE',
+    headers: { 'x-lyraflow-server-key': serverKey },
+  })
+  expect([200, 202]).toContain(erased.status)
+
+  // WAIT FOR THE PURGE TO FINISH, and this is not politeness. The purge runs
+  // asynchronously and deletes that person's events from ClickHouse; a purge
+  // that lands in the middle of a later test moves `rows.clickhouse.events`
+  // between a manifest and the count taken against it, or between the two
+  // halves of `expectRefusal`. Every count in this file has to be taken after
+  // it, so the fixture blocks until `completed_at` is set.
+  const purgeDeadline = Date.now() + 120_000
+  while (Date.now() < purgeDeadline) {
+    if (
+      pgScalar('SELECT count(*) FROM public.deletion_requests WHERE completed_at IS NULL') === '0'
+    )
+      break
+    await new Promise((r) => setTimeout(r, 1000))
+  }
+  expect(
+    pgScalar('SELECT count(*) FROM public.deletion_requests WHERE completed_at IS NULL'),
+    'the purge did not finish; every row count in this file would be racing it',
+  ).toBe('0')
+  expect(
+    Number(pgScalar('SELECT count(*) FROM public.suppressed_persons')),
+    'the erasure fixture did not produce a suppression row',
+  ).toBeGreaterThan(0)
+  // The buffer may have flushed again while the purge ran.
   await new Promise((r) => setTimeout(r, 5000))
 
   // mkdir(2) under a *regular file* fails with ENOTDIR for every user
@@ -388,6 +464,19 @@ beforeAll(async () => {
     'fi',
     'if [ -n "${SHIM_FAIL_AFTER:-}" ]; then',
     `  case "$SELF $*" in *"$SHIM_FAIL_AFTER"*) "$REAL_BIN" "$@"; exit 1 ;; esac`,
+    'fi',
+    // SHIM_KILL_BEFORE signals the script that invoked it and never runs the
+    // real command — the shape of `timeout`, systemd stopping a unit, a
+    // supervisor, a CI cancel or a plain `kill`, parked at a chosen
+    // statement. $PPID is the shell running the script, because the shim is
+    // its direct child.
+    'if [ -n "${SHIM_KILL_BEFORE:-}" ]; then',
+    '  case "$SELF $*" in',
+    '    *"$SHIM_KILL_BEFORE"*)',
+    '      kill -TERM "$PPID"',
+    '      exit 143',
+    '      ;;',
+    '  esac',
     'fi',
     'exec "$REAL_BIN" "$@"',
     '',
@@ -1932,6 +2021,272 @@ describe('restore.sh', () => {
       'a restore must replace the schema, not overlay the dump on it',
     ).toBe('0')
     expect(await readyStatus()).toBe(200)
+  }, 900_000)
+
+  it('says what happened to the data when a signal kills it mid-restore', async () => {
+    // THE ONE EXIT NOTHING IN THIS FILE USED TO TAKE. Every other route out of
+    // the destructive region goes through `abort`, which prints the data
+    // state; a signal goes through neither `abort` nor any of the failure
+    // branches, and before this test the whole run said:
+    //
+    //   Stopping the app... / Restoring ClickHouse... / Restoring Postgres...
+    //   Starting the app again...
+    //   exit 143
+    //
+    // …while leaving a ClickHouse full of restored events beside an EMPTY
+    // Postgres. The app then restarted onto the empty schema, re-migrated
+    // forward, and came up healthy with zero suppression rows — the state this
+    // script's own header calls "a privacy regression, and a silent one",
+    // reached without a word about it.
+    //
+    // SIGTERM is ordinary here: `timeout`, systemd stopping a unit, a
+    // supervisor, a CI cancel, a plain `kill`. The shim parks one exactly
+    // between the Postgres drop and the Postgres refill.
+    const out = takeBackup()
+    const res = spawnSync('./restore.sh', [out], {
+      encoding: 'utf8',
+      env: { ...SCRIPT_ENV, ...withShim({ SHIM_KILL_BEFORE: 'pg_restore' }) },
+      input: confirmation(out),
+    })
+    expect(res.status === 0, 'a killed restore must not report success').toBe(false)
+
+    // The whole point: it says so, and it says which of the states it is.
+    expect(res.stderr).toMatch(/STATE OF YOUR DATA/)
+    expect(res.stderr).toMatch(/Postgres is EMPTY/i)
+    expect(res.stderr).toMatch(/run this script again/i)
+
+    // …and the EXIT trap still did its job.
+    await waitReady(120_000)
+    expect(await readyStatus()).toBe(200)
+    expect(backupsDirListing().trim()).toBe('')
+
+    // Put the stack back for whatever runs next.
+    runScript('./restore.sh', [out], {}, confirmation(out))
+    expect(Number(pgScalar('SELECT count(*) FROM public.suppressed_persons'))).toBeGreaterThan(0)
+  }, 900_000)
+
+  it('does not add a stderr line to a restore that worked', async () => {
+    // The other half of the fix above. Announcing the data state on every exit
+    // that changed something must not mean announcing it on the exit where
+    // stdout has already said the same thing positively — a cron wrapper that
+    // treats any stderr output as a problem should not be handed one by a
+    // restore that succeeded.
+    const out = takeBackup()
+    const res = spawnSync('./restore.sh', [out], {
+      encoding: 'utf8',
+      env: SCRIPT_ENV,
+      input: confirmation(out),
+    })
+    expect(res.status).toBe(0)
+    expect(res.stdout).toMatch(/Both stores now match/)
+    expect(res.stderr).not.toMatch(/STATE OF YOUR DATA/)
+  }, 900_000)
+
+  it('fails the restore when a POSTGRES count disagrees with the manifest', async () => {
+    // Verification has two halves and only the ClickHouse one was pinned:
+    // every test that made verification fail rewrote a ClickHouse count, so
+    // deleting the entire Postgres loop left the suite green. That half covers
+    // `suppressed_persons` — the table the whole ClickHouse-before-Postgres
+    // argument exists to protect — and it is the only check of it that runs
+    // after the data has already been replaced.
+    const out = takeBackup()
+    const before = parseManifest(join(out, 'MANIFEST'))[
+      'rows.postgres.suppressed_persons'
+    ] as string
+    expect(Number(before), 'the fixture never suppressed anyone').toBeGreaterThan(0)
+    rewriteManifestKey(
+      join(out, 'MANIFEST'),
+      'rows.postgres.suppressed_persons',
+      String(Number(before) + 3),
+    )
+
+    const err = runScriptExpectingFailure('./restore.sh', [out], {}, confirmation(out))
+    expect(err).toMatch(/verification/i)
+    expect(err).toMatch(/postgres\.suppressed_persons/)
+    expect(err).toContain(String(Number(before) + 3))
+
+    await waitReady(120_000)
+    expect(await readyStatus()).toBe(200)
+  }, 900_000)
+
+  it('exits non-zero and does not claim success when the restart fails outright', async () => {
+    // `backup.sh`'s round-3 Critical, reproduced in `restore.sh` and until now
+    // undefended: `restore.sh` has its own 14-line `cleanup()`, and every test
+    // pinning that `exit 1` lived under `describe('backup.sh')`. Deleting the
+    // line here left the suite green while the script printed "Both stores now
+    // match the backup…" and exited 0 with the container `Exited (0)`.
+    const out = takeBackup()
+    let err: string
+    try {
+      err = runScriptExpectingFailure(
+        './restore.sh',
+        [out],
+        withShim({ SHIM_FAIL_BEFORE: 'compose start lyraflow' }),
+        confirmation(out),
+      )
+    } finally {
+      // Whatever the assertions do, put the app back for the tests that follow.
+      compose('start', 'lyraflow')
+      await waitReady()
+    }
+    expect(err).toMatch(/could not start it|is stopped/i)
+    expect(err).toMatch(/docker compose start lyraflow/)
+    // The data state has to travel with it: "the app is down" is not
+    // actionable without "and here is what state your data is in".
+    expect(err).toMatch(/STATE OF YOUR DATA/)
+  }, 900_000)
+
+  it('removes the archive it copied in even when that copy then fails', async () => {
+    // `CH_ARTEFACT_CREATED=1` goes BEFORE the copy, not after it. The archive
+    // name comes from the manifest's timestamp rather than the clock, so a
+    // retry recomputes the same name on purpose and overwrites its own
+    // leftovers — there is no concurrent run whose archive this could be, which
+    // is the race that makes `backup.sh` set the same flag late.
+    //
+    // Set late here, a copy that runs and then reports failure leaks a whole
+    // database archive onto a disk that lives inside the ClickHouse data
+    // volume and survives `docker compose down`. One per abandoned run, for
+    // ever. The success path was already pinned; this is the other one.
+    const out = takeBackup()
+    expect(backupsDirListing().trim()).toBe('')
+
+    const err = runScriptExpectingFailure(
+      './restore.sh',
+      [out],
+      withShim({ SHIM_FAIL_AFTER: 'sh -c cat >' }),
+      confirmation(out),
+    )
+    expect(err).toMatch(/ClickHouse/)
+    // Nothing was destroyed — the copy is the last step before the DROP.
+    expect(err).toMatch(/nothing has been changed/i)
+
+    await waitReady(120_000)
+    expect(await readyStatus()).toBe(200)
+    expect(
+      backupsDirListing().trim(),
+      'a copy that failed part way must not leave its archive behind',
+    ).toBe('')
+  }, 900_000)
+
+  it('verifies the restored rows before the app can accept new ones', async () => {
+    // The reason verification runs while the app is still stopped, pinned
+    // rather than argued. Under continuous ingest, verification moved back
+    // below the restart reports a completely successful restore as data loss —
+    // the SDK's queued events start arriving the moment the app answers, and
+    // they land before the check reads the counts.
+    //
+    // The shipped order cannot see them at all, so this is deterministic in
+    // both directions: the load runs throughout, and the restore must still
+    // exit 0.
+    //
+    // `runScriptAsync`, NOT `runScript`. The first version of this test used
+    // the synchronous helper and passed against the defect: `execFileSync`
+    // blocks the whole event loop, so the load loop beside it never issued one
+    // request, and "the restore succeeded under load" was really "the restore
+    // succeeded under no load at all". `accepted` below is the guard against
+    // that ever being true again quietly.
+    const out = takeBackup()
+    const expectedEvents = parseManifest(join(out, 'MANIFEST'))['rows.clickhouse.events'] as string
+    let loading = true
+    let accepted = 0
+    const load = (async () => {
+      while (loading) {
+        try {
+          const res = await fetch(`${BASE}/v1/track`, {
+            method: 'POST',
+            headers: ingestHeaders(),
+            body: JSON.stringify({
+              message_id: randomUUID(),
+              anonymous_id: 'under-load',
+              event: 'during_restore',
+            }),
+          })
+          if (res.status === 202) accepted++
+        } catch {
+          // The app is stopped for most of this; a refused connection is the
+          // expected answer and not what the test is about.
+        }
+        await new Promise((r) => setTimeout(r, 25))
+      }
+    })()
+
+    try {
+      const res = await runScriptAsync('./restore.sh', [out], confirmation(out))
+      expect(res.status, res.stderr).toBe(0)
+      expect(res.stdout).toMatch(/Restored from/)
+    } finally {
+      // Keep the load on for a moment past the restore, so the events accepted
+      // while the script was finishing are flushed rather than left in the
+      // buffer — a verification that ran after the restart would have been
+      // reading exactly this window.
+      await new Promise((r) => setTimeout(r, 6000))
+      loading = false
+      await load
+    }
+
+    // The load was real: the app accepted events during this test, and they
+    // reached ClickHouse. Without this the test passes vacuously whenever the
+    // load fails to run — which is precisely how its first version passed.
+    expect(accepted, 'no event was accepted; this test proved nothing').toBeGreaterThan(5)
+    expect(
+      Number(await chScalar('SELECT count() FROM events FINAL')),
+      'the accepted events never reached ClickHouse',
+    ).toBeGreaterThan(Number(expectedEvents))
+    expect(await readyStatus()).toBe(200)
+  }, 900_000)
+
+  it('completes the restore when its own output is closed mid-run', async () => {
+    // `restore.sh` inherits backup.sh's `trap "" PIPE` and its non-fatal
+    // say/note, and had no test for either. It also has the two commands in
+    // this pair of scripts that carry no redirect at all — the copy into the
+    // container and the Postgres restore — so their stderr goes straight to
+    // whatever the caller left open.
+    //
+    // Both shapes of a log-capping wrapper: stdout closed, and both streams
+    // closed. `| head -1` is also `| less` then q, and `| grep -m1`.
+    //
+    // THE DIVERGENCE IS THE ASSERTION. The first version of this test checked
+    // only that the app was healthy and the backups disk clean afterwards —
+    // both of which are also true of a restore that died on its very first
+    // `say`, before touching anything, which is exactly what happens with the
+    // PIPE trap removed. Constructed: `trap "" PIPE` deleted and the test still
+    // passed. A project created after the backup and gone afterwards is the
+    // only evidence that the run reached the end rather than the beginning.
+    for (const pipeline of ['./restore.sh "$1" | head -1', './restore.sh "$1" 2>&1 | head -1']) {
+      const out = takeBackup()
+      const expectedProjects = parseManifest(join(out, 'MANIFEST'))[
+        'rows.postgres.projects'
+      ] as string
+      compose(
+        'exec',
+        '-T',
+        'lyraflow',
+        'node',
+        'packages/cli/dist/index.js',
+        'create-project',
+        `ClosedStream${Date.now()}`,
+      )
+      expect(pgScalar('SELECT count(*) FROM public.projects'), pipeline).not.toBe(expectedProjects)
+
+      const res = spawnSync('bash', ['-c', pipeline, '_', out], {
+        encoding: 'utf8',
+        env: SCRIPT_ENV,
+        input: confirmation(out),
+      })
+      await waitReady(120_000)
+      expect(await readyStatus(), pipeline).toBe(200)
+      // A capped log asked for a shorter log, not for an abandoned restore.
+      expect(
+        pgScalar('SELECT count(*) FROM public.projects'),
+        `${pipeline} — the restore did not run to completion`,
+      ).toBe(expectedProjects)
+      expect(backupsDirListing().trim(), pipeline).toBe('')
+      expect(
+        Number(pgScalar('SELECT count(*) FROM public.suppressed_persons')),
+        pipeline,
+      ).toBeGreaterThan(0)
+      expect(res.stderr, pipeline).not.toMatch(/write error|Broken pipe/)
+    }
   }, 900_000)
 
   it('runs no command that could create a file, and restores in the right order', async () => {

@@ -427,9 +427,18 @@ remove_incomplete_output() {
 #
 # NOTE FOR restore.sh: this function is shared, and the flag defaults to 0, so
 # calling it without setting the flag is a silent no-op. A restore copies an
-# archive INTO the container and must therefore set CH_ARTEFACT_CREATED=1 once
-# that copy has succeeded — otherwise the restored archive stays on the backups
-# disk forever, which is precisely the volume growth this exists to prevent.
+# archive INTO the container and must therefore set CH_ARTEFACT_CREATED=1
+# — otherwise the restored archive stays on the backups disk forever, which is
+# precisely the volume growth this exists to prevent.
+#
+# BEFORE that copy, not after it, which is the reverse of the rule above and
+# for a reason that does not apply there: a restore's archive name comes from
+# the manifest's timestamp rather than from the clock, so a second attempt
+# recomputes the same name on purpose and overwrites its own leftovers. There
+# is no concurrent run whose archive it could take. Setting the flag after the
+# copy instead leaks a partial archive from every copy that fails part way —
+# measured at 34 kB per abandoned run on a scale model, on a disk that survives
+# `docker compose down`.
 # Cannot fail, for the same reason as remove_incomplete_output.
 remove_in_container_artefact() {
   [ "${CH_ARTEFACT_CREATED:-0}" = "1" ] || return 0

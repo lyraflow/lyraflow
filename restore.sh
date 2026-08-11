@@ -31,6 +31,18 @@
 #   people's future events become visible again. A privacy regression, and a
 #   silent one.
 #
+#   ClickHouse back, Postgres EMPTY -- the third one, and the one an ordering
+#   argument written from the first two forgets. It is reachable, because the
+#   Postgres half is a drop followed by a refill and a run can stop between
+#   them. Worse than it sounds: the app restarts onto an empty schema, finds no
+#   `schema_migrations`, migrates forward, and comes up healthy and answering
+#   with a structurally complete Postgres holding zero suppression rows beside
+#   a ClickHouse full of restored events. Nothing about it looks wrong.
+#
+# The third is why DATA_STATE below is announced on EVERY exit that changed
+# anything, including one caused by a signal, rather than only on the failures
+# this script chose to report.
+#
 # That asymmetry is the whole reason the order below is ClickHouse first and
 # Postgres second, and the intuition points the other way: the store that
 # feels safe to do first is the small metadata one. It is not.
@@ -63,14 +75,20 @@ trap "" PIPE
 CONFIRM_TIMEOUT=120
 
 # What has actually happened to the operator's data at this point in the run,
-# in words. Read by `abort` below, which is the only thing that prints it.
+# in words. Reassigned at each step; printed by announce_data_state below.
 #
 # A single fixed sentence is what backup-lib.sh's `fail` can afford, because a
-# backup only ever reads. This script passes through four genuinely different
+# backup only ever reads. This script passes through five genuinely different
 # states and an operator at 4am needs to be told which one they are in -- "your
-# data is intact", "ClickHouse is empty", and "both stores are back" call for
-# three completely different next actions.
-DATA_STATE="nothing has been changed: both stores still hold exactly what they held before this ran"
+# data is intact", "ClickHouse is empty", "Postgres is empty" and "both stores
+# are back" call for four completely different next actions.
+DATA_STATE_INITIAL="nothing has been changed: both stores still hold exactly what they held before this ran"
+DATA_STATE="$DATA_STATE_INITIAL"
+DATA_STATE_REPORTED=0
+
+# Set on the last line of the run, so cleanup can tell "finished" from "stopped
+# part way". Same role as backup.sh's BACKUP_COMPLETE.
+RESTORE_COMPLETE=0
 
 usage() {
   cat >&2 <<'EOF'
@@ -128,6 +146,39 @@ refuse() {
   exit 1
 }
 
+# announce_data_state -- says what happened to the operator's data, once.
+#
+# THE ONLY PLACE DATA_STATE IS PRINTED, and it is deliberately not owned by
+# `abort`. It used to be, and that is a defect with a name: a SIGTERM arriving
+# between the Postgres drop and the Postgres refill killed the script without
+# going through `abort` at all, so the run printed
+#
+#   Stopping the app...  /  Restoring ClickHouse...  /  Restoring Postgres...
+#   Starting the app again...        <- from the EXIT trap
+#
+# and nothing else, exit 143 -- while leaving a ClickHouse full of restored
+# events beside an EMPTY Postgres. The app then restarted, found no
+# `schema_migrations`, migrated forward, and came up healthy with zero
+# suppression rows. That is the state this file's own header calls "a privacy
+# regression, and a silent one", reached without a single word about it.
+#
+# A signal is ordinary here, not exotic: `timeout`, systemd stopping a unit, a
+# supervisor, a CI cancel, a plain `kill`. bash runs the EXIT trap on signal
+# death (measured, same as the SIGPIPE case backup-lib.sh documents), so the
+# trap is the one place that sees EVERY exit -- which is why the announcement
+# belongs there rather than in the failure reporter.
+#
+# Once, because `abort` exits and the trap then runs too; without the flag the
+# same paragraph would print twice on the paths that already work.
+#
+# Cannot fail: `note` cannot, and every other statement is an assignment.
+announce_data_state() {
+  [ "$DATA_STATE_REPORTED" = "0" ] || return 0
+  DATA_STATE_REPORTED=1
+  note "STATE OF YOUR DATA: ${DATA_STATE}"
+  return 0
+}
+
 # abort <step> <detail…> -- a failure after the destruction has begun.
 #
 # backup-lib.sh's `fail` cannot be reused here: its closing claim is "no data
@@ -145,7 +196,7 @@ abort() {
     note "  ${line}"
   done
   note ""
-  note "STATE OF YOUR DATA: ${DATA_STATE}"
+  announce_data_state
   note "The backup directory has not been modified and can be used again."
   exit 1
 }
@@ -340,11 +391,29 @@ cleanup() {
 
   remove_in_container_artefact || true
 
+  # THE ANNOUNCEMENT, on every exit that changed anything and did not reach the
+  # end of the run. This is the branch a signal takes, and before it existed a
+  # SIGTERM between the two Postgres statements said nothing at all -- see
+  # announce_data_state.
+  #
+  # Suppressed on a completed run, and only there: stdout has already said
+  # "Restored from …" and "Both stores now match …", which is the same fact
+  # stated positively, and a cron wrapper that treats any stderr output as a
+  # problem should not be handed one by a restore that worked.
+  if [ "$RESTORE_COMPLETE" = "0" ] && [ "$DATA_STATE" != "$DATA_STATE_INITIAL" ]; then
+    note ""
+    announce_data_state
+  fi
+
   if [ "$restart_ok" = "0" ]; then
     note ""
     note "ERROR: the app is stopped and this script could not start it."
     note "  Run: docker compose start $APP_SERVICE"
-    note "STATE OF YOUR DATA: ${DATA_STATE}"
+    # Unconditional, unlike the branch above: "the app is down" is not
+    # actionable without "and here is what state your data is in", even when
+    # that state is the initial one -- which is exactly the case when the
+    # restart fails between the quiesce and the first DROP.
+    announce_data_state
     exit 1
   fi
 }
@@ -580,20 +649,32 @@ say "Restoring ClickHouse..."
 # a file that is sitting right there. Through a redirect it is created by the
 # container's own umask -- measured as 0644 root:clickhouse, which the server
 # reads without complaint.
+#
+# FLAG FIRST, COPY SECOND, and this is the opposite of the trade-off backup.sh
+# makes one line from the same place. There the flag goes up only after BACKUP
+# succeeds, because two runs launched in the same second compute the same
+# archive name and the loser must not delete the winner's. Here the name comes
+# from the MANIFEST's timestamp rather than the clock, so a second run of this
+# script against the same backup computes the same name deliberately -- it
+# overwrites its own previous attempt instead of accumulating one archive per
+# try, and there is no other run whose archive it could be.
+#
+# So the archive is ours from the moment the copy STARTS, and setting the flag
+# after the copy means a copy that fails part way leaks a partial database
+# archive. Measured, with a copy that really ran and then reported failure:
+#
+#   STATE OF YOUR DATA: nothing has been changed ...
+#   backups disk after:  -rw-r--r-- 1 root clickhouse 34198 lyraflow-….zip
+#
+# The backups disk lives inside the ClickHouse data volume and survives
+# `docker compose down`, so that is one whole database copy per abandoned run,
+# for ever. The flag defaults to 0 in backup-lib.sh, so forgetting this line
+# does not fail -- it makes remove_in_container_artefact a silent no-op.
+CH_ARTEFACT_CREATED=1
 docker compose exec -T "$CH_SERVICE" sh -c 'cat > "$1"' _ "$CH_BACKUP_DIR/$CH_FILE" \
   < "$SRC/clickhouse.zip" ||
   abort "ClickHouse" \
     "Could not copy the archive into the $CH_SERVICE container."
-
-# Set immediately, and this is not the same trade-off backup.sh makes. There
-# the flag goes up only after BACKUP succeeds, so a run that loses a
-# same-second race cannot delete the winner's archive. Here the archive was
-# put on the disk by this run, by name, one statement ago: it is ours from the
-# moment the copy starts, and a partial copy left behind is exactly the volume
-# growth remove_in_container_artefact exists to prevent. The flag defaults to
-# 0 in backup-lib.sh, so forgetting this line makes that function a silent
-# no-op rather than an error.
-CH_ARTEFACT_CREATED=1
 
 # Bound to `default`, not to the application database. A ClickHouse session
 # sets its current database on connect and naming one that does not exist is
@@ -700,6 +781,14 @@ remove_in_container_artefact
 # fails here must not stop the operator being told the restore succeeded, and
 # must not be reported as success either. The trap does both.
 start_app_if_stopped || true
+
+# The run reached its own ending, so the EXIT trap does not need to announce
+# the state of the data -- the two lines below are that announcement, stated
+# positively. Set BEFORE them rather than after: `say` cannot fail, but a
+# signal can still land between two statements, and a run that has done
+# everything and been killed on the last line is a finished restore, not a
+# half-finished one.
+RESTORE_COMPLETE=1
 
 say "Restored from $SRC"
 say "Both stores now match the backup taken at $STAMP."
