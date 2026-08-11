@@ -263,11 +263,21 @@ const fingerprint = (dir: string): string[] =>
  * moves if and only if the container was actually restarted.
  */
 const appStartedAt = (): string =>
-  execFileSync(
-    'docker',
-    ['inspect', '--format', '{{.State.StartedAt}}', compose('ps', '-aq', 'lyraflow').trim()],
-    { encoding: 'utf8' },
-  ).trim()
+  execFileSync('docker', ['inspect', '--format', '{{.State.StartedAt}}', appContainerId()], {
+    encoding: 'utf8',
+  }).trim()
+
+/**
+ * The app's long-lived container id.
+ *
+ * First line only, deliberately. `restore.sh` asks the image its schema
+ * version with `docker compose run --rm --no-deps`, which creates a second
+ * container belonging to the same service; `--rm` removes it, but a helper
+ * that hands two newline-separated ids to `docker inspect` fails in a way
+ * that looks like a broken assertion rather than a broken helper.
+ */
+const appContainerId = (): string =>
+  compose('ps', '-aq', 'lyraflow').trim().split('\n')[0] as string
 
 /** The same stamp format backup.sh computes with `date -u +%Y-%m-%dT%H%M%SZ`. */
 function utcStamp(d: Date): string {
@@ -478,6 +488,22 @@ beforeAll(async () => {
     '      ;;',
     '  esac',
     'fi',
+    // SHIM_KILL_AFTER runs the real command and THEN signals — the faithful
+    // shape of a signal arriving while a destructive command is running.
+    // bash defers SIGTERM until the foreground child exits, so the command
+    // completes and the shell dies before the NEXT statement. That is why
+    // every DATA_STATE assignment has to precede its command rather than
+    // follow it, and SHIM_KILL_BEFORE cannot show it: it lands in the gap
+    // between statements, which is the one instant that was never broken.
+    'if [ -n "${SHIM_KILL_AFTER:-}" ]; then',
+    '  case "$SELF $*" in',
+    '    *"$SHIM_KILL_AFTER"*)',
+    `      "$REAL_BIN" "$@"`,
+    '      kill -TERM "$PPID"',
+    '      exit 143',
+    '      ;;',
+    '  esac',
+    'fi',
     'exec "$REAL_BIN" "$@"',
     '',
   ]
@@ -489,11 +515,14 @@ beforeAll(async () => {
     ['docker', realDocker],
     ['rm', execFileSync('sh', ['-c', 'command -v rm'], { encoding: 'utf8' }).trim()],
   ] as const) {
-    writeFileSync(
-      join(shimDir, name),
-      shimBody.join('\n').replace('$REAL_BIN', real).replace('$REAL_BIN', real),
-      { mode: 0o755 },
-    )
+    // `replaceAll`, not a hand-counted chain of `.replace()` calls. It was two
+    // of those, matching the two `$REAL_BIN` occurrences that existed; adding
+    // SHIM_KILL_AFTER made three, and the one left unsubstituted was the
+    // `exec` on the last line — the path EVERY unmatched invocation takes. The
+    // shim would have silently stopped forwarding to the real binary.
+    const body = shimBody.join('\n').replaceAll('$REAL_BIN', real)
+    expect(body, 'a $REAL_BIN placeholder survived substitution').not.toContain('$REAL_BIN')
+    writeFileSync(join(shimDir, name), body, { mode: 0o755 })
   }
 }, 600_000)
 
@@ -956,9 +985,18 @@ describe('backup.sh', () => {
     ])
     const seenSub = new Set<string>()
     for (const line of dockerCalls) {
+      // The first NON-FLAG word after `compose`, not simply `argv[2]`. Global
+      // flags sit between the two — `docker compose --progress quiet run …` —
+      // and a parser that took the next token would audit `compose --progress`
+      // and let the real sub-command through unexamined.
       const argv = line.replace(/^\++ /, '').split(/\s+/)
-      const sub = argv[1] === 'compose' ? `compose ${argv[2]}` : (argv[1] as string)
-      seenSub.add(sub)
+      if (argv[1] !== 'compose') {
+        seenSub.add(argv[1] as string)
+        continue
+      }
+      let i = 2
+      while (i < argv.length && argv[i]?.startsWith('-')) i += 2 // a flag and its value
+      seenSub.add(`compose ${argv[i]}`)
     }
     expect(
       [...seenSub].filter((c) => !DOCKER_SUBCOMMANDS.has(c)).sort(),
@@ -990,7 +1028,7 @@ describe('backup.sh', () => {
     // already say `healthy`, not `starting`. Anything an operator chains after
     // a backup — a smoke test, a monitoring probe, the next cron step — depends
     // on this being true rather than nearly true.
-    const cid = compose('ps', '-aq', 'lyraflow').trim()
+    const cid = appContainerId()
     const health = execFileSync(
       'docker',
       [
@@ -1197,9 +1235,16 @@ describe('backup.sh', () => {
     // with piped stdio and drains both streams to completion, so not one of
     // them ever closed the script's output. That gap hid a fourth way to leave
     // the app stopped, and the worst of the four: a plain `echo` to a closed
-    // stdout dies of SIGPIPE, a shell killed by a signal does not run its EXIT
-    // trap at all, and the pipeline's status is the READER's — so the app was
-    // left down, stderr said nothing whatsoever, and `$?` was 0.
+    // stdout dies of SIGPIPE, `start_app_if_stopped`'s FIRST STATEMENT was a
+    // write, and the pipeline's status is the READER's — so the app was left
+    // down, stderr said nothing whatsoever, and `$?` was 0.
+    //
+    // An earlier version of this comment blamed "a shell killed by a signal
+    // does not run its EXIT trap at all". That is FALSE — bash does run the
+    // EXIT trap on signal death, measured on 5.2.21 and 5.3.9, and
+    // backup-lib.sh's own sources were corrected to say so. What actually
+    // saved the app was reordering that function so the restart precedes any
+    // write. This copy of the claim was missed at the time.
     //
     //   PIPESTATUS=141 head=0
     //   lyraflow-ci-lyraflow-1  exited  Exited (0)
@@ -1427,7 +1472,7 @@ describe('backup.sh', () => {
     // stopped: this script restarts it on the way out, and waits for health
     // before returning. The container's start count is what separates "never
     // stopped" from "stopped and put back".
-    const cid = compose('ps', '-aq', 'lyraflow').trim()
+    const cid = appContainerId()
     const restarts = execFileSync('docker', ['inspect', '--format', '{{.State.StartedAt}}', cid], {
       encoding: 'utf8',
     }).trim()
@@ -1539,6 +1584,29 @@ async function seedDeadLetters(count: number): Promise<void> {
   }
   await new Promise((r) => setTimeout(r, 2000))
 }
+
+/**
+ * Puts the stack back after a test that deliberately left it half-restored.
+ *
+ * Runs the real restore, which is exactly what the script's own message tells
+ * an operator to do — so every use of this is also a standing check that the
+ * recovery instruction WORKS, including from the two states where the app is
+ * stopped and, in the ClickHouse case, cannot boot at all. It could not, until
+ * the pre-flight stopped requiring the app to be running: `docker compose
+ * start` returns 0 there and the container is `exited (1)` twenty seconds
+ * later with code 81, so the instruction would have been refused every time.
+ */
+async function repairFromBackup(out: string): Promise<void> {
+  runScript('./restore.sh', [out], {}, confirmation(out))
+  await waitReady(120_000)
+}
+
+/** Whether the app container is currently running, per Compose itself. */
+const appIsRunning = (): boolean =>
+  compose('ps', '--status', 'running', '--services')
+    .split('\n')
+    .map((s) => s.trim())
+    .includes('lyraflow')
 
 /** restore.sh with comment lines and here-document bodies removed. */
 function restoreCode(): string {
@@ -1908,32 +1976,49 @@ describe('restore.sh', () => {
     }
   }, 900_000)
 
-  it('restarts the app and names the state when the Postgres step fails', async () => {
-    // The half-restored state, and the only one an operator can be left in:
-    // ClickHouse replaced, Postgres still current. It is the SAFE half — a
-    // deleted person's events are back but their suppression row is still
-    // there, so they stay hidden — and the message has to say so, because the
-    // obvious reading of "the restore failed" is that nothing happened.
+  it('leaves the app stopped and names the state when the Postgres step fails', async () => {
+    // The half-restored state: ClickHouse replaced, Postgres still current.
+    // It is the SAFE half — a deleted person's events are back but their
+    // suppression row is still there, so they stay hidden — and the message
+    // has to say so, because the obvious reading of "the restore failed" is
+    // that nothing happened.
+    //
+    // The app is NOT started again. This test asserted the opposite until the
+    // rule changed: a run that began destroying and did not get both stores
+    // back leaves the app down, because a site that is up and serving a
+    // half-restored pair of stores is a silent failure and a down site is a
+    // loud one. A re-run is required either way and stops the app immediately.
     const out = takeBackup()
-    const err = runScriptExpectingFailure(
-      './restore.sh',
-      [out],
-      withShim({ SHIM_FAIL_BEFORE: 'DROP SCHEMA IF EXISTS public' }),
-      confirmation(out),
-    )
+    let err = ''
+    let runningAfter = true
+    try {
+      err = runScriptExpectingFailure(
+        './restore.sh',
+        [out],
+        withShim({ SHIM_FAIL_BEFORE: 'DROP SCHEMA IF EXISTS public' }),
+        confirmation(out),
+      )
+      runningAfter = appIsRunning()
+      // The scratch archive is cleaned up from this path too.
+      expect(backupsDirListing().trim()).toBe('')
+    } finally {
+      await repairFromBackup(out)
+    }
     expect(err).toMatch(/Postgres/)
     expect(err).toMatch(/STATE OF YOUR DATA/)
     // It must name which half happened, not just that something failed.
     expect(err).toMatch(/ClickHouse has been restored/i)
-    expect(err).toMatch(/Postgres has NOT been touched/i)
-
-    await waitReady(120_000)
-    expect(await readyStatus()).toBe(200)
-    // The scratch archive is cleaned up from the failure path too.
-    expect(backupsDirListing().trim()).toBe('')
-
-    // Leave the stack consistent for whatever runs next.
-    runScript('./restore.sh', [out], {}, confirmation(out))
+    // …and the Postgres half is reported CONSERVATIVELY, not as untouched.
+    // This assertion read /Postgres has NOT been touched/ until the state
+    // wording moved in front of the command it describes. A drop that reports
+    // failure is genuinely ambiguous from the outside — a refused connection
+    // changed nothing, a connection lost after COMMIT changed everything — and
+    // the honest answer is the one that makes the operator re-run. It is also
+    // the only wording a signal can leave behind, which is the whole point.
+    expect(err).toMatch(/may already be EMPTY/i)
+    expect(err).toMatch(/NO SUPPRESSION ROWS/i)
+    expect(err).toMatch(/LEFT STOPPED ON PURPOSE/)
+    expect(runningAfter).toBe(false)
   }, 900_000)
 
   it('reads a manifest value that contains an `=`', async () => {
@@ -2043,25 +2128,160 @@ describe('restore.sh', () => {
     // supervisor, a CI cancel, a plain `kill`. The shim parks one exactly
     // between the Postgres drop and the Postgres refill.
     const out = takeBackup()
-    const res = spawnSync('./restore.sh', [out], {
-      encoding: 'utf8',
-      env: { ...SCRIPT_ENV, ...withShim({ SHIM_KILL_BEFORE: 'pg_restore' }) },
-      input: confirmation(out),
-    })
-    expect(res.status === 0, 'a killed restore must not report success').toBe(false)
+    let status: number | null = 0
+    let stderr = ''
+    try {
+      const r = spawnSync('./restore.sh', [out], {
+        encoding: 'utf8',
+        env: { ...SCRIPT_ENV, ...withShim({ SHIM_KILL_BEFORE: 'pg_restore' }) },
+        input: confirmation(out),
+      })
+      status = r.status
+      stderr = r.stderr
+    } finally {
+      // THE REPAIR GOES IN `finally`, not after the assertions. It used to be
+      // the last statement, so reverting the fix left Postgres re-migrated-
+      // empty for the whole rest of the file: `projects`, `api_keys` and
+      // `suppressed_persons` gone, `writeKey` dead, and three later tests
+      // failing for reasons that have nothing to do with them. A reviewer then
+      // sees four failures for one defect and learns to distrust the pin.
+      await repairFromBackup(out)
+    }
+    expect(status === 0, 'a killed restore must not report success').toBe(false)
 
     // The whole point: it says so, and it says which of the states it is.
-    expect(res.stderr).toMatch(/STATE OF YOUR DATA/)
-    expect(res.stderr).toMatch(/Postgres is EMPTY/i)
-    expect(res.stderr).toMatch(/run this script again/i)
+    // The wording is the one live at that instant — "either EMPTY or complete"
+    // — because the state is assigned before `pg_restore` rather than after
+    // it. Postgres really is empty here; the message under-claims, which is
+    // the direction a message about someone's data should err in.
+    expect(stderr).toMatch(/STATE OF YOUR DATA/)
+    expect(stderr).toMatch(/EMPTY/)
+    expect(stderr).toMatch(/NO SUPPRESSION ROWS/i)
+    expect(stderr).toMatch(/run this script again/i)
+    // …and it did NOT bring the app back up onto that state.
+    expect(stderr).toMatch(/LEFT STOPPED ON PURPOSE/)
+    expect(backupsDirListing().trim()).toBe('')
+  }, 900_000)
 
-    // …and the EXIT trap still did its job.
+  it('tells the truth when a signal lands DURING the Postgres drop', async () => {
+    // The mirror of the Critical above, on the same variable, reachable by the
+    // same signal — and invisible to the test above, which parks its SIGTERM
+    // in the one instant that was never broken.
+    //
+    // bash DEFERS a signal until the running foreground child exits. So the
+    // vulnerable window is not the gap between two statements; it is the whole
+    // duration of the command, and an assignment placed AFTER the command
+    // never runs. With `DATA_STATE` assigned after `DROP SCHEMA public
+    // CASCADE`, a SIGTERM during it produced:
+    //
+    //   STATE OF YOUR DATA: ClickHouse has been restored from the backup;
+    //   Postgres has NOT been touched and is still current. Deleted people
+    //   stay hidden, which is the safe half.
+    //
+    //   actual: suppressed_persons = 0, Postgres EMPTY, events restored
+    //
+    // An affirmative false statement about the exact privacy property the
+    // ClickHouse-first ordering exists to protect. Silence was the first
+    // version of this defect; this is worse.
+    const out = takeBackup()
+    let status: number | null = 0
+    let stderr = ''
+    let runningAfterKill = true
+    try {
+      const r = spawnSync('./restore.sh', [out], {
+        encoding: 'utf8',
+        env: { ...SCRIPT_ENV, ...withShim({ SHIM_KILL_AFTER: 'DROP SCHEMA IF EXISTS public' }) },
+        input: confirmation(out),
+      })
+      status = r.status
+      stderr = r.stderr
+      runningAfterKill = appIsRunning()
+    } finally {
+      await repairFromBackup(out)
+    }
+
+    expect(status === 0).toBe(false)
+    // It must warn about the suppression rows…
+    expect(stderr).toMatch(/STATE OF YOUR DATA/)
+    expect(stderr).toMatch(/NO SUPPRESSION ROWS/i)
+    // …and must NOT make the claim that was false.
+    expect(stderr, 'the announcement asserted the opposite of the truth').not.toMatch(
+      /Postgres has NOT been touched/i,
+    )
+    expect(stderr).not.toMatch(/the safe half/i)
+    // …and must not have served that state.
+    expect(
+      runningAfterKill,
+      'the app must be left stopped, not started onto an empty Postgres',
+    ).toBe(false)
+    expect(stderr).toMatch(/LEFT STOPPED ON PURPOSE/)
+  }, 900_000)
+
+  it('tells the truth when a signal lands DURING the ClickHouse drop', async () => {
+    // The other false window. `DATA_STATE` was still its initial value there,
+    // so two things went wrong at once: the announcement said "nothing has
+    // been changed" while `SHOW DATABASES` no longer listed `lyraflow`, and
+    // `cleanup`'s old `[ "$DATA_STATE" != "$DATA_STATE_INITIAL" ]` predicate
+    // would have suppressed the announcement ENTIRELY had the restart
+    // succeeded. It could not succeed — the app exits at boot with code 81 —
+    // so the operator got a three-minute health timeout and then a claim that
+    // nothing had happened, with the site down.
+    const out = takeBackup()
+    let status: number | null = 0
+    let stderr = ''
+    let runningAfterKill = true
+    let databases = ''
+    try {
+      const r = spawnSync('./restore.sh', [out], {
+        encoding: 'utf8',
+        env: { ...SCRIPT_ENV, ...withShim({ SHIM_KILL_AFTER: 'DROP DATABASE IF EXISTS' }) },
+        input: confirmation(out),
+      })
+      status = r.status
+      stderr = r.stderr
+      runningAfterKill = appIsRunning()
+      databases = compose(
+        'exec',
+        '-T',
+        'clickhouse',
+        'clickhouse-client',
+        '--user',
+        'lyraflow',
+        '--password',
+        'lyraflow',
+        '--query',
+        'SHOW DATABASES',
+      )
+    } finally {
+      await repairFromBackup(out)
+    }
+
+    expect(status === 0).toBe(false)
+    // The database really was gone — without this the test proves nothing.
+    expect(databases.split('\n').map((s) => s.trim())).not.toContain('lyraflow')
+    expect(stderr).toMatch(/STATE OF YOUR DATA/)
+    expect(stderr).toMatch(/ClickHouse database/i)
+    expect(stderr, 'it claimed nothing had changed while the database was gone').not.toMatch(
+      /nothing has been changed/i,
+    )
+    expect(runningAfterKill).toBe(false)
+    expect(stderr).toMatch(/LEFT STOPPED ON PURPOSE/)
+  }, 900_000)
+
+  it('restores from a backup with the app already stopped', async () => {
+    // The recovery instruction the message above prints, exercised on its own.
+    // A restore is the operation you perform on a system that is already
+    // broken, so requiring the app to be running refused in exactly the two
+    // situations the script exists for. `repairFromBackup` leans on this in
+    // four other tests; here it is the assertion rather than the scaffolding.
+    const out = takeBackup()
+    compose('stop', 'lyraflow')
+    expect(appIsRunning()).toBe(false)
+
+    const stdout = runScript('./restore.sh', [out], {}, confirmation(out))
+    expect(stdout).toMatch(/Restored from/)
     await waitReady(120_000)
     expect(await readyStatus()).toBe(200)
-    expect(backupsDirListing().trim()).toBe('')
-
-    // Put the stack back for whatever runs next.
-    runScript('./restore.sh', [out], {}, confirmation(out))
     expect(Number(pgScalar('SELECT count(*) FROM public.suppressed_persons'))).toBeGreaterThan(0)
   }, 900_000)
 
@@ -2406,12 +2626,26 @@ describe('restore.sh', () => {
       'compose exec',
       'compose start',
       'compose stop',
+      // Added deliberately: the schema-version guard asks the IMAGE, with
+      // `run --rm --no-deps`, because `exec` needs a container that is up and
+      // a restore is the operation you perform on a system that is not.
+      'compose run',
       'inspect',
     ])
     const seenSub = new Set<string>()
     for (const line of dockerCalls) {
+      // The first NON-FLAG word after `compose`, not simply `argv[2]`. Global
+      // flags sit between the two — `docker compose --progress quiet run …` —
+      // and a parser that took the next token would audit `compose --progress`
+      // and let the real sub-command through unexamined.
       const argv = line.replace(/^\++ /, '').split(/\s+/)
-      seenSub.add(argv[1] === 'compose' ? `compose ${argv[2]}` : (argv[1] as string))
+      if (argv[1] !== 'compose') {
+        seenSub.add(argv[1] as string)
+        continue
+      }
+      let i = 2
+      while (i < argv.length && argv[i]?.startsWith('-')) i += 2 // a flag and its value
+      seenSub.add(`compose ${argv[i]}`)
     }
     expect(
       [...seenSub].filter((c) => !DOCKER_SUBCOMMANDS.has(c)).sort(),

@@ -39,9 +39,22 @@
 #   with a structurally complete Postgres holding zero suppression rows beside
 #   a ClickHouse full of restored events. Nothing about it looks wrong.
 #
-# The third is why DATA_STATE below is announced on EVERY exit that changed
-# anything, including one caused by a signal, rather than only on the failures
-# this script chose to report.
+# The third is why DATA_STATE below is announced on any exit that began
+# destroying anything -- including one caused by a signal -- rather than only
+# on the failures this script chose to report, and why every one of its values
+# is assigned BEFORE the command it describes rather than after.
+#
+# Before, because bash DEFERS a signal until the running foreground child
+# exits: the destructive command therefore completes and the shell dies before
+# the next statement, so an assignment placed after the command never runs and
+# the announcement describes the previous step. Measured, with the assignment
+# after `DROP SCHEMA public CASCADE`: "Postgres has NOT been touched and is
+# still current ... which is the safe half", printed over an EMPTY Postgres
+# with zero suppression rows. Silence was the first version of this defect; an
+# affirmative false statement about the privacy property is worse.
+#
+# It is also why a run that began destroying and did not finish leaves the app
+# STOPPED. See cleanup().
 #
 # That asymmetry is the whole reason the order below is ClickHouse first and
 # Postgres second, and the intuition points the other way: the store that
@@ -74,17 +87,42 @@ trap "" PIPE
 # has been touched yet.
 CONFIRM_TIMEOUT=120
 
-# What has actually happened to the operator's data at this point in the run,
-# in words. Reassigned at each step; printed by announce_data_state below.
+# What has happened to the operator's data at this point in the run, in words.
+# Printed by announce_data_state below.
 #
 # A single fixed sentence is what backup-lib.sh's `fail` can afford, because a
-# backup only ever reads. This script passes through five genuinely different
+# backup only ever reads. This script passes through nine genuinely different
 # states and an operator at 4am needs to be told which one they are in -- "your
-# data is intact", "ClickHouse is empty", "Postgres is empty" and "both stores
-# are back" call for four completely different next actions.
+# data is intact", "ClickHouse may be gone", "Postgres may be empty" and "both
+# stores are back" call for completely different next actions.
+#
+# EVERY VALUE IS ASSIGNED BEFORE THE COMMAND IT DESCRIBES, and each pair reads
+# "this may or may not have happened" before, tightened to "this happened"
+# after. That is the same rule, for the same reason, as APP_STOPPED and
+# CH_ARTEFACT_CREATED: the window in which the outcome is unknown is the whole
+# duration of the command, not a gap between two statements, and the shell can
+# die inside it. `docker compose stop`'s own comment has the long version.
 DATA_STATE_INITIAL="nothing has been changed: both stores still hold exactly what they held before this ran"
 DATA_STATE="$DATA_STATE_INITIAL"
 DATA_STATE_REPORTED=0
+
+# Set immediately BEFORE the first statement that can destroy anything, and
+# never cleared. cleanup() reads it to decide whether this run owes the
+# operator an announcement and whether the app may be started again.
+#
+# A flag rather than `[ "$DATA_STATE" != "$DATA_STATE_INITIAL" ]`, which is
+# what this used to be: that comparison is true only once an assignment has
+# run, so a signal arriving during the very first DROP left DATA_STATE at its
+# initial value and the test suppressed the announcement entirely -- the app
+# could not boot, the site was down, and the script said "nothing has been
+# changed". A flag cannot be defeated by the wording moving.
+DESTRUCTION_BEGUN=0
+
+# Set once BOTH stores are back. Distinct from RESTORE_COMPLETE: verification
+# runs after this and can fail, and a verification failure is not a half-
+# restored system -- the two stores agree with each other, they merely
+# disagree with the manifest -- so the app is still started for it.
+STORES_RESTORED=0
 
 # Set on the last line of the run, so cleanup can tell "finished" from "stopped
 # part way". Same role as backup.sh's BACKUP_COMPLETE.
@@ -165,8 +203,16 @@ refuse() {
 # A signal is ordinary here, not exotic: `timeout`, systemd stopping a unit, a
 # supervisor, a CI cancel, a plain `kill`. bash runs the EXIT trap on signal
 # death (measured, same as the SIGPIPE case backup-lib.sh documents), so the
-# trap is the one place that sees EVERY exit -- which is why the announcement
-# belongs there rather than in the failure reporter.
+# trap sees every exit a trap CAN see -- which is why the announcement belongs
+# there rather than in the failure reporter.
+#
+# EXCEPT SIGKILL, which no process can trap. `kill -9` mid-restore runs
+# nothing: no announcement, the app left stopped, and the archive left on the
+# backups disk -- reopening the volume growth CH_ARTEFACT_CREATED exists to
+# prevent. Measured. There is no shell-level fix for it; it is recorded so
+# nobody reads "every exit" as a stronger claim than it is. The next run
+# overwrites that archive by name, so the leak is bounded per backup rather
+# than per attempt.
 #
 # Once, because `abort` exits and the trap then runs too; without the flag the
 # same paragraph would print twice on the paths that already work.
@@ -255,22 +301,49 @@ safe_identifier() {
 # The app image's schema version
 # ---------------------------------------------------------------------------
 
-# Read from the RUNNING CONTAINER, never from this checkout. An operator
-# restoring at 2am is standing in whatever working tree they happen to have
-# cloned, which is routinely not the image the stack is running -- and it is
-# the image that will boot against the restored database and either understand
-# it or refuse to.
+# Read from the IMAGE, never from this checkout. An operator restoring at 2am
+# is standing in whatever working tree they happen to have cloned, which is
+# routinely not the image the stack is running -- and it is the image that will
+# boot against the restored database and either understand it or refuse to.
+#
+# `docker compose run --rm --no-deps`, NOT `exec`, and that is load-bearing
+# rather than stylistic: a restore is the operation you perform on a system
+# that is already broken, and `exec` needs a container that is up. The two
+# cases that matter both have the app down.
+#
+#   The previous run left it stopped on purpose (see cleanup) -- so the very
+#   command this script tells the operator to run next would have refused.
+#
+#   The ClickHouse database is missing, so the app EXITS at boot with code 81,
+#   UNKNOWN_DATABASE. Measured: `docker compose start` returns 0 and the
+#   container is `exited (1)` twenty seconds later, so no amount of starting it
+#   first makes `exec` work. The recovery path was a dead end.
+#
+# `--rm` so nothing is left behind (verified: `compose ps -a` shows no run-
+# container afterwards), `--no-deps` so asking the image a question does not
+# start the stores, `-T` because there is no terminal.
+#
+# `--progress quiet` is NOT cosmetic, and it is the same trap `docker compose
+# stop` carries in backup.sh. `run` narrates itself on stderr -- "Container …
+# Creating", "Container … Created", 384 bytes of it -- and a caller that has
+# closed stderr (`./restore.sh DIR 2>&1 | head -1`, which is what a log-capping
+# wrapper writes) makes the second of those writes raise SIGPIPE in a child
+# this shell's `trap "" PIPE` does not cover. Measured: the child died, the
+# guard could not read a version, the run was refused, and no restore happened
+# at all. With this flag a successful call writes ZERO bytes to stderr, and a
+# genuine failure still prints the image's own error -- verified both ways.
 #
 # The import is tried as a package specifier first and falls back to the path
 # inside the image, because the production install does not link the workspace
-# packages at the root of /app (measured: `node_modules/@lyraflow` contains
-# only `db`). Either way this is the constant the image was built with.
+# packages at the root of the image's workdir (measured: `node_modules/
+# @lyraflow` contains only `db`). Either way this is the constant the image was
+# built with.
 #
 # A failure here is a refusal, not a shrug: a guard that cannot read the number
 # it guards on has not passed, and skipping it would turn the one check that
 # stands between an operator and an unbootable app into a no-op.
 image_schema_version() {
-  docker compose exec -T "$APP_SERVICE" node -e \
+  docker compose --progress quiet run --rm --no-deps -T "$APP_SERVICE" node -e \
     'import("@lyraflow/core").catch(() => import("./packages/core/dist/index.js")).then((m) => console.log(m.SCHEMA_VERSION))' \
     < /dev/null
 }
@@ -387,21 +460,70 @@ verify_row_counts() {
 # site did.
 cleanup() {
   local restart_ok=1
+
+  # THE ONE PATH WHERE THE APP IS DELIBERATELY LEFT DOWN, and it is a reversal
+  # of backup.sh's invariant rather than a violation of it.
+  #
+  # There, the script changes nothing, so leaving the app stopped is pure harm
+  # and the restart comes first unconditionally. Here the app coming back up on
+  # a half-restored pair of stores IS the harm. Two measured shapes:
+  #
+  #   killed during the Postgres drop -- the app restarts onto an empty schema,
+  #   finds no `schema_migrations`, migrates forward, and answers /ready 200
+  #   with ZERO suppression rows beside a ClickHouse full of restored events.
+  #   Every deleted person is visible again, and nothing looks wrong.
+  #
+  #   killed during the ClickHouse drop -- the app cannot boot at all (code 81,
+  #   UNKNOWN_DATABASE), so the restart burns the full health timeout and fails
+  #   anyway, delaying the only message that matters by three minutes.
+  #
+  # A down site is loud and an operator acts on it within minutes. A site that
+  # is up and serving a person who asked to be erased is silent, and the
+  # announcement alone cannot fix that: it goes to stderr, and the `timeout`
+  # /systemd/cron case that motivates this whole branch is precisely the one
+  # where nobody is reading. A re-run is required either way, and its first act
+  # is to stop the app again.
+  #
+  # STORES_RESTORED, not RESTORE_COMPLETE: a failed verification leaves two
+  # stores that agree with each other and disagree with the manifest, which is
+  # a reason to distrust the backup, not to keep the site dark.
+  if [ "$DESTRUCTION_BEGUN" = "1" ] && [ "$STORES_RESTORED" = "0" ]; then
+    remove_in_container_artefact || true
+    note ""
+    note "THE APP HAS BEEN LEFT STOPPED ON PURPOSE. It was not started again."
+    announce_data_state
+    note ""
+    note "Starting it now would serve that state: a Postgres with no suppression"
+    note "rows makes deleted people visible again, and a missing ClickHouse"
+    note "database stops the app booting at all."
+    note ""
+    note "Finish the restore -- it is safe to repeat, and it starts the app again"
+    note "once both stores are back:"
+    note "  ./restore.sh $SRC"
+    note ""
+    note "Or, if you have decided against it, start the app as it is:"
+    note "  docker compose start $APP_SERVICE"
+    exit 1
+  fi
+
+  # THE RESTART IS FIRST on every other path, and nothing below it may abort.
   start_app_if_stopped || restart_ok=0
 
   remove_in_container_artefact || true
 
-  # THE ANNOUNCEMENT, on every exit that changed anything and did not reach the
-  # end of the run. This is the branch a signal takes, and before it existed a
-  # SIGTERM between the two Postgres statements said nothing at all -- see
-  # announce_data_state.
+  # The announcement, for a run that got both stores back and then stopped
+  # short -- a failed verification, or a signal during it.
   #
   # Suppressed on a completed run, and only there: stdout has already said
   # "Restored from …" and "Both stores now match …", which is the same fact
   # stated positively, and a cron wrapper that treats any stderr output as a
   # problem should not be handed one by a restore that worked.
-  if [ "$RESTORE_COMPLETE" = "0" ] && [ "$DATA_STATE" != "$DATA_STATE_INITIAL" ]; then
-    note ""
+  #
+  # No bare `note ""` guarding it: `announce_data_state` is a once-per-run
+  # function and `abort` usually spends it first, so a blank line printed
+  # unconditionally around it is a stray line on exactly the paths that already
+  # said everything.
+  if [ "$RESTORE_COMPLETE" = "0" ] && [ "$DESTRUCTION_BEGUN" = "1" ]; then
     announce_data_state
   fi
 
@@ -500,17 +622,34 @@ done <<EOF
 $CH_KEYS
 EOF
 
-# --- the stack is up -------------------------------------------------------
+# --- the stores are up ------------------------------------------------------
 #
-# All three, and the app in particular. It has to be stoppable (nothing may
-# write while the stores are being replaced) and it has to be readable: the
-# schema-version guard below asks the running image which version it
-# understands, and an image that is not running cannot be asked. Finding any
-# of this out after the ClickHouse database has been dropped would be the
-# worst possible time.
-for service in "$APP_SERVICE" "$CH_SERVICE" "$PG_SERVICE"; do
+# The two stores, and DELIBERATELY NOT THE APP. Finding either store missing
+# after the ClickHouse database has been dropped would be the worst possible
+# time, so they are checked here.
+#
+# The app is not, and this is the opposite of backup.sh's rule. A backup's
+# whole consistency claim rests on THIS script having been the one that stopped
+# the writer, so an app that is already down makes the backup meaningless.
+# A restore overwrites both stores wholesale; there is nothing for a concurrent
+# writer to make inconsistent, and requiring the app to be up would refuse in
+# exactly the two situations a restore exists for. Both measured:
+#
+#   the previous run left it stopped on purpose (cleanup, below) -- so the
+#   command that run printed as the way to finish would have been refused;
+#
+#   the ClickHouse database is missing, so the app exits at boot with code 81
+#   and `compose ps --status running` never lists it, no matter how many times
+#   the operator starts it.
+#
+# `docker compose stop` on a container that is already stopped returns 0 and
+# `wait_until_stopped` returns immediately, so the quiesce below needs no
+# special case; and the app is started at the end either way, which is what an
+# operator recovering a dead stack actually wants.
+for service in "$CH_SERVICE" "$PG_SERVICE"; do
   service_running "$service" ||
     refuse "The '$service' service is not running." \
+      "Both stores must be up to restore into them." \
       "Start the stack first: docker compose up -d"
 done
 
@@ -676,11 +815,18 @@ docker compose exec -T "$CH_SERVICE" sh -c 'cat > "$1"' _ "$CH_BACKUP_DIR/$CH_FI
   abort "ClickHouse" \
     "Could not copy the archive into the $CH_SERVICE container."
 
+# EVERYTHING BELOW THIS LINE CAN DESTROY DATA. The flag goes up before the
+# statement that does, never after: bash defers a signal until the running
+# child exits, so the shell can die between a destructive command finishing and
+# any assignment placed after it.
+DESTRUCTION_BEGUN=1
+DATA_STATE="the ClickHouse database was being dropped and may already be gone; Postgres is untouched. If it is gone the app cannot start at all (code 81, UNKNOWN_DATABASE). Run this script again with the same backup."
+
 # Bound to `default`, not to the application database. A ClickHouse session
 # sets its current database on connect and naming one that does not exist is
 # itself an error -- Code 81, UNKNOWN_DATABASE, measured -- which is precisely
-# the state between the DROP below and the RESTORE after it. The second
-# argument to ch_query exists for this.
+# the state between this DROP and the RESTORE after it. The second argument to
+# ch_query exists for this.
 ch_query "DROP DATABASE IF EXISTS $CH_DATABASE SYNC" default > /dev/null ||
   abort "ClickHouse" \
     "Could not drop the $CH_DATABASE database; the ClickHouse error is above."
@@ -689,8 +835,9 @@ ch_query "DROP DATABASE IF EXISTS $CH_DATABASE SYNC" default > /dev/null ||
 # the RESTORE returns there is no ClickHouse database at all. SYNC is what
 # keeps it as short as it can be -- without it the DROP returns while the
 # tables are still being detached and the RESTORE races it.
-DATA_STATE="the ClickHouse database has been dropped and not yet restored, and Postgres is untouched. Run this script again with the same backup."
+DATA_STATE="the ClickHouse database has been dropped and not yet restored, and Postgres is untouched. The app cannot start against it. Run this script again with the same backup."
 
+DATA_STATE="the ClickHouse database was being restored and is either missing or half-restored; Postgres is untouched. Run this script again with the same backup."
 ch_query "RESTORE DATABASE $CH_DATABASE FROM Disk('backups', '$CH_FILE')" default > /dev/null ||
   abort "ClickHouse" \
     "RESTORE DATABASE $CH_DATABASE failed; the ClickHouse error is above." \
@@ -736,6 +883,12 @@ say "Restoring Postgres..."
 # announces every one of the fifteen objects it is taking with it, on stderr,
 # in the middle of the one part of this script where a real diagnostic must not
 # be scrolled past. Which objects are dropped is not news -- all of them are.
+#
+# THE MOST DANGEROUS STATEMENT IN THE SCRIPT, and the one whose state message
+# used to be assigned after it. A signal delivered while this runs left the
+# announcement saying "Postgres has NOT been touched and is still current …
+# the safe half" over an empty Postgres with zero suppression rows -- measured.
+DATA_STATE="ClickHouse has been restored and the Postgres schema was being dropped: Postgres may already be EMPTY, which means NO SUPPRESSION ROWS and every deleted person visible again. Run this script again with the same backup."
 docker compose exec -T "$PG_SERVICE" sh -c \
   'PGPASSWORD="$POSTGRES_PASSWORD" PGOPTIONS="-c client_min_messages=warning" \
      psql -U "$0" -d "$1" -v ON_ERROR_STOP=1 -q \
@@ -744,7 +897,7 @@ docker compose exec -T "$PG_SERVICE" sh -c \
   abort "Postgres" \
     "Could not drop and recreate the public schema; the Postgres error is above."
 
-DATA_STATE="ClickHouse has been restored and the Postgres schema has been dropped but not yet refilled. Postgres is EMPTY. Run this script again with the same backup."
+DATA_STATE="ClickHouse has been restored and the Postgres schema has been dropped but not yet refilled. Postgres is EMPTY, which means NO SUPPRESSION ROWS. Run this script again with the same backup."
 
 # `--single-transaction` so the dump lands whole or not at all: a half-applied
 # Postgres is the state with real teeth, because a partial `suppressed_persons`
@@ -755,6 +908,7 @@ DATA_STATE="ClickHouse has been restored and the Postgres schema has been droppe
 # The one thing it does not cover is the drop above, which is its own
 # statement and cannot be inside this transaction -- hence the state message
 # on the line before, which names the only intermediate state that exists.
+DATA_STATE="ClickHouse has been restored and Postgres was being refilled: it is either EMPTY or complete, and this run cannot tell which. If it is empty there are NO SUPPRESSION ROWS. Run this script again with the same backup."
 docker compose exec -T "$PG_SERVICE" sh -c \
   'PGPASSWORD="$POSTGRES_PASSWORD" pg_restore -U "$0" -d "$1" \
      --clean --if-exists --no-owner --single-transaction' \
@@ -765,6 +919,9 @@ docker compose exec -T "$PG_SERVICE" sh -c \
     "the public schema is empty and this can be run again."
 
 DATA_STATE="both stores have been restored from the backup"
+# Both stores agree with each other from here, so the app may be started again
+# even if what follows fails. See cleanup().
+STORES_RESTORED=1
 
 # --- Verification, with the app still stopped ------------------------------
 
