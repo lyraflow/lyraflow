@@ -2893,3 +2893,98 @@ describe('restore.sh', () => {
     expect(await readyStatus()).toBe(200)
   }, 900_000)
 })
+
+/**
+ * The round trip the whole feature exists for: both Docker volumes destroyed,
+ * the stack rebuilt from nothing, and the data brought back.
+ *
+ * Every other restore test in this file drops the ClickHouse database and the
+ * Postgres schema in place, against containers that keep running and keep
+ * their volumes. That is the common case and it is well covered. It is not
+ * the case an operator is in when they reach for a backup: theirs is a host
+ * that lost its disk, and the recovery starts from `docker compose up -d` on
+ * an empty machine. The difference is not cosmetic — the stack that comes up
+ * has run every migration from zero, rebuilt its identity dictionaries from
+ * an empty Postgres, and holds a schema the restore is about to replace
+ * wholesale.
+ *
+ * It is self-repairing by construction: the backup is taken from the fixture
+ * state, so restoring it puts the fixture back. Nothing after this describe
+ * depends on that, but the property is why it can safely be the one test that
+ * destroys the world.
+ */
+describe('restore.sh onto a stack rebuilt from nothing', () => {
+  it('brings both stores back after `down -v`, and the erased person stays erased', async () => {
+    const out = takeBackup()
+    const m = parseManifest(join(out, 'MANIFEST'))
+
+    // The fixture's erasure has to be IN this backup, or the assertion below
+    // that matters most is vacuous — which is the shape that hid a defect
+    // twice on this branch.
+    expect(
+      Number(m['rows.postgres.suppressed_persons']),
+      'the backup contains no suppression row; the erasure assertion below would prove nothing',
+    ).toBeGreaterThan(0)
+
+    // Destroy both volumes. `-v` is the whole point: without it the stores
+    // keep their data and this is just a slow restart.
+    compose('down', '-v')
+    compose('up', '-d', '--wait')
+    await waitReady()
+
+    // Prove the destruction actually happened before restoring, so a restore
+    // that did nothing cannot pass by inheriting the old state.
+    const empty = await liveState()
+    expect(empty.events, 'ClickHouse survived `down -v`').toBe('0')
+    expect(empty.projects, 'Postgres survived `down -v`').toBe('0')
+    expect(empty.suppressed, 'suppression rows survived `down -v`').toBe('0')
+
+    const stdout = runScript('./restore.sh', [out], {}, confirmation(out))
+    expect(stdout).toMatch(/Restored from/)
+
+    // Every table in both stores, compared with the expression the manifest
+    // itself names — a bare count() would pass here and fail a minute later,
+    // once a background merge collapses the ReplacingMergeTree parts.
+    for (const [key, value] of Object.entries(m)) {
+      if (key.startsWith('rows.clickhouse.')) {
+        const table = key.slice('rows.clickhouse.'.length)
+        const expr = m[`rowexpr.clickhouse.${table}`] as string
+        const final = expr.endsWith('FINAL') ? ' FINAL' : ''
+        expect(await chScalar(`SELECT count() FROM \`${table}\`${final}`), table).toBe(value)
+      }
+      if (key.startsWith('rows.postgres.')) {
+        const table = key.slice('rows.postgres.'.length)
+        expect(pgScalar(`SELECT count(*) FROM public."${table}"`), table).toBe(value)
+      }
+    }
+
+    // THE ONE THAT MATTERS. `suppressed_persons` is in Postgres; the events it
+    // hides are in ClickHouse. A restore that got the ordering wrong, or that
+    // skipped Postgres, brings a person who exercised their right to erasure
+    // back into every query — and nothing else in this test would notice,
+    // because their events are already purged and the row counts would still
+    // agree.
+    expect(
+      Number(pgScalar('SELECT count(*) FROM public.suppressed_persons')),
+      'the erased person lost their suppression row across the restore',
+    ).toBeGreaterThan(0)
+    const stillGone = await fetch(`${BASE}/v1/persons/backup-person-1`, {
+      headers: { 'x-lyraflow-server-key': serverKey },
+    })
+    expect(stillGone.status, 'the erased person is readable again after a restore').toBe(404)
+
+    // The pipeline is live, not merely the tables. device_index, event_schema
+    // and person_traits are fed ONLY by materialized views firing on INSERT
+    // INTO events, so a restore that returned the target tables without the
+    // views looks perfect on every assertion above and silently stops
+    // updating all three from here on.
+    const indexBefore = await chScalar('SELECT count() FROM device_index FINAL')
+    await ingestOneEvent('after-the-volumes-died')
+    expect(
+      Number(await chScalar('SELECT count() FROM device_index FINAL')),
+      'a new event after the restore did not reach device_index',
+    ).toBeGreaterThan(Number(indexBefore))
+
+    expect(await readyStatus()).toBe(200)
+  }, 900_000)
+})
