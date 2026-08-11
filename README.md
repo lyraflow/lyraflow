@@ -44,7 +44,11 @@ It is **not** an [OSI-approved open source](https://opensource.org/osd)
 license. The practical difference: you may not sell Lyraflow as a hosted
 service to other people.
 
-## Install
+## Getting started
+
+Four steps. About five minutes, most of it waiting for Docker.
+
+### 1. Install
 
 You need Docker and Docker Compose. Nothing else.
 
@@ -55,7 +59,7 @@ cd lyraflow
 ```
 
 That generates passwords into `.env`, starts three containers, and waits until
-the app answers. Then create a project:
+the app answers on port 3000. Then create a project:
 
 ```sh
 docker compose exec lyraflow node packages/cli/dist/index.js create-project "My App"
@@ -68,42 +72,100 @@ It prints two keys, and the difference between them matters:
 | **Write key** `wk_…` | **Public.** It can only write events. Ship it in your page source — that is what it is for. |
 | **Server key** `sk_…` | **Secret, shown once.** Reads people, merges them, deletes and exports them. Write it down; only its hash is stored, so nothing can recover it for you. |
 
-Put both in your shell to follow the examples below:
+Keep both to hand:
 
 ```sh
 export LYRAFLOW_WRITE_KEY=wk_...
 export LYRAFLOW_SERVER_KEY=sk_...
 ```
 
-## Sending your first event
+### 2. Put the snippet on your website
 
-Ingest listens on port 3000. `/v1/track`, `/v1/page`, `/v1/identify` and
-`/v1/batch` all authenticate with the write key in the `x-lyraflow-write-key`
-header.
+Ask Lyraflow for the snippet rather than writing it yourself — it fills in your
+host and write key, and escapes them correctly:
+
+```sh
+docker compose exec \
+  -e LYRAFLOW_HOST=http://localhost:3000 \
+  -e LYRAFLOW_SERVER_KEY=$LYRAFLOW_SERVER_KEY \
+  lyraflow node packages/cli/dist/index.js snippet
+```
+
+Paste what it prints into your site's `<head>`. It loads a ~5 KB script, starts
+recording page views immediately, and queues events in `localStorage` if your
+server is unreachable, so a deploy or a blip loses nothing.
+
+When someone signs in, tell Lyraflow who they are — this is what ties their
+anonymous browsing to their account:
+
+```js
+lyraflow.identify('user-42', { plan: 'pro' })
+```
+
+Details, consent handling and single-page-app routing: [Sending events from a
+browser](#sending-events-from-a-browser).
+
+### 3. Send events from your backend
+
+Anything your server knows and the browser does not — payments, cancellations,
+webhooks — goes over the same ingest API with the same write key:
 
 ```sh
 curl -i http://localhost:3000/v1/track \
   -H 'content-type: application/json' \
   -H "x-lyraflow-write-key: $LYRAFLOW_WRITE_KEY" \
-  -A 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36' \
+  -A 'MyApp/1.0 (+https://example.com)' \
   -d '{
     "message_id": "0b2f6a1e-9c4d-4a1f-8f3b-2f1c7d5e6a90",
-    "anonymous_id": "visitor-1",
-    "event": "signup",
-    "properties": { "plan": "trial", "seats": 3 },
-    "context": { "path": "/pricing", "utm_source": "newsletter" }
+    "user_id": "user-42",
+    "event": "subscription_started",
+    "properties": { "plan": "pro", "seats": 3 }
   }'
 ```
 
 You get `202 Accepted` with `{"status":"accepted"}`.
 
-**The `-A` is not decoration.** Lyraflow discards events whose `User-Agent`
-looks automated, so bots do not inflate your person counts — and curl's own
-default, or no header at all, counts as automated. Without it this request
-still answers `202` and the event is silently dropped. When sending from a
-server, set a `User-Agent` that names your service and avoids `bot`, `crawler`,
-`curl/`, `python-requests` and similar (full list:
-`packages/core/src/enrich/bots.ts`).
+**Set a real `User-Agent`, as above.** Lyraflow discards events that look
+automated so bots do not inflate your person counts — and curl's default, or no
+header at all, counts as automated. Without one this request still answers
+`202` and the event is silently dropped. Avoid `bot`, `crawler`, `curl/`,
+`python-requests` and similar (full list: `packages/core/src/enrich/bots.ts`).
+
+### 4. See your data
+
+The CLI wraps the read endpoints. It is already built inside the running
+container, so give yourself a shorthand:
+
+```sh
+lyraflow() {
+  docker compose exec \
+    -e LYRAFLOW_HOST=http://localhost:3000 \
+    -e LYRAFLOW_SERVER_KEY="$LYRAFLOW_SERVER_KEY" \
+    lyraflow node packages/cli/dist/index.js "$@"
+}
+```
+
+Then:
+
+```sh
+lyraflow stats --since 24h --by-event    # how many of each event, per hour
+lyraflow events --since 1h               # the raw feed, newest first
+lyraflow events --follow                 # watch them arrive live
+lyraflow persons get user-42             # one person's stitched profile
+```
+
+Every command takes `--json` for scripts and agents; the table output is for
+humans and is not a stable interface. Full reference:
+[`packages/cli/README.md`](packages/cli/README.md).
+
+**That is the whole loop** — instrument, send, read. Everything below is
+detail on each part.
+
+## The ingest API
+
+Ingest listens on port 3000. `/v1/track`, `/v1/page`, `/v1/identify` and
+`/v1/batch` all authenticate with the write key in the `x-lyraflow-write-key`
+header.
 
 ### Endpoints
 
@@ -261,7 +323,7 @@ the calls were made in. On a repeat visit the cached script can run *before*
 the third block; the queue is then held until that `init` arrives, and drained
 by it. Either way nothing queued is lost. Replace both
 occurrences of `https://analytics.example.com` with your own Lyraflow host,
-and `writeKey` with the `wk_…` key from [Install](#install) above — the same
+and `writeKey` with the `wk_…` key from [Getting started](#1-install) above — the same
 one your server-side calls already use. Or skip the substitution entirely:
 `lyraflow snippet` (see [`packages/cli/README.md`](packages/cli/README.md))
 prints this exact block with your project's own host and write key already
@@ -334,7 +396,7 @@ await lyraflow.flush()   // e.g. before a manual redirect the browser's own unlo
 ```
 
 Events are queued in `localStorage` and sent in batches to `/v1/batch` (see
-*Sending your first event* above for that endpoint's own semantics), on a
+[The ingest API](#the-ingest-api) for that endpoint's own semantics), on a
 timer and again on page unload using `fetch`'s `keepalive` option, so a
 tab closed mid-batch still delivers what was already queued.
 
@@ -361,7 +423,7 @@ load (`requireConsent: false` once you know they said yes, or call
 
 ### `LYRAFLOW_ALLOWED_ORIGINS`
 
-The CORS preflight restriction described in *Sending your first event* above
+The CORS preflight restriction described in [The ingest API](#the-ingest-api)
 applies here too, since this is exactly what triggers it: the same
 `LYRAFLOW_ALLOWED_ORIGINS` env var, and the same limit. It stops someone from
 quietly reusing your write key on a different origin without you noticing —
