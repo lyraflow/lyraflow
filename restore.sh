@@ -162,6 +162,14 @@ if [ -z "$SRC" ]; then
   exit 2
 fi
 
+# The absolute form, resolved once, for the recovery instruction cleanup prints
+# and nothing else. A relative path is the wrong thing to print: the operator
+# reading it may well have changed directory, and the whole point of that line
+# is that it can be pasted. Falls back to what was typed when the directory
+# does not exist, because the refusal that follows names the path anyway.
+SRC_ABS="$(cd "$SRC" 2> /dev/null && pwd)" || SRC_ABS="$SRC"
+[ -n "$SRC_ABS" ] || SRC_ABS="$SRC"
+
 # ---------------------------------------------------------------------------
 # Failure reporting
 # ---------------------------------------------------------------------------
@@ -180,7 +188,21 @@ refuse() {
     note "  ${line}"
   done
   note ""
-  note "Nothing has been changed. Your live data and this backup are both intact."
+  # "THIS RUN", not "nothing". The old closing line was "Nothing has been
+  # changed. Your live data and this backup are both intact." -- and the
+  # no-restart rule made repeated invocations the normal recovery path, so the
+  # commonest caller of this function is now an operator re-running from a
+  # system a PREVIOUS run left half-restored. Measured, from a Postgres with
+  # zero tables, with a mistyped confirmation (or the 120s timeout, which is
+  # the unattended case): the script printed "your live data ... intact" over
+  # an empty database. A refusal can only ever speak for itself.
+  note "This run has changed nothing."
+  # …and if the pre-flight already found the system half-restored, say so here
+  # too. A refusal is exactly when the operator is deciding what to do next.
+  if [ -n "${SYSTEM_WARNING:-}" ]; then
+    note ""
+    note "$SYSTEM_WARNING"
+  fi
   exit 1
 }
 
@@ -343,6 +365,32 @@ safe_identifier() {
 # it guards on has not passed, and skipping it would turn the one check that
 # stands between an operator and an unbootable app into a no-op.
 image_schema_version() {
+  local cid image
+  # THE CONTAINER'S OWN IMAGE ID, not the tag. `compose run` resolves the tag
+  # as it stands NOW, and a stack mid-upgrade -- `pull` done, `up -d` not --
+  # is exactly when the two differ. Measured on such a stack: the running
+  # container answered 11 and the tag answered 99, so a schema-12 backup was
+  # waved through by a guard reading the tag and would then have been handed to
+  # the OLD container, which refuses to boot with SchemaTooNewError against the
+  # only copy of the database left. A fail-open in the one guard whose whole
+  # purpose is to fail closed.
+  #
+  # An image id also works with the container stopped, which is what `exec`
+  # could not do and why this moved in the first place.
+  cid="$(docker compose ps -aq "$APP_SERVICE" 2> /dev/null | head -n 1)" || cid=''
+  if [ -n "$cid" ]; then
+    image="$(docker inspect --format '{{.Image}}' "$cid" 2> /dev/null)" || image=''
+    if [ -n "$image" ]; then
+      docker run --rm "$image" node -e \
+        'import("@lyraflow/core").catch(() => import("./packages/core/dist/index.js")).then((m) => console.log(m.SCHEMA_VERSION))' \
+        < /dev/null
+      return
+    fi
+  fi
+  # No container has ever been created for the service -- a genuinely fresh
+  # host restoring into a stack it has only just brought the stores up on. The
+  # tag is then the only answer there is, and it is also the image `up -d` will
+  # use, so the two cannot disagree.
   docker compose --progress quiet run --rm --no-deps -T "$APP_SERVICE" node -e \
     'import("@lyraflow/core").catch(() => import("./packages/core/dist/index.js")).then((m) => console.log(m.SCHEMA_VERSION))' \
     < /dev/null
@@ -488,7 +536,14 @@ cleanup() {
   # stores that agree with each other and disagree with the manifest, which is
   # a reason to distrust the backup, not to keep the site dark.
   if [ "$DESTRUCTION_BEGUN" = "1" ] && [ "$STORES_RESTORED" = "0" ]; then
-    remove_in_container_artefact || true
+    # THE MESSAGE COMES FIRST, and the tidy-up after it. This is the same rule
+    # `backup.sh`'s cleanup spends its whole comment on, applied to the action
+    # that matters HERE: there the critical thing is restarting the app, so the
+    # restart is first; in this branch the app is deliberately not restarted
+    # and the only thing the operator gets is the message, so the message is
+    # first. `remove_in_container_artefact` is a `docker compose exec` with no
+    # timeout -- `|| true` covers it failing, not it hanging -- and against a
+    # wedged ClickHouse it would swallow the announcement entirely.
     note ""
     note "THE APP HAS BEEN LEFT STOPPED ON PURPOSE. It was not started again."
     announce_data_state
@@ -499,10 +554,26 @@ cleanup() {
     note ""
     note "Finish the restore -- it is safe to repeat, and it starts the app again"
     note "once both stores are back:"
-    note "  ./restore.sh $SRC"
-    note ""
-    note "Or, if you have decided against it, start the app as it is:"
-    note "  docker compose start $APP_SERVICE"
+    # Absolute and quoted. `$SRC` is whatever the caller typed: a relative path
+    # is wrong the moment the operator changes directory, and an unquoted one
+    # with a space in it is a command that does something else entirely.
+    note "  ./restore.sh '$SRC_ABS'"
+    if [ "${PG_MAY_BE_EMPTY:-0}" = "1" ]; then
+      # NOT offered as a neutral alternative here, because it is not one. This
+      # is the branch where Postgres is, or may be, empty -- and an operator
+      # who takes the escape hatch gets a healthy-looking site serving every
+      # person who asked to be erased. Naming the consequence beside the
+      # command is the least this can do.
+      note ""
+      note "There is no safe way to start the app as it is: with Postgres empty it"
+      note "will migrate itself a fresh schema, answer normally, and show the data"
+      note "of everyone who asked to be deleted. Finish the restore instead."
+    else
+      note ""
+      note "Or, if you have decided against it, start the app as it is:"
+      note "  docker compose start $APP_SERVICE"
+    fi
+    remove_in_container_artefact || true
     exit 1
   fi
 
@@ -652,6 +723,55 @@ for service in "$CH_SERVICE" "$PG_SERVICE"; do
       "Both stores must be up to restore into them." \
       "Start the stack first: docker compose up -d"
 done
+
+# --- is this system ALREADY half-restored? ---------------------------------
+#
+# EVERY CLAIM THIS SCRIPT MAKES ABOUT POSTGRES IS SCOPED TO THIS RUN, and this
+# is what lets one of them be more specific than that.
+#
+# The no-restart rule above makes a repeated invocation the ordinary recovery
+# path, so "an earlier run of this script was interrupted" is not an exotic
+# starting state -- it is the expected one. And the ClickHouse-window messages
+# used to say "Postgres is untouched and still current" on the strength of THIS
+# run not having reached the Postgres half yet. Measured across two consecutive
+# aborted runs -- the first killed during the Postgres drop, the second during
+# the ClickHouse restore:
+#
+#   STATE OF YOUR DATA: … Postgres is untouched.
+#   actual: public schema empty, suppressed_persons gone, ClickHouse populated
+#
+# …printed eleven lines above an offer to start the app anyway, which an
+# operator who believed the sentence would reasonably take.
+#
+# An empty `public` schema is an unambiguous signature of that state: the app
+# creates its tables on boot, so a running deployment never has zero of them.
+# A count that cannot be taken leaves the wording scoped to this run and
+# nothing more, which is the honest answer to "I could not look".
+PG_TABLE_COUNT="$(pg_query \
+  "SELECT count(*) FROM information_schema.tables
+   WHERE table_schema = 'public' AND table_type = 'BASE TABLE'")" || PG_TABLE_COUNT=''
+PG_WAS_EMPTY=0
+SYSTEM_WARNING=''
+PG_BASELINE="Postgres has not been touched by this run"
+if [ "$PG_TABLE_COUNT" = "0" ]; then
+  PG_WAS_EMPTY=1
+  PG_BASELINE="Postgres was ALREADY EMPTY before this run started -- an earlier restore was interrupted -- so there are NO SUPPRESSION ROWS and every deleted person is visible"
+  SYSTEM_WARNING="WARNING: this system is already half-restored. Postgres has no tables at
+all, which is what an interrupted restore leaves behind. Until one finishes,
+there are NO SUPPRESSION ROWS: anyone who asked to be erased is visible again.
+Finishing a restore is the fix."
+fi
+
+# Tracks whether Postgres may be empty RIGHT NOW, from either cause: it was
+# already empty when this run started, or this run dropped the schema. Read by
+# cleanup, which must not offer "start the app as it is" as a neutral option
+# when taking it exposes deleted people.
+PG_MAY_BE_EMPTY="$PG_WAS_EMPTY"
+
+if [ -n "$SYSTEM_WARNING" ]; then
+  note ""
+  note "$SYSTEM_WARNING"
+fi
 
 # ---------------------------------------------------------------------------
 # GUARD 1 -- the artefacts are the ones the manifest describes.
@@ -820,7 +940,7 @@ docker compose exec -T "$CH_SERVICE" sh -c 'cat > "$1"' _ "$CH_BACKUP_DIR/$CH_FI
 # child exits, so the shell can die between a destructive command finishing and
 # any assignment placed after it.
 DESTRUCTION_BEGUN=1
-DATA_STATE="the ClickHouse database was being dropped and may already be gone; Postgres is untouched. If it is gone the app cannot start at all (code 81, UNKNOWN_DATABASE). Run this script again with the same backup."
+DATA_STATE="the ClickHouse database was being dropped and may already be gone. If it is gone the app cannot start at all (code 81, UNKNOWN_DATABASE). $PG_BASELINE. Run this script again with the same backup."
 
 # Bound to `default`, not to the application database. A ClickHouse session
 # sets its current database on connect and naming one that does not exist is
@@ -835,16 +955,16 @@ ch_query "DROP DATABASE IF EXISTS $CH_DATABASE SYNC" default > /dev/null ||
 # the RESTORE returns there is no ClickHouse database at all. SYNC is what
 # keeps it as short as it can be -- without it the DROP returns while the
 # tables are still being detached and the RESTORE races it.
-DATA_STATE="the ClickHouse database has been dropped and not yet restored, and Postgres is untouched. The app cannot start against it. Run this script again with the same backup."
+DATA_STATE="the ClickHouse database has been dropped and not yet restored, and the app cannot start against it. $PG_BASELINE. Run this script again with the same backup."
 
-DATA_STATE="the ClickHouse database was being restored and is either missing or half-restored; Postgres is untouched. Run this script again with the same backup."
+DATA_STATE="the ClickHouse database was being restored and is either missing or half-restored. $PG_BASELINE. Run this script again with the same backup."
 ch_query "RESTORE DATABASE $CH_DATABASE FROM Disk('backups', '$CH_FILE')" default > /dev/null ||
   abort "ClickHouse" \
     "RESTORE DATABASE $CH_DATABASE failed; the ClickHouse error is above." \
     "The archive is still on the backups disk inside the container and the" \
     "backup directory is untouched, so this can simply be run again."
 
-DATA_STATE="ClickHouse has been restored from the backup; Postgres has NOT been touched and is still current. Deleted people stay hidden, which is the safe half. Run this script again with the same backup to finish."
+DATA_STATE="ClickHouse has been restored from the backup. $PG_BASELINE. Run this script again with the same backup to finish."
 
 # --- Postgres --------------------------------------------------------------
 
@@ -889,6 +1009,9 @@ say "Restoring Postgres..."
 # announcement saying "Postgres has NOT been touched and is still current …
 # the safe half" over an empty Postgres with zero suppression rows -- measured.
 DATA_STATE="ClickHouse has been restored and the Postgres schema was being dropped: Postgres may already be EMPTY, which means NO SUPPRESSION ROWS and every deleted person visible again. Run this script again with the same backup."
+# Before the command, for the same reason DATA_STATE is: from here on cleanup
+# must not offer "start the app as it is" as a neutral option.
+PG_MAY_BE_EMPTY=1
 docker compose exec -T "$PG_SERVICE" sh -c \
   'PGPASSWORD="$POSTGRES_PASSWORD" PGOPTIONS="-c client_min_messages=warning" \
      psql -U "$0" -d "$1" -v ON_ERROR_STOP=1 -q \

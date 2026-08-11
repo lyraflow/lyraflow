@@ -2268,6 +2268,147 @@ describe('restore.sh', () => {
     expect(stderr).toMatch(/LEFT STOPPED ON PURPOSE/)
   }, 900_000)
 
+  it('does not claim Postgres is untouched when an EARLIER run emptied it', async () => {
+    // DATA_STATE describes THIS run and used to be printed as a claim about
+    // the system. Those are the same thing exactly once — on the first
+    // invocation — and the no-restart rule made a repeated invocation the
+    // ordinary recovery path, so the common case is the one where they differ.
+    //
+    // Two consecutive aborted runs, which is the shape every other fixture in
+    // this file avoids: kill the first during the Postgres drop (Postgres now
+    // empty), then kill the second during the ClickHouse restore, which is a
+    // window whose message speaks about Postgres. Measured before the fix:
+    //
+    //   STATE OF YOUR DATA: … Postgres is untouched.
+    //   actual: public schema empty, suppressed_persons gone
+    //
+    // …eleven lines above "Or, if you have decided against it, start the app
+    // as it is", which produces `/ready` 200 with every erased person visible.
+    const out = takeBackup()
+    let firstStderr = ''
+    let secondStderr = ''
+    let refusalStderr = ''
+    let tablesAfterFirst = ''
+    try {
+      // RUN 1 — killed during the Postgres drop.
+      firstStderr = spawnSync('./restore.sh', [out], {
+        encoding: 'utf8',
+        env: { ...SCRIPT_ENV, ...withShim({ SHIM_KILL_AFTER: 'DROP SCHEMA IF EXISTS public' }) },
+        input: confirmation(out),
+      }).stderr
+      tablesAfterFirst = pgScalar(
+        "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'",
+      )
+
+      // RUN 2 — killed during the ClickHouse restore, whose message talks
+      // about Postgres.
+      secondStderr = spawnSync('./restore.sh', [out], {
+        encoding: 'utf8',
+        env: { ...SCRIPT_ENV, ...withShim({ SHIM_KILL_AFTER: 'RESTORE DATABASE' }) },
+        input: confirmation(out),
+      }).stderr
+
+      // …and a plain refusal from the same state, which is the other path that
+      // spoke for the whole system. `refuse` closed with "Your live data and
+      // this backup are both intact" over a Postgres with no tables at all.
+      refusalStderr = runScriptExpectingFailure('./restore.sh', [out], {}, 'not-the-timestamp\n')
+    } finally {
+      await repairFromBackup(out)
+    }
+
+    expect(tablesAfterFirst, 'the first run did not empty Postgres').toBe('0')
+
+    // The run-2 announcement must not assert the thing run 1 falsified…
+    expect(secondStderr).toMatch(/STATE OF YOUR DATA/)
+    expect(secondStderr, 'it claimed Postgres was untouched').not.toMatch(/Postgres is untouched/i)
+    expect(secondStderr).toMatch(/ALREADY EMPTY/i)
+    expect(secondStderr).toMatch(/NO SUPPRESSION ROWS/i)
+    // …and must not offer the escape hatch as a neutral choice.
+    expect(secondStderr, 'it offered to start the app onto an empty Postgres').not.toMatch(
+      /if you have decided against it/i,
+    )
+    expect(secondStderr).toMatch(/no safe way to start the app/i)
+
+    // The refusal speaks only for itself, and warns about the system.
+    expect(refusalStderr).toMatch(/This run has changed nothing/i)
+    expect(refusalStderr, 'a refusal claimed the live data was intact').not.toMatch(
+      /live data and this backup are both intact/i,
+    )
+    expect(refusalStderr).toMatch(/already half-restored/i)
+
+    // The first run's own message was right about itself all along.
+    expect(firstStderr).toMatch(/STATE OF YOUR DATA/)
+  }, 900_000)
+
+  it('reads the schema version from the image the container will boot, not the tag', async () => {
+    // The guard moved from `compose exec` to `compose run` so it would work
+    // with the app stopped — and `run` resolves the TAG, which is not the
+    // image the container is running. A stack mid-upgrade (`pull` done, `up
+    // -d` not) is exactly when they differ, and the divergence fails OPEN:
+    // the tag understands the newer schema, so the backup is waved through,
+    // and the OLD container is then started against it and refuses to boot
+    // with SchemaTooNewError — the outage this guard exists to prevent.
+    //
+    // Constructed by tagging a deliberately-newer image over the service's
+    // tag while leaving the container on the old one.
+    const out = takeBackup()
+    const running = Number(parseManifest(join(out, 'MANIFEST')).schema_version)
+    rewriteManifestKey(join(out, 'MANIFEST'), 'schema_version', String(running + 1))
+
+    const tag = execFileSync(
+      'docker',
+      ['inspect', '--format', '{{.Config.Image}}', appContainerId()],
+      { encoding: 'utf8' },
+    ).trim()
+    const originalId = execFileSync('docker', ['inspect', '--format', '{{.Id}}', tag], {
+      encoding: 'utf8',
+    }).trim()
+
+    // buildkit will not resolve a bare digest in `FROM` — it reads
+    // `sha256:…` as a Docker Hub repository name and tries to pull it — so the
+    // base gets a throwaway tag of its own first.
+    const baseTag = `lyraflow-test-base:${Date.now()}`
+    execFileSync('docker', ['tag', originalId, baseTag])
+
+    try {
+      execFileSync('docker', ['build', '-q', '-t', tag, '-'], {
+        input: [
+          `FROM ${baseTag}`,
+          'USER root',
+          `RUN sed -i 's/export const SCHEMA_VERSION = [0-9]*;/export const SCHEMA_VERSION = 99;/' packages/core/dist/index.js`,
+          'USER lyraflow',
+          '',
+        ].join('\n'),
+        stdio: 'pipe',
+      })
+      // The construction is real: the tag now answers 99 and the container's
+      // own image still answers its true version. Without this the test could
+      // pass because the build silently did nothing.
+      const fromTag = execFileSync(
+        'docker',
+        [
+          'run',
+          '--rm',
+          tag,
+          'node',
+          '-e',
+          'import("./packages/core/dist/index.js").then((m) => console.log(m.SCHEMA_VERSION))',
+        ],
+        { encoding: 'utf8' },
+      ).trim()
+      expect(fromTag, 'the divergent image was not built').toBe('99')
+
+      // schema_version is running+1: newer than the container, older than the
+      // tag. A guard reading the tag proceeds and destroys both stores.
+      const err = await expectRefusal(out, confirmation(out))
+      expect(err).toMatch(/newer than the running image|newer than this build/i)
+      expect(err).toContain(String(running))
+    } finally {
+      execFileSync('docker', ['tag', originalId, tag])
+      execFileSync('docker', ['rmi', '-f', baseTag], { stdio: 'ignore' })
+    }
+  }, 900_000)
+
   it('restores from a backup with the app already stopped', async () => {
     // The recovery instruction the message above prints, exercised on its own.
     // A restore is the operation you perform on a system that is already
@@ -2509,6 +2650,93 @@ describe('restore.sh', () => {
     }
   }, 900_000)
 
+  it('brings the app back, and still speaks, when a cleanup step itself fails', async () => {
+    // `restore.sh` has its own 45-line `cleanup()` — a no-restart branch, a
+    // restart branch, an announcement and a tidy-up — and NOTHING pinned any
+    // of its ordering. The two tests that pin the same rule for `backup.sh`
+    // live under its own describe and shim against `backup.sh` only, so
+    // inverting this file's order left all 55 tests green. That is precisely
+    // how the `exit 1` defect in this same function reached a review round.
+    //
+    // The rule is not identical in the two branches, because the critical
+    // action is not. On the restart path the app coming back is what matters,
+    // so the restart is first. In the no-restart branch the app is
+    // deliberately left down and the MESSAGE is the only thing the operator
+    // gets, so the message is first. Both are checked with the tidy-up — a
+    // `docker compose exec` with no timeout — made to fail underneath them.
+    const removal = `docker compose exec -T clickhouse rm -f ${CH_BACKUP_DIR}`
+
+    // BRANCH 1 — a successful restore whose artefact removal fails.
+    const out = takeBackup()
+    const stdout = runScript(
+      './restore.sh',
+      [out],
+      withShim({ SHIM_FAIL_BEFORE: removal }),
+      confirmation(out),
+    )
+    expect(stdout).toMatch(/Restored from/)
+    expect(await readyStatus(), 'the app must come back when the tidy-up fails').toBe(200)
+    compose('exec', '-T', 'clickhouse', 'sh', '-c', `rm -f ${CH_BACKUP_DIR}/*.zip`)
+
+    // BRANCH 2 — the no-restart branch, same failure. The announcement must
+    // survive it.
+    let stderr = ''
+    try {
+      stderr = spawnSync('./restore.sh', [out], {
+        encoding: 'utf8',
+        env: {
+          ...SCRIPT_ENV,
+          ...withShim({
+            SHIM_FAIL_BEFORE: removal,
+            SHIM_KILL_AFTER: 'DROP SCHEMA IF EXISTS public',
+          }),
+        },
+        input: confirmation(out),
+      }).stderr
+    } finally {
+      compose('exec', '-T', 'clickhouse', 'sh', '-c', `rm -f ${CH_BACKUP_DIR}/*.zip`)
+      await repairFromBackup(out)
+    }
+    expect(stderr).toMatch(/LEFT STOPPED ON PURPOSE/)
+    expect(stderr).toMatch(/STATE OF YOUR DATA/)
+    expect(stderr).toMatch(/NO SUPPRESSION ROWS/i)
+  }, 900_000)
+
+  it('orders its cleanup so no tidy-up can pre-empt the critical action', () => {
+    // The ordering itself, pinned in the source for the same reason backup.sh
+    // pins the umask's position: a failure injected at runtime proves the
+    // tidy-up cannot BREAK the critical action, and says nothing about it
+    // running first — `remove_in_container_artefact` cannot return non-zero,
+    // so moving it above either critical action leaves the runtime tests
+    // green. What it can do is block, and there is no way to inject that.
+    const code = restoreCode()
+    const fnAt = code.indexOf('cleanup() {')
+    expect(fnAt, 'cleanup() not found').toBeGreaterThan(-1)
+    const body = code.slice(fnAt, code.indexOf('\n}', fnAt))
+
+    // The no-restart branch: its announcement precedes the tidy-up.
+    const branchAt = body.indexOf('LEFT STOPPED ON PURPOSE')
+    expect(branchAt, 'the no-restart branch is gone').toBeGreaterThan(-1)
+    const removalAfterBranch = body.indexOf('remove_in_container_artefact', branchAt)
+    expect(removalAfterBranch, 'no tidy-up in the no-restart branch').toBeGreaterThan(-1)
+    expect(branchAt, 'the message must come before the tidy-up').toBeLessThan(removalAfterBranch)
+    expect(body.indexOf('announce_data_state'), 'the state must be announced first').toBeLessThan(
+      removalAfterBranch,
+    )
+    // …and nothing may tidy up before it, either.
+    expect(
+      body.slice(0, branchAt).includes('remove_in_container_artefact'),
+      'a tidy-up runs before the no-restart branch can speak',
+    ).toBe(false)
+
+    // The restart branch: the restart precedes its tidy-up.
+    const restartAt = body.indexOf('start_app_if_stopped')
+    expect(restartAt).toBeGreaterThan(-1)
+    const removalAfterRestart = body.indexOf('remove_in_container_artefact', restartAt)
+    expect(removalAfterRestart).toBeGreaterThan(-1)
+    expect(restartAt, 'the restart must come before the tidy-up').toBeLessThan(removalAfterRestart)
+  })
+
   it('runs no command that could create a file, and restores in the right order', async () => {
     // The runtime half of two separate claims, both from a single trace of a
     // real restore.
@@ -2630,6 +2858,10 @@ describe('restore.sh', () => {
       // `run --rm --no-deps`, because `exec` needs a container that is up and
       // a restore is the operation you perform on a system that is not.
       'compose run',
+      // Added deliberately: the schema guard runs the CONTAINER'S OWN image
+      // id, which `compose run` cannot address — it resolves the tag, and a
+      // stack mid-upgrade is exactly when those differ.
+      'run',
       'inspect',
     ])
     const seenSub = new Set<string>()
