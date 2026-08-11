@@ -64,3 +64,23 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm vitest run --config vitest.durability.config.ts
+
+  # Split out of `durability` because the two backup suites take about a
+  # quarter of an hour between them — they take real backups, destroy both
+  # Docker volumes and restore — and they had taken that job from under three
+  # minutes to nearly seventeen. Its own runner, so the two run concurrently
+  # and a failure names which half broke without reading the log.
+  #
+  # They can share `docker-compose.ci.yml` with `durability` precisely because
+  # this is a separate runner: both call `down -v`, and on one machine they
+  # would destroy each other's stack.
+  backup-restore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm vitest run --config vitest.backup.config.ts

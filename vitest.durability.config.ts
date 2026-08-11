@@ -12,6 +12,13 @@ import { defineConfig } from 'vitest/config'
 export default defineConfig({
   test: {
     include: ['test/*.test.ts'],
+    // Subtracted, not enumerated elsewhere. These two live in
+    // vitest.backup.config.ts and their own CI job because together they run
+    // for about a quarter of an hour. Excluding them here rather than listing
+    // the wanted files means a NEW test/*.test.ts is picked up by this config
+    // automatically — the alternative leaves a new suite belonging to no job
+    // at all, and nothing would report it.
+    exclude: ['test/backup-restore.test.ts', 'test/clickhouse-backup.test.ts'],
     testTimeout: 30_000,
     hookTimeout: 60_000,
     fileParallelism: false,
