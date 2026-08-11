@@ -1,0 +1,61 @@
+name: Backup and restore
+
+# Its own workflow rather than a job in ci.yml, because GitHub supports a
+# `paths:` filter per workflow and not per job. This suite takes about a
+# quarter of an hour — it takes real backups, destroys both Docker volumes and
+# restores — and running it on a pull request that touches the browser SDK buys
+# nothing.
+#
+# TWO TRIGGERS, DELIBERATELY ASYMMETRIC.
+#
+# On a pull request it runs only when something below changed. That filter is a
+# guess about coupling, and this repository has already been wrong about
+# coupling twice: a SCHEMA_VERSION bump broke tests nobody had listed, and the
+# CI stack silently served a three-day-old image. So on `main` it runs
+# unconditionally, with no paths filter at all. Anything the guess misses is
+# caught within a quarter of an hour of merging rather than never — which is
+# the property that makes the filter safe to have.
+on:
+  pull_request:
+    paths:
+      # The scripts themselves, and the library they share.
+      - 'backup.sh'
+      - 'restore.sh'
+      - 'backup-lib.sh'
+      # The suites and the config that selects them.
+      - 'test/backup-restore.test.ts'
+      - 'test/clickhouse-backup.test.ts'
+      - 'vitest.backup.config.ts'
+      # BACKUP refuses every disk until `backups.allowed_disk` is set, so this
+      # file is the difference between a working backup and error code 318.
+      - 'docker/clickhouse/**'
+      # The stack under test, and the one operators actually run.
+      - 'docker-compose.yml'
+      - 'docker-compose.ci.yml'
+      # Migrations change what the manifest records and what a restored
+      # database has to satisfy, and the migrator owns `schema_migrations` —
+      # which `pg_dump` carries and `restore.sh` compares against.
+      - 'packages/db/**'
+      # SCHEMA_VERSION lives here, and restore.sh's guard reads it out of the
+      # running image to refuse a backup newer than the code.
+      - 'packages/core/src/index.ts'
+      # A dependency bump can move vitest or shellcheck under us.
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/backup-restore.yml'
+  push: { branches: [main] }
+  workflow_dispatch:
+
+jobs:
+  backup-restore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No `version:` here on purpose. package.json pins `packageManager`, and
+      # pnpm/action-setup errors out if both are set.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm vitest run --config vitest.backup.config.ts

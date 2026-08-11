@@ -54,12 +54,20 @@ an in-process purge worker erases the underlying rows, and every read path — s
 counts and members, the person read, the export itself — is filtered against the
 suppression boundary the moment a deletion is accepted.
 
-There is still **no UI** and no reporting layer — funnels, cohorts and retention are
-v0.2; that is now the whole remaining v0.1 gap. `README.md` documents the whole public
-surface; keep it accurate when the API changes, because it is the only thing standing
-between a new self-hoster and a working install. It has drifted twice; both times a
-shipped endpoint went undocumented because the task that added it had no documentation
-step.
+Three operational features have landed since, and each one enforces a column the schema
+had promised and nothing honoured. **Retention** prunes events past each project's own
+`retention_months`, 13 by default. **Quotas** enforce `monthly_event_quota`, opt-in, with
+`429 quota_exceeded` and deliberately no `retry-after`. **Backup and restore** are two
+scripts beside `install.sh`: `backup.sh` quiesces the app so both stores are captured with
+no writes in flight, `restore.sh` verifies checksums, image version and a typed
+confirmation before anything is destroyed, and restores ClickHouse before Postgres so an
+interrupted restore cannot resurrect a deleted person.
+
+There is still **no UI** and no reporting layer — funnels, cohorts and retention reports
+are v0.2. `README.md` documents the whole public surface; keep it accurate when the API
+changes, because it is the only thing standing between a new self-hoster and a working
+install. It has drifted twice; both times a shipped endpoint went undocumented because the
+task that added it had no documentation step.
 
 ## Stack and layout
 
@@ -124,17 +132,29 @@ The lesson generalises: a package whose output is not produced by `tsc` cannot r
 `typecheck` to stand in for a build, and the failure surfaces only where that output is
 read.
 
-Most tests talk to those real containers rather than mocking the databases. The durability
-test is deliberately excluded from `pnpm test` — it builds an image and starts the full
-stack, and takes minutes:
+Most tests talk to those real containers rather than mocking the databases. Two suites
+under `test/` are deliberately excluded from `pnpm test` — they build an image, start the
+full stack, and take minutes:
 
 ```sh
-pnpm build && pnpm vitest run --config vitest.durability.config.ts
+pnpm build
+pnpm vitest run --config vitest.durability.config.ts   # restart durability, ~40s
+pnpm vitest run --config vitest.backup.config.ts       # backup and restore, ~15min
 ```
 
-It starts its own stack from `docker-compose.ci.yml`, which binds the same host ports as
-the dev and test stacks (3000 and 8123). Stop those first, or it fails with "port is
-already allocated" — an environment clash that reads like a broken test.
+They have separate configs and separate CI jobs because the backup suites take a quarter
+of an hour between them — they take real backups, destroy both Docker volumes and restore.
+**The durability config selects `test/*.test.ts` and subtracts the backup files rather than
+listing what it wants**, so a new `test/*.test.ts` is picked up automatically. Listing the
+wanted files in each config reads tidier and loses coverage silently, because a new suite
+would belong to neither job.
+
+Both start their own stack from `docker-compose.ci.yml`, which binds the same host ports as
+the dev and test stacks (3000 and 8123). **Stop both of those first**, or you get "port is
+already allocated" — an environment clash that reads like a broken test. And bring the test
+stack back up before the next `pnpm test`, which needs it. Do not run the two configs
+concurrently on one machine either: both call `down -v` and would destroy each other's
+stack. In CI they are separate runners, which is why they can share the compose file.
 
 ## Writing tests here
 
@@ -218,6 +238,19 @@ Fair-code, under the Sustainable Use License (`LICENSE.md`). Two rules that foll
    commit messages, and anything else written about the project.
 2. **A CLA must be in place before merging any external PR.** Without it we lose the right
    to relicense contributed code. This is a launch blocker for accepting contributions.
+
+## Shell scripts
+
+`install.sh`, `backup.sh`, `restore.sh` and the `backup-lib.sh` they share run on the
+operator's host, not in a container, so they target **bash 3.2** — the version macOS still
+ships. No associative arrays, no `mapfile`. They call plain `docker compose` with no `-f`,
+which is what lets `COMPOSE_FILE` point them at a test stack; a script you have to edit to
+test is not the script you shipped.
+
+**`shellcheck` is pinned in `devDependencies` and CI runs `pnpm exec shellcheck`.** Not the
+runner's preinstalled binary: the two are different versions and they disagree, which once
+produced a lint that passed on a developer machine and failed in CI on a rule the local
+version had dropped. A lint you cannot reproduce locally cannot be fixed, only guessed at.
 
 ## Conventions
 
