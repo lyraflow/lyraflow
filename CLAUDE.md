@@ -258,3 +258,8 @@ version had dropped. A lint you cannot reproduce locally cannot be fixed, only g
   reading every file.
 - Documentation here is user- and contributor-facing. Design rationale and decision
   records live in the private repo, not here.
+- **Lyraflow has a visual identity. Do not invent one.** None of it has landed in this
+  repo yet — there is no logo, palette or typeface here to copy from, and that absence is
+  not an invitation. If a README header, favicon, social card or docs theme is wanted,
+  ask for the real assets rather than designing something to fill the gap. This history
+  is permanent, and an invented mark is far harder to withdraw than to avoid.
