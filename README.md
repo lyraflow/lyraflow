@@ -1,37 +1,52 @@
 # Lyraflow
 
-**Self-hosted, end-to-end customer journey intelligence and analytics.**
+**Self-hosted customer journey analytics. Your data stays on your servers.**
 
-Lyraflow helps you understand the full path your customers take — from first touch to conversion, retention, and beyond — on infrastructure you control. Your customer data stays yours.
+Lyraflow records what people do in your product, stitches anonymous visits to
+known accounts, and lets you ask who did what. It runs on your own machine
+under Docker, and nothing leaves it.
 
-> ⚠️ **Early days.** Lyraflow currently ships the ingest spine, identity resolution, a segment query API, and per-person deletion and export — you can self-host it, create a project, send it events, stitch anonymous and known activity into one person, count or list the people matching a filter tree, and erase or export any one person's data on request. There is no builder UI yet (segments, journeys, dashboards) and no journey/funnel analysis. Watch the repo to follow along.
+> **Early days.** v0.1 is the API and the operations behind it: ingest,
+> identity, segments, event reads, privacy, retention, quotas, and backup.
+> There is **no UI yet** — everything here is HTTP and a CLI. Journeys,
+> funnels and dashboards are v0.2. Watch the repo to follow along.
 
-## Why Lyraflow?
+## What it is good at
 
-- **Self-hosted first.** Run it on your own servers. No data leaves your infrastructure.
-- **End-to-end journeys.** Not just page views — the entire customer lifecycle across touchpoints.
-- **Source-available.** Distributed [fair-code](https://faircode.io) under the [Sustainable Use License](LICENSE.md): free to use, self-host, and modify for internal business purposes.
+**Knowing who someone is.** A visitor browses anonymously, signs up two weeks
+later, then uses your product from a phone. Lyraflow ties all of that to one
+person, and reads their history back stitched. If two people share a device,
+each event is attributed to whoever was signed in *at that moment* — not to
+whoever used it last.
+
+**Deleting someone completely.** `DELETE /v1/persons/:id` erases the underlying
+rows, and every read path — segment counts, member lists, person reads, exports
+— is filtered from the instant the request is accepted, not when the purge
+finishes. A person deleted a second ago is already invisible.
+
+**Being cheap to run and hard to surprise.** Events go to ClickHouse and
+identity to Postgres, one container each. Old events expire on a schedule you
+set. A project can be given a monthly event cap. One script backs both
+databases up together; another puts them back. Every limit in this document
+has a number attached, and the ones with known slack say so.
+
+**Being scriptable.** Events, people, segments, schema and deletions all have
+CLI wrappers with machine-readable output, so scripts and agents can use them
+without a browser. See [`packages/cli/README.md`](packages/cli/README.md).
 
 ## License
 
-Lyraflow is [fair-code](https://faircode.io) distributed under the [Sustainable Use License](LICENSE.md).
+Lyraflow is [fair-code](https://faircode.io) distributed under the
+[Sustainable Use License](LICENSE.md). The source is always visible, and you
+are free to self-host, use and modify it for your own business.
 
-- Source is always visible
-- Free to self-host and use for internal business purposes
-- Extensible and modifiable
+It is **not** an [OSI-approved open source](https://opensource.org/osd)
+license. The practical difference: you may not sell Lyraflow as a hosted
+service to other people.
 
-Note: this is a source-available license, not an [OSI-approved open source](https://opensource.org/osd) license. The practical difference: you may not offer Lyraflow as a paid hosted service to third parties.
+## Install
 
-## Repository layout
-
-```
-packages/   # product packages (workspace)
-docs/       # product documentation
-```
-
-## Running Lyraflow
-
-Requires Docker and Docker Compose.
+You need Docker and Docker Compose. Nothing else.
 
 ```sh
 git clone https://github.com/lyraflow/lyraflow.git
@@ -39,48 +54,32 @@ cd lyraflow
 ./install.sh
 ```
 
-The script generates passwords into `.env`, starts the stack, and waits for
-readiness. Then create a project and get your write key:
+That generates passwords into `.env`, starts three containers, and waits until
+the app answers. Then create a project:
 
 ```sh
 docker compose exec lyraflow node packages/cli/dist/index.js create-project "My App"
 ```
 
-That prints two keys. The **write key** (`wk_…`) is the one the examples below
-use, so put it in your shell:
+It prints two keys, and the difference between them matters:
+
+| | |
+| --- | --- |
+| **Write key** `wk_…` | **Public.** It can only write events. Ship it in your page source — that is what it is for. |
+| **Server key** `sk_…` | **Secret, shown once.** Reads people, merges them, deletes and exports them. Write it down; only its hash is stored, so nothing can recover it for you. |
+
+Put both in your shell to follow the examples below:
 
 ```sh
-export LYRAFLOW_WRITE_KEY=wk_...   # the write key printed above
-```
-
-The **server key** (`sk_…`) is secret and shown only once — write it down. It
-is not needed for sending events; it authenticates `/v1/alias` and
-`GET /v1/persons/:id` (see *Identity resolution* below), and deletion and
-export too (see *Privacy: deletion and export* below). The *Identity
-resolution* examples use it the same way:
-
-```sh
-export LYRAFLOW_SERVER_KEY=sk_...  # the server key printed above
+export LYRAFLOW_WRITE_KEY=wk_...
+export LYRAFLOW_SERVER_KEY=sk_...
 ```
 
 ## Sending your first event
 
-Everything below is the whole of v0.1's public surface. There is still no UI
-and no journey/funnel analysis — v0.1 adds identity resolution
-(`/v1/identify` binds a device to a person, `/v1/alias` merges two known
-people, `GET /v1/persons/:id` reads one person's stitched profile back out —
-see *Identity resolution* below), a segment query API for counting and
-listing people matching a filter tree (see *Segments* below), a raw event feed
-and time-bucketed counts (see *Reading events* below), per-person deletion and
-export (see *Privacy: deletion and export* below), and a CLI that wraps all of
-the read endpoints for scripts and agents (see [`packages/cli/README.md`](packages/cli/README.md)).
-
-Ingest listens on port 3000. Every ingest request — `/v1/track`, `/v1/page`,
-`/v1/identify`, `/v1/batch` — authenticates with the project's **write key**
-in the `x-lyraflow-write-key` header. That key is public by design: it is safe
-in browser JavaScript, and it can only write. `/v1/alias` and
-`GET /v1/persons/:id` are the exception: see *Identity resolution* below for
-why those two use the separate, secret server key instead.
+Ingest listens on port 3000. `/v1/track`, `/v1/page`, `/v1/identify` and
+`/v1/batch` all authenticate with the write key in the `x-lyraflow-write-key`
+header.
 
 ```sh
 curl -i http://localhost:3000/v1/track \
@@ -96,15 +95,15 @@ curl -i http://localhost:3000/v1/track \
   }'
 ```
 
-A successful call answers `202 Accepted` with `{"status":"accepted"}`.
+You get `202 Accepted` with `{"status":"accepted"}`.
 
-**The `-A` is not decoration.** Lyraflow drops events whose `User-Agent` looks
-automated — including curl's own default and a missing header — so that bots do
-not inflate person counts. Without it this request still answers `202`, and the
-event is silently discarded. Use a real browser `User-Agent` when testing by
-hand; server-side senders should set one that identifies your service and does
-not contain `bot`, `crawler`, `curl/`, `python-requests`, and similar tokens
-(the full list is `packages/core/src/enrich/bots.ts`).
+**The `-A` is not decoration.** Lyraflow discards events whose `User-Agent`
+looks automated, so bots do not inflate your person counts — and curl's own
+default, or no header at all, counts as automated. Without it this request
+still answers `202` and the event is silently dropped. When sending from a
+server, set a `User-Agent` that names your service and avoids `bot`, `crawler`,
+`curl/`, `python-requests` and similar (full list:
+`packages/core/src/enrich/bots.ts`).
 
 ### Endpoints
 
@@ -262,7 +261,7 @@ the calls were made in. On a repeat visit the cached script can run *before*
 the third block; the queue is then held until that `init` arrives, and drained
 by it. Either way nothing queued is lost. Replace both
 occurrences of `https://analytics.example.com` with your own Lyraflow host,
-and `writeKey` with the `wk_…` key from *Running Lyraflow* above — the same
+and `writeKey` with the `wk_…` key from [Install](#install) above — the same
 one your server-side calls already use. Or skip the substitution entirely:
 `lyraflow snippet` (see [`packages/cli/README.md`](packages/cli/README.md))
 prints this exact block with your project's own host and write key already
@@ -378,9 +377,7 @@ The SDK does not patch `history.pushState` or listen for route changes — call
 
 v0.1 stitches a device's anonymous activity to the person it belongs to, and
 lets you merge two people that turn out to be the same one. Filtering and
-segmentation are built on top of it — see [Segments](#segments) below — but
-there is still no builder UI, journey analysis, or dashboards; see the note at
-the top of this README.
+segmentation are built on top of it — see [Segments](#segments) below.
 
 ### Binding a device to a person
 
@@ -838,8 +835,8 @@ those can be built on top of, rather than a guess at one of them.
 
 ### What this does not do yet
 
-There is **no builder UI** — every segment above is built and run through the
-HTTP API directly, in JSON. There is **no export** of a segment's membership:
+Every segment above is built and run through the HTTP API directly, in JSON.
+There is **no export** of a segment's membership:
 the members endpoints are a bounded 1,000-row preview, not a way to pull an
 entire population out. There is **no point-in-time membership** — a saved
 segment stores its last count and when it was computed, not who was in it at
@@ -1550,6 +1547,15 @@ owns it — true of the stack this repository ships.
 
 ## Upgrading
 
+**Take a backup first.** Migrations run automatically on boot and some of them
+cannot be undone, so this is the one step worth never skipping:
+
+```sh
+./backup.sh /var/backups/lyraflow
+```
+
+Then:
+
 ```sh
 docker compose pull || docker compose build
 docker compose down
@@ -1559,42 +1565,40 @@ docker compose up -d
 The `|| docker compose build` covers the period before the first image is
 published; once it is, the pull succeeds and the build never runs.
 
-Migrations run automatically on boot, and accepted events are flushed before
-shutdown, so the restart itself loses no events. Identity bindings and
-aliases live in Postgres and survive the same way; the ClickHouse identity
-dictionaries are rebuilt from that data on every boot, not migrated, so a
-restart never leaves them stale or missing.
+The restart itself loses nothing. Accepted events are flushed before shutdown,
+migrations run on boot, and the ClickHouse identity dictionaries are rebuilt
+from Postgres every time rather than migrated, so they are never left stale.
 
-**This release is the first one that enforces `retention_months`.** The
-column has existed since the first migration, but nothing ever acted on it:
-until now every project has carried a retention setting that was recorded and
-never applied. From this version a background worker prunes each project
-against the value its own row already holds — starting within an hour of the
-first boot, and irreversibly, since it drops whole ClickHouse partitions (see
-*Operations → Retention* above). Check what your projects are set to before
-you upgrade:
+**If the new version will not start**, check the logs for a schema-version
+error. Downgrading the image below the schema in your database is refused
+deliberately — the remedy is to put the newer image back, or restore the backup
+you took above.
+
+### Upgrading to the release that added retention
+
+Retention prunes old events, and the first version to enforce it acts on
+whatever `retention_months` each project already had. That column has existed
+since the first migration and nothing ever applied it, so the value being
+enforced may be one nobody has looked at in a long time. Check before you
+upgrade:
 
 ```sh
 docker compose exec postgres psql -U lyraflow -d lyraflow \
   -c 'SELECT id, slug, retention_months FROM projects ORDER BY id'
 ```
 
-The upgrade changes none of those values — the 13-month default applies to
-projects created afterwards, not to existing rows — so what is dropped on
-that first run is whatever each project was already configured with, however
-long ago that was decided. If that is not what you want to happen yet, turn
-the worker off before starting the new version by adding
+Upgrading changes none of those values — the 13-month default applies only to
+projects created afterwards. If you would rather it did not start yet, add
 
 ```yaml
       LYRAFLOW_RETENTION_ENABLED: "false"
 ```
 
-to the `environment:` block of the `lyraflow` service in
-`docker-compose.yml`. It has to go there rather than in `.env`: Compose uses
-`.env` for substitution inside the compose file and passes only the variables
-that block lists, so a `LYRAFLOW_RETENTION_ENABLED` added to `.env` alone
-never reaches the server and retention would run anyway. Nothing is dropped
-for age until you turn it back on.
+to the `environment:` block of the `lyraflow` service in `docker-compose.yml`,
+before starting the new version. It has to go there and not in `.env`: Compose
+uses `.env` for substitution inside the compose file and passes the server only
+the variables that block names, so retention would run anyway. Nothing is
+dropped for age until you turn it back on.
 
 ## Contributing
 
