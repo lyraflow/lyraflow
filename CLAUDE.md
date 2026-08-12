@@ -258,8 +258,12 @@ version had dropped. A lint you cannot reproduce locally cannot be fixed, only g
   reading every file.
 - Documentation here is user- and contributor-facing. Design rationale and decision
   records live in the private repo, not here.
-- **Lyraflow has a visual identity. Do not invent one.** None of it has landed in this
-  repo yet — there is no logo, palette or typeface here to copy from, and that absence is
-  not an invitation. If a README header, favicon, social card or docs theme is wanted,
-  ask for the real assets rather than designing something to fill the gap. This history
-  is permanent, and an invented mark is far harder to withdraw than to avoid.
+- **Lyraflow has a visual identity. Do not invent one.** It is in `brand/`, and the rules
+  are in `BRANDING.md` — read that before adding a README header, favicon, social card or
+  docs theme. The two that are invisible until they are expensive: there is **no single
+  brand hex** (the accent is a different value per mode, because no one copper clears AA
+  on both paper and ink), and contrast is **measured** in `brand/contrast-report.txt`,
+  never estimated. Do not add a sixth star to the mark.
+- **`brand/` is generated output. Do not hand-edit it.** The generator is not in this
+  repo, and a rebuild overwrites every file there. Changes have to go upstream — say so
+  rather than patching an asset.

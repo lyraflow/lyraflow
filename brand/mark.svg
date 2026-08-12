@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="Lyraflow — the five brightest stars of Lyra" fill="none">
+<title>Lyraflow — the five brightest stars of Lyra</title>
+<g stroke="currentColor" stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round">
+<path d="M91.00 16.98L66.23 27.79"/>
+<path d="M66.23 27.79L37.63 30.21"/>
+<path d="M37.63 30.21L9.00 83.02"/>
+<path d="M9.00 83.02L36.52 81.05"/>
+<path d="M36.52 81.05L66.23 27.79"/>
+</g>
+<g fill="currentColor">
+<circle cx="91.00" cy="16.98" r="5.0"/>
+<circle cx="66.23" cy="27.79" r="3.4"/>
+<circle cx="37.63" cy="30.21" r="3.4"/>
+<circle cx="9.00" cy="83.02" r="3.4"/>
+<circle cx="36.52" cy="81.05" r="3.4"/>
+</g></svg>
