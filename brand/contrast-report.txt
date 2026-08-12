@@ -1,0 +1,44 @@
+
+=== light ===
+  PASS  18.07:1  (min 4.5)  body on surface                        #121110 on #FBFAF7
+  PASS  18.86:1  (min 4.5)  body on raised                         #121110 on #FFFFFF
+  PASS  17.17:1  (min 4.5)  body on sunken                         #121110 on #F6F4F0
+  PASS   6.55:1  (min 4.5)  muted on surface                       #5F5A52 on #FBFAF7
+  PASS   6.84:1  (min 4.5)  muted on raised                        #5F5A52 on #FFFFFF
+  PASS   4.08:1  (min 3.0)  subtle on surface (non-essential)      #807A70 on #FBFAF7
+  PASS   6.79:1  (min 4.5)  accent text on surface                 #8C4421 on #FBFAF7
+  PASS   7.09:1  (min 4.5)  accent text on raised                  #8C4421 on #FFFFFF
+  PASS   6.42:1  (min 4.5)  accent text on accent tint             #8C4421 on #FBF2EC
+  PASS   6.79:1  (min 4.5)  label on accent fill                   #FBFAF7 on #8C4421
+  PASS   4.08:1  (min 3.0)  control border (WCAG 1.4.11)           #807A70 on #FBFAF7
+  PASS   4.25:1  (min 3.0)  control border on raised               #807A70 on #FFFFFF
+  PASS   6.79:1  (min 3.0)  accent as graphic (the mark)           #8C4421 on #FBFAF7
+  PASS  17.08:1  (min 4.5)  body on accent tint                    #121110 on #FBF2EC
+  -- semantics on #FBFAF7 --
+  PASS   6.16:1  (min 4.5)  success                                #2E6B32
+  PASS   6.37:1  (min 4.5)  warning                                #7A5600
+  PASS   7.19:1  (min 4.5)  danger                                 #A32219
+  PASS   6.71:1  (min 4.5)  info                                   #2B5C8A
+
+=== dark ===
+  PASS  16.57:1  (min 4.5)  body on surface                        #F2F0EC on #121110
+  PASS  15.25:1  (min 4.5)  body on raised                         #F2F0EC on #1C1A17
+  PASS  17.28:1  (min 4.5)  body on sunken                         #F2F0EC on #0C0B0A
+  PASS   7.53:1  (min 4.5)  muted on surface                       #A9A398 on #121110
+  PASS   6.93:1  (min 4.5)  muted on raised                        #A9A398 on #1C1A17
+  PASS   4.43:1  (min 3.0)  subtle on surface (non-essential)      #807A70 on #121110
+  PASS   8.45:1  (min 4.5)  accent text on surface                 #DDA07F on #121110
+  PASS   7.78:1  (min 4.5)  accent text on raised                  #DDA07F on #1C1A17
+  PASS   7.67:1  (min 4.5)  accent text on accent tint             #DDA07F on #2A170E
+  PASS   8.45:1  (min 4.5)  label on accent fill                   #121110 on #DDA07F
+  PASS   4.43:1  (min 3.0)  control border (WCAG 1.4.11)           #807A70 on #121110
+  PASS   4.08:1  (min 3.0)  control border on raised               #807A70 on #1C1A17
+  PASS   8.45:1  (min 3.0)  accent as graphic (the mark)           #DDA07F on #121110
+  PASS  15.03:1  (min 4.5)  body on accent tint                    #F2F0EC on #2A170E
+  -- semantics on #121110 --
+  PASS   9.54:1  (min 4.5)  success                                #7FC98A
+  PASS   9.93:1  (min 4.5)  warning                                #E8B44A
+  PASS   8.48:1  (min 4.5)  danger                                 #F0968C
+  PASS   9.61:1  (min 4.5)  info                                   #8FBEE8
+
+ALL PASS

@@ -1,4 +1,9 @@
-# Lyraflow
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="brand/lockup-dark.svg">
+    <img src="brand/lockup-light.svg" alt="Lyraflow" width="200">
+  </picture>
+</h1>
 
 **Self-hosted customer journey analytics. Your data stays on your servers.**
 
