@@ -15,6 +15,7 @@ adding a header, favicon, social card or docs theme, everything you need is in
 | `brand/favicon.svg` | The mark with tighter padding, tuned for a browser tab. |
 | `brand/avatar-light.svg`, `-dark.svg`, `-accent.svg` | Square, with a background. Social profiles. |
 | `brand/social-card-light.svg`, `-dark.svg` | 1280×640 preview card for links. |
+| `brand/*.png` | The same avatars and social cards as raster. For the places that refuse SVG — GitHub's avatar and social-preview uploads are both raster-only, and so are most `og:image` consumers. |
 | `brand/tokens.css`, `brand/tokens.json` | Every colour and type token, both modes. |
 | `brand/contrast-report.txt` | The measured contrast ratio of every pairing. |
 
