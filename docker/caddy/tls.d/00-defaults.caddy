@@ -1,0 +1,17 @@
+# Certificates are obtained automatically from Let's Encrypt when this
+# directory holds nothing else. That is the right default for a server with a
+# public domain and nothing in front of it.
+#
+# To override where the certificate comes from, drop another .caddy file in
+# here. Its directives land inside the site block, so a Cloudflare Origin CA
+# pair is one line:
+#
+#     tls /etc/caddy/certs/origin.pem /etc/caddy/certs/origin.key
+#
+# See "Serving over HTTPS" in the README for the cases that need this --
+# a proxied Cloudflare record is the common one, because Let's Encrypt's
+# HTTP-01 challenge is answered by Cloudflare rather than by this server.
+#
+# This file is not decoration. With an empty directory Caddy logs
+# "No files matching import glob pattern" on every start, which reads as a
+# misconfiguration to anyone tailing the logs for the first time.

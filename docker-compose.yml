@@ -23,7 +23,11 @@ services:
       LYRAFLOW_CLICKHOUSE_USER: lyraflow
       LYRAFLOW_CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
       LYRAFLOW_CLICKHOUSE_DB: lyraflow
-    ports: ["3000:3000"]
+    # Interpolated so domain mode can drop this to loopback without a second
+    # compose file. Unset it is 3000:3000 -- byte-for-byte today's behaviour.
+    # The three-part IP:host:container form is required in domain mode;
+    # "127.0.0.1:3000" alone parses as hostPort:containerPort and is rejected.
+    ports: ["${LYRAFLOW_PUBLISH:-3000:3000}"]
     # Must exceed LYRAFLOW_DRAIN_DEADLINE_MS (25s default), or SIGKILL will
     # interrupt the drain and accepted events will be lost on every upgrade.
     stop_grace_period: 30s
@@ -35,6 +39,27 @@ services:
       timeout: 5s
       retries: 6
       start_period: 10s
+
+  caddy:
+    image: caddy:2-alpine
+    # Inactive unless COMPOSE_PROFILES names it, which install.sh writes into
+    # .env only when a domain was given. An install with no domain never pulls
+    # this image and never binds 80 or 443.
+    profiles: ["tls"]
+    restart: unless-stopped
+    depends_on:
+      lyraflow: { condition: service_healthy }
+    environment:
+      LYRAFLOW_DOMAIN: ${LYRAFLOW_DOMAIN}
+    ports: ["80:80", "443:443"]
+    volumes:
+      - "./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro"
+      - "./docker/caddy/tls.d:/etc/caddy/tls.d:ro"
+      # A named volume, and it must survive `down`: it holds the ACME account
+      # key and the issued certificates. Re-issuing on every restart walks
+      # into Let's Encrypt's duplicate-certificate rate limit, and the failure
+      # arrives days later as an expiry rather than as an error now.
+      - "caddy-data:/data"
 
   clickhouse:
     image: clickhouse/clickhouse-server:24.8-alpine
@@ -80,3 +105,4 @@ services:
 volumes:
   clickhouse-data:
   postgres-data:
+  caddy-data:
