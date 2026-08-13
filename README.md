@@ -1471,13 +1471,16 @@ re-issuing for the same name.
 #### Behind Cloudflare, or any other proxy
 
 If the record is proxied — Cloudflare's orange cloud, or an equivalent — the
-automatic certificate **will not issue**. Let's Encrypt's HTTP-01 challenge is
-answered by the proxy, not by your server, and the request never arrives.
-There is no error that says so; the site simply never starts serving.
+automatic certificate may not issue, and whether it does depends on settings
+that Lyraflow cannot see. The challenge is an ordinary HTTP request, so a
+proxy that passes port 80 through to your server will let it through; one set
+to redirect that traffic, or to refuse unencrypted connections to the origin,
+will not. The failure is quiet either way — the site simply never starts
+serving, and nothing says why.
 
-Two ways through. Either grey-cloud the record until the certificate issues
-and turn the proxy back on afterwards, or give Caddy a certificate directly.
-For Cloudflare that means an Origin CA certificate: create one in the
+The dependable answer is not to rely on that question having a good answer.
+Give Caddy a certificate directly, and issuance stops involving the proxy at
+all. For Cloudflare that means an Origin CA certificate: create one in the
 dashboard, save the pair on the server, and add a file to `docker/caddy/tls.d/`:
 
 ```
@@ -1486,6 +1489,12 @@ tls /etc/caddy/certs/origin.pem /etc/caddy/certs/origin.key
 
 Mount the directory holding them into the `caddy` service, and set
 Cloudflare's SSL/TLS mode to **Full (strict)**.
+
+You can instead grey-cloud the record until the automatic certificate issues
+and turn the proxy back on. That works, but it is not finished: renewal
+happens on its own schedule months later and meets whatever conditions exist
+then. A certificate that issued once behind a grey cloud is not evidence the
+next one will.
 
 One thing worth being explicit about, because the setting sounds like it
 solves the problem and does not: Cloudflare's **Full** mode does not remove
