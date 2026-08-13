@@ -1,0 +1,41 @@
+name: TLS
+
+# Its own workflow, not a job in ci.yml, because this suite binds 80 and 443
+# in addition to the 3000 the CI stack takes -- and `paths:` filters are per
+# workflow, not per job.
+#
+# The trigger asymmetry follows backup-restore.yml, and for the same reason:
+# the paths list below is a guess about coupling, and this repository has been
+# wrong about coupling before. On main it runs unconditionally, so anything
+# the guess misses surfaces within minutes of merging rather than never.
+on:
+  pull_request:
+    paths:
+      - 'docker/caddy/**'
+      - 'docker-compose.yml'
+      - 'docker-compose.tls-test.yml'
+      - 'test/tls-proxy.test.ts'
+      - 'test/fixtures/tls.d/**'
+      - 'vitest.tls.config.ts'
+      - '.github/workflows/tls.yml'
+      # The proxy target is the server, and its readiness endpoint and the
+      # browser bundle route are what this suite asserts on.
+      - 'packages/server/**'
+      - 'packages/sdk-browser/**'
+      - 'Dockerfile'
+  push: { branches: [main] }
+  workflow_dispatch:
+
+jobs:
+  tls:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No `version:` here on purpose. package.json pins `packageManager`,
+      # and pnpm/action-setup errors out if both are set.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm vitest run --config vitest.tls.config.ts
