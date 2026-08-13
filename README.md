@@ -1468,6 +1468,37 @@ data, and the next start asks for a new certificate — worth knowing before you
 reach for `-v` repeatedly, because certificate authorities rate-limit
 re-issuing for the same name.
 
+Re-running `./install.sh analytics.example.com` on an install that already
+serves that name is fine — it picks up a new image and restarts the stack. It
+will not change a domain that is already in `.env`; nothing in the installer
+rewrites a value that file already holds.
+
+To go back to a local install, remove **all three** of the settings the
+installer added — `LYRAFLOW_DOMAIN`, `COMPOSE_PROFILES` and `LYRAFLOW_PUBLISH`
+— leaving the passwords alone, since they are the only copy. Then:
+
+```sh
+docker compose --profile tls down
+docker compose up -d
+```
+
+You are left with the three containers and port 3000 again, and your data
+where it was.
+
+Both halves matter, in ways that are easy to get wrong:
+
+- **Remove all three settings, not just the domain.** With
+  `COMPOSE_PROFILES=tls` still in `.env`, Caddy is still started — now with no
+  domain to serve, so it fails to parse its configuration and restarts
+  forever. And with `LYRAFLOW_PUBLISH` still there, the app stays bound to
+  loopback, which is not reachable once Caddy is gone.
+- **`--profile tls` on the `down`, and no `-v`.** Removing the settings makes
+  Compose stop listing the `caddy` service at all, so a plain
+  `docker compose down` — even with `--remove-orphans` — walks straight past
+  the running container and leaves it holding 80 and 443. Naming the profile
+  is what brings it back into view long enough to remove it. `-v` would take
+  your database volumes with it.
+
 #### Behind Cloudflare, or any other proxy
 
 If the record is proxied — Cloudflare's orange cloud, or an equivalent — the
