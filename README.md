@@ -77,6 +77,15 @@ It prints two keys, and the difference between them matters:
 | **Write key** `wk_…` | **Public.** It can only write events. Ship it in your page source — that is what it is for. |
 | **Server key** `sk_…` | **Secret, shown once.** Reads people, merges them, deletes and exports them. Write it down; only its hash is stored, so nothing can recover it for you. |
 
+Run `create-project` again for each additional website you want to track
+separately — one install holds as many projects as you like, and the rest of
+this document shows one only because a project is the unit each example
+operates on. If you are tracking two sites, read
+[*Tracking more than one site*](#tracking-more-than-one-site) before
+instrumenting either: whether they are one project or two decides whether a
+person using both is one person or two, and that cannot be changed later
+without re-ingesting.
+
 Keep both to hand:
 
 ```sh
@@ -165,6 +174,133 @@ humans and is not a stable interface. Full reference:
 
 **That is the whole loop** — instrument, send, read. Everything below is
 detail on each part.
+
+## Tracking more than one site
+
+Two separate websites, a marketing site and the app behind it, staging and
+production: each of those is a project, and one install carries all of them.
+Run `create-project` once per site.
+
+```sh
+docker compose exec lyraflow node packages/cli/dist/index.js create-project "Acme Store"
+docker compose exec lyraflow node packages/cli/dist/index.js create-project "Acme Docs"
+```
+
+Each call prints its own write key and server key. Names must be unique after
+slugification (`Acme Store` → `acme-store`), and running it twice with the
+same name is refused with a message saying so rather than a database error.
+
+### The keys are the project selector
+
+**No request to Lyraflow ever names a project.** There is no project id in any
+path, no `?project=` parameter, and no `--project` flag on the CLI. The key
+you present *is* the selection:
+
+| | |
+| --- | --- |
+| **Write key** `wk_…` | Picks the project on ingest. The snippet on `acme.example` carries that project's write key; the snippet on `docs.example` carries the other. |
+| **Server key** `sk_…` | Picks the project on every read, export and deletion. One `lyraflow stats` call reports on exactly one project — whichever key it authenticated with. |
+
+So switching projects means switching keys, and nothing else:
+
+```sh
+LYRAFLOW_SERVER_KEY=$STORE_KEY lyraflow stats --since 24h
+LYRAFLOW_SERVER_KEY=$DOCS_KEY  lyraflow stats --since 24h
+```
+
+`lyraflow snippet` follows the same rule — it prints the install block for the
+project whose server key it authenticated with, so run it once per project and
+paste each result on its own site.
+
+### What a project separates, and what it does not
+
+Separation is in the storage layout, not a filter applied at query time. The
+events table is partitioned and ordered by project first, and every table in
+Postgres — identity bindings, aliases, segments, saved views, ingest counters,
+deletion requests — carries a project foreign key. A segment id or person id
+belonging to another project answers `404`, never `403`.
+
+| Per project | Shared by the whole install |
+| --- | --- |
+| Events, people, and identity | The Postgres and ClickHouse containers |
+| Segments and saved views | The ingest buffer (see below) |
+| `retention_months` — 13 by default | The retention worker's schedule |
+| `monthly_event_quota` — unlimited by default | Backups: one script dumps every project together |
+| Usage counters, and the quota `429` | `LYRAFLOW_ALLOWED_ORIGINS` (see below) |
+
+Three of those are worth stating plainly rather than leaving to be discovered:
+
+**`LYRAFLOW_ALLOWED_ORIGINS` is one list for the whole install.** It is a
+server env var, not a project column. Unset — the default — every origin is
+allowed and a second site needs nothing. But **if you have set it, every
+domain you instrument must appear in that one list**
+(`https://acme.example,https://docs.example`), because creating a project does
+not extend it. The symptom of forgetting is a site whose events never arrive
+while its snippet looks perfectly correct: the browser's CORS preflight is
+refused before any request reaches ingest, so nothing is rejected, dead-lettered
+or counted anywhere you would think to look.
+
+**The ingest buffer is one buffer, not one per project.** It holds 100,000
+rows by default (`LYRAFLOW_BUFFER_MAX_ROWS`), and it is shared. A burst on
+your busiest site can push the buffer to its limit and cause events from a
+quiet one to be throttled. A per-project quota bounds how much a project may
+*accept* in a month; it does not reserve capacity for it in the moment.
+
+**A backup is per install.** `backup.sh` and `restore.sh` operate on both
+databases whole. There is no way to back up, restore, or move one project on
+its own.
+
+### Identity does not cross projects
+
+This is the consequence most likely to be discovered late, so decide it before
+you instrument anything.
+
+Identity bindings and person aliases are keyed by project. **The same
+`user_id` in two projects is two unrelated people.** Calling
+`identify('user-42')` on both of your sites produces two separate profiles,
+with separate event histories, that no query joins and no merge can combine. A
+person who signs up on one site and later reads the other is two visitors, and
+Lyraflow will never tell you they are the same human — not because the join
+fails, but because it is never attempted.
+
+That is the right model when the sites are genuinely separate products. It is
+the wrong one if you want to answer "did the docs visit lead to the signup?"
+
+### If you want one journey across both sites
+
+Use **one** project, and put the site on every event as a property:
+
+```js
+lyraflow.init({ writeKey: 'wk_...', host: 'https://analytics.example.com' })
+lyraflow.track('signup', { site: 'store' })
+```
+
+Identity then works across both — one `user_id` is one person, and their
+journey spans the sites — and segments filter on `site` like any other
+property. What you give up is everything in the "per project" column above:
+one retention setting, one quota, one server key that reads both sites, and a
+`site` filter you must remember on every query, since forgetting it silently
+returns both.
+
+Neither choice can be changed later without re-ingesting, because it decides
+how identity was resolved at write time. Separate products: separate projects.
+One product across several domains: one project.
+
+### What is missing today
+
+- **No cross-project read.** No endpoint aggregates projects, so an "all my
+  sites" total does not exist in the API. Getting one means querying
+  ClickHouse directly, or calling each project in turn and adding up.
+- **No project list or delete.** `GET /v1/project` returns only the caller's
+  own. Removing a project means deleting the Postgres row by hand — and its
+  ClickHouse partitions with it, because the retention worker only sweeps
+  projects it can still see in Postgres.
+- **Retention and quota are SQL, not API.** Both are columns on `projects`;
+  see *Retention* and *Quotas* under *Operations* for the statements.
+- **One project per page.** The browser SDK keeps a single configuration on
+  `window.lyraflow`; calling `init()` again reconfigures it from scratch
+  rather than adding a second destination. One page cannot report to two
+  projects at once.
 
 ## The ingest API
 
