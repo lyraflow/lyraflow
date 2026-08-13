@@ -12,8 +12,10 @@ from a terminal, not for browsing. It wraps `GET /v1/events`,
 this document is about the CLI's own surface on top of them.
 
 `create-project`, `migrate`, and `healthcheck` are separate, operational
-commands this binary also ships (used once per install, not per query) — see
-*Running Lyraflow* in the main README for those. `healthcheck` reads its own
+commands this binary also ships — `migrate` and `healthcheck` once per install,
+`create-project` once per *project*, and none of them per query. See *Running
+Lyraflow* in the main README for those, and *Tracking more than one site* for
+why you might run `create-project` more than once. `healthcheck` reads its own
 env var, `LYRAFLOW_URL` (defaulting to `http://localhost:3000`), not
 `LYRAFLOW_HOST` — the two are not interchangeable and neither falls back to
 the other:
@@ -74,6 +76,46 @@ Missing both the flag and the env var for either one is a usage error (exit
 ```
 Error: LYRAFLOW_HOST and LYRAFLOW_SERVER_KEY must be set (or pass --host/--server-key) (usage_error)
 ```
+
+### Which project a command talks to
+
+One Lyraflow install can hold many projects (see *Tracking more than one site*
+in the main README), and **this CLI has no `--project` flag** because it does
+not need one: the server key already identifies exactly one project, and every
+command reports on that project alone. Switching projects is switching keys.
+
+The flags above are the per-invocation way to do it:
+
+```sh
+lyraflow stats --server-key "$STORE_KEY" --since 24h
+lyraflow stats --server-key "$DOCS_KEY"  --since 24h
+```
+
+For anything longer than one command, a shell function per project reads
+better than exporting and re-exporting a variable — and, more usefully, makes
+it impossible to run a command against whichever project you configured last
+and misread the answer as being about the other:
+
+```sh
+store() { lyraflow --server-key "$STORE_KEY" "$@"; }
+docs()  { lyraflow --server-key "$DOCS_KEY"  "$@"; }
+
+store stats --since 24h --by-event
+docs persons get user-42
+```
+
+Two consequences of the key being the selector, both easy to trip over:
+
+- **No output names its project.** No command prints the project's name or
+  slug — not even `snippet`, which fetches both from `GET /v1/project` and
+  uses neither. Two terminals side by side are therefore indistinguishable by
+  their output alone. The nearest thing to a project label any command emits
+  is the write key in `snippet`, so pairing each server key with its write key
+  once, somewhere you can look it up, is worth the minute it takes.
+- **`persons get user-42` against the wrong key is a `404`, not a wrong
+  answer.** Ids do not collide across projects; they simply do not resolve.
+  The same is true of every segment and deletion id. A `404` on an id you are
+  certain exists is worth checking the key for before checking anything else.
 
 ## `--json` is the stable interface; the table is not
 
