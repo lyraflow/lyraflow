@@ -12,11 +12,26 @@ if [ -z "$DOMAIN" ] && [ -t 0 ]; then
   read -r DOMAIN || DOMAIN=''
 fi
 
+# What the .env governing this install already says. Read before anything is
+# written, so it describes the stack that is running right now rather than the
+# one this run is about to configure. Two later decisions depend on it.
+CONFIGURED_DOMAIN=''
+if [ -f .env ]; then
+  CONFIGURED_DOMAIN="$(sed -n 's/^LYRAFLOW_DOMAIN=//p' .env | tr -d '\r' | head -n 1)"
+fi
+
 # Fail before writing anything if the ports Caddy needs are taken. The failure
 # mode otherwise is a container that will not start, reported several steps
 # later and attributed to the wrong thing. Best-effort: `ss` is Linux-only, and
 # no check at all is better than refusing to install on a machine that lacks it.
-if [ -n "$DOMAIN" ] && command -v ss >/dev/null 2>&1; then
+#
+# Skipped when .env already names this same domain, because then the listener
+# on 80 is this install's own Caddy and refusing is wrong: `./install.sh
+# <domain>` is the only command the README gives for enabling TLS, and re-running
+# it -- to pick up a new image, or after editing tls.d -- must not be an error.
+# A *different* domain still checks, and so does a first install: those are the
+# case the guard was written for, some other service already holding the port.
+if [ -n "$DOMAIN" ] && [ "$DOMAIN" != "$CONFIGURED_DOMAIN" ] && command -v ss >/dev/null 2>&1; then
   for port in 80 443; do
     if ss -ltnH "sport = :$port" 2>/dev/null | grep -q .; then
       echo "Port $port is already in use, and serving $DOMAIN needs it." >&2
@@ -92,8 +107,16 @@ echo
 echo "Starting Lyraflow..."
 docker compose up -d --wait
 
-if [ -n "$DOMAIN" ]; then
-  HOST="https://$DOMAIN"
+# The domain the running stack actually serves, which is what every URL printed
+# below has to be built from. .env wins over this invocation because add_setting
+# above never overwrites it: on an existing TLS install, `./install.sh` with no
+# argument at all must still say https://<that domain>. Deriving from "$DOMAIN"
+# printed http://localhost:3000 there, and a snippet built from it is blocked as
+# mixed content on the very page it was meant for.
+EFFECTIVE_DOMAIN="${CONFIGURED_DOMAIN:-$DOMAIN}"
+
+if [ -n "$EFFECTIVE_DOMAIN" ]; then
+  HOST="https://$EFFECTIVE_DOMAIN"
   echo
   echo "Checking $HOST/ready ..."
   # A warning, never a failure. DNS propagation, firewall rules and a
@@ -103,8 +126,10 @@ if [ -n "$DOMAIN" ]; then
   if curl -fsS --max-time 10 "$HOST/ready" >/dev/null 2>&1; then
     echo "Answering over HTTPS."
   else
-    echo "Not answering yet. The containers are up; this is usually DNS or a"
-    echo "certificate still being issued. Watch it with:"
+    echo "Not answering yet. The containers are up. Usually that is DNS or a"
+    echo "certificate still being issued, and it clears on its own within"
+    echo "minutes. It can also be a Caddy configuration error -- a file added"
+    echo "under docker/caddy/tls.d/ is the usual source. The logs say which:"
     echo "  docker compose logs -f caddy"
   fi
 else
