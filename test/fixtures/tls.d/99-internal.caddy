@@ -1,0 +1,8 @@
+# Caddy's own CA. The suite needs neither public DNS nor a call to Let's
+# Encrypt, and cannot walk into a rate limit however often it runs.
+#
+# This file is also the proof that the tls.d override seam works at all: if
+# `import` stopped picking these up, the site would fall through to the
+# Let's Encrypt default and fail on an unresolvable name rather than passing
+# quietly.
+tls internal

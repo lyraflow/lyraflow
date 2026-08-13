@@ -18,7 +18,15 @@ export default defineConfig({
     // the wanted files means a NEW test/*.test.ts is picked up by this config
     // automatically — the alternative leaves a new suite belonging to no job
     // at all, and nothing would report it.
-    exclude: ['test/backup-restore.test.ts', 'test/clickhouse-backup.test.ts'],
+    exclude: [
+      'test/backup-restore.test.ts',
+      'test/clickhouse-backup.test.ts',
+      // Own workflow: it binds 80 and 443. Listed here rather than left to be
+      // picked up, and listed in .github/workflows/tls.yml so it belongs to
+      // exactly one job -- a suite excluded here and named nowhere else would
+      // run in no job at all and nothing would report it.
+      'test/tls-proxy.test.ts',
+    ],
     testTimeout: 30_000,
     hookTimeout: 60_000,
     fileParallelism: false,

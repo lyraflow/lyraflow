@@ -1,0 +1,17 @@
+# Overrides exactly one thing -- where the certificate comes from -- so the
+# suite exercises the shipped service definition, the shipped Caddyfile and
+# the shipped profile. A test against a bespoke stack proves nothing about
+# the one operators run.
+#
+# All three volumes are restated even though only the middle one changes.
+# Compose merges `volumes` by target path, so restating the other two is a
+# no-op -- but if it replaced the list wholesale instead, naming only tls.d
+# would silently drop the Caddyfile mount and Caddy would start with no site
+# block at all. Restating is correct under both readings; naming one is
+# correct only under the first.
+services:
+  caddy:
+    volumes:
+      - "./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro"
+      - "./test/fixtures/tls.d:/etc/caddy/tls.d:ro"
+      - "caddy-data:/data"

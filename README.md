@@ -64,7 +64,20 @@ cd lyraflow
 ```
 
 That generates passwords into `.env`, starts three containers, and waits until
-the app answers on port 3000. Then create a project:
+the app answers on port 3000.
+
+That is a local install: plain HTTP on port 3000, which is all the examples
+below need. **Running this on a server with a domain name?** Pass it to the
+installer and Lyraflow serves HTTPS itself:
+
+```sh
+./install.sh analytics.example.com
+```
+
+See [Serving over HTTPS](#serving-over-https) for what that changes, and for
+the one case — a domain proxied through Cloudflare — where it needs a hand.
+
+Then create a project:
 
 ```sh
 docker compose exec lyraflow node packages/cli/dist/index.js create-project "My App"
@@ -1417,6 +1430,110 @@ first thing to check: a `503` means it never started, a response missing
 
 
 ## Operations
+
+### Serving over HTTPS
+
+Lyraflow speaks plain HTTP and has no TLS of its own. For a local trial that
+is fine. For anything else it is not, and not for the reason you would
+expect first:
+
+- **The snippet will not load.** It arrives as a `<script src>`. On a page
+  served over `https://`, a script tag pointing at `http://` is active mixed
+  content, which browsers block outright with no warning and no override.
+  Nothing is collected and nothing says why.
+- **Your server key crosses the internet in clear.** The write key is public
+  by design. The server key — which reads, exports and deletes people — is
+  on every read call you make.
+
+So give the installer a hostname that already resolves to the server:
+
+```sh
+./install.sh analytics.example.com
+```
+
+A fourth container joins the stack. It takes ports 80 and 443, obtains a
+certificate from Let's Encrypt on its own, renews it on its own, and forwards
+to Lyraflow — which stops being reachable from anywhere but the machine
+itself. Nothing else about the install changes, and every example in this
+document works against `https://analytics.example.com` in place of
+`http://localhost:3000`.
+
+Leaving the hostname out keeps today's behaviour exactly: three containers,
+port 3000, no certificate. That is the right choice if you already run a
+reverse proxy — put it in front of port 3000 as you would anything else.
+
+The certificate and the account key live in a Docker volume, so restarts and
+upgrades keep them. `docker compose down -v` throws them away along with your
+data, and the next start asks for a new certificate — worth knowing before you
+reach for `-v` repeatedly, because certificate authorities rate-limit
+re-issuing for the same name.
+
+Re-running `./install.sh analytics.example.com` on an install that already
+serves that name is fine — it picks up a new image and restarts the stack. It
+will not change a domain that is already in `.env`; nothing in the installer
+rewrites a value that file already holds.
+
+To go back to a local install, remove **all three** of the settings the
+installer added — `LYRAFLOW_DOMAIN`, `COMPOSE_PROFILES` and `LYRAFLOW_PUBLISH`
+— leaving the passwords alone, since they are the only copy. Then:
+
+```sh
+docker compose --profile tls down
+docker compose up -d
+```
+
+You are left with the three containers and port 3000 again, and your data
+where it was.
+
+Both halves matter, in ways that are easy to get wrong:
+
+- **Remove all three settings, not just the domain.** With
+  `COMPOSE_PROFILES=tls` still in `.env`, Caddy is still started — now with no
+  domain to serve, so it fails to parse its configuration and restarts
+  forever. And with `LYRAFLOW_PUBLISH` still there, the app stays bound to
+  loopback, which is not reachable once Caddy is gone.
+- **`--profile tls` on the `down`, and no `-v`.** Removing the settings makes
+  Compose stop listing the `caddy` service at all, so a plain
+  `docker compose down` — even with `--remove-orphans` — walks straight past
+  the running container and leaves it holding 80 and 443. Naming the profile
+  is what brings it back into view long enough to remove it. `-v` would take
+  your database volumes with it.
+
+#### Behind Cloudflare, or any other proxy
+
+If the record is proxied — Cloudflare's orange cloud, or an equivalent — the
+automatic certificate may not issue, and whether it does depends on settings
+that Lyraflow cannot see. The challenge is an ordinary HTTP request, so a
+proxy that passes port 80 through to your server will let it through; one set
+to redirect that traffic, or to refuse unencrypted connections to the origin,
+will not. The failure is quiet either way — the site simply never starts
+serving, and nothing says why.
+
+The dependable answer is not to rely on that question having a good answer.
+Give Caddy a certificate directly, and issuance stops involving the proxy at
+all. For Cloudflare that means an Origin CA certificate: create one in the
+dashboard, save the pair on the server, and add a file to `docker/caddy/tls.d/`:
+
+```
+tls /etc/caddy/certs/origin.pem /etc/caddy/certs/origin.key
+```
+
+Mount the directory holding them into the `caddy` service, and set
+Cloudflare's SSL/TLS mode to **Full (strict)**.
+
+You can instead grey-cloud the record until the automatic certificate issues
+and turn the proxy back on. That works, but it is not finished: renewal
+happens on its own schedule months later and meets whatever conditions exist
+then. A certificate that issued once behind a grey cloud is not evidence the
+next one will.
+
+One thing worth being explicit about, because the setting sounds like it
+solves the problem and does not: Cloudflare's **Full** mode does not remove
+the need for a certificate here. It still requires your server to speak HTTPS
+— it only stops checking which certificate you present. The mode that needs
+no certificate at all is **Flexible**, and it leaves the leg between
+Cloudflare and your server unencrypted, carrying your server key and your
+event data. Your visitors would see a padlock that stops being true partway.
 
 ### Retention
 
