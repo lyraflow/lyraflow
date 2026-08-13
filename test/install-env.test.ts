@@ -95,5 +95,10 @@ describe('an existing .env', () => {
     expect(env).toContain('LYRAFLOW_DOMAIN=old.example.com')
     expect(env).not.toContain('new.example.com')
     expect(env.match(/^LYRAFLOW_DOMAIN=/gm)).toHaveLength(1)
+    // The pre-seeded fixture has no COMPOSE_PROFILES line. Its presence here
+    // proves the TLS-configuration block actually ran for this case -- and
+    // that add_setting's already-set branch, not just "the script touched
+    // nothing", is what produced the LYRAFLOW_DOMAIN assertions above.
+    expect(env).toContain('COMPOSE_PROFILES=tls')
   })
 })
