@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -73,5 +73,54 @@ describe('where the app is published', () => {
   it('is loopback-only once LYRAFLOW_PUBLISH says so', () => {
     const cfg = composeConfig(`${BASE}LYRAFLOW_PUBLISH=127.0.0.1:3000:3000\n`, ['config'])
     expect(cfg).toContain('host_ip: 127.0.0.1')
+  })
+})
+
+// Not cosmetic-only: `${LYRAFLOW_DOMAIN}` with no default warns on every
+// `up`, `ps` and `exec` an existing three-container install runs, including
+// the ones inside backup.sh and restore.sh. "Existing installs are untouched"
+// is the guarantee this branch is built on, and a new warning on every
+// command is the first thing that contradicts it.
+describe('an install with no domain', () => {
+  it('gets no "variable is not set" warning from Compose', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lyraflow-tls-warn-'))
+    const envFile = join(dir, 'env')
+    writeFileSync(envFile, BASE)
+    try {
+      const r = spawnSync(
+        'docker',
+        [
+          'compose',
+          '--env-file',
+          envFile,
+          '--project-directory',
+          '.',
+          '-f',
+          'docker-compose.yml',
+          'config',
+        ],
+        { encoding: 'utf8', stdio: 'pipe' },
+      )
+      expect(r.status).toBe(0)
+      // Compose puts interpolation warnings on stderr, which is why the
+      // helper above -- which returns stdout -- could never have caught this.
+      expect(r.stderr).not.toContain('variable is not set')
+      expect(r.stderr).not.toContain('LYRAFLOW_DOMAIN')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+// The fast half of the crash-loop guard. test/tls-proxy.test.ts proves the
+// healthcheck actually discriminates by starting a broken Caddy; this proves
+// it is declared at all, in a test that needs no stack -- so deleting it does
+// not depend on the slow suite running to be noticed.
+describe('the caddy healthcheck', () => {
+  it('is declared, so `up --wait` has something to wait for', () => {
+    const cfg = composeConfig(`${BASE}COMPOSE_PROFILES=tls\n`, ['config'])
+    const caddy = cfg.slice(cfg.indexOf('caddy:'), cfg.indexOf('clickhouse:'))
+    expect(caddy).toContain('healthcheck:')
+    expect(caddy).toContain('2019')
   })
 })

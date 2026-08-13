@@ -50,8 +50,39 @@ services:
     depends_on:
       lyraflow: { condition: service_healthy }
     environment:
-      LYRAFLOW_DOMAIN: ${LYRAFLOW_DOMAIN}
+      # `:-` so an install with no domain does not get "variable is not set"
+      # on every `up`, `ps` and `exec` -- including the ones backup.sh and
+      # restore.sh run. The tls profile is inactive in that case, so the empty
+      # value is never read by anything.
+      LYRAFLOW_DOMAIN: ${LYRAFLOW_DOMAIN:-}
     ports: ["80:80", "443:443"]
+    # Without this, `up -d --wait` only requires that Caddy *started*, and
+    # `restart: unless-stopped` turns a config error into a crash-loop that
+    # Compose reports as "Healthy" before exiting 0. Two ways in: a .env with
+    # COMPOSE_PROFILES=tls and no LYRAFLOW_DOMAIN (the Caddyfile's
+    # `{$$LYRAFLOW_DOMAIN}` becomes a bare `{`, so the site block parses as a
+    # global options block and Caddy dies on `unrecognized global option:
+    # reverse_proxy`), and a typo in an operator's own tls.d file, which the
+    # README sends people to write for the Cloudflare Origin CA case.
+    #
+    # The probe is Caddy's admin API rather than a request through the proxy.
+    # It has to distinguish "config loaded and the site is provisioned" from
+    # "crash-looping" WITHOUT also failing while a Let's Encrypt certificate
+    # is still being issued -- that wait is documented as normal and must not
+    # fail the install. Asking the reverse_proxy module for its upstreams is
+    # exactly that line: it answers only once the site block provisioned, it
+    # names the upstream so an empty or global-options-only config fails, and
+    # it does not care whether a certificate exists yet.
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS --max-time 5 http://127.0.0.1:2019/reverse_proxy/upstreams | grep -q 'lyraflow:3000'",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     volumes:
       - "./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro"
       - "./docker/caddy/tls.d:/etc/caddy/tls.d:ro"
