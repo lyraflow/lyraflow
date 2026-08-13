@@ -64,7 +64,20 @@ cd lyraflow
 ```
 
 That generates passwords into `.env`, starts three containers, and waits until
-the app answers on port 3000. Then create a project:
+the app answers on port 3000.
+
+That is a local install: plain HTTP on port 3000, which is all the examples
+below need. **Running this on a server with a domain name?** Pass it to the
+installer and Lyraflow serves HTTPS itself:
+
+```sh
+./install.sh analytics.example.com
+```
+
+See [Serving over HTTPS](#serving-over-https) for what that changes, and for
+the one case — a domain proxied through Cloudflare — where it needs a hand.
+
+Then create a project:
 
 ```sh
 docker compose exec lyraflow node packages/cli/dist/index.js create-project "My App"
@@ -1417,6 +1430,70 @@ first thing to check: a `503` means it never started, a response missing
 
 
 ## Operations
+
+### Serving over HTTPS
+
+Lyraflow speaks plain HTTP and has no TLS of its own. For a local trial that
+is fine. For anything else it is not, and not for the reason you would
+expect first:
+
+- **The snippet will not load.** It arrives as a `<script src>`. On a page
+  served over `https://`, a script tag pointing at `http://` is active mixed
+  content, which browsers block outright with no warning and no override.
+  Nothing is collected and nothing says why.
+- **Your server key crosses the internet in clear.** The write key is public
+  by design. The server key — which reads, exports and deletes people — is
+  on every read call you make.
+
+So give the installer a hostname that already resolves to the server:
+
+```sh
+./install.sh analytics.example.com
+```
+
+A fourth container joins the stack. It takes ports 80 and 443, obtains a
+certificate from Let's Encrypt on its own, renews it on its own, and forwards
+to Lyraflow — which stops being reachable from anywhere but the machine
+itself. Nothing else about the install changes, and every example in this
+document works against `https://analytics.example.com` in place of
+`http://localhost:3000`.
+
+Leaving the hostname out keeps today's behaviour exactly: three containers,
+port 3000, no certificate. That is the right choice if you already run a
+reverse proxy — put it in front of port 3000 as you would anything else.
+
+The certificate and the account key live in a Docker volume, so restarts and
+upgrades keep them. `docker compose down -v` throws them away along with your
+data, and the next start asks for a new certificate — worth knowing before you
+reach for `-v` repeatedly, because certificate authorities rate-limit
+re-issuing for the same name.
+
+#### Behind Cloudflare, or any other proxy
+
+If the record is proxied — Cloudflare's orange cloud, or an equivalent — the
+automatic certificate **will not issue**. Let's Encrypt's HTTP-01 challenge is
+answered by the proxy, not by your server, and the request never arrives.
+There is no error that says so; the site simply never starts serving.
+
+Two ways through. Either grey-cloud the record until the certificate issues
+and turn the proxy back on afterwards, or give Caddy a certificate directly.
+For Cloudflare that means an Origin CA certificate: create one in the
+dashboard, save the pair on the server, and add a file to `docker/caddy/tls.d/`:
+
+```
+tls /etc/caddy/certs/origin.pem /etc/caddy/certs/origin.key
+```
+
+Mount the directory holding them into the `caddy` service, and set
+Cloudflare's SSL/TLS mode to **Full (strict)**.
+
+One thing worth being explicit about, because the setting sounds like it
+solves the problem and does not: Cloudflare's **Full** mode does not remove
+the need for a certificate here. It still requires your server to speak HTTPS
+— it only stops checking which certificate you present. The mode that needs
+no certificate at all is **Flexible**, and it leaves the leg between
+Cloudflare and your server unencrypted, carrying your server key and your
+event data. Your visitors would see a padlock that stops being true partway.
 
 ### Retention
 
