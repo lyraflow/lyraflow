@@ -1061,6 +1061,157 @@ Membership is also not recomputed automatically on any schedule; a saved
 segment's snapshot only updates when you explicitly run it. Those are
 planned; none of them exist today.
 
+## Funnels
+
+A funnel is an ordered list of steps — "landed, clicked login, registered,
+paid" — and one question: how many people got through each one, and where did
+the rest stop.
+
+Funnels are **saved objects**. You create one, give it a name, and re-run it
+over whatever date range you care about. There is no UI: this is the HTTP API
+and the CLI, the same as everything else in v0.1.
+
+### Defining one
+
+```sh
+curl -X POST https://analytics.example.com/v1/funnels \
+  -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY" \
+  -H 'content-type: application/json' \
+  -d '{
+    "name": "signup",
+    "window_seconds": 604800,
+    "steps": [
+      { "event": "$page", "where": [{ "property": "path", "operator": "=", "value": "/" }] },
+      { "event": "login_click" },
+      { "event": "signed_up", "where": [{ "property": "method", "operator": "=", "value": "email" }] }
+    ]
+  }'
+```
+
+A **step** is one event, optionally constrained by predicates on that event's
+own properties. `where` is exactly the shape a segment behaviour uses —
+`{ property, operator, value }`, with `operator` one of `=`, `!=`, `>`, `>=`,
+`<`, `<=`, `between` — so you write a predicate the same way in both places.
+Predicates matter more than they look: a page-view funnel is several `$page`
+steps that differ only by `path`.
+
+Two steps minimum, eight maximum.
+
+### The two clocks
+
+This is the part worth reading twice, because getting it wrong makes a funnel
+quietly report the wrong number.
+
+- **`window_seconds` belongs to the funnel.** It is how long one person gets
+  to finish once they have started. Maximum 30 days.
+- **`since` and `until` belong to the question**, and are supplied per run,
+  never stored. They bound **who enters** the funnel — a person enters by
+  matching step 1 inside that range.
+
+Because those are different things, a run **observes conversions past the end
+of the range**: someone who entered an hour before `until` still gets their
+full window to finish, so the query reads on to `until + window` (or to now,
+whichever comes first). Without that, a funnel would report as failures people
+who simply had not finished yet.
+
+That leaves one honest gap, and the response names it rather than hiding it.
+Someone who entered ten minutes ago has not had their seven-day window. They
+are counted in `entered` — dropping them would misstate the population — and
+also reported separately as `partial_window_entrants`, with a warning saying
+how many. **They can still convert.** If a recent funnel looks worse than you
+expected, that number is the first thing to check.
+
+### Running one
+
+```sh
+curl -X POST https://analytics.example.com/v1/funnels/3/run \
+  -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY" \
+  -H 'content-type: application/json' \
+  -d '{ "since": "2026-08-01T00:00:00Z", "until": "2026-08-08T00:00:00Z" }'
+```
+
+Omit both and you get the last seven days. The response always echoes the
+range it actually used:
+
+```json
+{
+  "entered": 1284,
+  "converted": 212,
+  "conversion_rate": 0.165,
+  "steps": [
+    { "index": 1, "event": "$page", "people": 1284, "from_previous": 1, "from_start": 1 },
+    { "index": 2, "event": "login_click", "people": 507, "from_previous": 0.395, "from_start": 0.395 },
+    { "index": 3, "event": "signed_up", "people": 212, "from_previous": 0.418, "from_start": 0.165 }
+  ],
+  "partial_window_entrants": 96,
+  "range": { "since": "2026-08-01T00:00:00.000Z", "until": "2026-08-08T00:00:00.000Z" },
+  "as_of": "2026-08-08T09:31:02.000Z",
+  "warnings": [ … ]
+}
+```
+
+A step's `people` is everyone who reached **at least** that step. Both rates
+are given because deriving one from the other is a multiplication that is easy
+to get subtly wrong.
+
+`POST /v1/funnels/preview` takes the same body plus a full definition and runs
+it without saving anything — for trying a funnel out before committing to it.
+
+### How a person is counted
+
+- **In order.** Steps must happen in the order listed. Unrelated events in
+  between are fine.
+- **Best attempt.** Someone who abandoned on Monday and completed on Tuesday
+  counts as converted. The window slides to find their best run through, so
+  one bad start does not condemn them forever.
+- **Once.** A person appears at exactly one step — the furthest they reached.
+- **As one person.** Steps taken anonymously and steps taken after logging in
+  belong to the same person, provided the device was identified (see *Identity
+  resolution*).
+- **Not at all, if they asked to be deleted.** The same suppression boundary
+  every other read path enforces.
+
+### Who dropped out
+
+```sh
+curl -X POST https://analytics.example.com/v1/funnels/3/dropoff \
+  -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY" \
+  -H 'content-type: application/json' \
+  -d '{ "step": 2 }'
+```
+
+Lists the people who reached step 2 and went no further. Steps are numbered
+from 1, matching `index` in the run response. Paged with an opaque cursor, and
+bounded the same way the segment members preview is — 100 per page, 1,000
+total. It is a preview of a population, not an export of it.
+
+### From the CLI
+
+```sh
+lyraflow funnels list
+lyraflow funnels run signup --since 7d
+lyraflow funnels run signup --since 7d --json
+lyraflow funnels preview --file signup.json
+lyraflow funnels dropoff signup --step 2
+```
+
+Funnels are addressed by name. With `--json`, the step table goes to stdout as
+one JSON object per line and everything else — the summary and any warnings —
+goes to stderr, so a pipeline stays parseable and a human still sees the
+caveats.
+
+### What this does not do yet
+
+There is **no time-to-convert**: you get how many people reached each step,
+not how long it took them. There is **no breakdown** — you cannot split a
+funnel by campaign, device or country. There is **no strict mode**, where a
+later step appearing early breaks the chain. Retention grids, trends and path
+analysis are not here either. All are planned; none exist today.
+
+A funnel is computed on demand every time you run it, with nothing cached and
+nothing precomputed. A wide range over a high-volume event like `$page` is a
+large scan, and the response will warn you when it is about to be one.
+
 ## Reading events
 
 Two read endpoints answer "what happened" and "how much, over time" directly

@@ -523,6 +523,101 @@ described under *Retrieving members, not just the count* in the main README.
 is a usage error (exit `2`), since there is no members page to resume without
 `--members` in the same request.
 
+## `lyraflow funnels <list|run|preview|dropoff>`
+
+Ordered conversion over the events already stored: how many people got through
+each step of a journey, and where the rest stopped. See *Funnels* in the main
+[README](../../README.md) for what a funnel means — in particular the two
+clocks, which is the part that makes a number wrong if it is misread.
+
+Funnels are addressed **by name**, not by id: `UNIQUE (project_id, name)`
+makes that unambiguous, and an operator running a weekly report should not
+have to remember that signup is funnel 3. Every subcommand below resolves the
+name through `GET /v1/funnels` first, so an unknown name is a usage error
+(exit `2`) rather than a 404 from a URL you did not build.
+
+### `funnels list`
+
+```sh
+lyraflow funnels list --human
+```
+```
+ID  NAME    STEPS  WINDOW   SEGMENT  LAST RUN
+30  signup  2      604800s  -        never
+```
+
+`LAST RUN` is always rendered **with its timestamp** — `12/100 at
+2026-08-14T09:00:00.000Z` — because the stored count is a cache that nothing
+recomputes, and a bare number would read as current. `STEPS` shows `stale` for
+a row whose stored definition no longer parses; the rest of the list still
+renders, which is the point.
+
+### `funnels run <name> [--since <t>] [--until <t>]`
+
+```sh
+lyraflow funnels run signup --since 7d --human
+```
+```
+STEP  EVENT      PEOPLE  FROM PREV  FROM START
+1     landed     0       0.0%       0.0%
+2     signed_up  0       0.0%       0.0%
+```
+
+The step table goes to **stdout**; the summary — `entered`, `converted`,
+`conversion_rate`, `partial_window_entrants`, `range`, `as_of` — goes to
+**stderr**, the same "stdout stays a pure record stream" rule `segments run
+--members` follows.
+
+**Warnings also go to stderr, in both modes.** A caveat that corrupts a JSON
+pipeline is worse than no caveat, and one that appears only inside the JSON is
+one a human reading the table never sees. `partial_window_entrants` is the one
+to watch: those people entered too recently to have had their full window and
+can still convert.
+
+```sh
+lyraflow funnels run signup --since 7d --json
+```
+```json
+{"index":1,"event":"landed","people":0,"from_previous":0,"from_start":0}
+{"index":2,"event":"signed_up","people":0,"from_previous":0,"from_start":0}
+```
+
+Omit `--since`/`--until` and the CLI sends neither, so the **server's**
+documented default applies (the last seven days). The resolved range comes
+back in the summary either way — two defaults in one product is one too many,
+and the one that drifts would be the invisible one.
+
+### `funnels preview --file <path>`
+
+Runs a definition that has not been saved, for trying one out:
+
+```sh
+echo '{"steps":[{"event":"landed"},{"event":"signed_up"}],"window_seconds":604800}' > signup.json
+lyraflow funnels preview --file signup.json --human
+```
+
+Output is identical to `run`. Exploring should not be a write, which is why
+this exists rather than making you create a funnel to find out whether it was
+the one you meant.
+
+### `funnels dropoff <name> --step N [--cursor <c>]`
+
+The people who reached step *N* and went no further:
+
+```sh
+lyraflow funnels dropoff signup --step 2 --json
+```
+
+**`--step` is 1-indexed**, matching the `STEP` column of a run. A `0` is
+refused with a message saying so rather than sent — a 0-indexed caller would
+otherwise read step 2's drop-offs as step 1's and never see an error.
+
+Person rows go to stdout, the summary (`step`, `next_cursor`,
+`window_exhausted`, `range`, `as_of`) to stderr. Pass `next_cursor` back as
+`--cursor` for the next page. Bounded like the segment members preview — 100
+per page, 1,000 in total — because this previews a population rather than
+exporting one.
+
 ## `lyraflow schema <events|properties>`
 
 ```
