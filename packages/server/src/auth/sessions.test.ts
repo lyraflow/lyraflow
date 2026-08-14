@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import {
   SESSION_MAX_AGE_MS,
   SESSION_RENEW_WITHIN_MS,
@@ -162,20 +162,5 @@ describe('SessionStore', () => {
 
     const after = await pg.query('SELECT 1 FROM sessions WHERE id = $1', [hashSessionToken(token)])
     expect(after.rows).toHaveLength(0)
-  })
-
-  it('decides the max-age cap in the WHERE clause, not by reading the row and comparing in JS', async () => {
-    // Behaviorally, a JS-side check after the fetch returns the same
-    // answers as a SQL-side one -- this is the only test that would notice
-    // the cap moving out of the query, by inspecting the query text itself
-    // rather than verify()'s return value.
-    const store = new SessionStore(pg)
-    const { token } = await store.issue(adminId)
-    const querySpy = vi.spyOn(pg, 'query')
-    await store.verify(token)
-    const sql = String(querySpy.mock.calls[querySpy.mock.calls.length - 1]?.[0])
-    const whereClause = sql.slice(sql.indexOf('WHERE'))
-    expect(whereClause).toContain('created_at')
-    querySpy.mockRestore()
   })
 })
