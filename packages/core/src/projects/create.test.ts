@@ -4,9 +4,14 @@ import { ProjectExistsError, createProject, slugify } from './create.js'
 
 // `pg`'s own Pool, not `@lyraflow/db`'s `createPgPool` -- `@lyraflow/db`
 // depends on `@lyraflow/core` for its own tests (schema-version.test.ts), so
-// core depending back on db would be a circular project reference.
+// core depending back on db would be a circular project reference. `pg` is a
+// devDependency here (test-only): `createProject` itself takes no `pg`
+// import at all, only the local `ProjectStore` shape (see create.ts).
+// `max: 10` matches `createPgPool`'s own value explicitly, rather than
+// relying on it happening to equal pg's own default.
 const pg = new Pool({
   connectionString: 'postgres://lyraflow:lyraflow@localhost:5433/lyraflow_test',
+  max: 10,
 })
 const NAME = 'CLI Dup Test'
 
