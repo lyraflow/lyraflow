@@ -335,7 +335,7 @@ describe('funnel semantics', () => {
     for (const [anon, plan] of [
       [inside, 'enterprise'],
       [outside, 'free'],
-    ]) {
+    ] as const) {
       await send([
         {
           type: 'identify',
