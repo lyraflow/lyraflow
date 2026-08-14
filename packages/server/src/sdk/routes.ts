@@ -49,9 +49,18 @@ function loadBundle(): Buffer | undefined {
  *
  * Two paths, two cache policies:
  * - `/lyraflow-<version>.js` is immutable — the exact bundle for that
- *   version, forever.
+ *   version, for as long as this server runs that version.
  * - `/lyraflow.js` expires quickly, so an upgrade actually reaches browsers
  *   that already cached the old bundle at the bare path.
+ *
+ * **The versioned path is cache-busting, not pinning, and must not be put in
+ * a script tag.** It is only ever registered for the version this process is
+ * running, so upgrading the server makes the previous one 404 — the promise
+ * is "this URL's bytes never change", not "this version is served forever".
+ * A site that pinned it would keep working from cache and then silently stop
+ * collecting from every new visitor the moment the operator upgraded, which
+ * is the failure this docstring and the README both used to invite by saying
+ * "forever" without qualification.
  *
  * The versioned path is registered as a single literal route for the
  * current `VERSION`, not a `:version` parameter that serves the same bundle
@@ -127,4 +136,30 @@ export function registerSdkRoutes(app: FastifyInstance): void {
 
   app.get('/lyraflow.js', serve(BARE_CACHE_CONTROL))
   app.get(`/lyraflow-${VERSION}.js`, serve(VERSIONED_CACHE_CONTROL))
+
+  // A LEGIBLE 404 for any OTHER version, which is what a pinned script tag
+  // meets the first time the operator upgrades.
+  //
+  // This does not soften the guarantee above — it cannot serve a bundle. It
+  // only replaces Fastify's generic "Route not found" with a body naming the
+  // version this server actually has and what to use instead, because the
+  // alternative is an operator staring at a bare 404 for a URL that was
+  // correct last week.
+  //
+  // Registered as a parametric route, which Fastify matches only AFTER the
+  // static one above — so a request for the current version still reaches the
+  // real handler and never this. A test pins that precedence, since getting it
+  // backwards would turn the working path into a 404 for everyone.
+  app.get<{ Params: { version: string } }>('/lyraflow-:version.js', async (_req, reply) =>
+    reply
+      .code(404)
+      .header('cache-control', 'no-store')
+      .send({
+        error: 'sdk_version_not_served',
+        // The version asked for is deliberately NOT echoed: it is caller-
+        // controlled and would be reflected into a response body.
+        served_version: VERSION,
+        detail: `this server serves the browser SDK at /lyraflow-${VERSION}.js. The versioned path is cache-busting, not pinning — it stops being served when the server is upgraded. Use /lyraflow.js in a script tag.`,
+      }),
+  )
 }

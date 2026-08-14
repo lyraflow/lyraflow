@@ -62,6 +62,46 @@ describe('SDK routes', () => {
   it('404s an unknown version rather than serving the current one', async () => {
     const res = await app().inject({ method: 'GET', url: '/lyraflow-9.9.9.js' })
     expect(res.statusCode).toBe(404)
+    // Not merely "not 200": serving the current bundle under another
+    // version's URL is the specific failure the literal route exists to
+    // prevent, so this compares against the bundle itself rather than
+    // against a keyword — the guidance body legitimately mentions
+    // `/lyraflow.js`, which a naive substring check would trip over.
+    const bundle = await app().inject({ method: 'GET', url: '/lyraflow.js' })
+    expect(res.body).not.toBe(bundle.body)
+    expect(res.headers['content-type']).not.toContain('javascript')
+  })
+
+  it('names the version it does serve, instead of a bare "route not found"', async () => {
+    const res = await app().inject({ method: 'GET', url: '/lyraflow-9.9.9.js' })
+    const body = res.json()
+    expect(body.error).toBe('sdk_version_not_served')
+    expect(body.served_version).toBe(VERSION)
+    expect(body.detail).toContain('/lyraflow.js')
+  })
+
+  it('does not reflect the requested version back into the response', async () => {
+    // Caller-controlled and would otherwise be echoed into a body.
+    const res = await app().inject({ method: 'GET', url: '/lyraflow-<script>.js' })
+    expect(res.statusCode).toBe(404)
+    expect(res.body).not.toContain('<script>')
+  })
+
+  it('is not cached, so the 404 does not outlive the next upgrade', async () => {
+    // An upgrade makes this exact URL start working again. A cached 404
+    // would keep a site broken after the fix landed.
+    const res = await app().inject({ method: 'GET', url: '/lyraflow-9.9.9.js' })
+    expect(res.headers['cache-control']).toBe('no-store')
+  })
+
+  it('lets the CURRENT version reach the real handler, not the 404', async () => {
+    // Fastify matches static routes before parametric ones. Backwards, the
+    // working path would 404 for everyone — so this pins the precedence
+    // rather than assuming it.
+    const res = await app().inject({ method: 'GET', url: `/lyraflow-${VERSION}.js` })
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['content-type']).toContain('javascript')
+    expect(res.headers['cache-control']).toContain('immutable')
   })
 
   it('serves the immutable path under the SDK package version an install ships', async () => {
