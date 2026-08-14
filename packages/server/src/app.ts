@@ -1,6 +1,10 @@
+import cookie from '@fastify/cookie'
 import type { ClickHouseClient, Pool } from '@lyraflow/db'
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify'
 import { ProjectCache } from './auth/project-cache.js'
+import { AttemptLimiter } from './auth/rate-limit.js'
+import { registerAuthRoutes } from './auth/routes.js'
+import { SessionStore } from './auth/sessions.js'
 import type { Config } from './config.js'
 import { registerEventsRoutes } from './events/routes.js'
 import { registerFunnelRoutes } from './funnels/routes.js'
@@ -55,6 +59,28 @@ export interface AppDeps {
    * depends on this being the real, shared object.
    */
   segmentCache: SegmentCache
+  /**
+   * Exposed for the same reason `segmentCache` is: Task 11's
+   * cache-invalidation test reaches for `app.deps.projects` to assert
+   * against the EXACT `ProjectCache` instance every route below shares --
+   * constructing a second one there would be asserting against a different
+   * object than the routes actually use.
+   */
+  projects: ProjectCache
+  /**
+   * Exposed so a test can drive a session lifecycle -- issue, verify,
+   * revoke, sweep -- against the SAME store `registerAuthRoutes` reads and
+   * writes through, rather than a second `SessionStore` pointed at the same
+   * table that happens to agree by coincidence.
+   */
+  sessions: SessionStore
+  /**
+   * Exposed so a test can inspect or reset login-attempt state on the EXACT
+   * limiter `/v1/auth/login` checks and records against -- a second
+   * `AttemptLimiter` would start its own count at zero and never see what
+   * the route path actually recorded.
+   */
+  loginLimiter: AttemptLimiter
 }
 
 export function buildApp(input: {
@@ -87,6 +113,13 @@ export function buildApp(input: {
   // again every time, and would bury real client bugs under a false
   // "server unavailable" signal. Only an unknown error, or one that already
   // carries a 5xx status, is ours to convert.
+  // Registered before any route that reads req.cookies. @fastify/cookie is
+  // wrapped in fastify-plugin, so it decorates this instance directly and
+  // every route below sees it -- unlike @fastify/cors, it registers no
+  // wildcard route, so it carries none of the scoping hazard documented in
+  // ingest/routes.ts.
+  app.register(cookie)
+
   app.setErrorHandler((err: FastifyError, req, reply) => {
     if (req.url.startsWith('/v1/')) {
       if (err.statusCode !== undefined && err.statusCode < 500) {
@@ -121,6 +154,8 @@ export function buildApp(input: {
   // immediately, and a second ProjectCache-shaped duplicate would double the
   // Postgres load an identical lookup produces.
   const projects = new ProjectCache(pg, 60_000)
+  const sessions = new SessionStore(pg)
+  const loginLimiter = new AttemptLimiter()
   const bindings = new IdentityBindings(pg)
   const aliases = new PersonAliases(pg)
   const suppression = new SuppressionStore(pg)
@@ -190,11 +225,15 @@ export function buildApp(input: {
     purge,
     retention,
     segmentCache,
+    projects,
+    sessions,
+    loginLimiter,
   } satisfies AppDeps)
   registerHealth(app, readiness)
   // Unauthenticated and dependency-free, like health — registered up front
   // for the same reason.
   registerSdkRoutes(app)
+  registerAuthRoutes(app, { pg, sessions, limiter: loginLimiter, readiness })
   // Sourced from IngestCounters, not an onResponse hook counting HTTP
   // responses: /v1/batch answers with a single response for up to 500
   // events, so a response-derived count would undercount by up to 500x and
