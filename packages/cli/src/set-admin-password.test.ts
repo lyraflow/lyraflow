@@ -1,8 +1,15 @@
 import { join } from 'node:path'
+import { PassThrough } from 'node:stream'
 import { verifyPassword } from '@lyraflow/core'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
-import { EmptyPasswordError, setAdminPassword } from './set-admin-password.js'
+import {
+  EmptyPasswordError,
+  STDIN_READ_TIMEOUT_MS,
+  StdinTimeoutError,
+  readAllStdin,
+  setAdminPassword,
+} from './set-admin-password.js'
 
 const pg = createPgPool('postgres://lyraflow:lyraflow@localhost:5433/lyraflow_test')
 const ch = createChClient({
@@ -82,5 +89,87 @@ describe('setAdminPassword', () => {
       EmptyPasswordError,
     )
     expect((await pg.query('SELECT 1 FROM admin_user')).rows).toHaveLength(0)
+  })
+})
+
+describe('readAllStdin', () => {
+  it('STDIN_READ_TIMEOUT_MS is the real two-minute production value', () => {
+    expect(STDIN_READ_TIMEOUT_MS).toBe(2 * 60_000)
+  })
+
+  it('resolves with the piped bytes once stdin ends, unaffected by the timeout path', async () => {
+    const input = new PassThrough()
+    const result = readAllStdin(input, () => {}, STDIN_READ_TIMEOUT_MS)
+    input.write('a-good-password')
+    input.end()
+    await expect(result).resolves.toBe('a-good-password')
+  })
+
+  // Uses a short overridden `timeoutMs` rather than the real two-minute
+  // `STDIN_READ_TIMEOUT_MS` -- same reasoning `createPrompt`'s own timeout
+  // test (index.test.ts) already applies to `PROMPT_TIMEOUT_MS`.
+  it('rejects with StdinTimeoutError, distinct from EmptyPasswordError, when nothing arrives before the timeout', async () => {
+    const input = new PassThrough()
+    const result = readAllStdin(input, () => {}, 20)
+    await expect(result).rejects.toBeInstanceOf(StdinTimeoutError)
+    await expect(result).rejects.not.toBeInstanceOf(EmptyPasswordError)
+  })
+
+  it('a timed-out read never reaches setAdminPassword, so no row is written', async () => {
+    const input = new PassThrough()
+    await expect(readAllStdin(input, () => {}, 20)).rejects.toBeInstanceOf(StdinTimeoutError)
+    // setAdminPassword is never called on this path in the real dispatch
+    // (index.ts awaits readAllStdin first and breaks out on rejection) --
+    // asserted here as "no row exists", the same observable the empty/
+    // whitespace tests above check, rather than re-deriving the dispatch.
+    expect((await pg.query('SELECT 1 FROM admin_user')).rows).toHaveLength(0)
+  })
+
+  it('writes a hint to stderr before blocking when stdin is a TTY, and not otherwise', async () => {
+    const ttyInput = new PassThrough() as PassThrough & { isTTY: boolean }
+    ttyInput.isTTY = true
+    let hinted = ''
+    const result = readAllStdin(
+      ttyInput,
+      (s) => {
+        hinted += s
+      },
+      20,
+    )
+    await expect(result).rejects.toBeInstanceOf(StdinTimeoutError)
+    expect(hinted).toMatch(/reading password from stdin/i)
+
+    const pipedInput = new PassThrough()
+    let notHinted = ''
+    const piped = readAllStdin(
+      pipedInput,
+      (s) => {
+        notHinted += s
+      },
+      STDIN_READ_TIMEOUT_MS,
+    )
+    pipedInput.end()
+    await piped
+    expect(notHinted).toBe('')
+  })
+
+  // Found live, against a real pty, during the manual verification for this
+  // fix: the timeout fired and printed the right error, but the PROCESS
+  // never actually exited afterward. A 'data' listener switches a stream
+  // into flowing mode and it stays there once switched; for a TTY
+  // specifically that keeps the underlying fd polling and the event loop
+  // alive. `isPaused()` is the observable proxy for "won't do that" --
+  // `pause()` is what un-flows it.
+  it('pauses stdin once resolved, on both the success and the timeout path', async () => {
+    const resolved = new PassThrough()
+    const resolvedResult = readAllStdin(resolved, () => {}, STDIN_READ_TIMEOUT_MS)
+    resolved.write('a-password')
+    resolved.end()
+    await resolvedResult
+    expect(resolved.isPaused()).toBe(true)
+
+    const timedOut = new PassThrough()
+    await expect(readAllStdin(timedOut, () => {}, 20)).rejects.toBeInstanceOf(StdinTimeoutError)
+    expect(timedOut.isPaused()).toBe(true)
   })
 })

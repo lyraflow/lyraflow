@@ -28,7 +28,12 @@ import {
   resolveMode,
 } from './api/output.js'
 import { ProjectExistsError, createProject } from './create-project.js'
-import { EmptyPasswordError, setAdminPassword } from './set-admin-password.js'
+import {
+  EmptyPasswordError,
+  StdinTimeoutError,
+  readAllStdin,
+  setAdminPassword,
+} from './set-admin-password.js'
 
 // Re-exported so existing call sites (`import type { CommandContext } from
 // './index.js'`) keep working — the interface itself lives in
@@ -51,19 +56,6 @@ function clients() {
       database: env('LYRAFLOW_CLICKHOUSE_DB'),
     }),
   }
-}
-
-/**
- * Reads the whole of stdin as UTF-8. Used only by `set-admin-password`,
- * which takes the password this way so it never appears in shell history or
- * in `ps` output the way an argv value would. A closed or empty stdin
- * yields `''`, and `setAdminPassword` refuses that rather than silently
- * setting an empty password.
- */
-async function readAllStdin(): Promise<string> {
-  const chunks: Buffer[] = []
-  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk))
-  return Buffer.concat(chunks).toString('utf8')
 }
 
 /**
@@ -615,14 +607,27 @@ async function main(): Promise<void> {
 
       // Read from stdin, never from argv: an argument lands in shell
       // history and in `ps` output for every user on the box.
-      const password = await readAllStdin()
+      let password: string
+      try {
+        password = await readAllStdin(process.stdin)
+      } catch (err) {
+        if (!(err instanceof StdinTimeoutError)) throw err
+        // Rendered as `{error, code}` directly (not via `emitError`,
+        // which fixes every non-ApiError/UsageError `code` to the single
+        // literal `'error'`) so `--json` mode gives `stdin_timeout` a code
+        // distinct from `empty_password` below -- the whole point of these
+        // being two different exception classes rather than one.
+        emitObject({ error: err.message, code: err.code }, mode, writeErr)
+        process.exitCode = 1
+        break
+      }
       const { pg } = clients()
       try {
         const outcome = await setAdminPassword(pg, email, password)
         emitObject({ command: 'set-admin-password', email, outcome }, mode, write)
       } catch (err) {
         if (!(err instanceof EmptyPasswordError)) throw err
-        emitError(err, mode, writeErr)
+        emitObject({ error: err.message, code: err.code }, mode, writeErr)
         process.exitCode = 1
       } finally {
         await pg.end()
