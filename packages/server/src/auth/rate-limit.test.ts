@@ -51,4 +51,38 @@ describe('AttemptLimiter', () => {
     for (let i = 0; i < 50; i++) l.record([`ip:${i}`])
     expect(l.size).toBeLessThanOrEqual(4)
   })
+
+  // Eviction must be by recency, not by first-ever-insertion. Otherwise a
+  // blocked IP can erase its own block from a single machine: keep hitting
+  // the endpoint with disposable emails, and once the map fills, the
+  // blocked IP -- pinned at the front of the order since it was inserted
+  // first and never "moved" -- would be the first thing evicted.
+  it('keeps a blocked key blocked through a flood of unrelated keys', () => {
+    const l = new AttemptLimiter(1, 60_000, 4)
+    l.record(['ip:victim'])
+    expect(l.check(['ip:victim'])).toBe(false)
+    // A blocked caller keeps hitting the endpoint, so `check` keeps getting
+    // called against it -- but a request already refused by `check` is
+    // never recorded again, so `record` never touches ip:victim past this
+    // point. Only `check`'s own LRU refresh can keep it from aging out.
+    for (let i = 0; i < 50; i++) {
+      l.record([`ip:filler-${i}`])
+      expect(l.check(['ip:victim'])).toBe(false)
+    }
+    expect(l.check(['ip:victim'])).toBe(false)
+  })
+
+  // Companion to the above: a key that is NOT touched during the flood
+  // must still get evicted, so the previous test cannot pass simply
+  // because nothing was ever evicted.
+  it('evicts a key that is never touched again during the same flood', () => {
+    const l = new AttemptLimiter(1, 60_000, 4)
+    l.record(['ip:doomed'])
+    expect(l.check(['ip:doomed'])).toBe(false)
+    for (let i = 0; i < 50; i++) l.record([`ip:filler-${i}`])
+    // ip:doomed was never touched again, so it is the least recently used
+    // key throughout the flood and must be the one evicted -- its block
+    // is gone, which is the only way to observe eviction actually happened.
+    expect(l.check(['ip:doomed'])).toBe(true)
+  })
 })

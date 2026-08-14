@@ -19,7 +19,16 @@ export const LOGIN_MAX_KEYS = 4096
  * entropy, which the installer generates.
  */
 export class AttemptLimiter {
-  // Map iterates in insertion order, so the first key is always the oldest.
+  // Every read and write below deletes a key before re-inserting it, so the
+  // first key in iteration order is always the least recently used -- not
+  // merely the first one ever recorded (the same guarantee ProjectCache's
+  // #read/#store keep). That distinction is load-bearing: without it, a
+  // blocked key that keeps getting re-recorded from a single IP would stay
+  // pinned at the *front* of the order (its original insertion point) and
+  // become the first thing evicted once the map fills, letting that IP
+  // erase its own block just by continuing to hammer the endpoint. With it,
+  // every re-record moves the key to the protected end, and escaping the
+  // limit genuinely requires rotating source IPs, not just retrying.
   #hits = new Map<string, number[]>()
 
   constructor(
@@ -35,8 +44,12 @@ export class AttemptLimiter {
   #live(key: string): number[] {
     const cutoff = Date.now() - this.windowMs
     const kept = (this.#hits.get(key) ?? []).filter((t) => t > cutoff)
-    if (kept.length === 0) this.#hits.delete(key)
-    else this.#hits.set(key, kept)
+    // Delete before conditionally re-inserting: a key with live attempts
+    // must move to the end of the iteration order on every read, exactly
+    // as ProjectCache#read does, so a repeatedly-checked key is never the
+    // "oldest" one evicted.
+    this.#hits.delete(key)
+    if (kept.length > 0) this.#hits.set(key, kept)
     return kept
   }
 
@@ -49,6 +62,17 @@ export class AttemptLimiter {
     for (const key of keys) {
       const kept = this.#live(key)
       kept.push(Date.now())
+      // Bounded by the same limit `check` enforces: a key already over the
+      // limit that keeps getting recorded (a blocked IP that keeps
+      // retrying) would otherwise grow this array for the rest of the
+      // window. Only the most recent `maxAttempts` timestamps are ever
+      // relevant to `check`, so older ones are dropped as soon as they are.
+      if (kept.length > this.maxAttempts) kept.splice(0, kept.length - this.maxAttempts)
+      // Delete before set again: #live() already refreshed the position
+      // when there were live attempts, but when the key had fully expired
+      // #live() deleted it outright, so this insert is what lands the
+      // newly recorded key at the end of the order.
+      this.#hits.delete(key)
       this.#hits.set(key, kept)
       while (this.#hits.size > this.maxKeys) {
         const oldest = this.#hits.keys().next().value
