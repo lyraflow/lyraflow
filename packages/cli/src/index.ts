@@ -10,6 +10,7 @@ import { Client } from './api/client.js'
 import { runDeletions, runSchema, runSegments } from './api/commands/catalog.js'
 import { reportParseFailure } from './api/commands/command-support.js'
 import { runEvents } from './api/commands/events.js'
+import { runFunnels } from './api/commands/funnels.js'
 import { runPersons } from './api/commands/persons.js'
 import { runSnippet } from './api/commands/snippet.js'
 import { runStats } from './api/commands/stats.js'
@@ -556,6 +557,7 @@ async function main(): Promise<void> {
     case 'persons':
     case 'deletions':
     case 'segments':
+    case 'funnels':
     case 'schema':
     case 'snippet': {
       const isTty = process.stdout.isTTY ?? false
@@ -658,6 +660,9 @@ async function main(): Promise<void> {
         case 'segments':
           process.exitCode = await runSegments(args, ctx)
           break
+        case 'funnels':
+          process.exitCode = await runFunnels(args, ctx)
+          break
         case 'schema':
           process.exitCode = await runSchema(args, ctx)
           break
@@ -670,7 +675,7 @@ async function main(): Promise<void> {
 
     default:
       console.error(
-        'Usage: lyraflow <--version|migrate|create-project|healthcheck|events|stats|persons|deletions|segments|schema|snippet>',
+        'Usage: lyraflow <--version|migrate|create-project|healthcheck|events|stats|persons|deletions|segments|funnels|schema|snippet>',
       )
       process.exit(2)
   }
