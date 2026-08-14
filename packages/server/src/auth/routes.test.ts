@@ -132,6 +132,23 @@ describe('POST /v1/auth/login', () => {
     expect(header).toMatch(/Secure/i)
   })
 
+  // The installer writes LYRAFLOW_ADMIN_EMAIL verbatim, and an operator's
+  // browser autofill or manual typing is not guaranteed to match its case.
+  // The lookup must fold case so a mismatch here isn't indistinguishable
+  // from a wrong password.
+  it('logs in when the submitted email differs in case from what is stored', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/auth/login',
+      headers: { 'x-lyraflow-ui': '1' },
+      payload: { email: EMAIL.toUpperCase(), password: PASSWORD },
+    })
+    expect(res.statusCode).toBe(200)
+    const setCookie = res.headers['set-cookie']
+    const header = Array.isArray(setCookie) ? (setCookie[0] ?? '') : (setCookie ?? '')
+    expect(header).toMatch(/^lf_session=/)
+  })
+
   it('refuses a wrong password with no cookie', async () => {
     const res = await login('wrong-password')
     expect(res.statusCode).toBe(401)
@@ -215,5 +232,50 @@ describe('GET /v1/auth/session and POST /v1/auth/logout', () => {
       headers: { 'x-lyraflow-ui': '1' },
     })
     expect(res.statusCode).toBe(401)
+  })
+
+  // Nothing else pins clearSessionCookie's attributes against
+  // setSessionCookie's. A clear whose HttpOnly/SameSite/Path/Secure don't
+  // match the original cookie's can leave the original in place in some
+  // browsers -- logout would 204 while the browser keeps sending the old
+  // session.
+  it("logout's Set-Cookie carries the same HttpOnly/SameSite/Path as login, and omits Secure over plain HTTP", async () => {
+    const res = await login()
+    const cookie = `lf_session=${cookieValue(
+      Array.isArray(res.headers['set-cookie'])
+        ? (res.headers['set-cookie'][0] ?? '')
+        : (res.headers['set-cookie'] ?? ''),
+    )}`
+
+    const out = await app.inject({
+      method: 'POST',
+      url: '/v1/auth/logout',
+      headers: { cookie, 'x-lyraflow-ui': '1' },
+    })
+    const setCookie = out.headers['set-cookie']
+    const header = Array.isArray(setCookie) ? (setCookie[0] ?? '') : (setCookie ?? '')
+    expect(header).toMatch(/^lf_session=/)
+    expect(header).toMatch(/HttpOnly/i)
+    expect(header).toMatch(/SameSite=Lax/i)
+    expect(header).toMatch(/Path=\//i)
+    expect(header).not.toMatch(/Secure/i)
+  })
+
+  it("logout's Set-Cookie carries Secure when the request arrived over HTTPS via the proxy", async () => {
+    const res = await login()
+    const cookie = `lf_session=${cookieValue(
+      Array.isArray(res.headers['set-cookie'])
+        ? (res.headers['set-cookie'][0] ?? '')
+        : (res.headers['set-cookie'] ?? ''),
+    )}`
+
+    const out = await app.inject({
+      method: 'POST',
+      url: '/v1/auth/logout',
+      headers: { cookie, 'x-lyraflow-ui': '1', 'x-forwarded-proto': 'https' },
+    })
+    const setCookie = out.headers['set-cookie']
+    const header = Array.isArray(setCookie) ? (setCookie[0] ?? '') : (setCookie ?? '')
+    expect(header).toMatch(/Secure/i)
   })
 })

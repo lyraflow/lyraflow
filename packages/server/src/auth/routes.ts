@@ -49,8 +49,17 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): void {
       return reply.code(429).header('retry-after', '900').send({ error: 'too_many_attempts' })
     }
 
+    // Case-folded: the limiter's own key already lowercases the submitted
+    // email, and the installer writes LYRAFLOW_ADMIN_EMAIL verbatim into
+    // admin_user (ensureAdminUser never normalises it). Without this, an
+    // operator who types `Admin@localhost` for a stored `admin@localhost`
+    // gets `invalid_credentials` forever, and the identical body this route
+    // deliberately returns for "no such account" means they cannot tell a
+    // case mismatch from a wrong password. admin_user holds at most one row
+    // in practice, so folding at read time is unambiguous and needs no
+    // migration of what's already stored.
     const res = await pg.query<{ id: string; password_hash: string }>(
-      'SELECT id, password_hash FROM admin_user WHERE email = $1',
+      'SELECT id, password_hash FROM admin_user WHERE lower(email) = lower($1)',
       [email],
     )
     const row = res.rows[0]
