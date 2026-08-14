@@ -2,8 +2,7 @@ import { Params, chDateTime, notSuppressedExpr, resolvedPersonExpr } from '@lyra
 import type { ClickHouseClient } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import type { ProjectCache } from '../auth/project-cache.js'
-import type { Readiness } from '../health.js'
+import type { Authenticate } from '../auth/bridge.js'
 import type { PersonAliases } from '../identity/aliases.js'
 import type { IdentityBindings } from '../identity/bindings.js'
 import {
@@ -11,7 +10,6 @@ import {
   personEventsPredicate,
   resolvePersonScope,
 } from '../identity/scope.js'
-import { SERVER_KEY_HEADER, makeAuthenticator } from '../ingest/routes.js'
 import { parseChDateTime } from '../ingest/row.js'
 import { SEGMENT_MAX_EXECUTION_SECONDS, SEGMENT_MAX_MEMORY_BYTES } from '../segments/execute.js'
 import { FeedCursorError, decodeFeedCursor, encodeFeedCursor } from './cursor.js'
@@ -115,8 +113,7 @@ export const STATS_DEFAULT_WINDOW_MS: Record<keyof typeof STATS_INTERVALS, numbe
 }
 
 export interface EventsDeps {
-  projects: ProjectCache
-  readiness: Readiness
+  authenticate: Authenticate
   ch: ClickHouseClient
   bindings: IdentityBindings
   aliases: PersonAliases
@@ -279,18 +276,10 @@ interface FeedRow {
  * not reach it.
  */
 export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): void {
-  const { projects, readiness, ch, bindings, aliases, database } = deps
-
-  const authenticateServer = makeAuthenticator(
-    readiness,
-    SERVER_KEY_HEADER,
-    (key) => projects.byServerKey(key),
-    'missing_server_key',
-    'invalid_server_key',
-  )
+  const { authenticate, ch, bindings, aliases, database } = deps
 
   app.get('/v1/events', async (req, reply) => {
-    const project = await authenticateServer(req, reply)
+    const project = await authenticate(req, reply)
     if (!project) return
 
     const q = Query.safeParse(req.query)
@@ -535,7 +524,7 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
    * earliest or the latest.
    */
   app.get('/v1/events/stats', async (req, reply) => {
-    const project = await authenticateServer(req, reply)
+    const project = await authenticate(req, reply)
     if (!project) return
 
     const q = StatsQuery.safeParse(req.query)

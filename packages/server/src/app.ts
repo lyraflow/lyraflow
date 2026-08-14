@@ -1,6 +1,7 @@
 import cookie from '@fastify/cookie'
 import type { ClickHouseClient, Pool } from '@lyraflow/db'
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify'
+import { makeServerOrSessionAuthenticator } from './auth/bridge.js'
 import { ProjectCache } from './auth/project-cache.js'
 import { AttemptLimiter } from './auth/rate-limit.js'
 import { registerAuthRoutes } from './auth/routes.js'
@@ -156,6 +157,13 @@ export function buildApp(input: {
   const projects = new ProjectCache(pg, 60_000)
   const sessions = new SessionStore(pg)
   const loginLimiter = new AttemptLimiter()
+  // Built ONCE and shared by every project-scoped registration below —
+  // Task 9's whole point is that a browser session and a project server key
+  // resolve through this single implementation, never two. `registerIngestRoutes`
+  // deliberately does NOT receive this: its write-key path (and /v1/alias)
+  // stay on `makeAuthenticator` directly, so a browser cookie can never
+  // reach the ingest surface (see auth/bridge.ts's own docstring).
+  const authenticate = makeServerOrSessionAuthenticator({ readiness, projects, sessions })
   const bindings = new IdentityBindings(pg)
   const aliases = new PersonAliases(pg)
   const suppression = new SuppressionStore(pg)
@@ -261,44 +269,43 @@ export function buildApp(input: {
     aliases,
     allowedOrigins: config.allowedOrigins,
   })
-  registerPersonRoutes(app, { projects, readiness, ch, bindings, aliases, suppression })
-  // Shares `projects`/`bindings`/`aliases` with the registrations above and
-  // below rather than constructing new instances — same reasoning as the
-  // comment on those three above: two ProjectCache-shaped duplicates would
-  // double the Postgres load an identical lookup produces, and the person
-  // filter's resolution must see the exact same authoritative state the
-  // write path just wrote through.
+  registerPersonRoutes(app, { authenticate, ch, bindings, aliases, suppression })
+  // Shares `bindings`/`aliases` with the registrations above and below
+  // rather than constructing new instances — the person filter's resolution
+  // must see the exact same authoritative state the write path just wrote
+  // through. `authenticate` is the SAME shared instance every project-scoped
+  // registration below gets (see its own comment above) — never a
+  // per-registration authenticator, so a session and a server key resolve
+  // through identical logic everywhere.
   registerEventsRoutes(app, {
-    projects,
-    readiness,
+    authenticate,
     ch,
     bindings,
     aliases,
     database: config.ch.database,
   })
   registerSegmentRoutes(app, {
-    projects,
-    readiness,
+    authenticate,
     ch,
     pg,
     database: config.ch.database,
     cache: segmentCache,
   })
-  // Shares the same `projects`, `ch` and `pg` instances as the registrations
-  // around it, for the reason stated above registerEventsRoutes: a second
-  // ProjectCache-shaped duplicate would double the Postgres load an identical
-  // lookup produces. Deliberately NOT given `segmentCache` — a funnel is run
-  // interactively a few times a day rather than per page view, so a cache
-  // would buy little and would inherit the staleness #38 is open for.
+  // Shares the same `ch` and `pg` instances as the registrations around it —
+  // a second ProjectCache-shaped duplicate would double the Postgres load an
+  // identical lookup produces, which is why `authenticate` (built once,
+  // above) is shared rather than rebuilt here too. Deliberately NOT given
+  // `segmentCache` — a funnel is run interactively a few times a day rather
+  // than per page view, so a cache would buy little and would inherit the
+  // staleness #38 is open for.
   registerFunnelRoutes(app, {
-    projects,
-    readiness,
+    authenticate,
     ch,
     pg,
     database: config.ch.database,
   })
-  registerSchemaRoutes(app, { projects, readiness, ch })
-  registerProjectRoutes(app, { projects, readiness, pg })
+  registerSchemaRoutes(app, { authenticate, ch })
+  registerProjectRoutes(app, { authenticate, pg })
   // One shared object, not one built per registration: registerExportRoute
   // takes the exact same PrivacyDeps registerPrivacyRoutes does (export.ts's
   // own docstring), and constructing a second literal here is exactly the
@@ -308,8 +315,7 @@ export function buildApp(input: {
   // "failed" vs "in_progress", and a value that drifted from the worker's
   // own would make that endpoint lie about state the worker itself defines.
   const privacyDeps = {
-    projects,
-    readiness,
+    authenticate,
     pg,
     ch,
     bindings,

@@ -1,15 +1,9 @@
 import type { Pool } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
-import type { ProjectCache } from '../auth/project-cache.js'
-import type { Readiness } from '../health.js'
-// From ingest/routes.js -- that is where both live today, and every
-// server-key route in this codebase imports them from there. Verified
-// against schema/routes.ts:6 rather than assumed.
-import { SERVER_KEY_HEADER, makeAuthenticator } from '../ingest/routes.js'
+import type { Authenticate } from '../auth/bridge.js'
 
 export interface ProjectDeps {
-  projects: ProjectCache
-  readiness: Readiness
+  authenticate: Authenticate
   pg: Pool
 }
 
@@ -36,17 +30,10 @@ export interface ProjectDeps {
  * a direct Postgres read -- the cache does not carry either.
  */
 export function registerProjectRoutes(app: FastifyInstance, deps: ProjectDeps): void {
-  const { projects, readiness, pg } = deps
-  const authenticateServer = makeAuthenticator(
-    readiness,
-    SERVER_KEY_HEADER,
-    (key) => projects.byServerKey(key),
-    'missing_server_key',
-    'invalid_server_key',
-  )
+  const { authenticate, pg } = deps
 
   app.get('/v1/project', async (req, reply) => {
-    const project = await authenticateServer(req, reply)
+    const project = await authenticate(req, reply)
     if (!project) return
 
     // Scoped by the authenticated project's id -- never by anything a caller

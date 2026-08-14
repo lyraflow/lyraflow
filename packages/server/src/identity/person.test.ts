@@ -10,7 +10,9 @@ import {
 import Fastify, { type FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { buildApp } from '../app.js'
+import type { Authenticate } from '../auth/bridge.js'
 import { hashServerKey } from '../auth/project-cache.js'
+import type { Project } from '../auth/project-cache.js'
 import { type Config, loadConfig } from '../config.js'
 import { Readiness } from '../health.js'
 import { type PgDictionarySource, ensureIdentityDictionaries } from './dictionaries.js'
@@ -1032,12 +1034,15 @@ describe('GET /v1/persons/:id (mocked ClickHouse): parameter binding', () => {
         }
       },
     } as unknown as ClickHouseClient
-    const fakeProjects = {
-      byServerKey: async (key: string) =>
-        key === 'sk_fake'
-          ? { id: 1, slug: 'fake', retentionMonths: 1, monthlyEventQuota: 1 }
-          : null,
-    } as unknown as PersonDeps['projects']
+    // A fake `authenticate` standing in for the bridge (auth/bridge.ts) —
+    // this test's own concern is ClickHouse parameter binding, not auth, so
+    // it reproduces just enough of the real server-key check (a header
+    // match to a canned Project) rather than pulling in the real bridge and
+    // its Postgres/session dependencies.
+    const fakeAuthenticate: Authenticate = async (req) =>
+      req.headers['x-lyraflow-server-key'] === 'sk_fake'
+        ? ({ id: 1, slug: 'fake', retentionMonths: 1, monthlyEventQuota: 1 } as Project)
+        : null
     const fakeBindings = {
       devicesForAny: async () => [],
       mostRecentPersonFor: async () => null,
@@ -1058,11 +1063,8 @@ describe('GET /v1/persons/:id (mocked ClickHouse): parameter binding', () => {
     } as unknown as PersonDeps['suppression']
 
     const mockedApp = Fastify()
-    const readiness = new Readiness()
-    readiness.markReady()
     registerPersonRoutes(mockedApp, {
-      projects: fakeProjects,
-      readiness,
+      authenticate: fakeAuthenticate,
       ch: fakeCh,
       bindings: fakeBindings,
       aliases: fakeAliases,
