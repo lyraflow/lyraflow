@@ -14,6 +14,13 @@ export interface Config {
   allowedOrigins: string[]
   retentionIntervalMs: number
   retentionEnabled: boolean
+  /**
+   * Read once at boot by ensureAdminUser and never again. Absent on any
+   * install that predates the admin account, which is why nothing here
+   * throws on a missing value -- see auth/bootstrap.ts.
+   */
+  adminEmail: string | undefined
+  adminPassword: string | undefined
 }
 
 /**
@@ -138,5 +145,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     // data an operator believed they had turned off, which is the worse
     // failure of the two by a wide margin.
     retentionEnabled: bool(env, 'LYRAFLOW_RETENTION_ENABLED', true),
+    adminEmail: env.LYRAFLOW_ADMIN_EMAIL,
+    adminPassword: env.LYRAFLOW_ADMIN_PASSWORD,
   }
 }
