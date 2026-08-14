@@ -93,11 +93,17 @@ describe('SessionStore', () => {
   })
 
   it('renews a session inside the renewal window and reports it', async () => {
-    // TTL 10s, renew when under 60s remain: every fresh session is already
-    // inside its own renewal window, so one verify() must renew.
-    const store = new SessionStore(pg, 10_000, 60_000)
-    const { token, expiresAt } = await store.issue(adminId)
-    const rec = await store.verify(token)
+    // Issued with a 10s TTL, renewed by a store whose TTL is 10 minutes: the
+    // renewed expiry is later by construction, not by however many
+    // milliseconds happened to elapse between the two calls. The original
+    // form compared two timestamps computed from the SAME ttl and so
+    // depended on at least 1ms passing between issue() and verify() -- true
+    // most of the time, and intermittently false, which is a flaky test
+    // rather than a real signal.
+    const issuer = new SessionStore(pg, 10_000, 60_000)
+    const { token, expiresAt } = await issuer.issue(adminId)
+    const renewer = new SessionStore(pg, 600_000, 60_000)
+    const rec = await renewer.verify(token)
     expect(rec?.renewed).toBe(true)
     expect(rec?.expiresAt.getTime()).toBeGreaterThan(expiresAt.getTime())
 
@@ -139,12 +145,15 @@ describe('SessionStore', () => {
   })
 
   it('verifies and still renews a session that is within the max-age cap', async () => {
-    // Same TTL/renewal shape as "renews a session inside the renewal
-    // window", but with an explicit, generous max-age -- proving the cap
-    // does not interfere with a session nowhere near it.
-    const store = new SessionStore(pg, 10_000, 60_000, SESSION_MAX_AGE_MS)
-    const { token, expiresAt } = await store.issue(adminId)
-    const rec = await store.verify(token)
+    // Same issuer/renewer split as "renews a session inside the renewal
+    // window", so the renewed expiry is later by construction rather than
+    // by elapsed wall-clock time -- with an explicit, generous max-age on
+    // both stores, proving the cap does not interfere with a session
+    // nowhere near it.
+    const issuer = new SessionStore(pg, 10_000, 60_000, SESSION_MAX_AGE_MS)
+    const { token, expiresAt } = await issuer.issue(adminId)
+    const renewer = new SessionStore(pg, 600_000, 60_000, SESSION_MAX_AGE_MS)
+    const rec = await renewer.verify(token)
     expect(rec?.adminUserId).toBe(adminId)
     expect(rec?.renewed).toBe(true)
     expect(rec?.expiresAt.getTime()).toBeGreaterThan(expiresAt.getTime())
