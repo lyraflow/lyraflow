@@ -131,6 +131,15 @@ const SESSION_ROUTES_ID_SCOPED: ReadonlyArray<[string, string, string]> = [
   ['GET', `/v1/persons/${PREFIX}-no-such-person`, 'person_not_found'],
   ['GET', `/v1/persons/${PREFIX}-no-such-person/export`, 'person_not_found'],
   ['GET', '/v1/deletions/999999999', 'deletion_not_found'],
+  // DELETE /v1/persons/:id is destructive and asynchronous in general (it
+  // hands off to PurgeWorker), but PurgeWorker is never started by
+  // buildApp() in a route test (see app.ts's own comment on why) and a
+  // FRESH id with zero events takes the exact same "not exists" branch as
+  // the GET routes above (privacy/routes.ts: `deletions.reopen` finds no
+  // prior request and returns null) -- so this is a real, deterministic
+  // 404, not a manufactured person, and nothing is left claimed or pending
+  // for any worker to pick up.
+  ['DELETE', `/v1/persons/${PREFIX}-no-such-person-2`, 'person_not_found'],
 ]
 
 describe('every id-scoped project route also accepts a session (identity/person.ts, privacy/routes.ts, privacy/export.ts)', () => {
@@ -138,7 +147,7 @@ describe('every id-scoped project route also accepts a session (identity/person.
     '%s %s -> 404 %s, not an auth failure',
     async (method, url, error) => {
       const res = await app.inject({
-        method: method as 'GET',
+        method: method as 'GET' | 'DELETE',
         url,
         headers: { cookie, 'x-lyraflow-ui': '1', 'x-lyraflow-project': String(projectId) },
       })
@@ -146,6 +155,159 @@ describe('every id-scoped project route also accepts a session (identity/person.
       expect(res.json()).toEqual({ error })
     },
   )
+})
+
+// segments/routes.ts and funnels/routes.ts each expose several routes beyond
+// the one GET tested in SESSION_ROUTES above -- all of them resolve through
+// the SAME `authenticate` closure variable (one destructure at the top of
+// `registerSegmentRoutes`/`registerFunnelRoutes`), so a "one route per
+// module" sample already proves that binding is correct. This block exists
+// anyway, per fix round 1: a sample cannot catch a route wired wrong
+// INDIVIDUALLY (e.g. a stray per-route auth check that diverges from the
+// shared one), only a reference to a name that no longer exists at all
+// (which typecheck already catches independently). Every remaining
+// segments/funnels route is exercised below with the minimal body that
+// resolves to a real object, in dependency order: create, then read/write
+// against the created id, then delete it last.
+const TRAIT_FILTER = { kind: 'trait', key: 'plan', operator: '=', value: 'trial' }
+
+describe('every segments route accepts a session', () => {
+  let sessionSegmentId = 0
+
+  it('POST /v1/segments/preview', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/segments/preview',
+      headers: { cookie, 'x-lyraflow-ui': '1', 'x-lyraflow-project': String(projectId) },
+      payload: { ast_version: 1, filter: TRAIT_FILTER },
+    })
+    expect(res.statusCode).toBeLessThan(400)
+  })
+
+  it('POST /v1/segments', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/segments',
+      headers: { cookie, 'x-lyraflow-ui': '1', 'x-lyraflow-project': String(projectId) },
+      payload: { name: `${PREFIX}-segment`, ast_version: 1, filter: TRAIT_FILTER },
+    })
+    expect(res.statusCode).toBeLessThan(400)
+    sessionSegmentId = (res.json() as { id: number }).id
+  })
+
+  it('GET /v1/segments/:id', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/v1/segments/${sessionSegmentId}`,
+      headers: { cookie, 'x-lyraflow-ui': '1', 'x-lyraflow-project': String(projectId) },
+    })
+    expect(res.statusCode).toBeLessThan(400)
+  })
+
+  it('PATCH /v1/segments/:id', async () => {
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/v1/segments/${sessionSegmentId}`,
+      headers: { cookie, 'x-lyraflow-ui': '1', 'x-lyraflow-project': String(projectId) },
+      payload: { name: `${PREFIX}-segment-renamed` },
+    })
+    expect(res.statusCode).toBeLessThan(400)
+  })
+
+  it('POST /v1/segments/:id/preview', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/segments/${sessionSegmentId}/preview`,
+      headers: { cookie, 'x-lyraflow-ui': '1', 'x-lyraflow-project': String(projectId) },
+      payload: {},
+    })
+    expect(res.statusCode).toBeLessThan(400)
+  })
+
+  // Last: the routes above need this segment to still exist.
+  it('DELETE /v1/segments/:id', async () => {
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/segments/${sessionSegmentId}`,
+      headers: { cookie, 'x-lyraflow-ui': '1', 'x-lyraflow-project': String(projectId) },
+    })
+    expect(res.statusCode).toBeLessThan(400)
+  })
+})
+
+describe('every funnels route accepts a session', () => {
+  let sessionFunnelId = 0
+  const steps = [{ event: `${PREFIX}-step-a` }, { event: `${PREFIX}-step-b` }]
+
+  it('POST /v1/funnels', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/funnels',
+      headers: { cookie, 'x-lyraflow-ui': '1', 'x-lyraflow-project': String(projectId) },
+      payload: { name: `${PREFIX}-funnel`, steps, window_seconds: 604800 },
+    })
+    expect(res.statusCode).toBeLessThan(400)
+    sessionFunnelId = (res.json() as { id: number }).id
+  })
+
+  it('GET /v1/funnels/:id', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/v1/funnels/${sessionFunnelId}`,
+      headers: { cookie, 'x-lyraflow-ui': '1', 'x-lyraflow-project': String(projectId) },
+    })
+    expect(res.statusCode).toBeLessThan(400)
+  })
+
+  it('PATCH /v1/funnels/:id', async () => {
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/v1/funnels/${sessionFunnelId}`,
+      headers: { cookie, 'x-lyraflow-ui': '1', 'x-lyraflow-project': String(projectId) },
+      payload: { name: `${PREFIX}-funnel-renamed` },
+    })
+    expect(res.statusCode).toBeLessThan(400)
+  })
+
+  it('POST /v1/funnels/preview', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/funnels/preview',
+      headers: { cookie, 'x-lyraflow-ui': '1', 'x-lyraflow-project': String(projectId) },
+      payload: { steps, window_seconds: 604800 },
+    })
+    expect(res.statusCode).toBeLessThan(400)
+  })
+
+  it('POST /v1/funnels/:id/run', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/funnels/${sessionFunnelId}/run`,
+      headers: { cookie, 'x-lyraflow-ui': '1', 'x-lyraflow-project': String(projectId) },
+      payload: {},
+    })
+    expect(res.statusCode).toBeLessThan(400)
+  })
+
+  it('POST /v1/funnels/:id/dropoff', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/funnels/${sessionFunnelId}/dropoff`,
+      headers: { cookie, 'x-lyraflow-ui': '1', 'x-lyraflow-project': String(projectId) },
+      payload: { step: 1 },
+    })
+    expect(res.statusCode).toBeLessThan(400)
+  })
+
+  // Last: the routes above need this funnel to still exist.
+  it('DELETE /v1/funnels/:id', async () => {
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/funnels/${sessionFunnelId}`,
+      headers: { cookie, 'x-lyraflow-ui': '1', 'x-lyraflow-project': String(projectId) },
+    })
+    expect(res.statusCode).toBeLessThan(400)
+  })
 })
 
 // The write path is public-key authenticated and must stay structurally

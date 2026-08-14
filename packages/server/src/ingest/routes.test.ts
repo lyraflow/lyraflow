@@ -11,6 +11,7 @@ import {
 import Fastify, { type FastifyInstance } from 'fastify'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { buildApp } from '../app.js'
+import { ensureAdminUser } from '../auth/bootstrap.js'
 import { type Project, ProjectCache } from '../auth/project-cache.js'
 import { type Config, loadConfig } from '../config.js'
 import { Readiness } from '../health.js'
@@ -32,9 +33,21 @@ const pg = createPgPool('postgres://lyraflow:lyraflow@localhost:5433/lyraflow_te
 const ch = createChClient(CH)
 let app: FastifyInstance
 let config: Config
+let routesTestProjectId = 0
+// A real admin session cookie -- see the "POST /v1/alias never accepts a
+// session" describe block below, which is the only test in this file that
+// needs one.
+let adminCookie = ''
+const ADMIN_EMAIL = 'ingest-routes-suite-admin@example.test'
+const ADMIN_PASSWORD = 'ingest-routes-suite-admin-password'
 
 const UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/131.0 Safari/537.36'
+
+/** The cookie value only, from a Set-Cookie header -- same helper as auth/routes.test.ts. */
+function cookieValue(setCookie: string): string {
+  return (setCookie.split(';')[0] ?? '').split('=')[1] ?? ''
+}
 
 beforeAll(async () => {
   await migrate({
@@ -44,10 +57,18 @@ beforeAll(async () => {
     appSchemaVersion: 999,
   })
   await pg.query('DELETE FROM projects WHERE slug = $1', ['routes-test'])
-  await pg.query(
+  const routesTestProject = await pg.query<{ id: string }>(
     `INSERT INTO projects (name, slug, write_key, server_key_hash)
-     VALUES ('Routes', 'routes-test', 'wk_routes', 'h')`,
+     VALUES ('Routes', 'routes-test', 'wk_routes', 'h') RETURNING id`,
   )
+  routesTestProjectId = Number(routesTestProject.rows[0]?.id)
+
+  // admin_user is single-tenant (see auth/routes.test.ts, auth/bridge.test.ts)
+  // and this file did not previously need one -- cleared here and in
+  // afterAll per the shared harness rule, not left for a stray row from a
+  // prior run to make the login below ambiguous.
+  await pg.query('DELETE FROM admin_user')
+  await ensureAdminUser(pg, { email: ADMIN_EMAIL, password: ADMIN_PASSWORD })
 
   config = loadConfig({
     LYRAFLOW_POSTGRES_URL: 'postgres://lyraflow:lyraflow@localhost:5433/lyraflow_test',
@@ -62,6 +83,18 @@ beforeAll(async () => {
   readiness.markReady()
   app = buildApp({ config, pg, ch, readiness })
   await app.ready()
+
+  // A real login, not a hand-minted session -- see wiring.test.ts's identical
+  // reasoning for why this is what actually proves the boundary rather than
+  // a forged cookie a regression could satisfy for the wrong reason.
+  const login = await app.inject({
+    method: 'POST',
+    url: '/v1/auth/login',
+    headers: { 'x-lyraflow-ui': '1' },
+    payload: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD },
+  })
+  const setCookie = login.headers['set-cookie']
+  adminCookie = `lf_session=${cookieValue(Array.isArray(setCookie) ? (setCookie[0] ?? '') : (setCookie ?? ''))}`
 })
 
 afterAll(async () => {
@@ -72,6 +105,7 @@ afterAll(async () => {
   await app.deps.buffer.flush()
   await app.close()
   await pg.query('DELETE FROM projects WHERE slug = $1', ['routes-test'])
+  await pg.query('DELETE FROM admin_user')
   await pg.end()
   await ch.close()
 })
@@ -84,6 +118,36 @@ function track(body: Record<string, unknown>, key = 'wk_routes') {
     payload: body,
   })
 }
+
+// This is deliberate, not an oversight: Task 9 wired the admin-session
+// bridge (auth/bridge.ts) into every OTHER project-scoped route, but
+// /v1/alias stayed on its own server-key-only authenticator
+// (`authenticateServer`, built inside registerIngestRoutes) on purpose.
+// Aliasing is destructive and project-wide -- it rewrites who a person IS
+// for the whole project, irreversibly in v0.1 -- and it is reachable only
+// with the secret server key BY DESIGN, never by the write key OR a browser
+// session. Pinned here, next to where that authenticator is built, with a
+// REAL admin session (not a forged cookie) so a future change that
+// accidentally threads the bridge into this one route would show up as a
+// newly-passing request, not as a status code that happens to still be 401
+// for a different reason.
+describe('POST /v1/alias never accepts a session', () => {
+  it('refuses a valid admin session with no server key', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/alias',
+      headers: {
+        cookie: adminCookie,
+        'x-lyraflow-ui': '1',
+        'x-lyraflow-project': String(routesTestProjectId),
+        'user-agent': UA,
+      },
+      payload: { from_user_id: 'a', to_user_id: 'b' },
+    })
+    expect(res.statusCode).toBe(401)
+    expect(res.json()).toEqual({ error: 'missing_server_key' })
+  })
+})
 
 describe('ingest routes', () => {
   it('accepts a valid event with 202', async () => {
