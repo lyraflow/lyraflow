@@ -6,6 +6,21 @@ export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000
 /** Re-issued when this much or less remains, so an active admin never expires mid-use. */
 export const SESSION_RENEW_WITHIN_MS = 7 * 24 * 60 * 60 * 1000
 
+/**
+ * The hard ceiling on a session's total age, regardless of renewal.
+ *
+ * Renewal is sliding, so without this a cookie replayed once inside every
+ * renewal window lives forever -- and the threat this product actually
+ * documents is a stolen cookie, which grants every project on the install.
+ * 90 days is generous for a solo operator's dashboard and still bounds that
+ * exposure to a quarter rather than to "until someone notices".
+ *
+ * Enforced in the same WHERE clause as `expires_at`, for the same reason:
+ * an over-age row must be unusable the instant it is over-age, whether or
+ * not the sweeper has reached it.
+ */
+export const SESSION_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000
+
 const TOKEN_BYTES = 32
 
 /**
@@ -34,6 +49,7 @@ export class SessionStore {
     // for the production values. Production passes neither.
     private readonly ttlMs: number = SESSION_TTL_MS,
     private readonly renewWithinMs: number = SESSION_RENEW_WITHIN_MS,
+    private readonly maxAgeMs: number = SESSION_MAX_AGE_MS,
   ) {}
 
   async issue(adminUserId: number): Promise<{ token: string; expiresAt: Date }> {
@@ -47,16 +63,17 @@ export class SessionStore {
   }
 
   /**
-   * Expiry is decided HERE, in SQL, rather than by reading the row and
-   * comparing in JS -- `expires_at > now()` in the WHERE clause means a row
-   * the sweeper has not reached yet is already unusable, so the sweeper is
-   * housekeeping rather than a security control. If it stops running, no
-   * expired session becomes valid.
+   * Expiry and the max-age cap are both decided HERE, in SQL, rather than by
+   * reading the row and comparing in JS -- `expires_at > now()` and
+   * `created_at > $2` in the WHERE clause mean a row the sweeper has not
+   * reached yet is already unusable, so the sweeper is housekeeping rather
+   * than a security control. If it stops running, no expired or over-age
+   * session becomes valid.
    */
   async verify(token: string): Promise<SessionRecord | null> {
     const res = await this.pg.query<{ admin_user_id: string; expires_at: Date }>(
-      'SELECT admin_user_id, expires_at FROM sessions WHERE id = $1 AND expires_at > now()',
-      [hashSessionToken(token)],
+      'SELECT admin_user_id, expires_at FROM sessions WHERE id = $1 AND expires_at > now() AND created_at > $2',
+      [hashSessionToken(token), new Date(Date.now() - this.maxAgeMs)],
     )
     const row = res.rows[0]
     if (!row) return null
@@ -78,9 +95,17 @@ export class SessionStore {
     await this.pg.query('DELETE FROM sessions WHERE id = $1', [hashSessionToken(token)])
   }
 
-  /** Returns how many rows it removed. Served by `sessions_expires_at_idx`. */
+  /**
+   * Removes both expired rows and over-age rows -- a row past the max-age
+   * cap but with a future `expires_at` (kept alive by renewal) would
+   * otherwise sit dead in the table for up to `ttlMs` more. Served by
+   * `sessions_expires_at_idx` for the first condition.
+   */
   async sweep(): Promise<number> {
-    const res = await this.pg.query('DELETE FROM sessions WHERE expires_at <= now()')
+    const res = await this.pg.query(
+      'DELETE FROM sessions WHERE expires_at <= now() OR created_at <= $1',
+      [new Date(Date.now() - this.maxAgeMs)],
+    )
     return res.rowCount ?? 0
   }
 }

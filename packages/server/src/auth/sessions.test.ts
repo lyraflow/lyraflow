@@ -1,8 +1,14 @@
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { SessionStore, hashSessionToken } from './sessions.js'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import {
+  SESSION_MAX_AGE_MS,
+  SESSION_RENEW_WITHIN_MS,
+  SESSION_TTL_MS,
+  SessionStore,
+  hashSessionToken,
+} from './sessions.js'
 
 const pg = createPgPool('postgres://lyraflow:lyraflow@localhost:5433/lyraflow_test')
 const ch = createChClient({
@@ -119,5 +125,57 @@ describe('SessionStore', () => {
     const removed = await live.sweep()
     expect(removed).toBeGreaterThanOrEqual(1)
     expect(await live.verify(token)).not.toBeNull()
+  })
+
+  it('refuses a session older than the max-age cap, even with expires_at still in the future', async () => {
+    // maxAgeMs of -1000 puts the cutoff 1s in the future, so a row created
+    // "now" is already over-age -- the same no-sleep trick the ttlMs tests
+    // use, applied to created_at instead of expires_at. ttlMs stays at its
+    // normal default, so expires_at is 30 days out: the cap is what refuses
+    // this session, not ordinary expiry.
+    const store = new SessionStore(pg, SESSION_TTL_MS, SESSION_RENEW_WITHIN_MS, -1000)
+    const { token } = await store.issue(adminId)
+    expect(await store.verify(token)).toBeNull()
+  })
+
+  it('verifies and still renews a session that is within the max-age cap', async () => {
+    // Same TTL/renewal shape as "renews a session inside the renewal
+    // window", but with an explicit, generous max-age -- proving the cap
+    // does not interfere with a session nowhere near it.
+    const store = new SessionStore(pg, 10_000, 60_000, SESSION_MAX_AGE_MS)
+    const { token, expiresAt } = await store.issue(adminId)
+    const rec = await store.verify(token)
+    expect(rec?.adminUserId).toBe(adminId)
+    expect(rec?.renewed).toBe(true)
+    expect(rec?.expiresAt.getTime()).toBeGreaterThan(expiresAt.getTime())
+  })
+
+  it('sweep removes an over-age row whose expires_at is still in the future', async () => {
+    const overAge = new SessionStore(pg, SESSION_TTL_MS, SESSION_RENEW_WITHIN_MS, -1000)
+    const { token } = await overAge.issue(adminId)
+
+    const before = await pg.query('SELECT 1 FROM sessions WHERE id = $1', [hashSessionToken(token)])
+    expect(before.rows).toHaveLength(1)
+
+    const removed = await overAge.sweep()
+    expect(removed).toBeGreaterThanOrEqual(1)
+
+    const after = await pg.query('SELECT 1 FROM sessions WHERE id = $1', [hashSessionToken(token)])
+    expect(after.rows).toHaveLength(0)
+  })
+
+  it('decides the max-age cap in the WHERE clause, not by reading the row and comparing in JS', async () => {
+    // Behaviorally, a JS-side check after the fetch returns the same
+    // answers as a SQL-side one -- this is the only test that would notice
+    // the cap moving out of the query, by inspecting the query text itself
+    // rather than verify()'s return value.
+    const store = new SessionStore(pg)
+    const { token } = await store.issue(adminId)
+    const querySpy = vi.spyOn(pg, 'query')
+    await store.verify(token)
+    const sql = String(querySpy.mock.calls[querySpy.mock.calls.length - 1]?.[0])
+    const whereClause = sql.slice(sql.indexOf('WHERE'))
+    expect(whereClause).toContain('created_at')
+    querySpy.mockRestore()
   })
 })
