@@ -490,16 +490,26 @@ The bundle is served by the app itself at two paths, unauthenticated (a
 | Path | Cache policy |
 | --- | --- |
 | `GET /lyraflow.js` | `max-age=300` — an upgrade reaches already-cached browsers within five minutes |
-| `GET /lyraflow-<version>.js` (e.g. `/lyraflow-0.1.0.js`) | `max-age=31536000, immutable` — this exact version, forever |
+| `GET /lyraflow-<version>.js` (e.g. `/lyraflow-0.2.0.js`) | `max-age=31536000, immutable` — these exact bytes never change, for as long as the server runs that version |
 
 Both paths are served gzipped to any client that accepts it, by the app
 itself — putting a compressing proxy in front is a valid thing to do, but it
 is not something you have to do to avoid shipping three times the bytes.
 
-Use the bare `/lyraflow.js` path, as in the snippet above, unless you have a
-specific reason to pin a version. If the sibling package was never built into
-your image, both paths answer `503` rather than taking the rest of the server
-down.
+**Put `/lyraflow.js` in your script tag. The versioned path is cache-busting,
+not pinning, and a script tag must not use it.** A server only serves the
+versioned path for the version it is currently running, so upgrading makes the
+previous one answer `404` — naming the version it does serve, and telling you
+this. That failure is quiet in the worst way: browsers holding the old bundle
+keep working from cache for up to a year, so data goes on arriving while every
+*new* visitor silently collects nothing.
+
+The versioned path exists so an upgrade cannot be served a stale cached bundle,
+not so a site can freeze one. There is no way to pin an SDK version against a
+server that has moved on; if you need that, pin the *server* to a release tag.
+
+If the sibling package was never built into your image, both paths answer `503`
+rather than taking the rest of the server down.
 
 **The write key is public by design** — it is meant to sit in page source,
 same as in any curl example above. It can only write events. The **server
