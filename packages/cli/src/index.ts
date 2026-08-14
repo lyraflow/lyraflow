@@ -3,7 +3,7 @@ import { writeSync } from 'node:fs'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { pathToFileURL } from 'node:url'
-import { SCHEMA_VERSION } from '@lyraflow/core'
+import { ProjectExistsError, SCHEMA_VERSION, createProject } from '@lyraflow/core'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
 import { UsageError, hasRawFlag, parseCommandArgs } from './api/args.js'
 import { Client } from './api/client.js'
@@ -27,7 +27,6 @@ import {
   emitObject,
   resolveMode,
 } from './api/output.js'
-import { ProjectExistsError, createProject } from './create-project.js'
 import {
   EmptyPasswordError,
   StdinTimeoutError,

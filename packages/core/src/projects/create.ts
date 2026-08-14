@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto'
-import type { Pool } from '@lyraflow/db'
+import type { Pool } from 'pg'
 
 export interface CreatedProject {
   name: string

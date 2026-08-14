@@ -1,6 +1,7 @@
 export const SCHEMA_VERSION = 13
 
 export { hashPassword, verifyPassword } from './auth/password.js'
+export { ProjectExistsError, createProject, slugify } from './projects/create.js'
 export * from './ingest/payloads.js'
 export * from './ingest/properties.js'
 export * from './ingest/timestamp.js'

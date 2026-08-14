@@ -1,8 +1,13 @@
-import { createPgPool } from '@lyraflow/db'
+import { Pool } from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { ProjectExistsError, createProject, slugify } from './create-project.js'
+import { ProjectExistsError, createProject, slugify } from './create.js'
 
-const pg = createPgPool('postgres://lyraflow:lyraflow@localhost:5433/lyraflow_test')
+// `pg`'s own Pool, not `@lyraflow/db`'s `createPgPool` -- `@lyraflow/db`
+// depends on `@lyraflow/core` for its own tests (schema-version.test.ts), so
+// core depending back on db would be a circular project reference.
+const pg = new Pool({
+  connectionString: 'postgres://lyraflow:lyraflow@localhost:5433/lyraflow_test',
+})
 const NAME = 'CLI Dup Test'
 
 beforeAll(async () => {
