@@ -79,15 +79,31 @@ export function compileSegment(opts: {
   projectId: number
   database: string
   now: Date
-  select?: 'count' | 'members'
+  /**
+   * `persons` returns the bare person set with no ordering or page limit. It
+   * exists so another engine can embed this population as a subquery — the
+   * funnel compiler restricting a funnel to a segment — rather than
+   * assembling equivalent SQL by hand and inheriting none of the guarantees
+   * this function applies.
+   */
+  select?: 'count' | 'members' | 'persons'
   cursor?: Cursor
+  /**
+   * Continue an existing parameter sequence instead of starting a new one.
+   *
+   * Required when this query will be embedded in another compiled query:
+   * names are positional (`p0`, `p1`, …), so two independently-numbered maps
+   * merged after the fact would silently overwrite each other. Threading one
+   * instance makes that impossible rather than merely unlikely.
+   */
+  params?: Params
 }): CompiledQuery {
   const { query, projectId, database, now, select = 'count', cursor } = opts
 
   validateTree(query)
   const warnings = costWarnings(query)
 
-  const params = new Params()
+  const params = opts.params ?? new Params()
   const base = baseCte({ database, projectId, params })
 
   const behaviors: Behavior[] = []
@@ -162,7 +178,11 @@ export function compileSegment(opts: {
       : ''
 
   const projection =
-    select === 'members' ? `SELECT\n  ${memberProjection()}` : 'SELECT count() AS person_count'
+    select === 'members'
+      ? `SELECT\n  ${memberProjection()}`
+      : select === 'persons'
+        ? `SELECT ${RESOLVED_PERSON_ALIAS}`
+        : 'SELECT count() AS person_count'
 
   const tail =
     select === 'members'

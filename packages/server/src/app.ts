@@ -3,6 +3,7 @@ import Fastify, { type FastifyError, type FastifyInstance } from 'fastify'
 import { ProjectCache } from './auth/project-cache.js'
 import type { Config } from './config.js'
 import { registerEventsRoutes } from './events/routes.js'
+import { registerFunnelRoutes } from './funnels/routes.js'
 import { type Readiness, registerHealth } from './health.js'
 import { PersonAliases } from './identity/aliases.js'
 import { IdentityBindings } from './identity/bindings.js'
@@ -243,6 +244,19 @@ export function buildApp(input: {
     pg,
     database: config.ch.database,
     cache: segmentCache,
+  })
+  // Shares the same `projects`, `ch` and `pg` instances as the registrations
+  // around it, for the reason stated above registerEventsRoutes: a second
+  // ProjectCache-shaped duplicate would double the Postgres load an identical
+  // lookup produces. Deliberately NOT given `segmentCache` — a funnel is run
+  // interactively a few times a day rather than per page view, so a cache
+  // would buy little and would inherit the staleness #38 is open for.
+  registerFunnelRoutes(app, {
+    projects,
+    readiness,
+    ch,
+    pg,
+    database: config.ch.database,
   })
   registerSchemaRoutes(app, { projects, readiness, ch })
   registerProjectRoutes(app, { projects, readiness, pg })

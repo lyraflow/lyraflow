@@ -98,4 +98,86 @@ describe('postgres schema', () => {
     const c = await pg.query('SELECT events_accepted FROM ingest_counters')
     expect(Number(c.rows[0].events_accepted)).toBe(7)
   })
+
+  /** The referential action Postgres will take, read from the catalogue. */
+  async function deleteRuleFor(table: string, column: string): Promise<string> {
+    const r = await pg.query(
+      `SELECT rc.delete_rule
+         FROM information_schema.referential_constraints rc
+         JOIN information_schema.key_column_usage k
+           ON k.constraint_name = rc.constraint_name
+        WHERE k.table_name = $1 AND k.column_name = $2`,
+      [table, column],
+    )
+    return r.rows[0]?.delete_rule
+  }
+
+  it('stores a funnel definition as jsonb with its own version column', async () => {
+    const p = await pg.query("SELECT id FROM projects WHERE slug = 'demo'")
+    await pg.query(
+      `INSERT INTO funnels (project_id, name, definition_version, steps, window_seconds)
+       VALUES ($1, 'signup', 1, $2, 604800)`,
+      [p.rows[0].id, JSON.stringify([{ event: '$page' }, { event: 'signed_up' }])],
+    )
+    const f = await pg.query('SELECT steps, definition_version, window_seconds FROM funnels')
+    expect(f.rows[0].steps[0].event).toBe('$page')
+    expect(f.rows[0].definition_version).toBe(1)
+    expect(f.rows[0].window_seconds).toBe(604800)
+  })
+
+  it('scopes a funnel name to its project', async () => {
+    const p = await pg.query("SELECT id FROM projects WHERE slug = 'demo'")
+    await expect(
+      pg.query(
+        `INSERT INTO funnels (project_id, name, definition_version, steps, window_seconds)
+         VALUES ($1, 'signup', 1, '[]'::jsonb, 60)`,
+        [p.rows[0].id],
+      ),
+    ).rejects.toThrow(/duplicate key/i)
+  })
+
+  it('refuses a window the compiler would refuse to run', async () => {
+    const p = await pg.query("SELECT id FROM projects WHERE slug = 'demo'")
+    for (const seconds of [0, 2592001]) {
+      await expect(
+        pg.query(
+          `INSERT INTO funnels (project_id, name, definition_version, steps, window_seconds)
+           VALUES ($1, $2, 1, '[]'::jsonb, $3)`,
+          [p.rows[0].id, `bad-window-${seconds}`, seconds],
+        ),
+      ).rejects.toThrow(/funnels_window_positive/i)
+    }
+  })
+
+  it('keeps a funnel’s segment_id after the segment is deleted', async () => {
+    // Deliberately no FK. SET NULL would erase the very fact the run path
+    // needs in order to warn that the restriction is gone, and CASCADE would
+    // destroy the report outright. The dangling id is resolved at run time.
+    const p = await pg.query("SELECT id FROM projects WHERE slug = 'demo'")
+    const seg = await pg.query(
+      `INSERT INTO segments (project_id, name, filter, ast_version)
+       VALUES ($1, 'doomed', '{"kind":"group","op":"and","children":[]}'::jsonb, 1)
+       RETURNING id`,
+      [p.rows[0].id],
+    )
+    await pg.query(
+      `INSERT INTO funnels (project_id, name, definition_version, steps, window_seconds, segment_id)
+       VALUES ($1, 'restricted', 1, '[]'::jsonb, 60, $2)`,
+      [p.rows[0].id, seg.rows[0].id],
+    )
+    await pg.query('DELETE FROM segments WHERE id = $1', [seg.rows[0].id])
+    const after = await pg.query("SELECT segment_id FROM funnels WHERE name = 'restricted'")
+    expect(after.rows[0].segment_id).toBe(seg.rows[0].id)
+  })
+
+  it('does not make an earlier migration unrunnable', async () => {
+    // 007_segments begins with DROP TABLE IF EXISTS segments. A dependent
+    // table would make that drop fail, so replaying 007 — which the migration
+    // tests do, against a shared database — would break.
+    expect(await deleteRuleFor('funnels', 'segment_id')).toBeUndefined()
+  })
+
+  it('deletes a project’s funnels with the project', async () => {
+    expect(await deleteRuleFor('funnels', 'project_id')).toBe('CASCADE')
+  })
 })

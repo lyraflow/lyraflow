@@ -1,7 +1,8 @@
 import { RESOLVED_PERSON_ALIAS, resolvedPersonExpr } from '../identity/resolve.js'
 import { notSuppressedExpr } from '../privacy/suppression.js'
-import type { Behavior, WherePredicate, Window } from './ast.js'
+import type { Behavior, Window } from './ast.js'
 import { type Params, chDateTime } from './params.js'
+import { wherePredicate } from './predicates.js'
 
 export interface BehaviourPass {
   /** null when the tree has no behavioural nodes — the caller omits the join. */
@@ -18,26 +19,6 @@ function windowStart(w: Window, now: Date): Date | null {
   if (w.kind === 'absolute') return new Date(w.from)
   const ms = w.unit === 'hours' ? w.n * 3_600_000 : w.n * 86_400_000
   return new Date(now.getTime() - ms)
-}
-
-/**
- * A property predicate. `property` is a MAP KEY, not a column, so it is a
- * bound parameter like any other value — there is no identifier injection
- * surface here.
- */
-function wherePredicate(w: WherePredicate, params: Params): string {
-  const numeric =
-    typeof w.value === 'number' || (Array.isArray(w.value) && typeof w.value[0] === 'number')
-  const bag = numeric ? 'properties_num' : 'properties'
-  const type = numeric ? 'Float64' : 'String'
-  const key = params.add(w.property, 'String')
-  const lhs = `${bag}[${key}]`
-
-  if (w.operator === 'between') {
-    const [lo, hi] = w.value as [string | number, string | number]
-    return `${lhs} BETWEEN ${params.add(lo, type)} AND ${params.add(hi, type)}`
-  }
-  return `${lhs} ${w.operator} ${params.add(w.value as string | number, type)}`
 }
 
 /** The per-event condition for one behaviour: name, window, and `where` predicates. */
