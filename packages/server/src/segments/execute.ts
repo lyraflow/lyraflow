@@ -19,11 +19,20 @@ export class SegmentTimeoutError extends Error {
 }
 
 /**
- * The one place a compiled segment reaches ClickHouse. Both output modes go
+ * The one place a compiled query reaches ClickHouse. Every output mode goes
  * through it so the ceilings and the error mapping cannot diverge — a second
  * copy is how one mode ends up without a memory limit.
+ *
+ * Exported because the funnel engine runs through it too. A funnel is
+ * reachable by the same authenticated caller and scans the same table, so it
+ * needs the same ceilings; giving it its own would mean two timeout policies
+ * kept in agreement by whoever remembers, and the one added next year is the
+ * one that forgets. The name is deliberately not segment-specific.
  */
-async function execute<T>(client: ClickHouseClient, compiled: CompiledQuery): Promise<T[]> {
+export async function runCompiled<T>(
+  client: ClickHouseClient,
+  compiled: CompiledQuery,
+): Promise<T[]> {
   try {
     const r = await client.query({
       query: compiled.sql,
@@ -53,7 +62,7 @@ export async function runSegment(opts: {
   client: ClickHouseClient
   compiled: CompiledQuery
 }): Promise<number> {
-  const rows = await execute<{ person_count: string }>(opts.client, opts.compiled)
+  const rows = await runCompiled<{ person_count: string }>(opts.client, opts.compiled)
   return Number(rows[0]?.person_count ?? 0)
 }
 
@@ -61,5 +70,5 @@ export async function runSegmentMembers(opts: {
   client: ClickHouseClient
   compiled: CompiledQuery
 }): Promise<MemberRow[]> {
-  return execute<MemberRow>(opts.client, opts.compiled)
+  return runCompiled<MemberRow>(opts.client, opts.compiled)
 }
