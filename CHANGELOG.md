@@ -14,6 +14,31 @@ docker compose build`, so today every install builds from its own checkout. A
 release is therefore a git tag and the source at that tag — upgrading means
 pulling the tag and rebuilding, not pulling an image.
 
+## 0.2.1 — 2026-08-14
+
+### Fixed
+
+**The versioned browser-bundle path was documented as something it is not.** Both
+the README and the route's own docstring described `/lyraflow-<version>.js` as
+serving "this exact version, forever". It does not: a server only registers that
+path for the version it is running, so upgrading makes the previous one `404` —
+and the README's example was `/lyraflow-0.1.0.js`, which 0.2.0 turned into a dead
+link inside the documentation recommending it.
+
+The guarantee that is true, and what justifies a year of `immutable`, is that
+*these exact bytes never change*. The path is cache-busting, not pinning, and a
+`<script>` tag must use the bare `/lyraflow.js`. A site that pinned the versioned
+path would keep working from cache while every new visitor silently collected
+nothing.
+
+The `404` behaviour is unchanged and deliberate — serving the current bundle
+under another version's URL is what the single literal route exists to prevent —
+but it now names the version the server does serve and what to use instead,
+carries `no-store` so it cannot outlive the upgrade that fixes it, and does not
+echo the caller-supplied version back into the body.
+
+No change to the bundle itself, to ingest, or to any query path. (#74, #75)
+
 ## 0.2.0 — 2026-08-14
 
 ### Added
