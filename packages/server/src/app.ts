@@ -27,6 +27,7 @@ import { purgePerson } from './privacy/purge.js'
 import { registerPrivacyRoutes } from './privacy/routes.js'
 import { SuppressionStore } from './privacy/suppression-store.js'
 import { PurgeWorker } from './privacy/worker.js'
+import { registerAdminProjectRoutes } from './project/admin-routes.js'
 import { registerProjectRoutes } from './project/routes.js'
 import { logDroppedPartition } from './retention/logging.js'
 import { RetentionStore } from './retention/store.js'
@@ -306,6 +307,9 @@ export function buildApp(input: {
   })
   registerSchemaRoutes(app, { authenticate, ch })
   registerProjectRoutes(app, { authenticate, pg })
+  // Session-only and NOT given `authenticate` -- see admin-routes.ts's own
+  // docstring for why these two routes must not accept a project server key.
+  registerAdminProjectRoutes(app, { pg, sessions, projects, readiness })
   // One shared object, not one built per registration: registerExportRoute
   // takes the exact same PrivacyDeps registerPrivacyRoutes does (export.ts's
   // own docstring), and constructing a second literal here is exactly the
