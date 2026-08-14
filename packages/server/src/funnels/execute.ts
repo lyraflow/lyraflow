@@ -35,3 +35,20 @@ export async function runFunnel(opts: {
   }))
   return summarise(levels, opts.steps)
 }
+
+/** One person who reached a step and stopped there. */
+export interface DropoffRow {
+  person_id: string
+  entered_at: string
+}
+
+/**
+ * One page of the people who dropped at a step. Goes through the same
+ * ceilings as every other compiled query — see `runCompiled`.
+ */
+export async function runDropoff(opts: {
+  client: ClickHouseClient
+  compiled: CompiledQuery
+}): Promise<DropoffRow[]> {
+  return runCompiled<DropoffRow>(opts.client, opts.compiled)
+}

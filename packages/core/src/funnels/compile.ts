@@ -1,6 +1,7 @@
 import { RESOLVED_PERSON_ALIAS, resolvedPersonExpr } from '../identity/resolve.js'
 import { notSuppressedExpr } from '../privacy/suppression.js'
-import type { CompiledQuery } from '../segments/compile.js'
+import { type CompiledQuery, MEMBER_PAGE_SIZE } from '../segments/compile.js'
+import type { Cursor } from '../segments/cursor.js'
 import { Params, chDateTime } from '../segments/params.js'
 import { wherePredicate } from '../segments/predicates.js'
 import type { FunnelDefinition, FunnelStep } from './ast.js'
@@ -65,6 +66,11 @@ export function compileFunnel(opts: {
   params?: Params
   /** Injected rather than read here, so a test can pin the partial boundary. */
   now: Date
+  /**
+   * Return the people who reached exactly this step and stopped, instead of
+   * the histogram. 1-indexed, matching the `index` in a run response.
+   */
+  dropoffAt?: { step: number; cursor?: Cursor }
 }): CompiledQuery {
   const { definition, projectId, database, range, segmentPersonSql, now } = opts
 
@@ -163,11 +169,13 @@ export function compileFunnel(opts: {
     ? `\n  AND ${RESOLVED_PERSON_ALIAS} IN (${segmentPersonSql})`
     : ''
 
-  const sql = `SELECT
-  level,
-  count() AS people,
-  countIf(entered_at > ${partialBoundary}) AS partial
-FROM (
+  /**
+   * The per-person pass, shared by both projections above it. Written once so
+   * the histogram and the drop-off list cannot disagree about who reached
+   * what — a second copy is how one of them ends up without the suppression
+   * filter.
+   */
+  const perPerson = `
   SELECT
     ${resolved} AS ${RESOLVED_PERSON_ALIAS},
     windowFunnel(${windowParam})(toUInt64(toUnixTimestamp64Milli(timestamp)), ${conditions.join(', ')}) AS level,
@@ -184,7 +192,43 @@ FROM (
   ) AS e
   WHERE ${notSuppressed}
   GROUP BY ${RESOLVED_PERSON_ALIAS}
-)
+`
+
+  const dropoff = opts.dropoffAt
+
+  // "Dropped at step N" is level == N — the ONE place in this feature where
+  // comparing a level for equality is correct. Everywhere else (see
+  // levels.ts) a step's population is level >= N, and confusing the two is
+  // the defect this whole layer is shaped to avoid.
+  //
+  // Ordered newest-entrant first, tie-broken by person_id, and paged by a
+  // strictly lexicographic keyset — collapsing that to `entered_at <` alone
+  // would skip every remaining person sharing the boundary row's instant.
+  const dropoffAfter =
+    dropoff?.cursor !== undefined
+      ? ` AND (entered_at < ${params.add(dropoff.cursor.lastSeen, 'DateTime64(3)')}` +
+        ` OR (entered_at = ${params.add(dropoff.cursor.lastSeen, 'DateTime64(3)')}` +
+        ` AND ${RESOLVED_PERSON_ALIAS} > ${params.add(dropoff.cursor.personId, 'String')}))`
+      : ''
+
+  if (dropoff) {
+    const level = params.add(dropoff.step, 'UInt32')
+    return {
+      sql: `SELECT ${RESOLVED_PERSON_ALIAS}, entered_at
+FROM (${perPerson})
+WHERE level = ${level}${segmentFilter}${dropoffAfter}
+ORDER BY entered_at DESC, ${RESOLVED_PERSON_ALIAS} ASC
+LIMIT ${MEMBER_PAGE_SIZE}`,
+      params: params.values,
+      warnings: funnelCostWarnings(definition, range),
+    }
+  }
+
+  const sql = `SELECT
+  level,
+  count() AS people,
+  countIf(entered_at > ${partialBoundary}) AS partial
+FROM (${perPerson})
 WHERE level > 0${segmentFilter}
 GROUP BY level`
 
