@@ -1,4 +1,4 @@
-import type { Behavior, Context, FilterNode, Lifecycle, Trait } from './ast.js'
+import type { Behavior, Context, FilterNode, Lifecycle, Trait, WherePredicate } from './ast.js'
 import { CONTEXT_COLUMNS } from './base.js'
 import { type ChType, type Params, chDateTime } from './params.js'
 
@@ -20,6 +20,25 @@ function compare(
     return `${lhs} BETWEEN ${params.add(lo, type)} AND ${params.add(hi, type)}`
   }
   return `${lhs} ${operator} ${params.add(value as string | number, type)}`
+}
+
+/**
+ * A predicate on one event's own properties. `property` is a MAP KEY, not a
+ * column, so it is a bound parameter like any other value — there is no
+ * identifier injection surface here.
+ *
+ * Exported because two engines compile it: the segment behavioural pass, and
+ * the funnel step compiler. A funnel step and a segment behaviour's `where`
+ * are the same idea — a claim about one event — and a second implementation
+ * would be two grammars for it, drifting first at the operator list.
+ */
+export function wherePredicate(w: WherePredicate, params: Params): string {
+  const numeric =
+    typeof w.value === 'number' || (Array.isArray(w.value) && typeof w.value[0] === 'number')
+  const bag = numeric ? 'properties_num' : 'properties'
+  const type = numeric ? 'Float64' : 'String'
+  const key = params.add(w.property, 'String')
+  return compare(`${bag}[${key}]`, w.operator, w.value, type, params)
 }
 
 function traitExpr(n: Trait, ctx: Ctx): string {
