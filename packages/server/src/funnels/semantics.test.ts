@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
+import { MEMBER_PAGE_SIZE } from '@lyraflow/core'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -321,6 +322,137 @@ describe('funnel semantics', () => {
     // different population (see levels.ts).
     const countAfter = (await preview({ steps: STEPS })).steps[1].people
     expect(countAfter).toBe(countBefore - 1)
+  })
+
+  it('ACTUALLY restricts the population to a segment, not merely runs with one', async () => {
+    // The whole-branch gap this closes: the existing route test asserts a
+    // restricted funnel returns 200 and warns about nothing. Deleting the
+    // segment SQL from the compile call entirely would still pass it — the
+    // restriction would silently become a no-op and every "for paid users"
+    // funnel would quietly report everyone.
+    const inside = 'sem-seg-inside'
+    const outside = 'sem-seg-outside'
+    for (const [anon, plan] of [
+      [inside, 'enterprise'],
+      [outside, 'free'],
+    ]) {
+      await send([
+        {
+          type: 'identify',
+          message_id: randomUUID(),
+          anonymous_id: anon,
+          user_id: anon,
+          traits: { plan },
+        },
+        track(anon, 'landed', ago(21 * HOUR)),
+        track(anon, 'clicked', ago(21 * HOUR - MINUTE)),
+        track(anon, 'converted', ago(21 * HOUR - 2 * MINUTE)),
+      ])
+    }
+    await reloadIdentityDictionaries()
+
+    const seg = await pg.query<{ id: string }>(
+      `INSERT INTO segments (project_id, name, filter, ast_version)
+       VALUES ($1, $2, '{"kind":"trait","key":"plan","operator":"=","value":"enterprise"}'::jsonb, 1)
+       RETURNING id`,
+      [projectId, `enterprise-${randomUUID()}`],
+    )
+
+    const unrestricted = await preview({ steps: STEPS, until: new Date().toISOString() })
+    const restricted = await preview({
+      steps: STEPS,
+      segment_id: Number(seg.rows[0]?.id),
+      until: new Date().toISOString(),
+    })
+
+    // Both people converted, so an unrestricted run sees at least two and the
+    // restricted one must see strictly fewer — and must still see somebody,
+    // or a restriction that matched nobody would pass just as well.
+    expect(unrestricted.converted).toBeGreaterThanOrEqual(2)
+    expect(restricted.converted).toBeGreaterThanOrEqual(1)
+    expect(restricted.converted).toBeLessThan(unrestricted.converted)
+    await pg.query('DELETE FROM segments WHERE id = $1', [Number(seg.rows[0]?.id)])
+  })
+
+  it('pages drop-offs without repeating or skipping anyone', async () => {
+    // MORE THAN ONE PAGE, deliberately. The first version of this test seeded
+    // five people, never filled a page, and so never requested a second one —
+    // it asserted "no duplicates in a single page", which any implementation
+    // satisfies. A wrong keyset looks perfect until a population crosses
+    // MEMBER_PAGE_SIZE, and that is the first real one, not a test one.
+    const people = MEMBER_PAGE_SIZE + 5
+    const batch: object[] = []
+    for (let i = 0; i < people; i++) {
+      const anon = `sem-page-${i}`
+      // EVERY ENTRANT SHARES ONE INSTANT, deliberately. Spacing them a second
+      // apart — the obvious way to write this — gives every row a distinct
+      // `entered_at`, which is precisely the shape that hides a keyset
+      // collapsed to `entered_at <` alone: with no ties, the tie-breaker is
+      // never consulted and the bug is invisible. Verified by mutation: the
+      // spaced version passed against exactly that defect.
+      batch.push(
+        track(anon, 'landed', ago(20 * HOUR)),
+        track(anon, 'clicked', ago(20 * HOUR - 500)),
+      )
+    }
+    // Batches are capped at 500 payloads, so this goes in chunks.
+    for (let i = 0; i < batch.length; i += 400) await send(batch.slice(i, i + 400))
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v1/funnels',
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: { name: `paged-${randomUUID()}`, steps: STEPS, window_seconds: WINDOW } as never,
+    })
+    const id = created.json().id
+
+    const seen: string[] = []
+    let cursor: string | null = null
+    for (let page = 0; page < 10; page++) {
+      const res: { json: () => { people: { person_id: string }[]; next_cursor: string | null } } =
+        await app.inject({
+          method: 'POST',
+          url: `/v1/funnels/${id}/dropoff`,
+          headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+          payload: {
+            step: 2,
+            since: RANGE.since,
+            until: new Date().toISOString(),
+            ...(cursor ? { cursor } : {}),
+          } as never,
+        })
+      const body = res.json()
+      seen.push(...body.people.map((r) => r.person_id))
+      cursor = body.next_cursor
+      if (!cursor) break
+    }
+    // Nobody twice — a keyset using `<` alone rather than the lexicographic
+    // pair would drop everyone sharing the boundary instant, and one built on
+    // an offset would repeat under concurrent ingest.
+    expect(new Set(seen).size).toBe(seen.length)
+    for (let i = 0; i < people; i++) expect(seen).toContain(`sem-page-${i}`)
+    // And it genuinely paged, rather than fitting in one response.
+    expect(seen.length).toBeGreaterThan(MEMBER_PAGE_SIZE)
+  })
+
+  it('refuses a cursor minted for a different route', async () => {
+    // The drop-off codec has its own label, so a segment walk cursor is not
+    // replayable here even within one project.
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v1/funnels',
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: { name: `forged-${randomUUID()}`, steps: STEPS, window_seconds: WINDOW } as never,
+    })
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/funnels/${created.json().id}/dropoff`,
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: {
+        step: 1,
+        cursor: Buffer.from('["a","b","c",0,"sig"]').toString('base64url'),
+      } as never,
+    })
+    expect(res.statusCode).toBe(400)
   })
 
   /**
