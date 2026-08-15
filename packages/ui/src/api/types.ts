@@ -25,6 +25,27 @@ export interface Project {
   monthly_event_quota: number | null
 }
 
+/**
+ * `PATCH /v1/project` body. Both fields are optional independently of one
+ * another -- ABSENT means "leave unchanged", which is how retention is
+ * edited without touching quota (and vice versa). `monthly_event_quota`
+ * additionally distinguishes `null` (unlimited) from any number: sending
+ * `0` is refused by the API with a 400, because `isOverQuota` throws on
+ * it rather than treating it as a limit, and a throw on that path becomes
+ * a 503 for every event of the project. Never coerce an empty input to
+ * `0` when building this.
+ */
+export interface ProjectPatch {
+  retention_months?: number
+  monthly_event_quota?: number | null
+}
+
+/** `PATCH /v1/project`'s response -- the two fields it can change. */
+export interface ProjectLimits {
+  retention_months: number
+  monthly_event_quota: number | null
+}
+
 export interface LyraEvent {
   event_id: string
   /** ISO 8601, already converted server-side. */

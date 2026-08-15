@@ -77,7 +77,12 @@ export function UsageSection(props: { usage: Usage | null }) {
             className="h-2 w-full overflow-hidden rounded-full bg-muted [&::-moz-progress-bar]:bg-primary [&::-webkit-progress-value]:bg-primary"
             value={Math.round(pct)}
             max={100}
-            aria-label="Events accepted against the monthly quota"
+            // Deliberately doesn't say "quota" -- the settings screen's
+            // limits section (added later) has an input labelled "Monthly
+            // event quota", and `getByLabelText(/quota/i)` in tests would
+            // otherwise match this element too, since the query matches
+            // any `aria-label`, not only form controls.
+            aria-label="Events accepted against the monthly limit"
           />
         )}
       </CardContent>

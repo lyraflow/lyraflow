@@ -2,17 +2,22 @@ import { useEffect, useState } from 'react'
 import type { ApiClient } from '../api/client.js'
 import type { ProjectIdentity, Usage } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
+import { LimitsSection } from './settings/LimitsSection.js'
 import { SnippetSection } from './settings/SnippetSection.js'
 import { UsageSection } from './settings/UsageSection.js'
 
 /**
- * The install snippet and this month's usage, for the active project.
- * Editing project details and creating a new project are later tasks --
- * these two sections are read-only.
+ * The install snippet, this month's usage, and the editable limits, for
+ * the active project. Creating a new project is a later task.
  */
 export function Settings(props: { client: ApiClient }) {
   const { client } = props
-  const { activeId } = useProject()
+  const { activeId, projects, updateProject } = useProject()
+  // The identity fields (write key) come from their own fetch below --
+  // `ProjectIdentity` doesn't carry retention/quota. Those live on the
+  // `Project` row context already holds, which is also what a successful
+  // limits save writes back to via `updateProject`.
+  const activeProject = activeId == null ? null : (projects.find((p) => p.id === activeId) ?? null)
   const [project, setProject] = useState<ProjectIdentity | null>(null)
   const [usage, setUsage] = useState<Usage | null>(null)
   // Neither fetch's fake in the test suite ever rejects, and a real one
@@ -60,6 +65,14 @@ export function Settings(props: { client: ApiClient }) {
 
       <SnippetSection writeKey={project?.write_key ?? null} />
       <UsageSection usage={usage} />
+      <LimitsSection
+        key={activeId ?? 'none'}
+        client={client}
+        project={activeProject}
+        onSaved={(patch) => {
+          if (activeId != null) updateProject(activeId, patch)
+        }}
+      />
     </div>
   )
 }

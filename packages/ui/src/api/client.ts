@@ -3,6 +3,8 @@ import type {
   EventsQuery,
   Project,
   ProjectIdentity,
+  ProjectLimits,
+  ProjectPatch,
   RejectionsPage,
   RejectionsQuery,
   StatsPage,
@@ -34,6 +36,10 @@ export interface ApiClient {
   session(): Promise<{ email: string | null }>
   projects(): Promise<Project[]>
   project(projectId: number): Promise<ProjectIdentity>
+  // A field ABSENT from `patch` means "leave unchanged" -- the caller must
+  // never send `monthly_event_quota: 0` for "no change", only omit the
+  // key entirely. See `ProjectPatch`'s docstring.
+  patchProject(projectId: number, patch: ProjectPatch): Promise<ProjectLimits>
   usage(projectId: number): Promise<Usage>
   events(projectId: number, q: EventsQuery): Promise<EventsPage>
   stats(projectId: number, q: StatsQuery): Promise<StatsPage>
@@ -102,6 +108,8 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
     // Both project-scoped the same way `events` is -- the header the client
     // attaches from `projectId`, not a path segment or query param.
     project: (projectId) => call('/v1/project', {}, projectId),
+    patchProject: (projectId, patch) =>
+      call('/v1/project', { method: 'PATCH', body: JSON.stringify(patch) }, projectId),
     usage: (projectId) => call('/v1/project/usage', {}, projectId),
     events: (projectId, q) =>
       call(`/v1/events${qs({ ...q, limit: q.limit ?? DEFAULT_LIMIT })}`, {}, projectId),
