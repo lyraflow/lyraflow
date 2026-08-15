@@ -57,4 +57,23 @@ describe('production bundle', () => {
     const load = bundleEntry[paths[0] as string] as () => Promise<unknown>
     await expect(load()).resolves.toBeDefined()
   })
+
+  // IMPORTANT 4 from the whole-branch review: `SnippetSection.tsx` used to
+  // import `SNIPPET_METHODS` from `@lyraflow/sdk-browser`'s ROOT barrel,
+  // which ends with a bare top-level `installGlobal()` call -- so loading
+  // the admin bundle silently defined `window.lyraflow` on the admin
+  // origin, which is also the ingest origin, and pulled the whole tracking
+  // SDK along with it. Nothing about that throws, which is exactly why the
+  // test above (the only one that existed) never caught it -- it can only
+  // see a module-scope THROW. This test evaluates the SAME real bundle and
+  // checks the one thing the other test structurally can't: that loading
+  // the admin UI does not ALSO stand up a tracking SDK global on the same
+  // window a real ingest response would otherwise use.
+  it('does not define window.lyraflow -- the admin bundle must not carry the tracking SDK', async () => {
+    const paths = Object.keys(bundleEntry)
+    if (paths.length === 0) return // the earlier test already reports this case
+    const load = bundleEntry[paths[0] as string] as () => Promise<unknown>
+    await load()
+    expect((window as unknown as { lyraflow?: unknown }).lyraflow).toBeUndefined()
+  })
 })
