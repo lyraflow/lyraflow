@@ -8,6 +8,7 @@ import { applyTheme, readStoredTheme } from './app/ThemeToggle.js'
 import { Button } from './components/ui/button.js'
 import { Card, CardContent, CardHeader, CardTitle } from './components/ui/card.js'
 import { Login } from './screens/Login.js'
+import { Wizard } from './screens/Wizard.js'
 
 interface Session {
   // MINOR from the whole-branch review: `GET /v1/auth/session` can answer
@@ -263,6 +264,32 @@ export default function App(props: { client?: ApiClient; sessionPollIntervalMs?:
   if (phase.kind === 'anonymous') return <Login client={client} onSignedIn={handleSignedIn} />
 
   const { session } = phase
+
+  // A full-screen takeover, not a route -- rendered INSTEAD OF the normal
+  // shell, because nothing in the shell is useful with no project yet: a
+  // project switcher with no project to switch to, and navigation to an
+  // empty feed, are noise at the one moment the operator needs a single
+  // obvious next step. This also means the wizard can never be reached by
+  // URL once a project exists -- there is no route for it, only this
+  // phase check.
+  if (session.projects.length === 0) {
+    return (
+      <Wizard
+        client={client}
+        onReady={() => {
+          // Re-fetches the project list and falls through to the normal
+          // app on success. On failure, `unavailable` -- the same outcome
+          // `handleSignedIn` uses for the equivalent load right after
+          // signing in -- rather than leaving the operator stuck on a
+          // wizard whose own job is already done.
+          loadSession(client, session.email)
+            .then((loaded) => setPhase({ kind: 'authenticated', session: loaded }))
+            .catch(() => setPhase({ kind: 'unavailable' }))
+        }}
+      />
+    )
+  }
+
   return (
     <ProjectProvider projects={session.projects} initialId={session.projects[0]?.id ?? null}>
       <AppRouter

@@ -253,6 +253,44 @@ describe('App', () => {
     }
   })
 
+  // The wizard replaces the shell entirely for a fresh install -- rendered
+  // as a phase, not a route, so it can't be reached once a project exists
+  // (see App.tsx's own comment). `onReady` re-fetches the project list and
+  // falls through to the normal app once one does.
+  it('renders the first-run wizard instead of the shell when there are no projects yet', async () => {
+    const projects = vi.fn().mockResolvedValueOnce([])
+    const c = client({ projects })
+    render(<App client={c} />)
+    expect(await screen.findByLabelText(/name/i)).toBeInTheDocument()
+    expect(screen.queryByText('Feed')).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: /accepted/i })).not.toBeInTheDocument()
+  })
+
+  it('falls through to the normal app once the wizard reports a project is ready', async () => {
+    const projects = vi
+      .fn()
+      // App's initial session load: no project yet.
+      .mockResolvedValueOnce([])
+      // The wizard's own lookup of the id behind the project it just
+      // created.
+      .mockResolvedValueOnce([PLACEHOLDER_PROJECT])
+      // App's re-fetch after `onReady`, and anything after.
+      .mockResolvedValue([PLACEHOLDER_PROJECT])
+    const createProject = vi.fn(async () => ({
+      name: 'Cem Demo',
+      slug: 'cem-demo',
+      write_key: 'wk_new',
+      server_key: 'sk_new',
+    }))
+    const c = client({ projects, createProject })
+    render(<App client={c} />)
+    await userEvent.type(await screen.findByLabelText(/name/i), 'Cem Demo')
+    await userEvent.click(screen.getByRole('button', { name: /create/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /skip|later|dashboard/i }))
+    expect(await screen.findByText('Feed')).toBeInTheDocument()
+    expect(screen.queryByLabelText(/project name/i)).not.toBeInTheDocument()
+  })
+
   // MINOR from the whole-branch review: ThemeToggle only ever mounted
   // inside Shell, so an explicit stored choice was ignored on every screen
   // before authentication -- login, boot, unavailable. This pins the boot
