@@ -29,6 +29,10 @@ Thumbs.db
 # Test coverage
 coverage/
 
+# Playwright
+packages/ui/test-results/
+packages/ui/playwright-report/
+
 # Session tooling (local only). Ignored by the repository itself, deliberately,
 # rather than relying on any contributor's personal global gitignore: these
 # directories hold machine-local paths and scratch artifacts, and this is a

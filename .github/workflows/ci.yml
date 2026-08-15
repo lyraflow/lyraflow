@@ -65,3 +65,51 @@ jobs:
       - run: pnpm build
       - run: pnpm vitest run --config vitest.durability.config.ts
 
+  # A separate job, not folded into `test` above: everything else in this
+  # repo is a unit test against a fake client, run in jsdom against source.
+  # This is the only check that exercises the built assets, the static
+  # serving, the real cookie and the API together -- worth the cost of a
+  # browser download and an image build, which do not belong gating every
+  # push the way `test` does.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No `version:` here on purpose. package.json pins `packageManager`,
+      # and pnpm/action-setup errors out if both are set. The pin is the one
+      # that matters: an unpinned corepack fetches whatever pnpm is current,
+      # which has already broken this build once.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      # The browser is the expensive part; cache it on the lockfile so a run
+      # that changes no dependency does not re-download it.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ hashFiles('pnpm-lock.yaml') }}
+      - run: pnpm --filter @lyraflow/ui exec playwright install chromium --with-deps
+      - run: pnpm build
+      # An EMPTY database, deliberately: the wizard only appears when there
+      # are no projects, and it is the whole point of this test.
+      - name: Start the stack
+        run: |
+          printf 'POSTGRES_PASSWORD=e2e\nCLICKHOUSE_PASSWORD=e2e\n' > .env
+          printf 'LYRAFLOW_ADMIN_EMAIL=%s\n' "$LYRAFLOW_ADMIN_EMAIL" >> .env
+          printf 'LYRAFLOW_ADMIN_PASSWORD=%s\n' "$LYRAFLOW_ADMIN_PASSWORD" >> .env
+          docker compose up -d --build --wait
+        env:
+          LYRAFLOW_ADMIN_EMAIL: admin@localhost
+          LYRAFLOW_ADMIN_PASSWORD: e2e-admin-password
+      - run: pnpm --filter @lyraflow/ui exec playwright test
+        env:
+          LYRAFLOW_ADMIN_EMAIL: admin@localhost
+          LYRAFLOW_ADMIN_PASSWORD: e2e-admin-password
+      # A failing E2E with no trace is a test you cannot act on.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: packages/ui/playwright-report/
+
