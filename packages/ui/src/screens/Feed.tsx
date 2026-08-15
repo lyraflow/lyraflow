@@ -66,7 +66,7 @@ export function Feed(props: { client: ApiClient; pollIntervalMs?: number }) {
   const error = eventsState.error ?? rejectionsState.error ?? statsState.error
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex min-w-0 flex-col gap-4">
       <Sparkline buckets={buckets} />
 
       {error != null && (
@@ -75,8 +75,17 @@ export function Feed(props: { client: ApiClient; pollIntervalMs?: number }) {
         </p>
       )}
 
-      <Tabs value={tab} onValueChange={setTab}>
-        <TabsList>
+      <Tabs value={tab} onValueChange={setTab} className="min-w-0">
+        {/*
+         * `max-w-full` plus `overflow-x-auto` here for the same reason the
+         * event/rejection tables below get their own scroll container: the
+         * two trigger labels ("Accepted N" / "Rejected N") have a combined
+         * natural width that doesn't fit next to a 224px sidebar at a
+         * phone-width viewport. Without a cap this list -- being `w-fit` --
+         * refuses to shrink and pushes the whole page into horizontal
+         * scroll instead of scrolling in place.
+         */}
+        <TabsList className="max-w-full overflow-x-auto">
           <TabsTrigger value="accepted">
             Accepted {formatCount(events.length, DEFAULT_LIMIT)}
           </TabsTrigger>
@@ -89,10 +98,10 @@ export function Feed(props: { client: ApiClient; pollIntervalMs?: number }) {
             Rejected {formatCount(rejections.length, DEFAULT_LIMIT)}
           </TabsTrigger>
         </TabsList>
-        <TabsContent value="accepted">
+        <TabsContent value="accepted" className="min-w-0">
           <AcceptedTable events={events} />
         </TabsContent>
-        <TabsContent value="rejected">
+        <TabsContent value="rejected" className="min-w-0">
           <RejectionsTable rejections={rejections} />
         </TabsContent>
       </Tabs>

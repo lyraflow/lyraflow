@@ -76,8 +76,11 @@ function ProjectSwitcher() {
       onValueChange={(value) => setActiveId(Number(value))}
     >
       {/* biome-ignore lint/a11y/useSemanticElements: SelectTrigger already renders a real <button>; this role replaces Radix's own "combobox" override, not a native element's implicit role. */}
-      <SelectTrigger role="button" className="w-auto gap-1.5 border-0 bg-transparent shadow-none">
-        <SelectValue>{active?.name ?? 'Select project'}</SelectValue>
+      <SelectTrigger
+        role="button"
+        className="min-w-0 w-auto gap-1.5 border-0 bg-transparent shadow-none"
+      >
+        <SelectValue className="truncate">{active?.name ?? 'Select project'}</SelectValue>
       </SelectTrigger>
       <SelectContent>
         {projects.map((project) => (
@@ -96,10 +99,10 @@ function AccountMenu(props: { email: string; onLogout(): void }) {
       <DropdownMenuTrigger asChild>
         <button
           type="button"
-          className="flex items-center gap-1.5 rounded-md px-2 py-1.5 text-sm text-foreground hover:bg-muted"
+          className="flex min-w-0 items-center gap-1.5 rounded-md px-2 py-1.5 text-sm text-foreground hover:bg-muted"
         >
-          {props.email}
-          <ChevronDown className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
+          <span className="truncate">{props.email}</span>
+          <ChevronDown className="h-4 w-4 shrink-0" strokeWidth={ICON_STROKE} aria-hidden="true" />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
@@ -134,14 +137,23 @@ export function Shell(props: { email: string; onLogout(): void; children: ReactN
         </nav>
       </aside>
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-card px-4">
+        {/*
+         * `overflow-x-auto` is the backstop, not the primary fix: the
+         * project name and email above already shrink and truncate first.
+         * At a phone-width viewport behind the sidebar's fixed 224px, the
+         * account button's icon and padding alone can still exceed what's
+         * left -- and this is what stops that from becoming page-level
+         * horizontal scroll (the same failure this task's overflow check
+         * exists to catch) instead of a scroll confined to the header bar.
+         */}
+        <header className="flex h-14 min-w-0 shrink-0 items-center justify-between gap-2 overflow-x-auto border-b border-border bg-card px-4">
           <ProjectSwitcher />
-          <div className="flex items-center gap-2">
+          <div className="flex min-w-0 shrink items-center gap-2">
             <ThemeToggle />
             <AccountMenu email={props.email} onLogout={props.onLogout} />
           </div>
         </header>
-        <main className="flex-1 overflow-auto p-6">{props.children}</main>
+        <main className="min-w-0 flex-1 overflow-auto p-6">{props.children}</main>
       </div>
     </div>
   )

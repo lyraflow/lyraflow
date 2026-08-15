@@ -44,7 +44,13 @@ export function ThemeToggle() {
     <button
       type="button"
       aria-label={`Theme: ${choice}`}
-      className="rounded-md border border-border px-2 py-1 text-sm text-muted-foreground"
+      // Hidden below `sm`: at a phone-width viewport the header only has
+      // room for the project switcher and the account menu (sign-out lives
+      // there) before it has to scroll -- and sign-out matters more than
+      // theme switching does. This control is still reachable at any width
+      // wide enough to show it comfortably, and the toggle remembers its
+      // last choice either way (see `readStoredTheme` above).
+      className="hidden shrink-0 rounded-md border border-border px-2 py-1 text-sm text-muted-foreground sm:block"
       onClick={() => setChoice(next[choice])}
     >
       {choice}
