@@ -11,6 +11,16 @@ interface ProjectState {
   // section -- agrees with what a successful save just changed, without
   // a second round trip to re-fetch the whole list.
   updateProject(id: number, patch: Partial<Project>): void
+  // Replaces the whole list -- the one operation `updateProject` cannot do,
+  // because a brand-new project has no existing entry to merge a patch
+  // into. This is deliberately the ONLY other write path: a caller that
+  // just created a project re-fetches the authoritative list (the create
+  // response itself lacks `id`/`retention_months`/`monthly_event_quota`)
+  // and hands the result here, so the header switcher and every other
+  // consumer of `projects` see it too. A second, component-local copy of
+  // the list is exactly the divergence this exists to prevent -- the
+  // switcher and a screen's own list disagreeing while both look correct.
+  setProjects(projects: Project[]): void
 }
 
 const Ctx = createContext<ProjectState | null>(null)
@@ -57,7 +67,7 @@ export function ProjectProvider(props: {
   }, [])
 
   const value = useMemo(
-    () => ({ projects, activeId, setActiveId, updateProject }),
+    () => ({ projects, activeId, setActiveId, updateProject, setProjects }),
     [projects, activeId, updateProject],
   )
   return <Ctx.Provider value={value}>{props.children}</Ctx.Provider>

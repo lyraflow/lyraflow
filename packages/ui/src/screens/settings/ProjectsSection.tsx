@@ -1,12 +1,12 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { ApiError } from '../../api/client.js'
 import type { ApiClient } from '../../api/client.js'
-import type { CreatedProject, Project } from '../../api/types.js'
+import type { CreatedProject } from '../../api/types.js'
+import { useProject } from '../../app/ProjectContext.js'
 import { Button } from '../../components/ui/button.js'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card.js'
 import { Input } from '../../components/ui/input.js'
 import { Label } from '../../components/ui/label.js'
-import { Skeleton } from '../../components/ui/skeleton.js'
 
 type Mode = 'idle' | 'form' | 'created'
 
@@ -14,38 +14,25 @@ type Mode = 'idle' | 'form' | 'created'
  * The full project list plus "create a new one" -- the only place in the
  * app a project's server key is ever visible.
  *
- * The list is fetched here rather than read from `useProject()`'s context:
- * that context has no way to add a freshly-created project to itself (it
- * only merges a patch into an existing row), and there is no other screen
- * in this task that owns re-fetching the authoritative list. Refetching
- * after a successful create is what makes the new project appear without
- * a full page reload.
+ * The list itself is read from `useProject()`'s context, not a component-
+ * local fetch: the header switcher (`Shell.tsx`'s `ProjectSwitcher`) reads
+ * the same context, and two independently-fetched copies of "the projects"
+ * is exactly the failure this app treats as worst on this screen -- the
+ * header naming one project while the data underneath answers to another,
+ * with neither looking wrong on its own. A successful create can't just
+ * merge into context via `updateProject` (that only patches an existing
+ * row by id), so it re-fetches the authoritative list and hands the whole
+ * thing to `setProjects` instead -- one source of truth, one write path.
  */
 export function ProjectsSection(props: { client: ApiClient }) {
   const { client } = props
-  const [projects, setProjects] = useState<Project[] | null>(null)
-  const [listError, setListError] = useState(false)
+  const { projects, setProjects } = useProject()
 
   const [mode, setMode] = useState<Mode>('idle')
   const [name, setName] = useState('')
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
   const [createdProject, setCreatedProject] = useState<CreatedProject | null>(null)
-
-  useEffect(() => {
-    let cancelled = false
-    client
-      .projects()
-      .then((list) => {
-        if (!cancelled) setProjects(list)
-      })
-      .catch(() => {
-        if (!cancelled) setListError(true)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [client])
 
   function openForm() {
     setCreateError(null)
@@ -71,6 +58,10 @@ export function ProjectsSection(props: { client: ApiClient }) {
       const created = await client.createProject(trimmed)
       setCreatedProject(created)
       setMode('created')
+      // The create response carries only name/slug/write_key/server_key --
+      // no `id`, so it can't be merged in locally. Re-fetching and handing
+      // the result to context's `setProjects` is what makes the header
+      // switcher (and this list) see the new project without a reload.
       // Best effort -- the create itself already succeeded, and a failed
       // refresh here must not hide the one-time keys panel above. The
       // person can always reload to see the list catch up.
@@ -106,23 +97,13 @@ export function ProjectsSection(props: { client: ApiClient }) {
         <CardTitle>Projects</CardTitle>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
-        {listError && (
-          <p role="alert" className="text-sm text-destructive">
-            Could not load the project list. Reload to try again.
-          </p>
-        )}
-
-        {projects == null ? (
-          <Skeleton className="h-10 w-full" />
-        ) : (
-          <ul className="flex flex-col gap-1">
-            {projects.map((p) => (
-              <li key={p.id} className="text-sm text-foreground">
-                {p.name}
-              </li>
-            ))}
-          </ul>
-        )}
+        <ul className="flex flex-col gap-1">
+          {projects.map((p) => (
+            <li key={p.id} className="text-sm text-foreground">
+              {p.name}
+            </li>
+          ))}
+        </ul>
 
         {mode === 'created' && createdProject && (
           // An inline panel, not a dialog -- deliberately. The server key

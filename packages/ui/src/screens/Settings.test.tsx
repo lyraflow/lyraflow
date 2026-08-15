@@ -1,10 +1,12 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { MemoryRouter } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import { ProjectProvider } from '../app/ProjectContext.js'
+import { Shell } from '../app/Shell.js'
 import { Settings } from './Settings.js'
 
 const PROJECTS = [
@@ -354,6 +356,16 @@ describe('Settings — projects', () => {
     expect(screen.getByLabelText(/name/i)).toHaveValue('Alpha')
   })
 
+  // Renders the REAL Shell/ProjectSwitcher alongside Settings, sharing one
+  // ProjectProvider, the way the running app does -- not a call count on a
+  // fake client. A previous version of this test asserted only
+  // `client.projects` was called twice, which is satisfiable by a
+  // component-local fetch that never reaches the switcher at all: the
+  // header would go on naming the old project after a reload-free create,
+  // and this test would still pass. That divergence -- the header saying
+  // one thing while the data underneath says another, both looking
+  // correct -- is the worst available failure on this screen, so this
+  // asserts the new project is actually selectable in the switcher.
   it('adds the new project to the switcher without a reload', async () => {
     const createProject = vi.fn(async () => ({
       name: 'Beta',
@@ -361,12 +373,40 @@ describe('Settings — projects', () => {
       write_key: 'wk_new',
       server_key: 'sk_new',
     }))
-    const client = fakeClient({ createProject })
-    renderSettings(client)
+    // The refresh this flow triggers is a genuine re-fetch, not a locally
+    // synthesized entry -- `CreatedProject` has no `id`. This mock has to
+    // answer the POST-create `GET /v1/projects` with Beta actually in it,
+    // the same way a real server would, or this test would pass by
+    // accident: the default `projects` mock below would hand context back
+    // exactly the list it started with.
+    const projects = vi.fn(async () => [
+      ...PROJECTS,
+      {
+        id: 2,
+        name: 'Beta',
+        slug: 'beta',
+        created_at: '',
+        retention_months: 24,
+        monthly_event_quota: null,
+      },
+    ])
+    const client = fakeClient({ createProject, projects })
+    render(
+      <MemoryRouter initialEntries={['/settings']}>
+        <ProjectProvider projects={PROJECTS} initialId={1}>
+          <Shell email="admin@localhost" onLogout={vi.fn()}>
+            <Settings client={client} />
+          </Shell>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
     await userEvent.click(await screen.findByRole('button', { name: /new project/i }))
     await userEvent.type(screen.getByLabelText(/name/i), 'Beta')
     await userEvent.click(screen.getByRole('button', { name: /^create$/i }))
-    await waitFor(() => expect(client.projects).toHaveBeenCalledTimes(2))
+    await screen.findByTestId('created-project-keys')
+
+    await userEvent.click(screen.getByRole('button', { name: /^alpha$/i }))
+    expect(await screen.findByRole('option', { name: /beta/i })).toBeInTheDocument()
   })
 })
 
