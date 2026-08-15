@@ -9,16 +9,15 @@ import { Sparkline } from './feed/Sparkline.js'
 import { usePolling } from './feed/usePolling.js'
 
 /**
- * How often the feed re-polls. The design brief describes "a ~3s interval";
- * this is deliberately faster. `@testing-library/dom`'s `waitFor` -- used
- * throughout this package's tests, unfaked here -- gives up after 1000ms by
- * default, and this screen's own test for "an error doesn't clear the rows
- * on screen" needs a real second poll to land inside that window. A faster
- * interval also serves the screen's actual job better: the whole point is a
- * five-second answer, so closer to real time is a feature, not just a test
- * accommodation.
+ * How often the feed re-polls, in production. Three polled endpoints at
+ * this interval is roughly one request per second per open tab against
+ * Postgres (events, rejections) and ClickHouse (stats) -- on a self-hosted
+ * box that may also be serving ingest, that has to stay conservative. Tests
+ * that need a faster cycle pass their own `pollIntervalMs` rather than
+ * this changing; see `Feed.test.tsx`'s "defaults to polling every 3
+ * seconds" for the pin.
  */
-const POLL_INTERVAL_MS = 300
+export const DEFAULT_POLL_INTERVAL_MS = 3000
 
 /**
  * A fetched page at exactly `limit` means there is more behind it that
@@ -29,8 +28,8 @@ function formatCount(n: number, limit: number): string {
   return n >= limit ? `${limit}+` : n.toLocaleString()
 }
 
-export function Feed(props: { client: ApiClient }) {
-  const { client } = props
+export function Feed(props: { client: ApiClient; pollIntervalMs?: number }) {
+  const { client, pollIntervalMs = DEFAULT_POLL_INTERVAL_MS } = props
   const { activeId } = useProject()
   const [tab, setTab] = useState('accepted')
 
@@ -52,9 +51,9 @@ export function Feed(props: { client: ApiClient }) {
     return client.stats(activeId, { interval: '1m' })
   }, [client, activeId])
 
-  const eventsState = usePolling(pollEvents, POLL_INTERVAL_MS)
-  const rejectionsState = usePolling(pollRejections, POLL_INTERVAL_MS)
-  const statsState = usePolling(pollStats, POLL_INTERVAL_MS)
+  const eventsState = usePolling(pollEvents, pollIntervalMs)
+  const rejectionsState = usePolling(pollRejections, pollIntervalMs)
+  const statsState = usePolling(pollStats, pollIntervalMs)
 
   const events = eventsState.data?.events ?? []
   const rejections = rejectionsState.data?.rejections ?? []

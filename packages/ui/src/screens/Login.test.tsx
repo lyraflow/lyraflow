@@ -1,8 +1,8 @@
-import { act, render, screen } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/client.js'
-import { Login } from './Login.js'
+import { AUTH_STATE_TIMEOUT_MS, Login } from './Login.js'
 
 function client(over: Partial<Record<string, unknown>> = {}) {
   return {
@@ -125,5 +125,26 @@ describe('Login', () => {
     render(<Login client={c} onSignedIn={vi.fn()} />)
     expect(await screen.findByLabelText(/email/i)).toBeInTheDocument()
     expect(screen.getByLabelText(/password/i)).toBeInTheDocument()
+  })
+
+  // Fix round 1, Finding 3 (Important): `authState` above always resolves
+  // or rejects immediately, so nothing exercised the pending window itself.
+  // A server that accepts the connection and never answers must not leave
+  // this screen blank (neither the form nor the CLI instruction) forever --
+  // it must show something is happening, then fall through to the form
+  // once its own bound elapses.
+  it('shows a loading state, then falls through to the form, if authState() never responds', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const c = client({ authState: vi.fn(() => new Promise<never>(() => {})) })
+      render(<Login client={c} onSignedIn={vi.fn()} />)
+      expect(await screen.findByText(/loading/i)).toBeInTheDocument()
+      expect(screen.queryByLabelText(/email/i)).not.toBeInTheDocument()
+      await vi.advanceTimersByTimeAsync(AUTH_STATE_TIMEOUT_MS)
+      await waitFor(() => expect(screen.getByLabelText(/email/i)).toBeInTheDocument())
+      expect(screen.getByLabelText(/password/i)).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

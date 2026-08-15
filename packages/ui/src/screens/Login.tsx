@@ -112,32 +112,59 @@ function LoginForm(props: { client: ApiClient; onSignedIn(email: string): void }
   )
 }
 
+/**
+ * Bounds the `authState()` check below. By the time `Login` mounts, `App`'s
+ * own `session()` check has already gotten SOME response from the server
+ * (that is how `App` decided to show this screen at all -- see its own
+ * `SESSION_CHECK_TIMEOUT_MS`), so a hang here is a narrower failure than
+ * the one `App` guards against, and a shorter bound is appropriate. Without
+ * this, a server that accepts the connection and never answers leaves
+ * `configured` at its initial `null` forever, and this screen renders
+ * nothing -- not the form, not the CLI instruction -- with no indication
+ * anything is happening.
+ */
+export const AUTH_STATE_TIMEOUT_MS = 5000
+
 export function Login(props: { client: ApiClient; onSignedIn(email: string): void }) {
   const [configured, setConfigured] = useState<boolean | null>(null)
 
   const { client } = props
   useEffect(() => {
     let cancelled = false
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      // Same fallback as an outright failure below, and for the same
+      // reason: a transient hang is not "unconfigured", and defaulting to
+      // the form is the safe choice either way -- the login attempt itself
+      // will surface its own error if the server truly is not answering.
+      if (!cancelled) setConfigured(true)
+    }, AUTH_STATE_TIMEOUT_MS)
+
     client
       .authState()
       .then((state) => {
-        if (!cancelled) setConfigured(state.configured)
+        if (!cancelled && !timedOut) setConfigured(state.configured)
       })
       .catch(() => {
         // A failed state check is not "unconfigured" -- default to the form
         // so a transient error doesn't hide the CLI instruction behind a
         // login box that can never succeed, nor hide sign-in behind a
         // blank screen. The login attempt itself will surface its own error.
-        if (!cancelled) setConfigured(true)
+        if (!cancelled && !timedOut) setConfigured(true)
       })
+      .finally(() => clearTimeout(timer))
     return () => {
       cancelled = true
+      clearTimeout(timer)
     }
   }, [client])
 
   return (
     <div className="flex h-dvh items-center justify-center bg-background p-4 text-foreground">
-      {configured === null ? null : configured ? (
+      {configured === null ? (
+        <p className="text-sm text-muted-foreground">Loading…</p>
+      ) : configured ? (
         <LoginForm client={props.client} onSignedIn={props.onSignedIn} />
       ) : (
         <Unconfigured />

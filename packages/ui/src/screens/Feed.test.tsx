@@ -5,7 +5,7 @@ import type { Mock } from 'vitest'
 import type { ApiClient } from '../api/client.js'
 import { ApiError } from '../api/client.js'
 import { ProjectProvider } from '../app/ProjectContext.js'
-import { Feed } from './Feed.js'
+import { DEFAULT_POLL_INTERVAL_MS, Feed } from './Feed.js'
 
 const EVENTS = [
   {
@@ -104,7 +104,13 @@ function failingRejectionsAfterFirstCall() {
   return c
 }
 
-function renderFeed(opts: { client?: ReturnType<typeof fakeClient>; projectId?: number } = {}) {
+function renderFeed(
+  opts: {
+    client?: ReturnType<typeof fakeClient>
+    projectId?: number
+    pollIntervalMs?: number
+  } = {},
+) {
   const client = opts.client ?? fakeClient()
   const projects = [
     {
@@ -126,7 +132,7 @@ function renderFeed(opts: { client?: ReturnType<typeof fakeClient>; projectId?: 
   ]
   const view = render(
     <ProjectProvider projects={projects} initialId={opts.projectId ?? 1}>
-      <Feed client={client} />
+      <Feed client={client} pollIntervalMs={opts.pollIntervalMs} />
     </ProjectProvider>,
   )
   return {
@@ -134,9 +140,27 @@ function renderFeed(opts: { client?: ReturnType<typeof fakeClient>; projectId?: 
     rerenderWithProject: (id: number) =>
       view.rerender(
         <ProjectProvider projects={projects} initialId={id}>
-          <Feed client={client} />
+          <Feed client={client} pollIntervalMs={opts.pollIntervalMs} />
         </ProjectProvider>,
       ),
+  }
+}
+
+/**
+ * The two tests below need a *second* poll to actually land -- real timers
+ * would mean either a literal multi-second `waitFor` (fragile, slow) or
+ * shrinking the production interval to fit `@testing-library/dom`'s default
+ * 1000ms `waitFor` budget (the shape Finding 1 of the first review round
+ * rejected: production behaviour bent to fit one test). Fake timers with
+ * `shouldAdvanceTime: true` -- the same technique `usePolling.test.ts` already
+ * uses -- let the test jump straight to the next tick without either cost.
+ */
+async function withFakeTimers(run: () => Promise<void>): Promise<void> {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  try {
+    await run()
+  } finally {
+    vi.useRealTimers()
   }
 }
 
@@ -200,11 +224,14 @@ describe('Feed', () => {
   })
 
   it('shows an error without clearing the rows it already has', async () => {
-    const client = failingAfterFirstCall()
-    renderFeed({ client })
-    expect(await screen.findByText('page_view')).toBeInTheDocument()
-    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
-    expect(screen.getByText('page_view')).toBeInTheDocument()
+    await withFakeTimers(async () => {
+      const client = failingAfterFirstCall()
+      renderFeed({ client })
+      expect(await screen.findByText('page_view')).toBeInTheDocument()
+      await vi.advanceTimersByTimeAsync(DEFAULT_POLL_INTERVAL_MS)
+      await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
+      expect(screen.getByText('page_view')).toBeInTheDocument()
+    })
   })
 
   // Invented mutation #1: an operator does not know or care which of the
@@ -215,10 +242,52 @@ describe('Feed', () => {
   // case where this screen's job -- surfacing that refusals are happening --
   // is most at risk of failing quietly.
   it('shows an error when only the rejections poll fails', async () => {
-    const client = failingRejectionsAfterFirstCall()
-    renderFeed({ client })
-    expect(await screen.findByText('page_view')).toBeInTheDocument()
-    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
+    await withFakeTimers(async () => {
+      const client = failingRejectionsAfterFirstCall()
+      renderFeed({ client })
+      expect(await screen.findByText('page_view')).toBeInTheDocument()
+      await vi.advanceTimersByTimeAsync(DEFAULT_POLL_INTERVAL_MS)
+      await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
+    })
+  })
+
+  // Fix round 1, Finding 1 (Critical): production behaviour must never be
+  // bent to fit a test again -- the previous version of this file shipped a
+  // 300ms poll interval to production so its own real-timer tests would fit
+  // inside `waitFor`'s 1000ms budget. Three polled endpoints at 300ms is
+  // roughly ten requests a second per open tab against Postgres and
+  // ClickHouse. This pins the default at the boundary: one tick before it,
+  // nothing has polled again; one tick after, it has. A default silently
+  // lowered (or raised) would fail one half of this or the other.
+  it('defaults to polling every 3 seconds when pollIntervalMs is not given', async () => {
+    await withFakeTimers(async () => {
+      const client = fakeClient()
+      renderFeed({ client })
+      await waitFor(() => expect(client.events).toHaveBeenCalledTimes(1))
+      // Asymmetric margins, not a tight 2999/3000 boundary: `shouldAdvanceTime`
+      // also ticks the fake clock forward by whatever real wall-clock time the
+      // surrounding `await`s take, so a boundary this tight is flaky by
+      // construction. 2000ms is still far past where a wrongly-small interval
+      // (300ms, the one Finding 1 removed) would have already polled again;
+      // 3500ms total is still comfortably before a wrongly-large one would.
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(client.events).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1500)
+      await waitFor(() => expect(client.events).toHaveBeenCalledTimes(2))
+    })
+  })
+
+  // The other half of Finding 1's fix: `pollIntervalMs` is real, not just a
+  // parameter nobody calls. A caller (a future settings screen, or a test
+  // that needs a faster cycle) can actually override the default.
+  it('polls at the given pollIntervalMs when overridden', async () => {
+    await withFakeTimers(async () => {
+      const client = fakeClient()
+      renderFeed({ client, pollIntervalMs: 50 })
+      await waitFor(() => expect(client.events).toHaveBeenCalledTimes(1))
+      await vi.advanceTimersByTimeAsync(50)
+      await waitFor(() => expect(client.events).toHaveBeenCalledTimes(2))
+    })
   })
 
   // Invented mutation #2: every fixture in this file gives both tabs a
