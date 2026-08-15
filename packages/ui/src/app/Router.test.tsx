@@ -44,10 +44,10 @@ describe('AppRouter', () => {
     expect(await screen.findByRole('tab', { name: /accepted/i })).toBeInTheDocument()
   })
 
-  // Task 3 replaces `Settings` with the real screen (heading "Tracking
-  // snippet") and updates this assertion in the same commit -- Task 2 only
-  // has to prove `/settings` reaches a distinct screen, not what that
-  // screen eventually says.
+  // Task 3 replaced the placeholder `Settings` with the real screen (the
+  // install snippet and this month's usage) -- the page-level heading is
+  // still exactly "Settings", so this assertion needed no change, but it's
+  // now asserting on the real screen rather than a stand-in.
   it('renders settings at /settings', async () => {
     renderAt('/settings')
     expect(await screen.findByRole('heading', { name: /^settings$/i })).toBeInTheDocument()

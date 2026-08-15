@@ -2,10 +2,12 @@ import type {
   EventsPage,
   EventsQuery,
   Project,
+  ProjectIdentity,
   RejectionsPage,
   RejectionsQuery,
   StatsPage,
   StatsQuery,
+  Usage,
 } from './types.js'
 
 /** The feed's default page size. Explicit on every request -- see #32. */
@@ -31,6 +33,8 @@ export interface ApiClient {
   // false for that real response shape.
   session(): Promise<{ email: string | null }>
   projects(): Promise<Project[]>
+  project(projectId: number): Promise<ProjectIdentity>
+  usage(projectId: number): Promise<Usage>
   events(projectId: number, q: EventsQuery): Promise<EventsPage>
   stats(projectId: number, q: StatsQuery): Promise<StatsPage>
   rejections(projectId: number, q: RejectionsQuery): Promise<RejectionsPage>
@@ -95,6 +99,10 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
     logout: () => call('/v1/auth/logout', { method: 'POST' }),
     session: () => call('/v1/auth/session'),
     projects: async () => (await call<{ projects: Project[] }>('/v1/projects')).projects,
+    // Both project-scoped the same way `events` is -- the header the client
+    // attaches from `projectId`, not a path segment or query param.
+    project: (projectId) => call('/v1/project', {}, projectId),
+    usage: (projectId) => call('/v1/project/usage', {}, projectId),
     events: (projectId, q) =>
       call(`/v1/events${qs({ ...q, limit: q.limit ?? DEFAULT_LIMIT })}`, {}, projectId),
     stats: (projectId, q) => call(`/v1/events/stats${qs({ ...q })}`, {}, projectId),

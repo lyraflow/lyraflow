@@ -1,3 +1,20 @@
+/** `GET /v1/project` -- the identity fields the settings screen needs to build an install snippet. */
+export interface ProjectIdentity {
+  name: string
+  slug: string
+  write_key: string
+}
+
+/** `GET /v1/project/usage` -- this calendar month's counts against the project's quota. */
+export interface Usage {
+  month: string
+  events_accepted: number
+  events_rejected: number
+  events_throttled: number
+  /** null means unlimited, and is what every project carries by default. */
+  monthly_event_quota: number | null
+}
+
 export interface Project {
   id: number
   name: string

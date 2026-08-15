@@ -21,5 +21,6 @@
     "module": "ESNext",
     "moduleResolution": "bundler"
   },
-  "include": ["src/**/*"]
+  "include": ["src/**/*"],
+  "references": [{ "path": "../core" }, { "path": "../sdk-browser" }]
 }

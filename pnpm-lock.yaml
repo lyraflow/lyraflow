@@ -120,6 +120,12 @@ importers:
 
   packages/ui:
     dependencies:
+      '@lyraflow/core':
+        specifier: workspace:*
+        version: link:../core
+      '@lyraflow/sdk-browser':
+        specifier: workspace:*
+        version: link:../sdk-browser
       class-variance-authority:
         specifier: ^0.7.1
         version: 0.7.1

@@ -42,7 +42,7 @@ export function AppRouter(props: {
         <Routes>
           <Route path="/" element={feed} />
           <Route path={ROUTES.feed} element={feed} />
-          <Route path={ROUTES.settings} element={<Settings />} />
+          <Route path={ROUTES.settings} element={<Settings client={props.client} />} />
           <Route path="*" element={feed} />
         </Routes>
       </Shell>
