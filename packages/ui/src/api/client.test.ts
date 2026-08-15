@@ -43,6 +43,25 @@ describe('createClient', () => {
     expect(new Headers(init.headers).get('x-lyraflow-project')).toBeNull()
   })
 
+  // Invented: the brief's mutation table names this row a question rather
+  // than a prescribed test, because Settings.test.tsx drives a fake
+  // `ApiClient` object and never touches `call()` at all -- attaching the
+  // header there would be unobservable from that suite. It IS observable
+  // here, the same way it already is for `projects()` above, so pin it
+  // the same way rather than leave the guard resting on "nobody happened
+  // to pass a project id".
+  it('does NOT send the project header on createProject either', async () => {
+    const f = fakeFetch(200, {
+      name: 'Beta',
+      slug: 'beta',
+      write_key: 'wk_new',
+      server_key: 'sk_new',
+    })
+    await createClient(f as unknown as typeof fetch).createProject('Beta')
+    const init = f.mock.calls[0]?.[1] as RequestInit
+    expect(new Headers(init.headers).get('x-lyraflow-project')).toBeNull()
+  })
+
   // #32: an omitted limit means the server's default, and a caller that
   // never states one cannot reason about whether a page was full.
   it('always sends an explicit limit on the feed', async () => {

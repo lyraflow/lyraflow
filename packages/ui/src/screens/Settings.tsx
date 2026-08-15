@@ -3,12 +3,13 @@ import type { ApiClient } from '../api/client.js'
 import type { ProjectIdentity, Usage } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
 import { LimitsSection } from './settings/LimitsSection.js'
+import { ProjectsSection } from './settings/ProjectsSection.js'
 import { SnippetSection } from './settings/SnippetSection.js'
 import { UsageSection } from './settings/UsageSection.js'
 
 /**
- * The install snippet, this month's usage, and the editable limits, for
- * the active project. Creating a new project is a later task.
+ * The install snippet, this month's usage, the editable limits for the
+ * active project, and the project list with create-a-new-one.
  */
 export function Settings(props: { client: ApiClient }) {
   const { client } = props
@@ -73,6 +74,7 @@ export function Settings(props: { client: ApiClient }) {
           if (activeId != null) updateProject(activeId, patch)
         }}
       />
+      <ProjectsSection client={client} />
     </div>
   )
 }

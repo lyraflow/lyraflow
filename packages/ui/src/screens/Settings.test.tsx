@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
@@ -292,5 +292,136 @@ describe('Settings — limits invented mutations', () => {
     await userEvent.click(screen.getByRole('button', { name: /save quota/i }))
     await waitFor(() => expect(patchProject).toHaveBeenCalledWith(1, { monthly_event_quota: 42 }))
     expect(patchProject).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('Settings — projects', () => {
+  it('lists the projects', async () => {
+    renderSettings()
+    expect(await screen.findByText('Alpha')).toBeInTheDocument()
+  })
+
+  it('creates a project and shows both keys', async () => {
+    const createProject = vi.fn(async () => ({
+      name: 'Beta',
+      slug: 'beta',
+      write_key: 'wk_new',
+      server_key: 'sk_new',
+    }))
+    renderSettings(fakeClient({ createProject }))
+    await userEvent.click(await screen.findByRole('button', { name: /new project/i }))
+    await userEvent.type(screen.getByLabelText(/name/i), 'Beta')
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }))
+    expect(await screen.findByText('sk_new')).toBeInTheDocument()
+    expect(screen.getByText('wk_new')).toBeInTheDocument()
+  })
+
+  // The one moment this value is visible. A dialog that can be dismissed
+  // by clicking away, or by Escape, will lose it for someone.
+  //
+  // Scoped to the keys panel itself (`within`), not a bare `screen`
+  // query: the snippet section's own static disclaimer ("cannot be shown
+  // again") already contains the substring "not be shown again", so an
+  // unscoped `screen.findByText(/not be shown again/i)` is satisfied by
+  // that unrelated, always-present text and would keep passing even if
+  // this panel's own warning were deleted -- a guard that doesn't guard
+  // anything. Scoping it to the panel is what makes "drop the
+  // not-shown-again warning" actually fail this test.
+  it('warns that the server key will not be shown again', async () => {
+    const createProject = vi.fn(async () => ({
+      name: 'Beta',
+      slug: 'beta',
+      write_key: 'wk_new',
+      server_key: 'sk_new',
+    }))
+    renderSettings(fakeClient({ createProject }))
+    await userEvent.click(await screen.findByRole('button', { name: /new project/i }))
+    await userEvent.type(screen.getByLabelText(/name/i), 'Beta')
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }))
+    const panel = await screen.findByTestId('created-project-keys')
+    expect(within(panel).getByText(/not be shown again/i)).toBeInTheDocument()
+  })
+
+  it('reports a duplicate name without losing what was typed', async () => {
+    const createProject = vi.fn(async () => {
+      throw new ApiError(409, 'project_exists')
+    })
+    renderSettings(fakeClient({ createProject }))
+    await userEvent.click(await screen.findByRole('button', { name: /new project/i }))
+    await userEvent.type(screen.getByLabelText(/name/i), 'Alpha')
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }))
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+    expect(screen.getByLabelText(/name/i)).toHaveValue('Alpha')
+  })
+
+  it('adds the new project to the switcher without a reload', async () => {
+    const createProject = vi.fn(async () => ({
+      name: 'Beta',
+      slug: 'beta',
+      write_key: 'wk_new',
+      server_key: 'sk_new',
+    }))
+    const client = fakeClient({ createProject })
+    renderSettings(client)
+    await userEvent.click(await screen.findByRole('button', { name: /new project/i }))
+    await userEvent.type(screen.getByLabelText(/name/i), 'Beta')
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }))
+    await waitFor(() => expect(client.projects).toHaveBeenCalledTimes(2))
+  })
+})
+
+// Invented beyond the brief's table.
+describe('Settings — projects invented mutations', () => {
+  // Every fixture above dismisses the keys panel by never dismissing it at
+  // all -- the create tests just assert the keys are present and stop.
+  // This drives the explicit dismiss button and confirms the panel is
+  // truly gone rather than merely covered, and that dismissing it does not
+  // also wipe the (already-refreshed) project list underneath it.
+  it('dismisses the keys panel only on the explicit button, and the list survives it', async () => {
+    const createProject = vi.fn(async () => ({
+      name: 'Beta',
+      slug: 'beta',
+      write_key: 'wk_new',
+      server_key: 'sk_new',
+    }))
+    renderSettings(fakeClient({ createProject }))
+    await userEvent.click(await screen.findByRole('button', { name: /new project/i }))
+    await userEvent.type(screen.getByLabelText(/name/i), 'Beta')
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }))
+    await screen.findByText('sk_new')
+
+    await userEvent.click(screen.getByRole('button', { name: /saved these keys/i }))
+    expect(screen.queryByText('sk_new')).not.toBeInTheDocument()
+    expect(screen.queryByText('wk_new')).not.toBeInTheDocument()
+    expect(screen.getByText('Alpha')).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /new project/i })).toBeInTheDocument()
+  })
+
+  // Every create in the brief's suite succeeds or fails on the first
+  // attempt. This retries after a 409 with a DIFFERENT name than the one
+  // that collided, to catch a handler that latches into a permanent
+  // disabled/error state, or that resubmits the stale first value instead
+  // of what is currently in the box.
+  it('allows a second, different name to succeed after the first collides', async () => {
+    const createProject = vi
+      .fn()
+      .mockRejectedValueOnce(new ApiError(409, 'project_exists'))
+      .mockResolvedValueOnce({
+        name: 'Gamma',
+        slug: 'gamma',
+        write_key: 'wk_g',
+        server_key: 'sk_g',
+      })
+    renderSettings(fakeClient({ createProject }))
+    await userEvent.click(await screen.findByRole('button', { name: /new project/i }))
+    await userEvent.type(screen.getByLabelText(/name/i), 'Alpha')
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }))
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+
+    await userEvent.clear(screen.getByLabelText(/name/i))
+    await userEvent.type(screen.getByLabelText(/name/i), 'Gamma')
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }))
+    expect(await screen.findByText('sk_g')).toBeInTheDocument()
+    expect(createProject).toHaveBeenCalledTimes(2)
   })
 })

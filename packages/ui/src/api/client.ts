@@ -1,4 +1,5 @@
 import type {
+  CreatedProject,
   EventsPage,
   EventsQuery,
   Project,
@@ -35,6 +36,11 @@ export interface ApiClient {
   // false for that real response shape.
   session(): Promise<{ email: string | null }>
   projects(): Promise<Project[]>
+  // Instance-scoped like `projects()` -- "does this name collide" has no
+  // project to resolve against, so this must not carry the project header.
+  // The server key in the response exists nowhere else, ever: only its
+  // SHA-256 is stored, so this is the caller's one chance to show it.
+  createProject(name: string): Promise<CreatedProject>
   project(projectId: number): Promise<ProjectIdentity>
   // A field ABSENT from `patch` means "leave unchanged" -- the caller must
   // never send `monthly_event_quota: 0` for "no change", only omit the
@@ -105,6 +111,11 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
     logout: () => call('/v1/auth/logout', { method: 'POST' }),
     session: () => call('/v1/auth/session'),
     projects: async () => (await call<{ projects: Project[] }>('/v1/projects')).projects,
+    // No third argument -- deliberately. This route is instance-scoped:
+    // "create a project" has no existing project to resolve, and sending
+    // the header would claim a scope this call doesn't have.
+    createProject: (name) =>
+      call('/v1/projects', { method: 'POST', body: JSON.stringify({ name }) }),
     // Both project-scoped the same way `events` is -- the header the client
     // attaches from `projectId`, not a path segment or query param.
     project: (projectId) => call('/v1/project', {}, projectId),

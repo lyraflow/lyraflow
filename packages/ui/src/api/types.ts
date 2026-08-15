@@ -26,6 +26,20 @@ export interface Project {
 }
 
 /**
+ * `POST /v1/projects`'s response. `server_key` appears here and NOWHERE
+ * else, ever -- only its SHA-256 is stored server-side, so this is the one
+ * and only moment it can be captured. If the caller lets this value fall
+ * out of memory without showing it, the person's only remedy is creating
+ * another project and abandoning this one.
+ */
+export interface CreatedProject {
+  name: string
+  slug: string
+  write_key: string
+  server_key: string
+}
+
+/**
  * `PATCH /v1/project` body. Both fields are optional independently of one
  * another -- ABSENT means "leave unchanged", which is how retention is
  * edited without touching quota (and vice versa). `monthly_event_quota`
