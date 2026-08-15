@@ -5,6 +5,7 @@
     { "path": "packages/db" },
     { "path": "packages/server" },
     { "path": "packages/cli" },
-    { "path": "packages/sdk-browser" }
+    { "path": "packages/sdk-browser" },
+    { "path": "packages/ui" }
   ]
 }
