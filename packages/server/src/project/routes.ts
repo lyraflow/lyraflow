@@ -33,7 +33,26 @@ const PatchBody = z
     // means "unlimited", and 0 is neither -- isOverQuota THROWS on 0 rather
     // than treating it as a limit, so admitting it would 503 every event of
     // the project. The positive() bound is what keeps them apart.
-    monthly_event_quota: z.number().int().positive().nullable().optional(),
+    //
+    // `.max(Number.MAX_SAFE_INTEGER)` -- IMPORTANT 2 from the whole-branch
+    // review. `int()` alone does not bound the value: `1e20` passes it (it
+    // is exactly representable as a float) and reaches Postgres as a
+    // `bigint` column write far outside that type's range, which Postgres
+    // refuses -- and at `1e21` the value serialises as the literal string
+    // `"1e+21"`, which Postgres refuses for an entirely different reason
+    // (invalid syntax for `bigint`). Both surfaced as `503 unavailable`
+    // through app.ts's generic error handler, indistinguishable from an
+    // outage, for what is a deterministic, catchable client error. The
+    // client (`LimitsSection.tsx`'s `parseQuota`) now rejects this before
+    // the request is even sent, but the server bound has to hold on its
+    // own regardless of what any particular client does.
+    monthly_event_quota: z
+      .number()
+      .int()
+      .positive()
+      .max(Number.MAX_SAFE_INTEGER)
+      .nullable()
+      .optional(),
   })
   .refine((b) => b.retention_months !== undefined || b.monthly_event_quota !== undefined, {
     message: 'empty patch',
