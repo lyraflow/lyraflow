@@ -30,8 +30,10 @@
  * this CLI does not control the shape of (a trailing slash alone silently
  * turns `src="HOST/lyraflow.js"` into a 404 by concatenating into
  * `HOST//lyraflow.js` — a real, previously-shipped defect, not a
- * theoretical one). `normalizeHost`/`jsStringLiteral`/`escapeHtmlAttr`
- * below are the fix — see their own docstrings.
+ * theoretical one). `normalizeHost`/`buildSnippet`, now in
+ * `@lyraflow/core` (`packages/core/src/snippet/build.ts`, shared with the
+ * web UI so a second implementation cannot drift), are the fix — see their
+ * own docstrings there.
  *
  * Three requests, in order:
  *   1. `GET /v1/project` — the project's `name`/`slug`/`write_key`. Must
@@ -97,12 +99,14 @@
  * `try` around both requests used to throw away.
  */
 
+import { buildSnippet, normalizeHost } from '@lyraflow/core'
 // VALUE imports, not type-only — `SNIPPET_METHODS` is what the stub's
-// method array is BUILT FROM (never retyped here), and `VERSION` is
-// reported as `sdk_version`. This is the CLI importing the browser SDK,
-// the opposite direction from the one `@lyraflow/core` value imports are
-// forbidden in (that direction breaks the browser bundle) — safe here, and
-// confirmed by running `pnpm build` after adding this import and checking
+// method array is BUILT FROM (never retyped here, and now passed straight
+// through to `buildSnippet` above), and `VERSION` is reported as
+// `sdk_version`. This is the CLI importing the browser SDK, the opposite
+// direction from the one `@lyraflow/core` value imports are forbidden in
+// (that direction breaks the browser bundle) — safe here, and confirmed by
+// running `pnpm build` after adding this import and checking
 // `packages/sdk-browser/dist/lyraflow.js` is still produced.
 import { SNIPPET_METHODS, VERSION } from '@lyraflow/sdk-browser'
 import { UsageError, parseCommandArgs, resolveInstant } from '../args.js'
@@ -228,120 +232,6 @@ interface SnippetContext extends CommandContext {
 
 function hasHost(ctx: CommandContext): ctx is SnippetContext {
   return typeof ctx.host === 'string'
-}
-
-/**
- * Resolves `host` to the value that is actually safe, and actually
- * CORRECT, to embed in a browser snippet: the URL's `origin` alone
- * (scheme + hostname + port), discarding anything else (path, query,
- * trailing slash).
- *
- * This is not a lossy simplification of what `Client` does — it IS what
- * `Client` does, made visible. Every request path this CLI ever sends
- * ("/v1/project", "/v1/schema/events", ...) is an ABSOLUTE-PATH reference
- * (starts with "/"), and per URL resolution rules `new URL(path, base)`
- * for an absolute-path reference discards the base's own path entirely —
- * confirmed directly: `new URL('/v1/project', 'https://h/sub/').href ===
- * 'https://h/v1/project'`, never `'https://h/sub/v1/project'`. Any path
- * configured in `--host`/`LYRAFLOW_HOST` has therefore never affected a
- * single real request this CLI makes, in any command, before or after this
- * fix — `.origin` simply stops pretending otherwise in what gets printed.
- *
- * This is also the fix for the reported defect: naive `${host}/lyraflow.js`
- * string concatenation turns a bare trailing slash (`https://h/`) into
- * `https://h//lyraflow.js` — a different URL that 404s. `.origin` never
- * carries a trailing slash, so the double-slash cannot occur.
- *
- * Can throw (an unparseable `host`) only in a state that is already
- * unreachable by the time this runs — see the call site's own comment: it
- * runs only after `GET /v1/project` has already parsed the identical
- * string successfully via `Client`'s own `new URL(...)`.
- */
-function normalizeHost(host: string): string {
-  return new URL(host).origin
-}
-
-/**
- * Encodes a value for safe inclusion inside an HTML DOUBLE-quoted
- * attribute. Belt-and-suspenders over `normalizeHost` (a real URL
- * `origin` structurally cannot contain any of these characters — the URL
- * parser rejects or strips them before `.origin` is ever read) — kept as
- * an explicit, structural guarantee anyway rather than an assumption about
- * `URL`'s own behaviour that nothing here enforces, the same reasoning
- * output.ts's `toCell`/`sanitizeForLine` give for hardening a value this
- * module does not fully control the shape of.
- */
-function escapeHtmlAttr(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/"/g, '&quot;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-}
-
-/**
- * Encodes a value as a JS string literal safe to inline inside an inline
- * `<script>` element. `JSON.stringify` produces valid JS string syntax
- * (not just JSON) and correctly escapes quotes, backslashes and control
- * characters — but it does not know about the ONE extra rule inline
- * script content has that a JS parser does not: an HTML tokenizer closes
- * the `<script>` element on the first `</` it sees, regardless of what JS
- * string syntax says about where the string itself ends. The trailing
- * `.replace` turns `</` into `<\/` — a different token to the HTML
- * tokenizer (an escaped forward slash inside a string, not a closing tag)
- * that decodes to the identical JS string value. The standard mitigation
- * for embedding untrusted data inside an inline `<script>`.
- *
- * THIS FUNCTION HAS TWO CALLERS WITH DIFFERENT STAKES — do not delete the
- * `</` guard because the host caller "can't need it":
- *   - for `host` (`normalizeHost`'s output), this IS belt-and-suspenders —
- *     a real URL `origin` structurally cannot contain `</` at all, so the
- *     guard is provably unreachable there (see `escapeHtmlAttr`'s own
- *     docstring for the identical reasoning on the other substitution
- *     site).
- *   - for `write_key`, it is LOAD-BEARING. The write key comes straight
- *     from `GET /v1/project`'s response body — server-supplied, and never
- *     normalised the way `host` is. A project row containing
- *     `wk_"+alert(1)+"</script><script>alert(2)</script>` (a compromised
- *     or misconfigured self-hosted database, not a hypothetical) would,
- *     without this guard, close the inline `<script>` element early and
- *     have its OWN injected markup parsed and executed on every page that
- *     pastes this snippet — confirmed directly: `snippet.test.ts`'s
- *     write-key-injection test fails exactly this way with the guard
- *     removed. Keep it.
- */
-function jsStringLiteral(s: string): string {
-  return JSON.stringify(s).replace(/<\//g, '<\\/')
-}
-
-/**
- * The install snippet template — the stub's method array is built from
- * `SNIPPET_METHODS`, never retyped, so a method missing from that list
- * cannot be silently dropped from the stub the way it was on the previous
- * plan. Matches the README's own block in structure; the two substitution
- * sites (`src`, `host`/`writeKey`) are properly encoded rather than bare
- * template concatenation — see `normalizeHost`/`escapeHtmlAttr`/
- * `jsStringLiteral`'s own docstrings for why bare substitution was unsafe.
- *
- * `originHost` MUST already be a normalized origin (`normalizeHost`'s
- * output) — this function does not re-derive it, so both substitution
- * sites below are guaranteed to embed the IDENTICAL host string.
- */
-function buildSnippet(originHost: string, writeKey: string): string {
-  const methods = SNIPPET_METHODS.map((m) => JSON.stringify(m)).join(',')
-  const srcAttr = escapeHtmlAttr(originHost)
-  const hostLiteral = jsStringLiteral(originHost)
-  const writeKeyLiteral = jsStringLiteral(writeKey)
-  return `<script>
-  !function(){var l=window.lyraflow=window.lyraflow||{};l.q=l.q||[];
-  [${methods}].forEach(function(m){
-    l[m]=l[m]||function(){l.q.push([m].concat([].slice.call(arguments)))}});
-  }();
-</script>
-<script async src="${srcAttr}/lyraflow.js"></script>
-<script>
-  lyraflow.init({ host: ${hostLiteral}, writeKey: ${writeKeyLiteral} })
-</script>`
 }
 
 /**
@@ -739,7 +629,7 @@ export async function runSnippet(argv: string[], ctx: CommandContext): Promise<n
 
     const until = ctx.now()
     const eventsSection = await fetchEventsSection(ctx, since, until)
-    const snippet = buildSnippet(host, project.write_key)
+    const snippet = buildSnippet(host, project.write_key, SNIPPET_METHODS)
 
     if (mode === 'json') {
       emitObject(

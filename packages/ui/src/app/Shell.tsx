@@ -1,5 +1,6 @@
-import { ChevronDown, LayoutList, LogOut } from 'lucide-react'
+import { ChevronDown, LayoutList, LogOut, Settings as SettingsIcon } from 'lucide-react'
 import type { ReactNode } from 'react'
+import { Link, NavLink, useLocation } from 'react-router'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -14,6 +15,7 @@ import {
   SelectValue,
 } from '../components/ui/select.js'
 import { useProject } from './ProjectContext.js'
+import { ROUTES } from './Router.js'
 import { ThemeToggle } from './ThemeToggle.js'
 
 // Lucide's default stroke (2, on a 24-unit box) reads heavier than the
@@ -118,6 +120,16 @@ function AccountMenu(props: { email: string | null; onLogout(): void }) {
 }
 
 export function Shell(props: { email: string | null; onLogout(): void; children: ReactNode }) {
+  // `Router.tsx` answers `/` with the SAME element as `/feed` (a bare hard
+  // refresh at the root has to land somewhere), but `NavLink`'s own
+  // `isActive` match is computed from `to` against the current location, so
+  // a Feed link `to="/feed" end` never matches `/` itself -- neither nav
+  // item got `aria-current` there, the exact state every operator lands on
+  // right after login (and right after the wizard, which has no route of
+  // its own to redirect through). Computed by hand here, rather than
+  // relying on `NavLink`'s own match, only for the Feed link's extra case.
+  const { pathname } = useLocation()
+  const feedActive = pathname === '/' || pathname === ROUTES.feed
   return (
     // `flex-col` below `sm`, `flex-row` at and above it: a 224px fixed
     // sidebar leaves a 390px viewport with less than half its width for
@@ -137,25 +149,46 @@ export function Shell(props: { email: string | null; onLogout(): void; children:
         </div>
         <nav className="flex items-center gap-1 sm:flex-col sm:items-stretch sm:gap-0.5 sm:p-2">
           {/*
-           * Not an <a>, and not one of a list. There is no router in this
-           * branch -- App.tsx renders Feed unconditionally -- so an anchor
-           * to "/feed" performs a full browser navigation: it hits the SPA
-           * fallback, remounts the whole app, re-runs the bounded session
-           * check, and lands back on Feed with a changed address bar, for
-           * no reason (Important 10). The Settings link that used to sit
-           * beside it named a screen that has never existed -- see the
-           * README's own "no settings screen" line -- and did the
-           * identical pointless round trip on click. Feed is the one
-           * screen this app has; it is marked current, not clickable. A
-           * router belongs with the screen it would route to, not here.
+           * Real links now that `Router.tsx` gives this app somewhere to
+           * route to -- Important 10 previously ruled out a plain anchor
+           * here because there was no router, so any `<a href>` performed a
+           * full browser navigation for no reason. Settings uses `NavLink`
+           * directly below, which supplies `aria-current="page"` for its own
+           * route with nothing more needed.
+           *
+           * Feed uses a plain `Link` instead, with `aria-current` computed
+           * by hand from `feedActive` above: `NavLink`'s OWN `isActive`
+           * match is computed from `to` against the current location
+           * internally, and cannot be overridden by passing an
+           * `aria-current` prop -- react-router only uses that prop as the
+           * VALUE to apply once its own match says active, not as a way to
+           * force the match itself, so it can't be made to also cover `/`.
            */}
-          <span
-            aria-current="page"
-            className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium text-foreground"
+          <Link
+            to={ROUTES.feed}
+            aria-current={feedActive ? 'page' : undefined}
+            className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium ${
+              feedActive
+                ? 'text-foreground'
+                : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+            }`}
           >
             <LayoutList className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
             Feed
-          </span>
+          </Link>
+          <NavLink
+            to={ROUTES.settings}
+            className={({ isActive }) =>
+              `flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium ${
+                isActive
+                  ? 'text-foreground'
+                  : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+              }`
+            }
+          >
+            <SettingsIcon className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
+            Settings
+          </NavLink>
         </nav>
       </aside>
       <div className="flex min-w-0 flex-1 flex-col">

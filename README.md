@@ -13,10 +13,11 @@ under Docker, and nothing leaves it.
 
 > **Early days.** v0.1 is the API and the operations behind it: ingest,
 > identity, segments, event reads, privacy, retention, quotas, and backup. A
-> web UI now sits on top of it — sign in and watch events arrive live — but
-> it is one screen. Segments, people and funnels are still **API and CLI
-> only**; see [Web UI](#web-ui) for exactly what that screen does and does
-> not do.
+> web UI now sits on top of it — sign in, walk through a first-run wizard,
+> watch events arrive live, and edit a project's retention and quota — but
+> segments, people, person profiles and funnels still have **no screen**,
+> **API and CLI only**; see [Web UI](#web-ui) for exactly what exists and
+> what does not.
 
 ## What it is good at
 
@@ -197,26 +198,47 @@ detail on each part.
 
 Open `http://localhost:3000` (or your domain, if you installed with one) and
 sign in with the admin account — see [Admin login](#admin-login) for where
-that password comes from and how to change it. Signed in, you get one
-screen: a live event feed, split into an **Accepted** tab and a **Rejected**
-tab. Rejected events carry the reason they were dropped next to each row —
-`validation_failed`, `too_many_properties`, `event_name_cardinality` or
-`property_key_cardinality` — which is otherwise only visible by reading
-server logs. An unauthenticated or over-quota request is refused *before* it
-reaches a project at all, so it is never dead-lettered and never shows up
-here — the Rejected tab tells you about payloads that reached a real
-project and were still refused, not about a bad or missing write key.
+that password comes from and how to change it. It is served on the **same
+origin and port as ingest** — there is no separate admin host or port to
+firewall off separately. Everything the [Admin login](#admin-login) section
+says about that origin being reachable from wherever ingest is reachable
+applies to the login form too.
 
-It is served on the **same origin and port as ingest** — there is no
-separate admin host or port to firewall off separately. Everything the
-[Admin login](#admin-login) section says about that origin being reachable
-from wherever ingest is reachable applies to the login form too.
+**A fresh install, signed in with no project yet, gets a first-run wizard
+instead of the normal screen.** Name a project, and the wizard hands back
+the install snippet and the project's one-time server key — shown once and
+never again, the same discipline Settings uses for every later project's
+key, described below — then waits for a real first event to arrive. It
+never claims a working install on a timer, only on an event actually
+landing, and an arriving event does not dismiss the wizard by itself either:
+it flips the last step into a success state and waits for you to click
+"Continue to dashboard" — so the key stays on screen until you say you're
+done with it. There is also a "Skip to dashboard" for the case where you
+cannot instrument the target site right now.
 
-**Volunteering the limit:** that is the whole UI. There is no settings
-screen and no first-run setup wizard — `.env` and the CLI still own
-configuration. Segments, people, person profiles and funnels have **no**
-screens at all yet; reach them the way the rest of this document shows, over
-the HTTP API or the CLI.
+Past the wizard (or immediately, if a project already exists), there are two
+screens, reachable from the sidebar:
+
+- **Feed** — a live event feed, split into an **Accepted** tab and a
+  **Rejected** tab. Rejected events carry the reason they were dropped next
+  to each row — `validation_failed`, `too_many_properties`,
+  `event_name_cardinality` or `property_key_cardinality` — which is
+  otherwise only visible by reading server logs. An unauthenticated or
+  over-quota request is refused *before* it reaches a project at all, so it
+  is never dead-lettered and never shows up here — the Rejected tab tells
+  you about payloads that reached a real project and were still refused,
+  not about a bad or missing write key.
+- **Settings** — the install snippet for the active project (so losing the
+  copy from the wizard is not a trip to the CLI); this month's usage
+  (accepted, rejected, throttled, and the quota — reading plainly as
+  **Unlimited** rather than a bar or a number when none is set); the
+  project's retention and monthly quota, both editable in place; and the
+  full project list with a create-project flow of its own, whose server key
+  is likewise shown exactly once and never again.
+
+**Volunteering the limit:** that is the whole UI. Segments, people, person
+profiles and funnels have **no** screens at all yet; reach them the way the
+rest of this document shows, over the HTTP API or the CLI.
 
 ## Tracking more than one site
 
@@ -334,12 +356,11 @@ One product across several domains: one project.
 - **No cross-project read.** No endpoint aggregates projects, so an "all my
   sites" total does not exist in the API. Getting one means querying
   ClickHouse directly, or calling each project in turn and adding up.
-- **No project list or delete.** `GET /v1/project` returns only the caller's
-  own. Removing a project means deleting the Postgres row by hand — and its
-  ClickHouse partitions with it, because the retention worker only sweeps
-  projects it can still see in Postgres.
-- **Retention and quota are SQL, not API.** Both are columns on `projects`;
-  see *Retention* and *Quotas* under *Operations* for the statements.
+- **No project delete.** `GET /v1/projects` (session-only — see below) lists
+  every project, and the [Web UI](#web-ui)'s Settings screen is built on it,
+  but nothing removes one. Removing a project means deleting the Postgres row
+  by hand — and its ClickHouse partitions with it, because the retention
+  worker only sweeps projects it can still see in Postgres.
 - **One project per page.** The browser SDK keeps a single configuration on
   `window.lyraflow`; calling `init()` again reconfigures it from scratch
   rather than adding a second destination. One page cannot report to two
@@ -377,6 +398,53 @@ nothing about what that caller can reach. `lyraflow snippet` (see
 [`packages/cli/README.md`](packages/cli/README.md)) is the intended way to
 use this endpoint: it prints a paste-ready install snippet with the write key
 already filled in, rather than a caller reading this response by hand.
+
+### `PATCH /v1/project`
+
+Also server-key authenticated. Body is `{"retention_months"}`,
+`{"monthly_event_quota"}`, or both — this is what the [Web UI](#web-ui)'s
+Settings screen calls, and it is the only API surface documented under
+*Retention* and *Quotas* below; there is no longer a raw SQL statement to run
+for either. **A field's absence means "leave it alone"; it is not the same as
+sending it explicitly.** `monthly_event_quota: null` sets unlimited;
+omitting the key entirely changes nothing about the existing quota. Sending
+neither field is a `400`. `retention_months` is `1`–`120`, matching the
+column's own check constraint; `monthly_event_quota` is a positive integer
+or `null` — `0` is rejected rather than accepted and silently misread as a
+limit, since `0` is what `isOverQuota` treats as "no limit configured" and
+refusing it here is cheaper than that ambiguity reaching ingest. Returns the
+row's current `{"retention_months", "monthly_event_quota"}` on `200`, and
+invalidates the 60-second project cache the retention worker and the ingest
+quota check both read from, so a new limit is in force immediately rather
+than up to a minute later.
+
+### `GET /v1/project/usage`
+
+Server-key authenticated. Returns the active project's counters for the
+current calendar month — `{"month", "events_accepted", "events_rejected",
+"events_throttled", "monthly_event_quota"}` — all zero for a project with no
+row yet this month, which is the ordinary state for a brand-new one. This is
+what the Settings screen's usage card reads.
+
+### `GET /v1/projects` and `POST /v1/projects`
+
+**Session-cookie authenticated, not server-key** — these are instance-scoped
+("which projects exist", "create one") rather than project-scoped, so a
+server key (which names one project) cannot answer them, and accepting one
+would let a single project's credential enumerate every other project on the
+install. In practice this means: the CLI's `create-project` and these two
+routes are the only ways to create a project, and only an admin signed into
+the [Web UI](#web-ui) (or holding its session cookie) can list every project
+or create a new one over HTTP. `GET /v1/projects` returns
+`{"projects": [...]}`, wrapped rather than a bare array, with each entry
+shaped `{"id", "name", "slug", "created_at", "retention_months",
+"monthly_event_quota"}` and **no key of either kind** — the one response in
+this API that names every project at once, so a key leaking here would leak
+the whole install rather than one project. `POST /v1/projects` takes
+`{"name"}`, slugifies it the same way `create-project` does, and returns
+`{"name", "slug", "write_key", "server_key"}` — the server key shown once,
+exactly as `create-project` prints it once, and never served again by
+anything.
 
 Sent directly from browser JavaScript (as opposed to a server-side SDK),
 `/v1/track`, `/v1/page`, `/v1/identify` and `/v1/batch` are CORS-preflighted
@@ -1772,9 +1840,11 @@ A background worker drops events older than each project's own
 lives on the `projects` table and applies only going forward: it changed
 where a fresh install starts, not what an existing project is already
 configured with, so upgrading never quietly shortens anyone's retention.
-There is no API yet for changing a project's `retention_months` after
-creation; today that means updating the column directly (`1`–`120`, enforced
-by a check constraint).
+Change it after creation with `PATCH /v1/project` (see *The ingest API*
+above), which the [Web UI](#web-ui)'s Settings screen also calls — both take
+the same range, `1`–`120`, enforced again by the column's own check
+constraint so a value the API validated can never fail at the database for a
+reason the caller wasn't already told.
 
 **Retention is month-granular, not day-granular — a floor, not an exact
 promise.** ClickHouse's `events` and `device_index` tables are both
@@ -1884,8 +1954,9 @@ in ClickHouse yourself at the same time.
 `projects.monthly_event_quota` column is nullable, `NULL` means unlimited, and
 `NULL` is what every project carries — both a new one and every existing one,
 which the upgrade rewrote on purpose rather than starting to enforce a limit
-nobody had opted into. There is no API or CLI for setting a quota yet; today
-it is a direct update:
+nobody had opted into. Set one with `PATCH /v1/project` (see *The ingest API*
+above) — the same route the [Web UI](#web-ui)'s Settings screen calls — or
+direct SQL if you would rather:
 
 ```sql
 -- 5,000,000 accepted events per calendar month for one project.
@@ -1895,10 +1966,11 @@ UPDATE projects SET monthly_event_quota = 5000000 WHERE slug = 'acme';
 UPDATE projects SET monthly_event_quota = NULL WHERE slug = 'acme';
 ```
 
-The value must be positive (a check constraint enforces it); use `NULL`, not
-`0`, to mean unlimited. The month is the **UTC calendar month**, so the budget
-resets at `00:00 UTC` on the 1st, not on a rolling 30-day window and not in
-the server's local timezone.
+The value must be positive (a check constraint enforces it, and the API
+rejects `0` and negative values the same way); send `null` over the API or
+`NULL` over SQL, never `0`, to mean unlimited. The month is the **UTC
+calendar month**, so the budget resets at `00:00 UTC` on the 1st, not on a
+rolling 30-day window and not in the server's local timezone.
 
 **Understand what you are turning on before you turn it on.** The write key
 ships in your browser bundle and is readable by anyone who visits an

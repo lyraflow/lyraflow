@@ -27,9 +27,15 @@ const VERSIONED_CACHE_CONTROL = 'public, max-age=31536000, immutable'
  * and for the copy `pnpm install` materialises in the Docker image — both
  * are ordinary resolvable packages as far as this call is concerned.
  * `package.json` is used as the resolution target (rather than, say, the
- * package's main entry) because sdk-browser declares no `exports` map, so
- * arbitrary subpaths — including its own manifest — resolve without needing
- * `dist/lyraflow.js` itself to be an advertised entry point.
+ * package's main entry) because `dist/lyraflow.js` is not itself an
+ * advertised entry point — it's the IIFE bundle `scripts/bundle.mjs`
+ * produces from `src/index.ts`, not one of `exports`' listed subpaths.
+ * sdk-browser's `exports` map (added for `SNIPPET_METHODS`'s own subpath,
+ * IMPORTANT 4 from the whole-branch review) explicitly lists
+ * `"./package.json"` for exactly this resolution — the same fix this
+ * repo's own `@lyraflow/core` needed for the identical reason, so a bare
+ * `exports` map here can't silently break this call the way it almost did
+ * there.
  */
 function loadBundle(): Buffer | undefined {
   try {

@@ -1,11 +1,16 @@
 import type {
+  CreatedProject,
   EventsPage,
   EventsQuery,
   Project,
+  ProjectIdentity,
+  ProjectLimits,
+  ProjectPatch,
   RejectionsPage,
   RejectionsQuery,
   StatsPage,
   StatsQuery,
+  Usage,
 } from './types.js'
 
 /** The feed's default page size. Explicit on every request -- see #32. */
@@ -31,6 +36,17 @@ export interface ApiClient {
   // false for that real response shape.
   session(): Promise<{ email: string | null }>
   projects(): Promise<Project[]>
+  // Instance-scoped like `projects()` -- "does this name collide" has no
+  // project to resolve against, so this must not carry the project header.
+  // The server key in the response exists nowhere else, ever: only its
+  // SHA-256 is stored, so this is the caller's one chance to show it.
+  createProject(name: string): Promise<CreatedProject>
+  project(projectId: number): Promise<ProjectIdentity>
+  // A field ABSENT from `patch` means "leave unchanged" -- the caller must
+  // never send `monthly_event_quota: 0` for "no change", only omit the
+  // key entirely. See `ProjectPatch`'s docstring.
+  patchProject(projectId: number, patch: ProjectPatch): Promise<ProjectLimits>
+  usage(projectId: number): Promise<Usage>
   events(projectId: number, q: EventsQuery): Promise<EventsPage>
   stats(projectId: number, q: StatsQuery): Promise<StatsPage>
   rejections(projectId: number, q: RejectionsQuery): Promise<RejectionsPage>
@@ -95,6 +111,17 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
     logout: () => call('/v1/auth/logout', { method: 'POST' }),
     session: () => call('/v1/auth/session'),
     projects: async () => (await call<{ projects: Project[] }>('/v1/projects')).projects,
+    // No third argument -- deliberately. This route is instance-scoped:
+    // "create a project" has no existing project to resolve, and sending
+    // the header would claim a scope this call doesn't have.
+    createProject: (name) =>
+      call('/v1/projects', { method: 'POST', body: JSON.stringify({ name }) }),
+    // Both project-scoped the same way `events` is -- the header the client
+    // attaches from `projectId`, not a path segment or query param.
+    project: (projectId) => call('/v1/project', {}, projectId),
+    patchProject: (projectId, patch) =>
+      call('/v1/project', { method: 'PATCH', body: JSON.stringify(patch) }, projectId),
+    usage: (projectId) => call('/v1/project/usage', {}, projectId),
     events: (projectId, q) =>
       call(`/v1/events${qs({ ...q, limit: q.limit ?? DEFAULT_LIMIT })}`, {}, projectId),
     stats: (projectId, q) => call(`/v1/events/stats${qs({ ...q })}`, {}, projectId),

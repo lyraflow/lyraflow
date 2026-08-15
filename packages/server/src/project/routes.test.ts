@@ -316,6 +316,30 @@ describe('PATCH /v1/project', () => {
     expect(res.statusCode).toBe(400)
   })
 
+  // IMPORTANT 2 from the whole-branch review, proved end to end against a
+  // real Postgres before this fix: `1e20` passes `Number.isInteger` (it's
+  // exactly representable as a float) but is far outside `bigint`'s range,
+  // and Postgres answered "value ... is out of range for type bigint" --
+  // rendered by app.ts's catch-all as a `503 unavailable`, indistinguishable
+  // from an outage, for what should be an ordinary 400. `1e21` is worse:
+  // it serialises as the literal string `"1e+21"`, and Postgres refuses
+  // that for a different reason ("invalid input syntax for type bigint"),
+  // but the outcome from the caller's side was identically a 503 either
+  // way. `.max(Number.MAX_SAFE_INTEGER)` must turn both into a 400 that
+  // never reaches Postgres at all.
+  it.each([
+    ['far outside bigint range but still an integer', 1e20],
+    ['serialises as exponential notation', 1e21],
+  ])('refuses an unrepresentable monthly_event_quota: %s', async (_name, quota) => {
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/v1/project',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_A },
+      payload: { monthly_event_quota: quota },
+    })
+    expect(res.statusCode).toBe(400)
+  })
+
   it('refuses an empty patch rather than silently doing nothing', async () => {
     const res = await app.inject({
       method: 'PATCH',
