@@ -748,7 +748,19 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
 
     reply.header('cache-control', 'no-store')
     return reply.code(200).send({
-      rejections: rows,
+      // `received_at` is converted through the same `parseChDateTime(...)
+      // .toISOString()` the feed and stats handlers above use, not sent
+      // verbatim. ClickHouse emits a space-separated, zone-less string
+      // ("2026-08-15 13:09:59.000"); `new Date(...)` on that shape is
+      // parsed as LOCAL time by the browser, not UTC, so an unconverted
+      // row rendered under a non-UTC TZ silently disagrees with the
+      // Accepted tab one tab over about what "now" is.
+      rejections: rows.map((r) => ({
+        received_at: parseChDateTime(r.received_at).toISOString(),
+        reason: r.reason,
+        detail: r.detail,
+        payload: r.payload,
+      })),
       // A full page means there is more behind it — the same contract the
       // feed states, and the reason the UI must always send an explicit
       // limit. See rejectionsHasMore's own docstring for why that alone
