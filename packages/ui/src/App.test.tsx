@@ -19,15 +19,18 @@ function client(over: Partial<Record<string, unknown>> = {}) {
     projects: vi.fn(async () => [PLACEHOLDER_PROJECT]),
     login: vi.fn(async () => ({ email: 'admin@localhost' })),
     logout: vi.fn(async () => {}),
+    events: vi.fn(async () => ({ events: [], next_cursor: null })),
+    stats: vi.fn(async () => ({ buckets: [] })),
+    rejections: vi.fn(async () => ({ rejections: [], has_more: false, next_offset: 0 })),
     ...over,
   } as never
 }
 
 describe('App', () => {
-  it('renders the shell around the placeholder content for an existing session', async () => {
+  it('renders the shell around the feed for an existing session', async () => {
     render(<App client={client()} />)
     expect(await screen.findByRole('link', { name: /feed/i })).toBeInTheDocument()
-    expect(screen.getByText('The interface is being built.')).toBeInTheDocument()
+    expect(await screen.findByRole('tab', { name: /accepted/i })).toBeInTheDocument()
   })
 
   // The other side of the same decision: no cookie (or an expired one)

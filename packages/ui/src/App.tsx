@@ -4,6 +4,7 @@ import { createClient } from './api/client.js'
 import type { Project } from './api/types.js'
 import { ProjectProvider } from './app/ProjectContext.js'
 import { Shell } from './app/Shell.js'
+import { Feed } from './screens/Feed.js'
 import { Login } from './screens/Login.js'
 
 interface Session {
@@ -68,7 +69,7 @@ export default function App(props: { client?: ApiClient }) {
   return (
     <ProjectProvider projects={session.projects} initialId={session.projects[0]?.id ?? null}>
       <Shell email={session.email} onLogout={handleLogout}>
-        <p className="text-muted-foreground">The interface is being built.</p>
+        <Feed client={client} />
       </Shell>
     </ProjectProvider>
   )

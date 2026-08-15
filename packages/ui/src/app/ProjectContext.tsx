@@ -1,4 +1,4 @@
-import { createContext, useContext, useMemo, useState } from 'react'
+import { createContext, useContext, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { Project } from '../api/types.js'
 
@@ -24,6 +24,19 @@ export function ProjectProvider(props: {
   children: ReactNode
 }) {
   const [activeId, setActiveId] = useState<number | null>(props.initialId)
+
+  // `useState`'s initial value is read once, on mount -- a caller whose own
+  // `initialId` changes on a later render (a re-loaded session naming a
+  // different first project, or a test driving this the same way) would
+  // otherwise leave `activeId` pointing at a project that no longer exists
+  // for this provider, with no way back short of a full remount. This
+  // syncs it without disturbing a project the user picked by hand via
+  // `setActiveId`: that only ever moves in response to `initialId` itself
+  // changing, never on an unrelated re-render.
+  useEffect(() => {
+    setActiveId(props.initialId)
+  }, [props.initialId])
+
   const value = useMemo(
     () => ({ projects: props.projects, activeId, setActiveId }),
     [props.projects, activeId],
