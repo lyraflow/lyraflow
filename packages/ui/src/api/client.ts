@@ -35,7 +35,11 @@ export interface ApiClient {
 function qs(params: Record<string, string | number | undefined>): string {
   const s = new URLSearchParams()
   for (const [k, v] of Object.entries(params)) {
-    if (v !== undefined) s.set(k, String(v))
+    if (v === undefined) continue
+    // An empty string is "no filter was chosen", not a literal filter value --
+    // distinct from a legitimate falsy number like `offset: 0`, which must survive.
+    if (v === '') continue
+    s.set(k, String(v))
   }
   const out = s.toString()
   return out ? `?${out}` : ''

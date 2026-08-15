@@ -86,4 +86,93 @@ describe('createClient', () => {
     const out = await createClient(f as unknown as typeof fetch).projects()
     expect(out[0]?.name).toBe('A')
   })
+
+  // login is the single most important call in this client -- a body sent
+  // without content-type gets 400 invalid_body server-side, which presents
+  // to a user as "my password is wrong".
+  describe('login and logout', () => {
+    it('login POSTs to /v1/auth/login', async () => {
+      const f = fakeFetch(200, { email: 'a@b.com' })
+      await createClient(f as unknown as typeof fetch).login('a@b.com', 'hunter2')
+      const url = String(f.mock.calls[0]?.[0])
+      const init = f.mock.calls[0]?.[1] as RequestInit
+      expect(url).toBe('/v1/auth/login')
+      expect(init.method).toBe('POST')
+    })
+
+    it('login sends a JSON body with exactly the given email and password', async () => {
+      const f = fakeFetch(200, { email: 'a@b.com' })
+      await createClient(f as unknown as typeof fetch).login('a@b.com', 'hunter2')
+      const init = f.mock.calls[0]?.[1] as RequestInit
+      expect(JSON.parse(init.body as string)).toEqual({ email: 'a@b.com', password: 'hunter2' })
+    })
+
+    it('login sets content-type: application/json', async () => {
+      const f = fakeFetch(200, { email: 'a@b.com' })
+      await createClient(f as unknown as typeof fetch).login('a@b.com', 'hunter2')
+      const init = f.mock.calls[0]?.[1] as RequestInit
+      expect(new Headers(init.headers).get('content-type')).toBe('application/json')
+    })
+
+    it('login carries the UI header and credentials like every other call', async () => {
+      const f = fakeFetch(200, { email: 'a@b.com' })
+      await createClient(f as unknown as typeof fetch).login('a@b.com', 'hunter2')
+      const init = f.mock.calls[0]?.[1] as RequestInit
+      expect(new Headers(init.headers).get('x-lyraflow-ui')).toBe('1')
+      expect(init.credentials).toBe('include')
+    })
+
+    it('login does NOT carry the project header -- it is instance-scoped', async () => {
+      const f = fakeFetch(200, { email: 'a@b.com' })
+      await createClient(f as unknown as typeof fetch).login('a@b.com', 'hunter2')
+      const init = f.mock.calls[0]?.[1] as RequestInit
+      expect(new Headers(init.headers).get('x-lyraflow-project')).toBeNull()
+    })
+
+    it('logout POSTs and tolerates a 204 with no body', async () => {
+      const f = vi.fn(
+        async (_input: RequestInfo | URL, _init?: RequestInit) =>
+          new Response(null, { status: 204 }),
+      )
+      const client = createClient(f as unknown as typeof fetch)
+      await expect(client.logout()).resolves.toBeUndefined()
+      const init = f.mock.calls[0]?.[1] as RequestInit
+      expect(init.method).toBe('POST')
+    })
+  })
+
+  // #32's sibling: `offset: 0` is the rejections feed's literal first page,
+  // not "no value" -- the guard in qs() must keep it while still omitting
+  // an unset param.
+  describe('qs() and falsy values', () => {
+    it('sends an explicit offset of 0 on the rejections feed', async () => {
+      const f = fakeFetch(200, { rejections: [], has_more: false, next_offset: 0 })
+      await createClient(f as unknown as typeof fetch).rejections(1, { offset: 0 })
+      const url = String(f.mock.calls[0]?.[0])
+      expect(url).toMatch(/[?&]offset=0(&|$)/)
+    })
+
+    it('omits a param that was never set', async () => {
+      const f = fakeFetch(200, { rejections: [], has_more: false, next_offset: 0 })
+      await createClient(f as unknown as typeof fetch).rejections(1, {})
+      const url = String(f.mock.calls[0]?.[0])
+      expect(url).not.toMatch(/[?&]offset=/)
+    })
+
+    // An empty string from an unfilled filter input means "no filter", not
+    // a literal filter value -- unlike `offset: 0`, which is meaningful.
+    it('omits an empty-string reason filter', async () => {
+      const f = fakeFetch(200, { rejections: [], has_more: false, next_offset: 0 })
+      await createClient(f as unknown as typeof fetch).rejections(1, { reason: '' })
+      const url = String(f.mock.calls[0]?.[0])
+      expect(url).not.toMatch(/[?&]reason=/)
+    })
+
+    it('sends a non-empty reason filter', async () => {
+      const f = fakeFetch(200, { rejections: [], has_more: false, next_offset: 0 })
+      await createClient(f as unknown as typeof fetch).rejections(1, { reason: 'bad_schema' })
+      const url = String(f.mock.calls[0]?.[0])
+      expect(url).toMatch(/[?&]reason=bad_schema(&|$)/)
+    })
+  })
 })
