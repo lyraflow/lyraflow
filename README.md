@@ -199,9 +199,13 @@ Open `http://localhost:3000` (or your domain, if you installed with one) and
 sign in with the admin account — see [Admin login](#admin-login) for where
 that password comes from and how to change it. Signed in, you get one
 screen: a live event feed, split into an **Accepted** tab and a **Rejected**
-tab. Rejected events carry the reason they were dropped (bad signature,
-missing write key, and so on) next to each row, which is otherwise only
-visible by reading server logs.
+tab. Rejected events carry the reason they were dropped next to each row —
+`validation_failed`, `too_many_properties`, `event_name_cardinality` or
+`property_key_cardinality` — which is otherwise only visible by reading
+server logs. An unauthenticated or over-quota request is refused *before* it
+reaches a project at all, so it is never dead-lettered and never shows up
+here — the Rejected tab tells you about payloads that reached a real
+project and were still refused, not about a bad or missing write key.
 
 It is served on the **same origin and port as ingest** — there is no
 separate admin host or port to firewall off separately. Everything the

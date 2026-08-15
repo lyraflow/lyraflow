@@ -14,9 +14,9 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    // The API and the SDK bundle are served by the Fastify process, not by
-    // Vite. On zeus that process runs inside the Incus container while Vite
-    // runs on the host, so this target is the container's published port.
+    // The API and the SDK bundle are served by the Lyraflow server, not by
+    // Vite -- this proxies both to it so the dev server can serve the SPA
+    // while still reaching a real backend.
     proxy: {
       '/v1': 'http://localhost:3000',
       '/lyraflow.js': 'http://localhost:3000',
