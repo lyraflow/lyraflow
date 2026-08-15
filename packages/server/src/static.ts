@@ -11,19 +11,58 @@ import type { FastifyInstance } from 'fastify'
  */
 const API_PREFIXES = ['/v1', '/health', '/ready', '/metrics', '/lyraflow']
 
+/**
+ * Reduces `req.url` to the single normalized path both `isApiPath` and
+ * `looksLikeFile` decide against — Important 8 from the whole-branch
+ * review: those two functions used to normalize independently (one
+ * stripped the query string, the other matched `req.url` verbatim, query
+ * string and all), and that seam let three shapes through the fallback
+ * that should never reach it:
+ *
+ * - `/v1?x=1` — `isApiPath` compared the WHOLE url including `?x=1` against
+ *   the bare `/v1` prefix, which never matches a string with a query string
+ *   appended.
+ * - `//v1/events` — a routine client bug (joining a base URL ending in `/`
+ *   with a path beginning with `/`) that used to produce a clean JSON 404
+ *   and, unnormalized, no longer matched any `API_PREFIXES` entry at all.
+ * - `/v1%2Fnope` — an encoded slash that never matches a literal `/`
+ *   comparison, letting a caller dodge the prefix check by encoding it away.
+ *
+ * One function, called from both, is what keeps them from drifting apart
+ * again the way they did the first time.
+ */
+function normalizePath(url: string): string {
+  const withoutQuery = url.split('?')[0] ?? url
+  let decoded = withoutQuery
+  try {
+    decoded = decodeURIComponent(withoutQuery)
+  } catch {
+    // Malformed percent-encoding (e.g. a lone `%`) — fall back to the
+    // undecoded path rather than throwing. Nothing below assumes a
+    // successful decode; worst case this path simply fails to match an API
+    // prefix and falls through to the file/SPA decision on its raw form,
+    // which is the same as today's behaviour for a path like this.
+  }
+  // Collapse repeated slashes so `//v1/events` normalizes to `/v1/events` —
+  // what a correctly-joined caller would have sent.
+  return decoded.replace(/\/{2,}/g, '/')
+}
+
 /** True for the prefix itself, or anything nested under it. */
 function isApiPath(url: string): boolean {
-  return API_PREFIXES.some((p) => url === p || url.startsWith(`${p}/`))
+  const path = normalizePath(url)
+  return API_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`))
 }
 
 /**
  * True when the final path segment contains a dot — i.e. the request names
  * a file (`/assets/index-abc123.js`, `/favicon.svg`) rather than a
- * client-side route (`/feed`). Ignores the query string, since that is not
- * part of the path being named.
+ * client-side route (`/feed`). Goes through the same `normalizePath` as
+ * `isApiPath` — see that function's own docstring for why the two must
+ * never normalize independently again.
  */
 function looksLikeFile(url: string): boolean {
-  const path = url.split('?')[0] ?? url
+  const path = normalizePath(url)
   const lastSegment = path.slice(path.lastIndexOf('/') + 1)
   return lastSegment.includes('.')
 }

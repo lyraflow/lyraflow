@@ -120,4 +120,32 @@ describe('serving the SPA', () => {
     expect(res.statusCode).toBe(404)
     expect(res.json()).toEqual({ error: 'not_found' })
   })
+
+  // Important 8 from the whole-branch review. Proved live against the
+  // running dev stack before the fix: `/v1?x=1`, `//v1/events` and
+  // `/v1%2Fnope` all answered 200 text/html instead of 404 JSON, because
+  // `isApiPath` matched `req.url` (query string and all) while its sibling
+  // `looksLikeFile` normalized independently -- a seam inside a 15-line
+  // module. `//v1/events` is the one that matters most: a base URL ending
+  // in `/` joined with a path beginning with `/` is a routine client bug,
+  // and it used to produce a clean JSON 404 a caller's error handling could
+  // act on, not a 200 whose body fails `JSON.parse`.
+  it.each([['/v1?x=1'], ['//v1/events'], ['/v1%2Fnope']])(
+    'does NOT serve index.html for %s',
+    async (url) => {
+      const res = await app.inject({ method: 'GET', url })
+      expect(res.statusCode).toBe(404)
+      expect(res.headers['content-type']).toMatch(/application\/json/)
+      expect(res.json()).toEqual({ error: 'not_found' })
+    },
+  )
+
+  // The fourth shape from the same finding, kept passing rather than
+  // flipped: an ordinary API 404 must still read exactly as it always did.
+  it('still serves a clean JSON 404 for an ordinary unknown API path', async () => {
+    const res = await app.inject({ method: 'GET', url: '/v1/nope' })
+    expect(res.statusCode).toBe(404)
+    expect(res.headers['content-type']).toMatch(/application\/json/)
+    expect(res.json()).toEqual({ error: 'not_found' })
+  })
 })
