@@ -12,14 +12,26 @@ export function Sparkline(props: { buckets: StatsBucket[] }) {
   const { buckets } = props
   const max = Math.max(1, ...buckets.map((b) => b.events))
 
+  /**
+   * A bar chart's entire value is showing shape across at least two
+   * points. Buckets come back sparse -- the server only returns minutes
+   * that had at least one event (`GROUP BY bucket` with no zero-fill) --
+   * so one bucket is not "quiet", it is a single fact with nothing to
+   * compare it to: one thin bar sitting alone in an otherwise-empty row
+   * reads as a broken widget, not as "not much has happened". Below two
+   * points there is no trend to draw, so say that in words instead of
+   * drawing a chart that implies more was measured than was.
+   */
+  const hasTrend = buckets.length >= 2
+
   return (
     <div className="flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3">
-      {buckets.length === 0 ? (
+      {!hasTrend ? (
         <div
           className="flex h-8 flex-1 items-center text-sm text-muted-foreground"
           style={{ height: CHART_HEIGHT_PX }}
         >
-          No data yet
+          {buckets.length === 0 ? 'No data yet' : 'Not enough events yet to chart a trend'}
         </div>
       ) : (
         <div

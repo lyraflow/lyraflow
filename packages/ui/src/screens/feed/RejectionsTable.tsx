@@ -53,7 +53,18 @@ export function RejectionsTable(props: { rejections: Rejection[] }) {
               {formatTime(rejection.received_at)}
             </TableCell>
             <TableCell className="font-medium text-destructive">{rejection.reason}</TableCell>
-            <TableCell className="text-muted-foreground">{rejection.detail}</TableCell>
+            {/*
+             * `detail` is free text -- for validation_failed it's a
+             * stringified array of Zod issues and can run to hundreds of
+             * characters. Without a bound it rendered at its full intrinsic
+             * width and just ran off the table edge mid-character, reading
+             * as a broken row rather than truncated content (the same
+             * max-w-xs + title treatment Payload already had). `title`
+             * keeps the full value one hover away.
+             */}
+            <TableCell className="max-w-xs truncate text-muted-foreground" title={rejection.detail}>
+              {rejection.detail}
+            </TableCell>
             <TableCell
               className="max-w-xs truncate font-mono text-muted-foreground"
               title={rejection.payload}

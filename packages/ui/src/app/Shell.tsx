@@ -117,13 +117,24 @@ function AccountMenu(props: { email: string; onLogout(): void }) {
 
 export function Shell(props: { email: string; onLogout(): void; children: ReactNode }) {
   return (
-    <div className="flex h-dvh bg-background text-foreground">
-      <aside className="flex w-56 shrink-0 flex-col border-r border-border bg-card">
-        <div className="flex h-14 items-center gap-2 border-b border-border px-4 font-semibold">
+    // `flex-col` below `sm`, `flex-row` at and above it: a 224px fixed
+    // sidebar leaves a 390px viewport with less than half its width for
+    // everything else, and no amount of truncation in the header made that
+    // usable (see the two-star screenshot review that sent this back). The
+    // aside below carries the same reflow -- one set of NAV links, laid out
+    // as a vertical sidebar at `sm:` and a compact top bar under it -- on
+    // purpose: two separate DOM copies of "Feed"/"Settings" gated by
+    // `hidden`/`flex` classes would both be visible to Shell.test.tsx (jsdom
+    // has no Tailwind stylesheet loaded, so `hidden` never actually hides
+    // anything there), turning `getByRole('link', { name: /feed/i })` into a
+    // multiple-match failure. One element that reflows has no such seam.
+    <div className="flex h-dvh flex-col bg-background text-foreground sm:flex-row">
+      <aside className="flex shrink-0 items-center gap-4 border-b border-border bg-card px-4 sm:w-56 sm:flex-col sm:items-stretch sm:gap-0 sm:border-b-0 sm:border-r sm:px-0">
+        <div className="flex h-14 items-center gap-2 font-semibold sm:border-b sm:border-border sm:px-4">
           <Mark />
           Lyra
         </div>
-        <nav className="flex flex-col gap-0.5 p-2">
+        <nav className="flex items-center gap-1 sm:flex-col sm:items-stretch sm:gap-0.5 sm:p-2">
           {NAV.map(({ href, label, icon: Icon }) => (
             <a
               key={href}
@@ -140,11 +151,12 @@ export function Shell(props: { email: string; onLogout(): void; children: ReactN
         {/*
          * `overflow-x-auto` is the backstop, not the primary fix: the
          * project name and email above already shrink and truncate first.
-         * At a phone-width viewport behind the sidebar's fixed 224px, the
-         * account button's icon and padding alone can still exceed what's
-         * left -- and this is what stops that from becoming page-level
-         * horizontal scroll (the same failure this task's overflow check
-         * exists to catch) instead of a scroll confined to the header bar.
+         * Now that the sidebar reflows away below `sm` instead of sitting
+         * fixed at 224px, the three controls usually fit -- but this is
+         * what stops the rare case (a very long project name, say) from
+         * becoming page-level horizontal scroll (the same failure this
+         * task's overflow check exists to catch) instead of a scroll
+         * confined to the header bar.
          */}
         <header className="flex h-14 min-w-0 shrink-0 items-center justify-between gap-2 overflow-x-auto border-b border-border bg-card px-4">
           <ProjectSwitcher />
