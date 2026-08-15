@@ -1,3 +1,4 @@
+import { join } from 'node:path'
 import cookie from '@fastify/cookie'
 import type { ClickHouseClient, Pool } from '@lyraflow/db'
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify'
@@ -37,6 +38,7 @@ import { registerSchemaRoutes } from './schema/routes.js'
 import { registerSdkRoutes } from './sdk/routes.js'
 import { SegmentCache } from './segments/cache.js'
 import { registerSegmentRoutes } from './segments/routes.js'
+import { registerStatic } from './static.js'
 
 export interface AppDeps {
   config: Config
@@ -351,6 +353,11 @@ export function buildApp(input: {
   }
   registerPrivacyRoutes(app, privacyDeps)
   registerExportRoute(app, privacyDeps)
+
+  // Last, so the not-found handler it installs cannot shadow a route
+  // registered above. `root` is absent in development and in most tests, and
+  // registerStatic no-ops in that case -- see its own docstring.
+  registerStatic(app, { root: join(import.meta.dirname, '..', '..', 'ui', 'dist') })
 
   // Deliberately NOT started here: every route test in this codebase calls
   // buildApp, and a live timer claiming real deletion requests during
