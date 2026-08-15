@@ -126,6 +126,25 @@ export const REJECTIONS_MAX_LIMIT = 500
  */
 export const REJECTIONS_MAX_OFFSET = 100_000
 
+/**
+ * MINOR B from the feat/admin-sessions whole-branch review: a full page
+ * alone is not enough to promise there is a reachable next page.
+ * offset=100_000 with a full page computes next_offset=100_002, which
+ * REJECTIONS_MAX_OFFSET's own Zod ceiling (`RejectionsQuery` below) then
+ * refuses with 400 -- a UI paging on `has_more` walks into that dead end.
+ * Pulled out as its own pure function so the boundary can be pinned
+ * directly, without needing a 100,000+ row ClickHouse fixture to reach it
+ * through the route.
+ */
+export function rejectionsHasMore(
+  rowsReturned: number,
+  limit: number,
+  nextOffset: number,
+  maxOffset: number = REJECTIONS_MAX_OFFSET,
+): boolean {
+  return rowsReturned === limit && nextOffset <= maxOffset
+}
+
 const RejectionsQuery = z.object({
   since: z.string().datetime().optional(),
   until: z.string().datetime().optional(),
@@ -725,13 +744,17 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
     })
     const rows = await rs.json<RejectionRow>()
 
+    const nextOffset = offset + rows.length
+
     reply.header('cache-control', 'no-store')
     return reply.code(200).send({
       rejections: rows,
       // A full page means there is more behind it — the same contract the
-      // feed states, and the reason the UI must always send an explicit limit.
-      has_more: rows.length === limit,
-      next_offset: offset + rows.length,
+      // feed states, and the reason the UI must always send an explicit
+      // limit. See rejectionsHasMore's own docstring for why that alone
+      // is not sufficient.
+      has_more: rejectionsHasMore(rows.length, limit, nextOffset),
+      next_offset: nextOffset,
     })
   })
 }

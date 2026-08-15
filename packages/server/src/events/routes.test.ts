@@ -10,7 +10,7 @@ import { Readiness } from '../health.js'
 import { type PgDictionarySource, ensureIdentityDictionaries } from '../identity/dictionaries.js'
 import { MAX_PERSON_RANGE_CLAUSES } from '../identity/scope.js'
 import { encodeFeedCursor } from './cursor.js'
-import { EVENTS_MAX_LIMIT, STATS_MAX_BUCKETS } from './routes.js'
+import { EVENTS_MAX_LIMIT, STATS_MAX_BUCKETS, rejectionsHasMore } from './routes.js'
 
 const CH_DB = 'lyraflow_test'
 const CH = {
@@ -1589,5 +1589,31 @@ describe('GET /v1/events/rejections', () => {
     const partialBody = partial.json() as { has_more: boolean; next_offset: number }
     expect(partialBody.has_more).toBe(false)
     expect(partialBody.next_offset).toBe(4)
+  })
+
+  // MINOR B from the feat/admin-sessions whole-branch review: a full page
+  // landing exactly at REJECTIONS_MAX_OFFSET computes a next_offset that
+  // REJECTIONS_MAX_OFFSET's own Zod ceiling then refuses with 400 -- a UI
+  // paging on has_more alone walks into that dead end. Tested against the
+  // pure rejectionsHasMore directly (with an injected maxOffset) rather
+  // than through the route: reaching offset=100_000 with a genuinely full
+  // page through the real route would need a 100,000+ row ClickHouse
+  // fixture, which is what this indirection avoids.
+  describe('rejectionsHasMore', () => {
+    it('clamps has_more to false when a full page would land past maxOffset', () => {
+      // offset=99_999, limit=2: a full page (rowsReturned === limit) whose
+      // nextOffset (100_001) is past maxOffset (100_000).
+      expect(rejectionsHasMore(2, 2, 100_001, 100_000)).toBe(false)
+    })
+
+    it('reports has_more when a full page lands exactly at maxOffset', () => {
+      // nextOffset === maxOffset is still a valid next request (offset's
+      // own Zod schema is `.max(REJECTIONS_MAX_OFFSET)`, inclusive).
+      expect(rejectionsHasMore(2, 2, 100_000, 100_000)).toBe(true)
+    })
+
+    it('stays false for a partial page regardless of maxOffset', () => {
+      expect(rejectionsHasMore(1, 2, 100_000, 100_000)).toBe(false)
+    })
   })
 })
