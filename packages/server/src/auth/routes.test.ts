@@ -279,3 +279,82 @@ describe('GET /v1/auth/session and POST /v1/auth/logout', () => {
     expect(header).toMatch(/Secure/i)
   })
 })
+
+// MINOR A from the feat/admin-sessions whole-branch review: while draining,
+// GET /v1/auth/session, POST /v1/auth/logout, and GET /v1/auth/state used to
+// answer 200/204/200 -- three separately-written drain checks (login here,
+// admin-routes.ts's requireSession, bridge.ts's session path) and two
+// session-surface routes with none at all. Each test below builds its OWN
+// app: Readiness.markDraining() has no way back, so sharing the file-level
+// `app` here would permanently drain every later test in this file.
+describe('the drain gate is uniform across the session surface', () => {
+  async function drainedApp(): Promise<{ app: FastifyInstance; cookie: string }> {
+    const local = build()
+    await local.ready()
+    await pg.query('DELETE FROM admin_user')
+    await ensureAdminUser(pg, { email: EMAIL, password: PASSWORD })
+    // Logged in BEFORE draining -- login itself is one of the routes this
+    // gate must refuse, so a cookie has to already exist to test the
+    // session/logout routes' own gates.
+    const login = await local.inject({
+      method: 'POST',
+      url: '/v1/auth/login',
+      headers: { 'x-lyraflow-ui': '1' },
+      payload: { email: EMAIL, password: PASSWORD },
+    })
+    const setCookie = login.headers['set-cookie']
+    const cookie = `lf_session=${cookieValue(Array.isArray(setCookie) ? (setCookie[0] ?? '') : (setCookie ?? ''))}`
+    local.deps.readiness.markDraining()
+    return { app: local, cookie }
+  }
+
+  it('refuses GET /v1/auth/session with 503 draining, not 200', async () => {
+    const { app: local, cookie } = await drainedApp()
+    const res = await local.inject({
+      method: 'GET',
+      url: '/v1/auth/session',
+      headers: { cookie, 'x-lyraflow-ui': '1' },
+    })
+    expect(res.statusCode).toBe(503)
+    expect(res.json()).toEqual({ error: 'draining' })
+    await local.close()
+  })
+
+  it('refuses POST /v1/auth/logout with 503 draining, not 204', async () => {
+    const { app: local, cookie } = await drainedApp()
+    const res = await local.inject({
+      method: 'POST',
+      url: '/v1/auth/logout',
+      headers: { cookie, 'x-lyraflow-ui': '1' },
+    })
+    expect(res.statusCode).toBe(503)
+    expect(res.json()).toEqual({ error: 'draining' })
+    await local.close()
+  })
+
+  it('refuses POST /v1/auth/login with 503 draining', async () => {
+    const local = build()
+    await local.ready()
+    local.deps.readiness.markDraining()
+    const res = await local.inject({
+      method: 'POST',
+      url: '/v1/auth/login',
+      headers: { 'x-lyraflow-ui': '1' },
+      payload: { email: EMAIL, password: PASSWORD },
+    })
+    expect(res.statusCode).toBe(503)
+    expect(res.json()).toEqual({ error: 'draining' })
+    await local.close()
+  })
+
+  // Deliberately exempt (see routes.ts's own comment on this route): an
+  // unauthenticated readiness-shaped probe, not a mutation.
+  it('GET /v1/auth/state stays available while draining', async () => {
+    const local = build()
+    await local.ready()
+    local.deps.readiness.markDraining()
+    const res = await local.inject({ method: 'GET', url: '/v1/auth/state' })
+    expect(res.statusCode).toBe(200)
+    await local.close()
+  })
+})

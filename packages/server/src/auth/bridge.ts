@@ -1,5 +1,5 @@
 import type { FastifyReply, FastifyRequest } from 'fastify'
-import type { Readiness } from '../health.js'
+import { type Readiness, refuseIfDraining } from '../health.js'
 import { SERVER_KEY_HEADER, makeAuthenticator } from '../ingest/routes.js'
 import { PROJECT_HEADER, SESSION_COOKIE, UI_HEADER } from './cookie.js'
 import type { Project, ProjectCache } from './project-cache.js'
@@ -93,11 +93,9 @@ export function makeServerOrSessionAuthenticator(deps: BridgeDeps): Authenticate
 
     // The session path runs the drain check itself rather than inheriting
     // it: a session must not become a way past the gate that stops the API
-    // during shutdown.
-    if (readiness.draining) {
-      reply.code(503).header('retry-after', '5').send({ error: 'draining' })
-      return null
-    }
+    // during shutdown. MINOR A: shared with every other session-surface
+    // route via refuseIfDraining, not a fourth copy of the same check.
+    if (refuseIfDraining(readiness, reply)) return null
 
     if (req.headers[UI_HEADER] === undefined) {
       reply.code(403).send({ error: 'missing_ui_header' })

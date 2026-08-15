@@ -2,7 +2,7 @@ import { verifyPassword } from '@lyraflow/core'
 import type { Pool } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import type { Readiness } from '../health.js'
+import { type Readiness, refuseIfDraining } from '../health.js'
 import { SESSION_COOKIE, clearSessionCookie, requireUiHeader, setSessionCookie } from './cookie.js'
 import type { AttemptLimiter } from './rate-limit.js'
 import type { SessionStore } from './sessions.js'
@@ -27,6 +27,12 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): void {
    * login form or "run `lyraflow set-admin-password`" without asking. It
    * discloses only whether an admin exists, which a login form discloses
    * anyway.
+   *
+   * MINOR A: deliberately EXEMPT from the drain gate. This is an
+   * unauthenticated, readiness-shaped probe -- not a mutation and not a
+   * credential check -- so there is nothing here a drain needs to protect
+   * against, unlike login (which would start a new session) or the
+   * cookie-bearing routes below (which touch the sessions table).
    */
   app.get('/v1/auth/state', async (_req, reply) => {
     const res = await pg.query('SELECT 1 FROM admin_user LIMIT 1')
@@ -36,9 +42,7 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): void {
 
   app.post('/v1/auth/login', async (req, reply) => {
     if (!requireUiHeader(req, reply)) return
-    if (readiness.draining) {
-      return reply.code(503).header('retry-after', '5').send({ error: 'draining' })
-    }
+    if (refuseIfDraining(readiness, reply)) return
 
     const body = LoginBody.safeParse(req.body)
     if (!body.success) return reply.code(400).send({ error: 'invalid_body' })
@@ -91,6 +95,12 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): void {
 
   app.get('/v1/auth/session', async (req, reply) => {
     if (!requireUiHeader(req, reply)) return
+    // MINOR A: this route performs SessionStore's renewal WRITE (see
+    // sessions.ts) whenever the session is inside its renewal window, so
+    // skipping the drain gate here would let a request during shutdown
+    // still mutate the sessions table -- exactly the kind of new-traffic
+    // side effect the gate exists to stop.
+    if (refuseIfDraining(readiness, reply)) return
     const token = req.cookies?.[SESSION_COOKIE]
     if (!token) return reply.code(401).send({ error: 'no_session' })
     const rec = await sessions.verify(token)
@@ -106,6 +116,7 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): void {
 
   app.post('/v1/auth/logout', async (req, reply) => {
     if (!requireUiHeader(req, reply)) return
+    if (refuseIfDraining(readiness, reply)) return
     const token = req.cookies?.[SESSION_COOKIE]
     // Idempotent: logging out twice, or with no cookie, is a 204. There is
     // nothing to report and nothing an operator can do differently.

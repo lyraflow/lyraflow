@@ -263,3 +263,59 @@ describe('POST /v1/projects', () => {
     expect(res.statusCode).toBe(403)
   })
 })
+
+// MINOR A from the feat/admin-sessions whole-branch review: these two
+// routes already gated correctly (the finding was about auth/routes.ts's
+// session/logout and no gate at all), but they are the reference points
+// the finding compares every other session-surface route against, so the
+// suite pins them here too. A fresh app: Readiness.markDraining() has no
+// way back, so this must not touch the file-level `app` every other test
+// in this file depends on.
+describe('the drain gate', () => {
+  it('refuses GET /v1/projects with 503 draining', async () => {
+    const config = loadConfig({
+      LYRAFLOW_POSTGRES_URL: 'postgres://lyraflow:lyraflow@localhost:5433/lyraflow_test',
+      LYRAFLOW_CLICKHOUSE_URL: CH.url,
+      LYRAFLOW_CLICKHOUSE_USER: CH.username,
+      LYRAFLOW_CLICKHOUSE_PASSWORD: CH.password,
+      LYRAFLOW_CLICKHOUSE_DB: CH.database,
+    } as NodeJS.ProcessEnv)
+    const readiness = new Readiness()
+    readiness.markReady()
+    const local = buildApp({ config, pg, ch, readiness })
+    await local.ready()
+    readiness.markDraining()
+    const res = await local.inject({
+      method: 'GET',
+      url: '/v1/projects',
+      headers: { cookie, 'x-lyraflow-ui': '1' },
+    })
+    expect(res.statusCode).toBe(503)
+    expect(res.json()).toEqual({ error: 'draining' })
+    await local.close()
+  })
+
+  it('refuses POST /v1/projects with 503 draining', async () => {
+    const config = loadConfig({
+      LYRAFLOW_POSTGRES_URL: 'postgres://lyraflow:lyraflow@localhost:5433/lyraflow_test',
+      LYRAFLOW_CLICKHOUSE_URL: CH.url,
+      LYRAFLOW_CLICKHOUSE_USER: CH.username,
+      LYRAFLOW_CLICKHOUSE_PASSWORD: CH.password,
+      LYRAFLOW_CLICKHOUSE_DB: CH.database,
+    } as NodeJS.ProcessEnv)
+    const readiness = new Readiness()
+    readiness.markReady()
+    const local = buildApp({ config, pg, ch, readiness })
+    await local.ready()
+    readiness.markDraining()
+    const res = await local.inject({
+      method: 'POST',
+      url: '/v1/projects',
+      headers: { cookie, 'x-lyraflow-ui': '1' },
+      payload: { name: 'Admin Routes Should Not Be Created While Draining' },
+    })
+    expect(res.statusCode).toBe(503)
+    expect(res.json()).toEqual({ error: 'draining' })
+    await local.close()
+  })
+})

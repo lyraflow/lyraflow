@@ -5,7 +5,7 @@ import { z } from 'zod'
 import { SESSION_COOKIE, requireUiHeader } from '../auth/cookie.js'
 import type { ProjectCache } from '../auth/project-cache.js'
 import type { SessionStore } from '../auth/sessions.js'
-import type { Readiness } from '../health.js'
+import { type Readiness, refuseIfDraining } from '../health.js'
 
 export interface AdminProjectDeps {
   pg: Pool
@@ -32,10 +32,9 @@ export function registerAdminProjectRoutes(app: FastifyInstance, deps: AdminProj
    * credential enumerate every other project on the install.
    */
   async function requireSession(req: FastifyRequest, reply: FastifyReply): Promise<boolean> {
-    if (readiness.draining) {
-      reply.code(503).header('retry-after', '5').send({ error: 'draining' })
-      return false
-    }
+    // MINOR A: shared with every other session-surface route via
+    // refuseIfDraining, not a third copy of the same check.
+    if (refuseIfDraining(readiness, reply)) return false
     if (!requireUiHeader(req, reply)) return false
     const token = req.cookies?.[SESSION_COOKIE]
     if (!token || !(await sessions.verify(token))) {
