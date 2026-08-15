@@ -1,6 +1,7 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import { userEvent } from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
+import { ApiError } from '../api/client.js'
 import { ProjectProvider } from './ProjectContext.js'
 import { AppRouter } from './Router.js'
 
@@ -68,10 +69,59 @@ describe('AppRouter', () => {
     expect(link).toHaveAttribute('aria-current', 'page')
   })
 
+  // Small fix from the whole-branch review: `<Route path="/">` renders the
+  // same Feed element as `/feed`, but the Feed nav link's own `to="/feed"`
+  // never matched `/` -- neither nav item got `aria-current` at the one
+  // path every operator lands on right after login (or right after the
+  // wizard, which has no route of its own to redirect through). Every
+  // other test in this file starts at `/feed` or `/settings`, so this is
+  // the one that actually exercises the root.
+  it('marks Feed as current at the bare root, not only at /feed', async () => {
+    renderAt('/')
+    const link = await screen.findByRole('link', { name: /feed/i })
+    expect(link).toHaveAttribute('aria-current', 'page')
+  })
+
   // An unknown client-side path must not render a blank shell. The server
   // already hands any non-API GET to the SPA, so this is the app's job.
   it('renders the feed for an unknown path rather than nothing', async () => {
     renderAt('/nope')
     expect(await screen.findByRole('tab', { name: /accepted/i })).toBeInTheDocument()
+  })
+
+  // IMPORTANT 3 from the whole-branch review: `onUnauthorized` used to be
+  // handed only to `Feed` -- an admin on `/settings` with an expired
+  // session had no unauthorized detector of its own, only `App`'s hour-long
+  // session poll. This proves `AppRouter` now wires it into `Settings` too.
+  it('hands onUnauthorized to Settings, not only Feed', async () => {
+    window.history.pushState({}, '', '/settings')
+    const onUnauthorized = vi.fn()
+    const client = {
+      events: vi.fn(async () => ({ events: [], next_cursor: null })),
+      rejections: vi.fn(async () => ({ rejections: [], has_more: false, next_offset: 0 })),
+      stats: vi.fn(async () => ({ buckets: [] })),
+      project: vi.fn(async () => {
+        throw new ApiError(401, 'invalid_session')
+      }),
+      usage: vi.fn(async () => ({
+        month: '2026-08',
+        events_accepted: 0,
+        events_rejected: 0,
+        events_throttled: 0,
+        monthly_event_quota: null,
+      })),
+      projects: vi.fn(async () => PROJECTS),
+    } as never
+    render(
+      <ProjectProvider projects={PROJECTS} initialId={1}>
+        <AppRouter
+          client={client}
+          email="admin@localhost"
+          onLogout={vi.fn()}
+          onUnauthorized={onUnauthorized}
+        />
+      </ProjectProvider>,
+    )
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalled())
   })
 })

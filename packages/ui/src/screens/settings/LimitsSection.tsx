@@ -45,12 +45,30 @@ function parseRetention(raw: string): { value: number } | { error: string } {
  *   on it rather than treating it as a limit, and a throw on that path
  *   becomes a 503 for every event of the project. Caught here so the
  *   person sees a client-side message instead of an opaque rejection.
+ *
+ * `Number.isInteger` alone is not enough: `Number.isInteger(1e20)` is
+ * `true` (1e20 is exactly representable as a float), but 1e20 is nowhere
+ * near representable in Postgres's `bigint` column the value is ultimately
+ * stored in. IMPORTANT 2 from the whole-branch review, proved end to end:
+ * typing `99999999999999999999` passed this check, passed the server's own
+ * (equally unbounded) `z.number().int().positive()`, and Postgres answered
+ * "value ... is out of range for type bigint" -- a deterministic client
+ * error that rendered as a `503 unavailable`, indistinguishable from an
+ * outage. This is the exact class this repo has already fixed twice
+ * (`parseDeletionId`, `parseId`): bound the value here, before it ever
+ * leaves the browser, not just check its shape.
  */
 function parseQuota(raw: string): { value: number | null } | { error: string } {
   const trimmed = raw.trim()
   if (trimmed === '') return { value: null }
   const parsed = Number(trimmed)
-  if (!Number.isInteger(parsed) || parsed <= 0) {
+  // `Number.isSafeInteger` bounds `parsed` to ±(2^53-1) -- comfortably
+  // inside `bigint`'s range -- which `Number.isInteger` does not. The
+  // explicit `> Number.MAX_SAFE_INTEGER` check below is redundant with
+  // `isSafeInteger` on its own, but pins the bound by name rather than
+  // leaving it implicit in which predicate was chosen, matching
+  // `parseDeletionId`'s own explicit bound.
+  if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > Number.MAX_SAFE_INTEGER) {
     return { error: 'Quota must be empty (for unlimited) or a whole number greater than zero.' }
   }
   return { value: parsed }

@@ -86,8 +86,28 @@ describe('Settings — snippet', () => {
 })
 
 describe('Settings — usage', () => {
+  // The quota rendered here comes from PROJECT CONTEXT, not from `usage()`
+  // (IMPORTANT 1 from the whole-branch review -- see `UsageSection`'s own
+  // doc comment) -- so this needs a project whose OWN `monthly_event_quota`
+  // agrees with the fixture's `usage()` response, unlike the shared
+  // `PROJECTS` fixture (`monthly_event_quota: null`) most other tests in
+  // this file use.
   it('shows this month against the quota', async () => {
-    renderSettings()
+    const projects = [
+      {
+        id: 1,
+        name: 'Alpha',
+        slug: 'alpha',
+        created_at: '',
+        retention_months: 24,
+        monthly_event_quota: 50_000_000,
+      },
+    ]
+    render(
+      <ProjectProvider projects={projects} initialId={1}>
+        <Settings client={fakeClient()} />
+      </ProjectProvider>,
+    )
     expect(await screen.findByText(/42,180/)).toBeInTheDocument()
     expect(screen.getByText(/50,000,000/)).toBeInTheDocument()
   })
@@ -220,6 +240,25 @@ describe('Settings — limits', () => {
     expect(patchProject).not.toHaveBeenCalled()
   })
 
+  // IMPORTANT 2 from the whole-branch review: `Number.isInteger(1e20)` is
+  // `true`, so a naive integer check lets this through -- proved end to end
+  // to reach Postgres as an out-of-range `bigint` write, a deterministic
+  // client error that rendered as a `503 unavailable`. `parseQuota` must
+  // refuse it client-side, before `patchProject` is ever called.
+  it.each([
+    ['far outside bigint range but still an integer', '99999999999999999999'],
+    ['serialises as exponential notation', '1e21'],
+  ])('refuses an unrepresentable quota without calling the API: %s', async (_name, value) => {
+    const patchProject = vi.fn()
+    renderSettings(fakeClient({ patchProject }))
+    const input = await screen.findByLabelText(/quota/i)
+    await userEvent.clear(input)
+    await userEvent.type(input, value)
+    await userEvent.click(screen.getByRole('button', { name: /save quota/i }))
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+    expect(patchProject).not.toHaveBeenCalled()
+  })
+
   it('surfaces an API rejection without losing what was typed', async () => {
     const patchProject = vi.fn(async () => {
       throw new ApiError(400, 'invalid_body')
@@ -294,6 +333,91 @@ describe('Settings — limits invented mutations', () => {
     await userEvent.click(screen.getByRole('button', { name: /save quota/i }))
     await waitFor(() => expect(patchProject).toHaveBeenCalledWith(1, { monthly_event_quota: 42 }))
     expect(patchProject).toHaveBeenCalledTimes(2)
+  })
+})
+
+// IMPORTANT 1 from the whole-branch review: `UsageSection` used to read
+// `usage.monthly_event_quota`, which only ever changes on the
+// `[client, activeId]` fetch effect -- a quota saved through
+// `LimitsSection` never re-triggers that, so this card went stale the
+// instant a save succeeded.
+describe('Settings — usage stays in sync with a saved limit', () => {
+  it('reflects a newly-set quota immediately, without a second usage fetch', async () => {
+    const patchProject = vi.fn(async () => ({ retention_months: 24, monthly_event_quota: 1000 }))
+    const client = fakeClient({
+      patchProject,
+      usage: vi.fn(async () => ({
+        month: '2026-08',
+        events_accepted: 5000,
+        events_rejected: 0,
+        events_throttled: 0,
+        monthly_event_quota: null,
+      })),
+    })
+    renderSettings(client)
+    // Scoped to the Usage card's own "Quota" value (its `<dd>`), not a bare
+    // `screen` query: `LimitsSection`'s own static hint text ("Leave empty
+    // for unlimited.") also matches `/unlimited/i` and is present the whole
+    // time, so an unscoped query would keep "passing" even if this card's
+    // own quota value were wrong.
+    const quotaValue = () => screen.getByText('Quota').nextElementSibling
+    await waitFor(() => expect(quotaValue()?.textContent).toMatch(/unlimited/i))
+
+    const input = await screen.findByLabelText(/quota/i)
+    await userEvent.clear(input)
+    await userEvent.type(input, '1000')
+    await userEvent.click(screen.getByRole('button', { name: /save quota/i }))
+
+    await waitFor(() => expect(quotaValue()?.textContent).toBe('1,000'))
+    // The fix reads the quota from project context (kept correct by
+    // `updateProject`), not from a re-fetch -- `usage()` is called exactly
+    // once, at mount, never again from a limits save.
+    expect(client.usage).toHaveBeenCalledTimes(1)
+  })
+
+  // The sharper direction: LOWERING a quota below what a project has
+  // already accepted this month must not leave the progress bar drawn
+  // against the old, larger denominator -- that renders a now-over-quota
+  // project as if it were barely used at all.
+  it('reflects a lowered quota immediately, not the stale larger one', async () => {
+    const patchProject = vi.fn(async () => ({ retention_months: 24, monthly_event_quota: 1000 }))
+    const projects = [
+      {
+        id: 1,
+        name: 'Alpha',
+        slug: 'alpha',
+        created_at: '',
+        retention_months: 24,
+        monthly_event_quota: 50_000_000,
+      },
+    ]
+    const client = fakeClient({
+      patchProject,
+      usage: vi.fn(async () => ({
+        month: '2026-08',
+        events_accepted: 5000,
+        events_rejected: 0,
+        events_throttled: 0,
+        monthly_event_quota: 50_000_000,
+      })),
+    })
+    render(
+      <ProjectProvider projects={projects} initialId={1}>
+        <Settings client={client} />
+      </ProjectProvider>,
+    )
+    expect(await screen.findByText('50,000,000')).toBeInTheDocument()
+
+    const input = await screen.findByLabelText(/quota/i)
+    await userEvent.clear(input)
+    await userEvent.type(input, '1000')
+    await userEvent.click(screen.getByRole('button', { name: /save quota/i }))
+
+    await waitFor(() => expect(screen.getByText('1,000')).toBeInTheDocument())
+    expect(screen.queryByText('50,000,000')).not.toBeInTheDocument()
+    // 5000 accepted against a quota of 1000 caps at 100%, not the ~0.01%
+    // the stale 50,000,000 denominator would have shown.
+    expect((screen.getByRole('progressbar') as HTMLProgressElement).value).toBe(100)
   })
 })
 
@@ -407,6 +531,43 @@ describe('Settings — projects', () => {
 
     await userEvent.click(screen.getByRole('button', { name: /^alpha$/i }))
     expect(await screen.findByRole('option', { name: /beta/i })).toBeInTheDocument()
+  })
+})
+
+describe('Settings — unauthorized', () => {
+  // IMPORTANT 3 from the whole-branch review: neither of Settings' own
+  // fetches had any unauthorized detector before this fix -- a 401 fell
+  // into the generic `error` state and rendered "Could not load...", the
+  // same as any other failure, with `onUnauthorized` never called at all.
+  it('calls onUnauthorized on a 401 from the project fetch, not the generic error banner', async () => {
+    const onUnauthorized = vi.fn()
+    const client = fakeClient({
+      project: vi.fn(async () => {
+        throw new ApiError(401, 'invalid_session')
+      }),
+    })
+    render(
+      <ProjectProvider projects={PROJECTS} initialId={1}>
+        <Settings client={client} onUnauthorized={onUnauthorized} />
+      </ProjectProvider>,
+    )
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalled())
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('calls onUnauthorized on a 401 from the usage fetch too', async () => {
+    const onUnauthorized = vi.fn()
+    const client = fakeClient({
+      usage: vi.fn(async () => {
+        throw new ApiError(401, 'invalid_session')
+      }),
+    })
+    render(
+      <ProjectProvider projects={PROJECTS} initialId={1}>
+        <Settings client={client} onUnauthorized={onUnauthorized} />
+      </ProjectProvider>,
+    )
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalled())
   })
 })
 

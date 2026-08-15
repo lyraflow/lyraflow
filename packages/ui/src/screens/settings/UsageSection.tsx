@@ -14,9 +14,22 @@ function formatNumber(n: number): string {
  * it would read as a project that can accept nothing) and a percentage of
  * `null` is `NaN`. Both are avoided structurally: the null case renders the
  * word "Unlimited" and never reaches the ratio calculation at all.
+ *
+ * `quota` is a SEPARATE prop from `usage.monthly_event_quota`, deliberately
+ * (IMPORTANT 1 from the whole-branch review). `usage` only ever changes from
+ * `Settings`'s own `[client, activeId]` fetch effect -- a quota saved via
+ * `LimitsSection` writes into project CONTEXT through `updateProject`, which
+ * that effect never re-runs for, so `usage.monthly_event_quota` went stale
+ * the instant a save succeeded: an unlimited project stayed "Unlimited"
+ * after a quota was set, and the reverse was worse -- lowering a quota left
+ * the bar drawn against the OLD, larger denominator, so a now-over-quota
+ * project could render as near-empty. `Settings` passes the quota straight
+ * from the context row `updateProject` already keeps correct instead, so
+ * this card can never disagree with what was just saved, with no second
+ * fetch required.
  */
-export function UsageSection(props: { usage: Usage | null }) {
-  const { usage } = props
+export function UsageSection(props: { usage: Usage | null; quota: number | null }) {
+  const { usage, quota } = props
 
   if (usage == null) {
     return (
@@ -31,12 +44,9 @@ export function UsageSection(props: { usage: Usage | null }) {
     )
   }
 
-  const { month, events_accepted, events_rejected, events_throttled, monthly_event_quota } = usage
-  const quotaLabel = monthly_event_quota == null ? 'Unlimited' : formatNumber(monthly_event_quota)
-  const pct =
-    monthly_event_quota == null
-      ? null
-      : Math.min(100, (events_accepted / monthly_event_quota) * 100)
+  const { month, events_accepted, events_rejected, events_throttled } = usage
+  const quotaLabel = quota == null ? 'Unlimited' : formatNumber(quota)
+  const pct = quota == null ? null : Math.min(100, (events_accepted / quota) * 100)
 
   return (
     <Card>

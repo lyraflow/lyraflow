@@ -20,14 +20,14 @@ export const ROUTES = {
 
 /**
  * Wraps `Shell` in a `BrowserRouter` so the nav's links are real
- * navigation -- back/forward, modifier-click, middle-click and scroll
- * position all come from the library rather than being reinvented (see the
- * task brief this was written from for the "why a library" case). `Feed`
- * answers both `/` and `/feed` so a bare hard refresh at the root still
- * lands on it, and the catch-all keeps an unrecognized client-side path
- * (typo'd or stale) from rendering a blank shell -- the server already
- * hands any non-API GET to the SPA, so this router is the last place that
- * can still decide what shows.
+ * navigation -- back/forward and modifier-click (new-tab) and middle-click
+ * come from the library rather than being reinvented (see the task brief
+ * this was written from for the "why a library" case). `Feed` answers both
+ * `/` and `/feed` so a bare hard refresh at the root still lands on it, and
+ * the catch-all keeps an unrecognized client-side path (typo'd or stale)
+ * from rendering a blank shell -- the server already hands any non-API GET
+ * to the SPA, so this router is the last place that can still decide what
+ * shows.
  */
 export function AppRouter(props: {
   client: ApiClient
@@ -36,13 +36,19 @@ export function AppRouter(props: {
   onUnauthorized?(): void
 }) {
   const feed = <Feed client={props.client} onUnauthorized={props.onUnauthorized} />
+  // IMPORTANT 3 from the whole-branch review: `onUnauthorized` used to be
+  // handed only to `Feed` here -- `Settings` has its own two fetches
+  // (`GET /v1/project`, `GET /v1/project/usage`) that can 401 exactly the
+  // same way, and it is the only screen with no unauthorized detector of
+  // its own now that both destinations get one.
+  const settings = <Settings client={props.client} onUnauthorized={props.onUnauthorized} />
   return (
     <BrowserRouter>
       <Shell email={props.email} onLogout={props.onLogout}>
         <Routes>
           <Route path="/" element={feed} />
           <Route path={ROUTES.feed} element={feed} />
-          <Route path={ROUTES.settings} element={<Settings client={props.client} />} />
+          <Route path={ROUTES.settings} element={settings} />
           <Route path="*" element={feed} />
         </Routes>
       </Shell>
