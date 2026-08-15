@@ -88,4 +88,36 @@ describe('serving the SPA', () => {
     expect(res.statusCode).toBe(401)
     expect(res.json()).toEqual({ error: 'missing_server_key' })
   })
+
+  // Fix round 1, finding 1. A browser holding a cached index.html after an
+  // upgrade requests the PREVIOUS build's hashed chunk filenames. Those no
+  // longer exist on disk, and handing back index.html turns a clean 404 (a
+  // chunk-load handler can catch this and prompt a reload) into a script
+  // tag that fails to execute at all, with a MIME/parse error that points
+  // nowhere near the real cause.
+  it('does NOT serve index.html for a missing hashed asset', async () => {
+    const res = await app.inject({ method: 'GET', url: '/assets/index-doesnotexist.js' })
+    expect(res.statusCode).toBe(404)
+    expect(res.json()).toEqual({ error: 'not_found' })
+  })
+
+  // Fix round 1, finding 2. API_PREFIXES holds the bare prefix, and a plain
+  // startsWith('/v1/') (note the trailing slash) never matches the bare
+  // path -- a very plausible typo, or a health probe someone wrote by hand.
+  it('does NOT serve index.html for the bare /v1 API root', async () => {
+    const res = await app.inject({ method: 'GET', url: '/v1' })
+    expect(res.statusCode).toBe(404)
+    expect(res.json()).toEqual({ error: 'not_found' })
+  })
+
+  // Fix round 1, finding 3. /lyraflow.js and /lyraflow-<version>.js are
+  // both REAL registered routes (see sdk/routes.ts) -- a request for either
+  // never reaches setNotFoundHandler at all, so the "leaves /lyraflow.js
+  // alone" case above never exercises the '/lyraflow' entry in
+  // API_PREFIXES. A bare /lyraflow (no such route exists) does.
+  it('does NOT serve index.html for the bare /lyraflow path', async () => {
+    const res = await app.inject({ method: 'GET', url: '/lyraflow' })
+    expect(res.statusCode).toBe(404)
+    expect(res.json()).toEqual({ error: 'not_found' })
+  })
 })
