@@ -1504,6 +1504,18 @@ describe('GET /v1/events/rejections', () => {
   // existing test asserted the wire format, and no client-side fixture
   // could have caught it either, since every UI fixture hand-writes the
   // ISO shape the server was not actually sending.
+  //
+  // FIX ROUND 2: the format-only version of this test (a regex checking
+  // for a trailing `Z`) passed against a WRONG-SHAPED fix --
+  // `new Date(r.received_at).toISOString()`, i.e. the exact local-time
+  // misparse Critical 1 is about, merely moved from the browser into the
+  // server. That produces a `Z`-suffixed string too, just the WRONG
+  // instant, under any non-UTC `TZ`. `AT` above is a `DateTime64(3, 'UTC')`
+  // literal every fixture row in this describe block shares, so the
+  // correct, fully-converted response is EXACTLY `2026-08-01T00:00:00.000Z`
+  // -- not merely ISO-shaped. This is the assertion that actually
+  // distinguishes a correct UTC parse from a local-time one; the format
+  // regex alone could not.
   it('returns received_at as ISO 8601 with a Z, not a space-separated ClickHouse string', async () => {
     const res = await get(
       `/v1/events/rejections?since=${encodeURIComponent('2026-07-01T00:00:00.000Z')}&until=${encodeURIComponent('2026-09-01T00:00:00.000Z')}&limit=100`,
@@ -1513,6 +1525,10 @@ describe('GET /v1/events/rejections', () => {
     expect(body.rejections.length).toBeGreaterThan(0)
     for (const r of body.rejections) {
       expect(r.received_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+      // Every fixture row above was inserted with `received_at: AT`
+      // ('2026-08-01 00:00:00.000') against a `DateTime64(3, 'UTC')`
+      // column -- the exact instant, not just an ISO-shaped string.
+      expect(r.received_at).toBe('2026-08-01T00:00:00.000Z')
     }
   })
 

@@ -140,6 +140,28 @@ describe('serving the SPA', () => {
     },
   )
 
+  // Finding 2 from the fix-wave re-review: all three cases above are
+  // matched by `isApiPath` alone (they are all under `/v1`), so they prove
+  // nothing about `looksLikeFile`'s OWN normalization -- reverting just
+  // `looksLikeFile` back to its old, un-normalized `url.split('?')[0]`
+  // left every test in this file green, because `looksLikeFile` is never
+  // even reached for an API-prefixed path (`isApiPath` short-circuits the
+  // `||` first). This is the case that actually exercises it: a request
+  // for a MISSING asset (not under any API_PREFIXES entry, so `isApiPath`
+  // is false and this reaches `looksLikeFile`) whose extension's dot is
+  // percent-encoded (`%2E`). The old, undecoded `looksLikeFile` sees a
+  // last segment of `index-doesnotexist%2Ejs` -- no literal `.` -- and
+  // wrongly concludes this ISN'T a file, falling through to the SPA
+  // fallback (200 text/html) for a path that plainly names a missing
+  // asset. Decoding first (this function's own normalizePath) reveals the
+  // real `.js` extension and correctly 404s instead.
+  it('does NOT serve index.html for a missing asset whose extension is percent-encoded', async () => {
+    const res = await app.inject({ method: 'GET', url: '/assets/index-doesnotexist%2Ejs' })
+    expect(res.statusCode).toBe(404)
+    expect(res.headers['content-type']).toMatch(/application\/json/)
+    expect(res.json()).toEqual({ error: 'not_found' })
+  })
+
   // The fourth shape from the same finding, kept passing rather than
   // flipped: an ordinary API 404 must still read exactly as it always did.
   it('still serves a clean JSON 404 for an ordinary unknown API path', async () => {
