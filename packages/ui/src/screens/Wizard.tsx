@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { CheckCircle2 } from 'lucide-react'
+import { useCallback, useRef, useState } from 'react'
 import type { ApiClient } from '../api/client.js'
 import { ApiError } from '../api/client.js'
 import type { CreatedProject, Project } from '../api/types.js'
@@ -49,11 +50,26 @@ function unresolvedProjectStub(name: string): Project {
  * `App.tsx`'s own comment on why this is a phase, not a route.
  *
  * The whole point of this screen (see the design doc it comes from): it
- * must never claim success on a timer. `onReady` fires exactly twice --
- * once when a poll of `events(projectId, { limit: 1 })` actually returns a
- * row, and once if the operator explicitly skips, for the case where the
- * site this snippet targets can't be deployed to right now. Nothing else
- * calls it.
+ * must never claim success on a timer, AND it must never dismiss itself on
+ * an event neither the operator nor this screen chose to happen right then.
+ * `onReady` fires from exactly two operator actions -- clicking "Continue
+ * to dashboard" once an event has actually arrived (a poll of
+ * `events(projectId, { limit: 1 })` returning a row), or clicking "Skip to
+ * dashboard" before one has, for the case where the site this snippet
+ * targets can't be deployed to right now. Nothing else calls it.
+ *
+ * This screen shows the project's one-time server key, exactly like
+ * `ProjectsSection`'s matching panel in Settings -- and it used to be undone
+ * by that very discipline living one layer up instead of here: `App`
+ * unmounts this component the instant `session.projects.length` goes from
+ * 0 to 1, and `onReady` used to be called automatically the moment an event
+ * arrived. The event this screen tells the operator to go cause was the
+ * same event that made the key vanish out from under them, often before
+ * they had finished copying it -- worse, on a site that already had
+ * traffic, the very first poll could already carry an event, so the key
+ * was never visible at all. An arriving event now only flips step 3 into
+ * its success state; leaving the wizard always requires the operator's own
+ * click, on Continue or on Skip, never a poll result by itself.
  */
 export function Wizard(props: {
   client: ApiClient
@@ -144,19 +160,27 @@ export function Wizard(props: {
   // `usePolling` already keeps retrying on the same interval; see
   // `usePolling`'s own doc comment. Treating an error as anything but
   // "keep waiting" is exactly the mutation this screen's tests pin against.
+  //
+  // `arrived` drives the UI directly -- it is NOT wired to an effect that
+  // calls `fireReady` on its own. That auto-fire was the critical defect:
+  // the moment an event landed, `onReady` fired unprompted, `App` unmounted
+  // this whole screen, and the server key it was still showing (the one
+  // thing that exists nowhere else, ever) went with it. An arriving event
+  // now only flips step 3 into its success state below; only the operator's
+  // own click on "Continue to dashboard" (or "Skip to dashboard", before
+  // one arrives) ever calls `fireReady`.
   const arrived = (pollState.data?.events.length ?? 0) > 0
 
-  // `fireReady` is intentionally omitted from the dependency list below --
-  // it is not memoized, but it only reads a ref and calls `onReady`;
-  // including it would re-run this effect on every render for no reason
-  // that changes `arrived` or `resolvedProject`.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: fireReady has no reactive state of its own, see comment above
-  useEffect(() => {
-    if (!arrived || resolvedProject == null) return
-    fireReady(resolvedProject)
-  }, [arrived, resolvedProject])
-
   function handleSkip() {
+    fireReady(resolvedProject ?? unresolvedProjectStub(created?.name ?? name.trim()))
+  }
+
+  function handleContinue() {
+    // Only reachable once `arrived` is true, which (see `pollEvents` above)
+    // only happens once `resolvedProject` is non-null -- the poll itself
+    // returns an empty page otherwise and `arrived` stays false. The
+    // fallback stub exists only so this stays typed as `Project`, matching
+    // `handleSkip`'s own fallback; it is not expected to ever be reached.
     fireReady(resolvedProject ?? unresolvedProjectStub(created?.name ?? name.trim()))
   }
 
@@ -246,20 +270,45 @@ export function Wizard(props: {
                 </p>
               </div>
 
-              <div className="flex flex-col gap-1">
-                <p className="text-sm font-medium text-foreground">
-                  3. Waiting for your first event…
-                </p>
-                <p className="text-sm text-muted-foreground">
-                  Send a pageview from the site you just added the snippet to. This updates on its
-                  own the moment one arrives -- nothing to refresh.
-                </p>
-              </div>
+              {arrived ? (
+                // The success state the design asks for and step 3 used to
+                // skip entirely -- it used to jump straight from "waiting"
+                // to the wizard being gone, with nothing in between ever
+                // rendered. Now an arriving event only gets this far: it
+                // takes an explicit click on "Continue to dashboard" below
+                // to actually leave, so the server key panel above stays on
+                // screen until the operator says they're done with it.
+                <div className="flex flex-col gap-1">
+                  <p className="flex items-center gap-1.5 text-sm font-medium text-success">
+                    <CheckCircle2 className="h-4 w-4 shrink-0" aria-hidden="true" />
+                    3. First event received
+                  </p>
+                  <p className="text-sm text-muted-foreground">
+                    Your snippet is working. Continue once you&apos;ve copied the server key above.
+                  </p>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-1">
+                  <p className="text-sm font-medium text-foreground">
+                    3. Waiting for your first event…
+                  </p>
+                  <p className="text-sm text-muted-foreground">
+                    Send a pageview from the site you just added the snippet to. This updates on its
+                    own the moment one arrives -- nothing to refresh.
+                  </p>
+                </div>
+              )}
 
               <div>
-                <Button type="button" variant="ghost" size="sm" onClick={handleSkip}>
-                  Skip to dashboard
-                </Button>
+                {arrived ? (
+                  <Button type="button" size="sm" onClick={handleContinue}>
+                    Continue to dashboard
+                  </Button>
+                ) : (
+                  <Button type="button" variant="ghost" size="sm" onClick={handleSkip}>
+                    Skip to dashboard
+                  </Button>
+                )}
               </div>
             </>
           )}

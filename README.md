@@ -206,12 +206,15 @@ applies to the login form too.
 
 **A fresh install, signed in with no project yet, gets a first-run wizard
 instead of the normal screen.** Name a project, and the wizard hands back
-the install snippet and the project's one-time server key — the same panel
-Settings shows for every later project, described below — then waits for a
-real first event to arrive before ever claiming success; there is a
-"Skip to dashboard" for the case where you cannot instrument the target
-site right now. It never claims a working install on a timer, only on an
-event actually landing.
+the install snippet and the project's one-time server key — shown once and
+never again, the same discipline Settings uses for every later project's
+key, described below — then waits for a real first event to arrive. It
+never claims a working install on a timer, only on an event actually
+landing, and an arriving event does not dismiss the wizard by itself either:
+it flips the last step into a success state and waits for you to click
+"Continue to dashboard" — so the key stays on screen until you say you're
+done with it. There is also a "Skip to dashboard" for the case where you
+cannot instrument the target site right now.
 
 Past the wizard (or immediately, if a project already exists), there are two
 screens, reachable from the sidebar:

@@ -43,8 +43,11 @@ describe('Wizard', () => {
   })
 
   // The whole point of the screen: it does not claim success until an
-  // event has actually arrived.
-  it('waits, then reports success only once an event arrives', async () => {
+  // event has actually arrived -- and, per the CRITICAL fix, it does not
+  // leave on its own just because one did. An arriving event flips step 3
+  // into its success state; only an explicit click on "Continue to
+  // dashboard" actually calls `onReady`.
+  it('waits, then shows success (without leaving) once an event arrives, and leaves only on the click', async () => {
     let arrived = false
     const client = fakeClient({
       events: vi.fn(async () => ({
@@ -61,7 +64,18 @@ describe('Wizard', () => {
 
     arrived = true
     await vi.advanceTimersByTimeAsync(50)
-    await waitFor(() => expect(onReady).toHaveBeenCalled())
+    expect(await screen.findByText(/first event received/i)).toBeInTheDocument()
+    // The critical assertion: the event arriving alone must NOT have fired
+    // `onReady` -- that auto-fire is exactly what used to unmount this
+    // screen (and the server key with it) the instant the operator did what
+    // step 3 told them to do.
+    expect(onReady).not.toHaveBeenCalled()
+    // ...and the server key must still be on screen at this point, not
+    // already gone with a dismissed wizard.
+    expect(screen.getByTestId('wizard-server-key').textContent).toContain('sk_new')
+
+    await userEvent.click(screen.getByRole('button', { name: /continue/i }))
+    expect(onReady).toHaveBeenCalled()
   })
 
   it('keeps waiting rather than failing when a poll errors', async () => {
@@ -105,6 +119,29 @@ describe('Wizard', () => {
   // to prove it, and it cannot be quietly changed without this failing.
   it('defaults the poll interval to a few seconds', () => {
     expect(DEFAULT_WIZARD_POLL_INTERVAL_MS).toBe(3000)
+  })
+
+  // Task 8's visual fixes shipped with zero regression tests -- these two
+  // pin the cheaply pinnable ones (small fix from the whole-branch review).
+  it('keeps step 1 numbered and visible after creating, not replaced by the title alone', async () => {
+    render(<Wizard client={fakeClient()} onReady={vi.fn()} pollIntervalMs={10} />)
+    await userEvent.type(screen.getByLabelText(/name/i), 'My App')
+    await userEvent.click(screen.getByRole('button', { name: /create/i }))
+    expect(await screen.findByText('1. Project created')).toBeInTheDocument()
+  })
+
+  // `min-h-dvh`, not `h-dvh`: a fixed height combined with `justify-center`
+  // clips content taller than the viewport at a negative, unreachable
+  // scroll offset (see the component's own comment). A regression back to
+  // `h-dvh` would pass every other test in this file, since none of them
+  // assert on layout classes at all.
+  it('uses min-h-dvh on the outer container, not a fixed h-dvh', () => {
+    const { container } = render(
+      <Wizard client={fakeClient()} onReady={vi.fn()} pollIntervalMs={10} />,
+    )
+    const outer = container.firstElementChild
+    expect(outer?.className).toContain('min-h-dvh')
+    expect(outer?.className).not.toMatch(/(?<!min-)\bh-dvh\b/)
   })
 
   // Invented mutation 1: the server key is required here by the brief
