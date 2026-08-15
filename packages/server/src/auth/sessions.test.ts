@@ -156,7 +156,15 @@ describe('SessionStore', () => {
   it('does not renew a session outside the renewal window', async () => {
     const store = new SessionStore(pg, 10 * 60_000, 1000)
     const { token, expiresAt } = await store.issue(adminId)
-    const rec = await store.verify(token)
+    // { renew: true } is load-bearing here: verify()'s default is now
+    // non-renewing (see sessions.ts's own docstring), so a bare
+    // store.verify(token) would report renewed: false regardless of
+    // whether the session is inside or outside its renewal window --
+    // pinning nothing about the window boundary this test exists to check.
+    // Without the explicit opt-in, this test passed even when the mutation
+    // `if (!renew || expiresAt... > this.renewWithinMs)` was collapsed to
+    // `if (!renew)`, deleting the window check entirely.
+    const rec = await store.verify(token, { renew: true })
     expect(rec?.renewed).toBe(false)
     expect(rec?.expiresAt.getTime()).toBe(expiresAt.getTime())
   })
