@@ -99,6 +99,7 @@ const SESSION_ROUTES: ReadonlyArray<[string, string]> = [
   ['GET', '/v1/project'],
   ['GET', '/v1/events?limit=1'],
   ['GET', '/v1/events/stats'],
+  ['GET', '/v1/events/rejections?limit=1'],
   ['GET', '/v1/segments'],
   ['GET', '/v1/funnels'],
   ['GET', '/v1/schema/events'],

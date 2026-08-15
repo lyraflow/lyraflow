@@ -1427,3 +1427,167 @@ describe('GET /v1/events/stats', () => {
     expect(res.json().error).toBe('window_too_large')
   })
 })
+
+describe('GET /v1/events/rejections', () => {
+  const AT = '2026-08-01 00:00:00.000'
+
+  beforeAll(async () => {
+    await ch.insert({
+      table: 'events_dead_letter',
+      format: 'JSONEachRow',
+      values: [
+        {
+          project_id: projectA,
+          received_at: AT,
+          reason: 'invalid_payload',
+          detail: 'd1',
+          payload: '{"a":1}',
+        },
+        // Byte-identical to the row above, at the same instant. A client
+        // looping on one bad payload produces exactly this, and it is the
+        // most valuable thing this screen ever shows -- so it must appear
+        // TWICE, not once.
+        {
+          project_id: projectA,
+          received_at: AT,
+          reason: 'invalid_payload',
+          detail: 'd1',
+          payload: '{"a":1}',
+        },
+        {
+          project_id: projectA,
+          received_at: AT,
+          reason: 'unknown_event',
+          detail: 'd2',
+          payload: '{"b":2}',
+        },
+        {
+          project_id: projectB,
+          received_at: AT,
+          reason: 'invalid_payload',
+          detail: 'other',
+          payload: '{}',
+        },
+      ],
+    })
+  })
+
+  it('returns this project rejections only', async () => {
+    const res = await get(
+      `/v1/events/rejections?since=${encodeURIComponent('2026-07-01T00:00:00.000Z')}&until=${encodeURIComponent('2026-09-01T00:00:00.000Z')}&limit=100`,
+    )
+    expect(res.statusCode).toBe(200)
+    const body = res.json() as { rejections: Array<{ detail: string }> }
+    // Asserted as the exact multiset project A's own fixture rows produce
+    // (two 'd1's, one 'd2'), not merely "no 'other'" -- a check that only
+    // excludes the literal string a cross-tenant row happens to carry passes
+    // vacuously against any response that doesn't spell that string, which
+    // includes an empty array or a route that silently dropped every row.
+    expect(body.rejections.map((r) => r.detail).sort()).toEqual(['d1', 'd1', 'd2'])
+  })
+
+  it('returns byte-identical rejections at the same instant as separate rows', async () => {
+    const res = await get(
+      `/v1/events/rejections?since=${encodeURIComponent('2026-07-01T00:00:00.000Z')}&until=${encodeURIComponent('2026-09-01T00:00:00.000Z')}&limit=100`,
+    )
+    const body = res.json() as { rejections: Array<{ detail: string }> }
+    expect(body.rejections.filter((r) => r.detail === 'd1')).toHaveLength(2)
+  })
+
+  it('filters by reason', async () => {
+    const res = await get(
+      `/v1/events/rejections?reason=unknown_event&since=${encodeURIComponent('2026-07-01T00:00:00.000Z')}&until=${encodeURIComponent('2026-09-01T00:00:00.000Z')}&limit=100`,
+    )
+    const body = res.json() as { rejections: Array<{ reason: string }> }
+    expect(body.rejections).toHaveLength(1)
+    expect(body.rejections[0]?.reason).toBe('unknown_event')
+  })
+
+  it('pages by offset without repeating or losing a row', async () => {
+    const url = (offset: number) =>
+      `/v1/events/rejections?since=${encodeURIComponent('2026-07-01T00:00:00.000Z')}&until=${encodeURIComponent('2026-09-01T00:00:00.000Z')}&limit=2&offset=${offset}`
+    const first = await get(url(0))
+    const second = await get(url(2))
+    const a = (first.json() as { rejections: unknown[] }).rejections
+    const b = (second.json() as { rejections: unknown[] }).rejections
+    expect(a).toHaveLength(2)
+    expect(b).toHaveLength(1)
+  })
+
+  it.each([
+    ['over the limit ceiling', 'limit=501'],
+    ['over the offset ceiling', 'offset=100001'],
+    ['negative offset', 'offset=-1'],
+  ])('refuses %s', async (_n, qs) => {
+    const res = await get(`/v1/events/rejections?${qs}`)
+    expect(res.statusCode).toBe(400)
+  })
+
+  // INVENTED (not in the brief). Every fixture above shares one `received_at`
+  // instant, and every test's `since`/`until` sits comfortably inside that
+  // window rather than exactly ON it -- so a boundary flip (`>=` to `>`, or
+  // `<=` to `<`) on either clause passes the whole describe block above with
+  // nothing failing. Confirmed by hand: swapping both comparisons to strict
+  // leaves all seven prior tests green, since AT is never equal to either
+  // edge they pass. This row and these two queries pin the boundary itself:
+  // `since` set to exactly this row's own `received_at` must still include
+  // it, and likewise for `until`.
+  const BOUNDARY_AT = '2026-08-02 00:00:00.000'
+
+  it('includes a row whose received_at exactly equals since', async () => {
+    await ch.insert({
+      table: 'events_dead_letter',
+      format: 'JSONEachRow',
+      values: [
+        {
+          project_id: projectA,
+          received_at: BOUNDARY_AT,
+          reason: 'boundary_test',
+          detail: 'boundary',
+          payload: '{}',
+        },
+      ],
+    })
+    const res = await get(
+      `/v1/events/rejections?reason=boundary_test&since=${encodeURIComponent('2026-08-02T00:00:00.000Z')}&until=${encodeURIComponent('2026-09-01T00:00:00.000Z')}&limit=100`,
+    )
+    expect(res.statusCode).toBe(200)
+    const body = res.json() as { rejections: unknown[] }
+    expect(body.rejections).toHaveLength(1)
+  })
+
+  it('includes a row whose received_at exactly equals until', async () => {
+    const res = await get(
+      `/v1/events/rejections?reason=boundary_test&since=${encodeURIComponent('2026-07-01T00:00:00.000Z')}&until=${encodeURIComponent('2026-08-02T00:00:00.000Z')}&limit=100`,
+    )
+    expect(res.statusCode).toBe(200)
+    const body = res.json() as { rejections: unknown[] }
+    expect(body.rejections).toHaveLength(1)
+  })
+
+  // INVENTED (not in the brief). `has_more`/`next_offset` had zero assertions
+  // anywhere in this describe block -- confirmed by hand: hardcoding
+  // `has_more: false, next_offset: 0` in the handler left the whole block
+  // green. A UI paginating on `has_more` would stop after page one even
+  // though more rows sit behind it. This window now holds 4 project-A rows
+  // (the original 'd1'/'d1'/'d2' trio plus the boundary-instant fixture
+  // inserted by the two tests just above), so offset=3 -- not 2 -- is what
+  // leaves exactly one row for the partial-page case.
+  it('reports has_more and next_offset correctly across a partial and a full page', async () => {
+    const windowQs = `since=${encodeURIComponent('2026-07-01T00:00:00.000Z')}&until=${encodeURIComponent('2026-09-01T00:00:00.000Z')}`
+
+    // limit=2 over 4 rows: a full page, more rows behind it.
+    const full = await get(`/v1/events/rejections?${windowQs}&limit=2&offset=0`)
+    expect(full.statusCode).toBe(200)
+    const fullBody = full.json() as { has_more: boolean; next_offset: number }
+    expect(fullBody.has_more).toBe(true)
+    expect(fullBody.next_offset).toBe(2)
+
+    // limit=2 at offset=3 over 4 rows: a partial page (1 row), nothing left.
+    const partial = await get(`/v1/events/rejections?${windowQs}&limit=2&offset=3`)
+    expect(partial.statusCode).toBe(200)
+    const partialBody = partial.json() as { has_more: boolean; next_offset: number }
+    expect(partialBody.has_more).toBe(false)
+    expect(partialBody.next_offset).toBe(4)
+  })
+})

@@ -112,6 +112,36 @@ export const STATS_DEFAULT_WINDOW_MS: Record<keyof typeof STATS_INTERVALS, numbe
   '1d': 7 * 24 * 60 * 60_000,
 }
 
+/**
+ * Bounded for the same reason `EVENTS_MAX_LIMIT` is: this route is reachable
+ * by an authenticated caller on repeat, and an unbounded `limit` is how a
+ * single request turns into an unbounded ClickHouse scan.
+ */
+export const REJECTIONS_MAX_LIMIT = 500
+
+/**
+ * Bounds the scan. `events_dead_letter` has a 30-day TTL, so this cap plus
+ * that TTL are what keep a deep page from becoming an unbounded read -- the
+ * same class of ceiling EVENTS_MAX_LIMIT exists for on the feed.
+ */
+export const REJECTIONS_MAX_OFFSET = 100_000
+
+const RejectionsQuery = z.object({
+  since: z.string().datetime().optional(),
+  until: z.string().datetime().optional(),
+  reason: z.string().min(1).max(64).optional(),
+  limit: z.coerce.number().int().positive().max(REJECTIONS_MAX_LIMIT).default(50),
+  offset: z.coerce.number().int().min(0).max(REJECTIONS_MAX_OFFSET).default(0),
+})
+
+/** The exact column list this route selects and returns — a compile-time allowlist. */
+interface RejectionRow {
+  received_at: string
+  reason: string
+  detail: string
+  payload: string
+}
+
 export interface EventsDeps {
   authenticate: Authenticate
   ch: ClickHouseClient
@@ -628,6 +658,80 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
         ...(groupBy ? { event_name: r.event_name } : {}),
         events: Number(r.events),
       })),
+    })
+  })
+
+  /**
+   * GET /v1/events/rejections — rejected events, read from the dead-letter
+   * table that has stored them since 002_events.sql. Nothing served this
+   * before, which is why an operator's only signal that ingest was refusing
+   * traffic was a counter.
+   *
+   * OFFSET-PAGED, NOT KEYSET-PAGED, unlike GET /v1/events — and the reason is
+   * in the table rather than in taste. `events_dead_letter` has no unique row
+   * identity: its columns are project_id, received_at, reason, detail and
+   * payload, and nothing else. A keyset needs a tiebreaker, and the only
+   * candidate is a hash of the row's own content — which makes two
+   * byte-identical rejections in the same millisecond skip each other. A
+   * client looping on one malformed payload produces exactly that, and it is
+   * the single most valuable thing this endpoint ever shows, so losing it
+   * silently is the worst failure available here.
+   *
+   * Offset paging's own weakness — rows arriving at the head shifting the
+   * window — is closed by the caller pinning `until` from the first page and
+   * paging inside that fixed window. The CLI and the UI both do that.
+   */
+  app.get('/v1/events/rejections', async (req, reply) => {
+    const project = await authenticate(req, reply)
+    if (!project) return
+
+    const q = RejectionsQuery.safeParse(req.query)
+    if (!q.success) return reply.code(400).send({ error: 'invalid_query' })
+    const { since, until, reason, limit, offset } = q.data
+
+    const params = new Params()
+    const projectParam = params.add(project.id, 'UInt32')
+    let clauses = ''
+    if (since)
+      clauses += ` AND received_at >= ${params.add(chDateTime(new Date(since)), 'DateTime64(3)')}`
+    if (until)
+      clauses += ` AND received_at <= ${params.add(chDateTime(new Date(until)), 'DateTime64(3)')}`
+    if (reason) clauses += ` AND reason = ${params.add(reason, 'String')}`
+
+    // limit and offset are interpolated as validated integers rather than
+    // bound: they are already through Zod's int()/max() and ClickHouse does
+    // not accept a bound parameter in LIMIT/OFFSET position.
+    const sql = `
+      SELECT received_at, reason, detail, payload
+        FROM events_dead_letter
+       WHERE project_id = ${projectParam}${clauses}
+       ORDER BY received_at DESC
+       LIMIT ${limit} OFFSET ${offset}`
+
+    // Two steps, matching the shape every other ClickHouse read in this file
+    // uses (the feed and stats handlers above), rather than introducing a
+    // second convention. Same execution ceilings as those handlers too: a
+    // silently truncated dead-letter page reads as "nothing was rejected",
+    // which is worse than a loud error.
+    const rs = await ch.query({
+      query: sql,
+      query_params: params.values,
+      format: 'JSONEachRow',
+      clickhouse_settings: {
+        max_execution_time: SEGMENT_MAX_EXECUTION_SECONDS,
+        max_memory_usage: String(SEGMENT_MAX_MEMORY_BYTES),
+        timeout_overflow_mode: 'throw',
+      },
+    })
+    const rows = await rs.json<RejectionRow>()
+
+    reply.header('cache-control', 'no-store')
+    return reply.code(200).send({
+      rejections: rows,
+      // A full page means there is more behind it — the same contract the
+      // feed states, and the reason the UI must always send an explicit limit.
+      has_more: rows.length === limit,
+      next_offset: offset + rows.length,
     })
   })
 }
