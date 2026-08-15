@@ -1,3 +1,4 @@
+import { join } from 'node:path'
 import cookie from '@fastify/cookie'
 import type { ClickHouseClient, Pool } from '@lyraflow/db'
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify'
@@ -37,6 +38,7 @@ import { registerSchemaRoutes } from './schema/routes.js'
 import { registerSdkRoutes } from './sdk/routes.js'
 import { SegmentCache } from './segments/cache.js'
 import { registerSegmentRoutes } from './segments/routes.js'
+import { registerStatic } from './static.js'
 
 export interface AppDeps {
   config: Config
@@ -351,6 +353,21 @@ export function buildApp(input: {
   }
   registerPrivacyRoutes(app, privacyDeps)
   registerExportRoute(app, privacyDeps)
+
+  // Called last, as conservative practice -- but this ordering is not
+  // currently load-bearing, and no test depends on it. `registerStatic`
+  // registers `@fastify/static` with `wildcard: false` (no catch-all route
+  // is ever added) and installs `setNotFoundHandler`, a single GLOBAL hook
+  // that Fastify invokes only after its router finds no match anywhere in
+  // the trie -- built once, at `.ready()`, independent of registration
+  // order. Moving this call to the very top of `buildApp` was tried and
+  // left the entire server test suite green. It WOULD become load-bearing
+  // the moment any registration here adds a wildcard/catch-all route of its
+  // own, since that could then compete with routes registered after it --
+  // which is exactly the failure mode "last" defends against pre-emptively.
+  // `root` is absent in development and in most tests, and registerStatic
+  // no-ops in that case -- see its own docstring.
+  registerStatic(app, { root: join(import.meta.dirname, '..', '..', 'ui', 'dist') })
 
   // Deliberately NOT started here: every route test in this codebase calls
   // buildApp, and a live timer claiming real deletion requests during

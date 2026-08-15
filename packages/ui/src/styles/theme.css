@@ -1,0 +1,100 @@
+@import "tailwindcss";
+
+/* The brand tokens are the single source of colour. This file NEVER states a
+ * hex value -- it only maps shadcn's semantic variable names onto the
+ * `--lf-*` ones. tokens.css is generated (see the brand tooling); editing a
+ * colour here instead of there is how the two drift.
+ *
+ * tokens.css already defines light on :root, dark under
+ * prefers-color-scheme guarded by :not([data-theme="light"]), and dark again
+ * under [data-theme="dark"]. So theme switching is entirely its job and
+ * there is deliberately no `.dark` block below. */
+@import "../../../../brand/tokens.css";
+
+/* Utility classes only (animate-in/animate-out etc.) -- no colour, no
+ * variables. shadcn's vendored `select` and `dropdown-menu` use these for
+ * open/close transitions. Never let `shadcn add` reintroduce the
+ * accompanying `@layer base` block of its own oklch palette: that is a
+ * second source of colour, which this file exists to prevent. */
+@import "tw-animate-css";
+
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("../fonts/ibm-plex-sans-400.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("../fonts/ibm-plex-sans-500.woff2") format("woff2");
+  font-weight: 500;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("../fonts/ibm-plex-sans-600.woff2") format("woff2");
+  font-weight: 600;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("../fonts/ibm-plex-mono-400.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("../fonts/ibm-plex-mono-500.woff2") format("woff2");
+  font-weight: 500;
+  font-display: swap;
+}
+
+/* `inline` is load-bearing. Without it Tailwind snapshots each referenced
+ * value at build time rather than emitting a var(), so every generated
+ * utility freezes at the light palette -- and dark mode then appears to work
+ * for hand-written CSS while silently failing for anything Tailwind made. */
+@theme inline {
+  --color-background: var(--lf-surface);
+  --color-foreground: var(--lf-text);
+  --color-card: var(--lf-surface-raised);
+  --color-popover: var(--lf-surface-raised);
+  --color-muted: var(--lf-surface-sunken);
+  --color-muted-foreground: var(--lf-text-muted);
+  --color-primary: var(--lf-accent);
+  --color-primary-foreground: var(--lf-on-accent);
+  --color-secondary: var(--lf-surface-inset);
+  --color-accent: var(--lf-accent-surface);
+  --color-border: var(--lf-border);
+  /* Not --lf-border-strong: that token was never measured as a component
+   * boundary and falls to ~1.7:1 against surface/raised, well under WCAG
+   * 1.4.11's 3:1 for interactive controls. --lf-border-interactive is the
+   * token the brand system built for exactly this role (see palette.py's
+   * "control border" checks) and is what every border-input consumer here
+   * -- Input, Select's trigger, the outline Button's dark-mode border, the
+   * active Tab's dark-mode border -- actually needs. */
+  --color-input: var(--lf-border-interactive);
+  --color-ring: var(--lf-accent);
+  --color-destructive: var(--lf-danger);
+  /* The vendored button/badge destructive variants shipped with a
+   * hardcoded `text-white` instead of a mapped token -- it passed in light
+   * mode by coincidence (danger there is a dark red, and white reads fine
+   * on it) and failed in dark mode 2.2:1, because dark's --lf-danger is a
+   * pale pink chosen for the opposite job: readable danger *text* on a
+   * dark surface, not a solid fill under white text. --lf-on-accent is
+   * already the token for "a label on a solid brand fill"; it clears 4.5:1
+   * against danger in both modes (see palette.py's "label on destructive
+   * fill" checks) so destructive fills reuse it here rather than a second
+   * copy of the same value under a different name. */
+  --color-destructive-foreground: var(--lf-on-accent);
+  --color-success: var(--lf-success);
+  --color-warning: var(--lf-warning);
+  --radius: var(--lf-radius-md);
+  --font-sans: var(--lf-font-sans);
+  --font-mono: var(--lf-font-mono);
+}
+
+body {
+  background: var(--lf-surface);
+  color: var(--lf-text);
+  font-family: var(--lf-font-sans);
+}
