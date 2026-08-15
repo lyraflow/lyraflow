@@ -12,9 +12,11 @@ known accounts, and lets you ask who did what. It runs on your own machine
 under Docker, and nothing leaves it.
 
 > **Early days.** v0.1 is the API and the operations behind it: ingest,
-> identity, segments, event reads, privacy, retention, quotas, and backup.
-> There is **no UI yet** — everything here is HTTP and a CLI. Journeys,
-> funnels and dashboards are v0.2. Watch the repo to follow along.
+> identity, segments, event reads, privacy, retention, quotas, and backup. A
+> web UI now sits on top of it — sign in and watch events arrive live — but
+> it is one screen. Segments, people and funnels are still **API and CLI
+> only**; see [Web UI](#web-ui) for exactly what that screen does and does
+> not do.
 
 ## What it is good at
 
@@ -185,8 +187,32 @@ Every command takes `--json` for scripts and agents; the table output is for
 humans and is not a stable interface. Full reference:
 [`packages/cli/README.md`](packages/cli/README.md).
 
+Or watch the same feed in a browser: sign in at `http://localhost:3000` — see
+[Web UI](#web-ui).
+
 **That is the whole loop** — instrument, send, read. Everything below is
 detail on each part.
+
+## Web UI
+
+Open `http://localhost:3000` (or your domain, if you installed with one) and
+sign in with the admin account — see [Admin login](#admin-login) for where
+that password comes from and how to change it. Signed in, you get one
+screen: a live event feed, split into an **Accepted** tab and a **Rejected**
+tab. Rejected events carry the reason they were dropped (bad signature,
+missing write key, and so on) next to each row, which is otherwise only
+visible by reading server logs.
+
+It is served on the **same origin and port as ingest** — there is no
+separate admin host or port to firewall off separately. Everything the
+[Admin login](#admin-login) section says about that origin being reachable
+from wherever ingest is reachable applies to the login form too.
+
+**Volunteering the limit:** that is the whole UI. There is no settings
+screen and no first-run setup wizard — `.env` and the CLI still own
+configuration. Segments, people, person profiles and funnels have **no**
+screens at all yet; reach them the way the rest of this document shows, over
+the HTTP API or the CLI.
 
 ## Tracking more than one site
 
@@ -1078,8 +1104,9 @@ paid" — and one question: how many people got through each one, and where did
 the rest stop.
 
 Funnels are **saved objects**. You create one, give it a name, and re-run it
-over whatever date range you care about. There is no UI: this is the HTTP API
-and the CLI, the same as everything else in v0.1.
+over whatever date range you care about. Funnels have no screen in the
+[Web UI](#web-ui) — this is the HTTP API and the CLI, like segments and
+people.
 
 ### Defining one
 
@@ -1698,12 +1725,11 @@ event data. Your visitors would see a padlock that stops being true partway.
 
 ### Admin login
 
-There is no screen behind this yet — this release ships the API a future
-web UI will sit behind, not the UI itself. What exists today is one admin
-account, a session-cookie login (`POST /v1/auth/login`), and the
-project-scoped routes it protects. It matters to what you expose even
-without a UI to look at, so it is documented here rather than left for
-whoever builds the screen.
+One admin account, a session-cookie login (`POST /v1/auth/login`), and the
+project-scoped routes it protects — including the [Web UI](#web-ui)'s own
+sign-in form, which calls this same endpoint. It matters to what you expose
+even if you never open the UI, so it is documented here rather than only in
+the section about the screen that uses it.
 
 `./install.sh` generates the admin account the same way it generates the
 database passwords: a random one, written into `.env`, and **printed once at
