@@ -161,7 +161,19 @@ export function Wizard(props: {
   }
 
   return (
-    <div className="flex h-dvh flex-col items-center justify-center gap-6 bg-background p-4 text-foreground">
+    // `min-h-dvh`, not `h-dvh`: a fixed height combined with `justify-center`
+    // is the classic flexbox "unsafe centering" trap -- once the "created"
+    // state's extra content (the server-key panel, step 3) makes this taller
+    // than the viewport, a FIXED-height centered flex container spills the
+    // overflow equally on both edges, and the top spill lands at a negative
+    // offset no scroll position can reach (found reviewing wizard-1180-light
+    // screenshot: the "✦ Lyraflow" wordmark was clipped -12px above the
+    // viewport origin, not merely tight against it). `min-h-dvh` is a FLOOR,
+    // not a cap: short content still centers in a full viewport exactly as
+    // before, but content taller than the viewport simply grows the
+    // container instead of forcing centering to clip it -- the excess then
+    // flows through ordinary page scroll like anything else.
+    <div className="flex min-h-dvh flex-col items-center justify-center gap-6 bg-background p-4 text-foreground">
       <p className="text-lg font-semibold tracking-tight">✦ Lyraflow</p>
       <Card className="w-full max-w-lg">
         <CardHeader>
@@ -199,6 +211,15 @@ export function Wizard(props: {
             </div>
           ) : (
             <>
+              {/* Keeps 1 numbered in its completed state -- without this,
+               * the sequence read "Your project is ready" / "2." / "3.",
+               * and a person reasonably wonders what happened to step 1
+               * (Finding 3, fix round 1). Muted rather than foreground:
+               * the same "done, de-emphasised" treatment CardDescription
+               * uses elsewhere, so it reads as past rather than pending. */}
+              <div className="flex flex-col gap-1">
+                <p className="text-sm font-medium text-muted-foreground">1. Project created</p>
+              </div>
               <div className="flex flex-col gap-1">
                 <p className="text-sm font-medium text-foreground">2. Paste this on your site</p>
               </div>

@@ -68,9 +68,20 @@ export function SnippetSection(props: { writeKey: string | null }) {
           // A text child, never `dangerouslySetInnerHTML` -- the snippet
           // is markup a browser will parse when pasted onto a page, not
           // markup this page itself should ever render.
+          // `whitespace-pre-wrap break-all`, not just `overflow-x-auto`: in
+          // the wizard's narrower card (`max-w-lg`, versus Settings' full
+          // column) the box was narrow enough that lines ran off the right
+          // edge mid-token -- reachable by scrolling, since the page itself
+          // never overflowed, but with no visible affordance that a scroll
+          // existed, so it read as mangled code rather than a snippet with
+          // more off-screen (Finding 2, fix round 1). Wrapping removes the
+          // clipped edge in either width, so nothing needs discovering.
+          // `overflow-x-auto` stays as a backstop for anything that
+          // genuinely cannot break (belt-and-suspenders, not load-bearing
+          // now that wrapping is unconditional).
           <pre
             data-testid="install-snippet"
-            className="overflow-x-auto rounded-md border border-border bg-muted p-3 font-mono text-xs text-foreground"
+            className="overflow-x-auto rounded-md border border-border bg-muted p-3 font-mono text-xs whitespace-pre-wrap break-all text-foreground"
           >
             {snippet}
           </pre>
