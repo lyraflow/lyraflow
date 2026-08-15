@@ -98,9 +98,22 @@ function Unavailable(props: { onRetry(): void }) {
  * `createClient()`. It is read once via useState's lazy initializer, so a
  * caller that passes a different client on a later render is not expected
  * to be honoured; the app has exactly one client for its lifetime.
+ *
+ * `sessionPollIntervalMs` is a test seam too, for the same reason `Feed`'s
+ * `pollIntervalMs` is (`screens/Feed.tsx`): CI found this the hard way --
+ * a test that drove the production 1-hour default through
+ * `vi.advanceTimersByTimeAsync` timed out on a constrained runner even
+ * though it passed locally, because `shouldAdvanceTime: true` keeps the
+ * fake clock moving in REAL time too, and simulating an hour of callbacks
+ * is not free no matter how fast the assertions themselves are. A caller
+ * that needs a fast cycle now passes a small value instead of the test
+ * simulating a large span of time; see `App.test.tsx`'s tests for the
+ * mechanism, and its separate constant-only assertion for the production
+ * default, which no timer ever has to prove.
  */
-export default function App(props: { client?: ApiClient }) {
+export default function App(props: { client?: ApiClient; sessionPollIntervalMs?: number }) {
   const [client] = useState<ApiClient>(() => props.client ?? createClient())
+  const sessionPollIntervalMs = props.sessionPollIntervalMs ?? SESSION_POLL_INTERVAL_MS
   const [phase, setPhase] = useState<Phase>({ kind: 'checking' })
   // Bumped by the "Try again" button to force the check effect below to
   // re-run even though `client` itself never changes identity.
@@ -174,17 +187,53 @@ export default function App(props: { client?: ApiClient }) {
   // does when a feed poll 401s; any other failure (a passing 5xx, a
   // network blip) is left for the next tick rather than bouncing to login
   // on what may be a transient hiccup.
+  //
+  // A settle-then-reschedule chain, matching `usePolling`'s own discipline
+  // (`screens/feed/usePolling.ts`) -- the whole-branch review's own
+  // observation: this used to be a bare `setInterval`, which keeps firing
+  // on the wall clock regardless of how long the previous `session()` call
+  // is taking. A call that outran its interval could in principle stack.
+  // `setTimeout` rescheduled only after the previous call settles closes
+  // that the same way `usePolling` already does, so the app has one
+  // polling discipline rather than two. Unlike `usePolling`, this does NOT
+  // call `session()` immediately on effect start -- the mount-time check
+  // above already did that; an immediate second call here would be
+  // redundant and would also change what `App.test.tsx`'s call-count
+  // assertions are pinning.
   useEffect(() => {
     if (phase.kind !== 'authenticated') return
-    const timer = setInterval(() => {
-      client.session().catch((err: unknown) => {
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+
+    function scheduleNext() {
+      if (!cancelled) timer = setTimeout(tick, sessionPollIntervalMs)
+    }
+
+    async function tick() {
+      try {
+        await client.session()
+        scheduleNext()
+      } catch (err) {
+        if (cancelled) return
         if (err instanceof ApiError && err.status === 401) {
+          // The session is definitively gone -- no point rescheduling
+          // another poll against it.
           setPhase({ kind: 'anonymous' })
+          return
         }
-      })
-    }, SESSION_POLL_INTERVAL_MS)
-    return () => clearInterval(timer)
-  }, [phase.kind, client])
+        // A transient failure (a passing 5xx, a network blip): try again
+        // next tick rather than giving up the renewal loop entirely.
+        scheduleNext()
+      }
+    }
+
+    scheduleNext()
+
+    return () => {
+      cancelled = true
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }, [phase.kind, client, sessionPollIntervalMs])
 
   function handleSignedIn(email: string) {
     setPhase({ kind: 'checking' })

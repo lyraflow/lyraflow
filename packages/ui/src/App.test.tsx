@@ -123,6 +123,18 @@ describe('App', () => {
     expect(session).toHaveBeenCalledTimes(2)
   })
 
+  // CI fix: this test used to advance fake time across the real 1-hour
+  // production default (`SESSION_POLL_INTERVAL_MS`). `shouldAdvanceTime:
+  // true` keeps the fake clock moving in REAL time too, so simulating an
+  // hour meant a large number of timer callbacks and microtask flushes --
+  // cheap on a fast machine, not cheap on a constrained CI runner, and
+  // vitest's test timeout is real time regardless of what the fake clock
+  // says. It passed locally and timed out on the GitHub runner. Fixed the
+  // same way `Feed`'s `pollIntervalMs` was: `sessionPollIntervalMs` is now
+  // a prop, and this test drives a small value instead of simulating a
+  // large span of time. The production default itself is pinned separately
+  // below, as a plain constant assertion no timer has to prove.
+  //
   // Critical 2 from the whole-branch review. Before this, nothing in
   // packages/ui ever called session() again after mount -- a direct
   // violation of the design spec ("The SPA must poll it"), and the entire
@@ -134,14 +146,59 @@ describe('App', () => {
     try {
       const session = vi.fn(async () => ({ email: 'admin@localhost' }))
       const c = client({ session })
-      render(<App client={c} />)
+      render(<App client={c} sessionPollIntervalMs={50} />)
       await screen.findByText('Feed')
       expect(session).toHaveBeenCalledTimes(1)
-      await vi.advanceTimersByTimeAsync(SESSION_POLL_INTERVAL_MS)
+      await vi.advanceTimersByTimeAsync(50)
       await waitFor(() => expect(session).toHaveBeenCalledTimes(2))
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  // The whole-branch review's own observation, acted on in this round:
+  // the session poll used to be a bare `setInterval`, which keeps firing
+  // on the wall clock regardless of how long the previous `session()` call
+  // is taking -- a call that outran its interval could in principle stack.
+  // Rebuilt as a settle-then-reschedule chain matching `usePolling`'s own
+  // discipline (`screens/feed/usePolling.ts`'s "does not start a second
+  // call while one is in flight" test is the sibling of this one).
+  it('does not start a second session poll while one is in flight', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      let n = 0
+      let release: () => void = () => {}
+      const session = vi.fn(() => {
+        n++
+        if (n === 1) return Promise.resolve({ email: 'admin@localhost' })
+        return new Promise<{ email: string }>((r) => {
+          release = () => r({ email: 'admin@localhost' })
+        })
+      })
+      const c = client({ session })
+      render(<App client={c} sessionPollIntervalMs={50} />)
+      await screen.findByText('Feed')
+      expect(session).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(50)
+      await waitFor(() => expect(session).toHaveBeenCalledTimes(2))
+      // The second call is now in flight (unresolved). Advancing well past
+      // several more intervals must not start a third call while it hangs.
+      await vi.advanceTimersByTimeAsync(500)
+      expect(session).toHaveBeenCalledTimes(2)
+      release()
+      await vi.advanceTimersByTimeAsync(50)
+      await waitFor(() => expect(session).toHaveBeenCalledTimes(3))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // The production default itself, pinned as a plain value -- not
+  // exercised by a timer, so the real interval cannot be quietly changed
+  // without this failing, and no test ever has to simulate an hour of
+  // fake time to prove it.
+  it('defaults the session poll interval to one hour', () => {
+    expect(SESSION_POLL_INTERVAL_MS).toBe(60 * 60 * 1000)
   })
 
   // The other half: a 401 from that same interval poll means the session
@@ -156,9 +213,9 @@ describe('App', () => {
         return { email: 'admin@localhost' }
       })
       const c = client({ session })
-      render(<App client={c} />)
+      render(<App client={c} sessionPollIntervalMs={50} />)
       await screen.findByText('Feed')
-      await vi.advanceTimersByTimeAsync(SESSION_POLL_INTERVAL_MS)
+      await vi.advanceTimersByTimeAsync(50)
       await waitFor(() =>
         expect(screen.getByRole('button', { name: /sign in/i })).toBeInTheDocument(),
       )
