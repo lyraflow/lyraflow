@@ -38,7 +38,14 @@ export function hashSessionToken(token: string): string {
 export interface SessionRecord {
   adminUserId: number
   expiresAt: Date
-  /** True when this verify() extended the row; the route re-sends the cookie. */
+  /**
+   * True when this verify() call actually extended the row -- which only
+   * ever happens when the caller asked to renew (the default) AND the
+   * session was inside its renewal window. `false` covers both "outside
+   * the window" and "renewal not requested"; a caller that cannot itself
+   * re-send the cookie (see `verify`'s `renew` option) must never see
+   * `true` here, because nothing downstream of it will act on it.
+   */
   renewed: boolean
 }
 
@@ -69,8 +76,31 @@ export class SessionStore {
    * reached yet is already unusable, so the sweeper is housekeeping rather
    * than a security control. If it stops running, no expired or over-age
    * session becomes valid.
+   *
+   * `renew` (default `true`) governs whether landing inside the renewal
+   * window actually performs the `UPDATE` -- pass `{ renew: false }` for a
+   * read that must not write. This exists because renewal is a
+   * cookie-lifecycle concern, not a session-validity one: the only reason
+   * to slide `expires_at` forward is that a client's cookie is about to
+   * follow it, and the only two things true about a caller that can
+   * actually make that happen are (a) it is the browser-facing route the
+   * cookie was set on, and (b) it can call `setSessionCookie` on the SAME
+   * response. `GET /v1/auth/session` is that route, and does exactly that
+   * with `rec.renewed`.
+   *
+   * `auth/bridge.ts`'s project-scoped authenticator is not that route --
+   * it is called from eight-plus route modules that have never sent a
+   * `Set-Cookie` header in their lives, so a `renewed: true` it received
+   * would be a promise it cannot keep. Worse, calling the renewing form
+   * from there made EVERY project-scoped request during a session's last 7
+   * days (`SESSION_RENEW_WITHIN_MS`) perform a `sessions` UPDATE as a side
+   * effect of authentication -- a hidden write on what every caller has
+   * every reason to assume is a read, and on a table a UI polling a live
+   * feed every few seconds hits constantly. `{ renew: false }` is what the
+   * bridge passes; see its own call site.
    */
-  async verify(token: string): Promise<SessionRecord | null> {
+  async verify(token: string, opts: { renew?: boolean } = {}): Promise<SessionRecord | null> {
+    const renew = opts.renew ?? true
     const res = await this.pg.query<{ admin_user_id: string; expires_at: Date }>(
       'SELECT admin_user_id, expires_at FROM sessions WHERE id = $1 AND expires_at > now() AND created_at > $2',
       [hashSessionToken(token), new Date(Date.now() - this.maxAgeMs)],
@@ -79,7 +109,7 @@ export class SessionStore {
     if (!row) return null
 
     const expiresAt = row.expires_at
-    if (expiresAt.getTime() - Date.now() > this.renewWithinMs) {
+    if (!renew || expiresAt.getTime() - Date.now() > this.renewWithinMs) {
       return { adminUserId: Number(row.admin_user_id), expiresAt, renewed: false }
     }
 

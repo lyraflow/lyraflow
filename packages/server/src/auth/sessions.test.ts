@@ -114,6 +114,44 @@ describe('SessionStore', () => {
     expect(stored.rows[0]?.expires_at.getTime()).toBeGreaterThan(expiresAt.getTime())
   })
 
+  // IMPORTANT 2: a caller that cannot resend the cookie (auth/bridge.ts)
+  // must be able to verify without sliding expires_at forward, even when
+  // the session IS inside its renewal window.
+  it('does not renew a session inside the renewal window when renew: false is passed', async () => {
+    const issuer = new SessionStore(pg, 10_000, 60_000)
+    const { token, expiresAt } = await issuer.issue(adminId)
+    const reader = new SessionStore(pg, 600_000, 60_000)
+
+    const rec = await reader.verify(token, { renew: false })
+    expect(rec?.renewed).toBe(false)
+    expect(rec?.expiresAt.getTime()).toBe(expiresAt.getTime())
+
+    const stored = await pg.query<{ expires_at: Date }>(
+      'SELECT expires_at FROM sessions WHERE id = $1',
+      [hashSessionToken(token)],
+    )
+    // The row itself must be untouched, not merely the returned record --
+    // this is the same check "renews a session inside the renewal window"
+    // makes on the write side, applied here to prove the ABSENCE of one.
+    expect(stored.rows[0]?.expires_at.getTime()).toBe(expiresAt.getTime())
+  })
+
+  // Companion: the same token, same store, verified normally (the default)
+  // right after, DOES renew -- proving the row was never touched by the
+  // `renew: false` call above, not merely that this particular call
+  // happened not to renew for some unrelated reason (e.g. already outside
+  // the window).
+  it('a subsequent default verify() still renews after a renew: false read', async () => {
+    const issuer = new SessionStore(pg, 10_000, 60_000)
+    const { token, expiresAt } = await issuer.issue(adminId)
+    const store = new SessionStore(pg, 600_000, 60_000)
+
+    await store.verify(token, { renew: false })
+    const rec = await store.verify(token)
+    expect(rec?.renewed).toBe(true)
+    expect(rec?.expiresAt.getTime()).toBeGreaterThan(expiresAt.getTime())
+  })
+
   it('does not renew a session outside the renewal window', async () => {
     const store = new SessionStore(pg, 10 * 60_000, 1000)
     const { token, expiresAt } = await store.issue(adminId)

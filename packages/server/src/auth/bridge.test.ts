@@ -7,7 +7,7 @@ import { Readiness } from '../health.js'
 import { makeServerOrSessionAuthenticator } from './bridge.js'
 import { hashServerKey } from './project-cache.js'
 import { ProjectCache } from './project-cache.js'
-import { SessionStore } from './sessions.js'
+import { SessionStore, hashSessionToken } from './sessions.js'
 
 const CH = {
   url: 'http://localhost:8123',
@@ -333,5 +333,107 @@ describe('the session path', () => {
       },
     })
     expect(res.json()).toEqual({ id: projectId, slug: SLUG })
+  })
+})
+
+describe('IMPORTANT 2: the bridge does not renew', () => {
+  // A session inside its renewal window, authenticated through the bridge,
+  // must not have expires_at moved -- the bridge has no way to resend the
+  // cookie the browser would need to agree with that new expiry. Verified
+  // live against Postgres (the row, not just the returned record), and
+  // proved to have been genuinely inside the renewal window by the
+  // companion test just below.
+  it('does not move expires_at for a session inside the renewal window', async () => {
+    // 10s TTL, 60s renew-within: issued already inside its own window.
+    const issuer = new SessionStore(pg, 10_000, 60_000)
+    const { token } = await issuer.issue(adminId)
+    const before = await pg.query<{ expires_at: Date }>(
+      'SELECT expires_at FROM sessions WHERE id = $1',
+      [hashSessionToken(token)],
+    )
+
+    // The bridge's own SessionStore, configured the same way #verify would
+    // renew under if asked -- 600s TTL, 60s renew-within -- so a renewal,
+    // if one happened, would be observable as a large jump forward.
+    const bridgeSessions = new SessionStore(pg, 600_000, 60_000)
+    const r = new Readiness()
+    r.markReady()
+    const projects = new ProjectCache(pg, 60_000)
+    const authenticate = makeServerOrSessionAuthenticator({
+      readiness: r,
+      projects,
+      sessions: bridgeSessions,
+    })
+    const local = Fastify()
+    await local.register(cookie)
+    local.get('/probe', async (req, reply) => {
+      const p = await authenticate(req, reply)
+      if (!p) return
+      return reply.code(200).send({ ok: true })
+    })
+    await local.ready()
+
+    const res = await local.inject({
+      method: 'GET',
+      url: '/probe',
+      headers: {
+        cookie: `lf_session=${token}`,
+        'x-lyraflow-ui': '1',
+        'x-lyraflow-project': String(projectId),
+      },
+    })
+    expect(res.statusCode).toBe(200)
+    // The other half of the finding: the bridge response never re-sends
+    // the cookie, so even a `renewed: true` it might have received would
+    // have been a promise it could not keep.
+    expect(res.headers['set-cookie']).toBeUndefined()
+    await local.close()
+
+    const after = await pg.query<{ expires_at: Date }>(
+      'SELECT expires_at FROM sessions WHERE id = $1',
+      [hashSessionToken(token)],
+    )
+    expect(after.rows[0]?.expires_at.getTime()).toBe(before.rows[0]?.expires_at.getTime())
+  })
+
+  // Companion, proving the session above really was inside its renewal
+  // window and the SAME store would in fact write given the chance --
+  // otherwise "the bridge doesn't renew" would be true only because
+  // nothing was ever going to renew regardless of the fix.
+  it('the same session, through GET /v1/auth/session, does renew', async () => {
+    const issuer = new SessionStore(pg, 10_000, 60_000)
+    const { token } = await issuer.issue(adminId)
+    const before = await pg.query<{ expires_at: Date }>(
+      'SELECT expires_at FROM sessions WHERE id = $1',
+      [hashSessionToken(token)],
+    )
+
+    const routeSessions = new SessionStore(pg, 600_000, 60_000)
+    const local = Fastify()
+    await local.register(cookie)
+    local.get('/v1/auth/session', async (req, reply) => {
+      const rec = await routeSessions.verify(req.cookies?.lf_session ?? '')
+      if (!rec) return reply.code(401).send({ error: 'no_session' })
+      if (rec.renewed) reply.header('set-cookie', 'lf_session=renewed')
+      return reply.code(200).send({ renewed: rec.renewed })
+    })
+    await local.ready()
+
+    const res = await local.inject({
+      method: 'GET',
+      url: '/v1/auth/session',
+      headers: { cookie: `lf_session=${token}` },
+    })
+    expect(res.json()).toEqual({ renewed: true })
+    expect(res.headers['set-cookie']).toBeDefined()
+    await local.close()
+
+    const after = await pg.query<{ expires_at: Date }>(
+      'SELECT expires_at FROM sessions WHERE id = $1',
+      [hashSessionToken(token)],
+    )
+    expect(after.rows[0]?.expires_at.getTime()).toBeGreaterThan(
+      before.rows[0]?.expires_at.getTime() ?? 0,
+    )
   })
 })

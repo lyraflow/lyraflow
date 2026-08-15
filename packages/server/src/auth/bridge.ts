@@ -104,7 +104,16 @@ export function makeServerOrSessionAuthenticator(deps: BridgeDeps): Authenticate
       return null
     }
 
-    const session = await sessions.verify(token)
+    // IMPORTANT 2: a non-renewing read. This authenticator has no way to
+    // resend the session cookie -- it is shared by every project-scoped
+    // route, none of which have ever sent a Set-Cookie header -- so letting
+    // verify() renew here would slide expires_at forward in Postgres on
+    // every request for a session's last 7 days while the browser's own
+    // cookie Expires never moves, an unkept promise and a hidden write on
+    // what looks like a read. `GET /v1/auth/session` is the one place that
+    // both learns `renewed` and can act on it; see SessionStore.verify's
+    // own docstring for the full reasoning.
+    const session = await sessions.verify(token, { renew: false })
     if (!session) {
       reply.code(401).send({ error: 'invalid_session' })
       return null
