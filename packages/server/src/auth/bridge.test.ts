@@ -285,6 +285,19 @@ describe('the session path', () => {
     ['negative', '-1'],
     ['zero', '0'],
     ['float', '1.5'],
+    // IMPORTANT 1: Number.isInteger(1e21) is true, and Number('1e21') is a
+    // finite, in-range-looking float -- so a bare Number()+isInteger check
+    // let this reach ProjectCache.byId, which stringifies it to '1e+21' and
+    // binds THAT against projects.id bigserial. Postgres rejects it
+    // (22P02/22003), #lookup rethrows, and app.ts's catch-all turns a
+    // deterministic client error into a 503 with a retry-after header --
+    // this whole table exists to prove none of these five ever reach that
+    // path.
+    ['exponential notation', '1e21'],
+    ['past MAX_SAFE_INTEGER but all digits', '99999999999999999999'],
+    ['hex notation', '0x10'],
+    ['leading plus', '+5'],
+    ['surrounding whitespace', ' 1 '],
   ])('refuses a malformed project header: %s', async (_name, value) => {
     const res = await app.inject({
       method: 'GET',

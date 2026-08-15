@@ -22,6 +22,31 @@ export interface BridgeDeps {
 export type Authenticate = (req: FastifyRequest, reply: FastifyReply) => Promise<Project | null>
 
 /**
+ * Parses the `x-lyraflow-project` header. Same shape as funnels/routes.ts's
+ * `parseId` and privacy/routes.ts's `parseDeletionId` (kept as a private
+ * copy here too, rather than imported, for the same reason those two stay
+ * separate from each other) -- this is the one place a malformed id reaches
+ * EVERY project-scoped route, so it needs the same two-part check they do:
+ *
+ * `/^\d+$/` first, so `Number()` never sees anything it could coerce --
+ * `'1e21'`, `'0x10'`, `' 1 '`, and `'+5'` all parse to a normal-looking
+ * finite number under a bare `Number()` call, and `Number.isInteger(1e21)`
+ * is `true`. Then `Number.isSafeInteger`, so a value that IS all digits but
+ * outside safe-integer range (`'99999999999999999999'`) is refused too.
+ *
+ * Without both checks, a value that passes lands as a `ProjectCache.byId`
+ * bind parameter against `projects.id bigserial`, Postgres raises
+ * `22P02`/`22003`, and `#lookup` rethrows into app.ts's catch-all -- turning
+ * a deterministic client error into a `503 {"error":"unavailable"}` with a
+ * `retry-after` header and a level-50 log line, on every request.
+ */
+function parseProjectId(raw: string): number | null {
+  if (!/^\d+$/.test(raw)) return null
+  const id = Number(raw)
+  return Number.isSafeInteger(id) && id > 0 ? id : null
+}
+
+/**
  * Resolves EITHER a project server key OR an admin session to the same
  * `Project`, so that every project-scoped route serves the API and the
  * browser through one implementation. The alternative -- a second `/admin/*`
@@ -90,11 +115,8 @@ export function makeServerOrSessionAuthenticator(deps: BridgeDeps): Authenticate
       reply.code(400).send({ error: 'missing_project' })
       return null
     }
-    // Integer-only and strictly positive: `Number('1.5')` is 1.5 and
-    // `Number('-1')` is -1, and both would reach Postgres as a bind
-    // parameter rather than being refused here.
-    const id = Number(raw)
-    if (!Number.isInteger(id) || id <= 0) {
+    const id = parseProjectId(raw)
+    if (id === null) {
       reply.code(400).send({ error: 'invalid_project' })
       return null
     }
