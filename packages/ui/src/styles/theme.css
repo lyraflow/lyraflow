@@ -65,9 +65,27 @@
   --color-secondary: var(--lf-surface-inset);
   --color-accent: var(--lf-accent-surface);
   --color-border: var(--lf-border);
-  --color-input: var(--lf-border-strong);
+  /* Not --lf-border-strong: that token was never measured as a component
+   * boundary and falls to ~1.7:1 against surface/raised, well under WCAG
+   * 1.4.11's 3:1 for interactive controls. --lf-border-interactive is the
+   * token the brand system built for exactly this role (see palette.py's
+   * "control border" checks) and is what every border-input consumer here
+   * -- Input, Select's trigger, the outline Button's dark-mode border, the
+   * active Tab's dark-mode border -- actually needs. */
+  --color-input: var(--lf-border-interactive);
   --color-ring: var(--lf-accent);
   --color-destructive: var(--lf-danger);
+  /* The vendored button/badge destructive variants shipped with a
+   * hardcoded `text-white` instead of a mapped token -- it passed in light
+   * mode by coincidence (danger there is a dark red, and white reads fine
+   * on it) and failed in dark mode 2.2:1, because dark's --lf-danger is a
+   * pale pink chosen for the opposite job: readable danger *text* on a
+   * dark surface, not a solid fill under white text. --lf-on-accent is
+   * already the token for "a label on a solid brand fill"; it clears 4.5:1
+   * against danger in both modes (see palette.py's "label on destructive
+   * fill" checks) so destructive fills reuse it here rather than a second
+   * copy of the same value under a different name. */
+  --color-destructive-foreground: var(--lf-on-accent);
   --color-success: var(--lf-success);
   --color-warning: var(--lf-warning);
   --radius: var(--lf-radius-md);
