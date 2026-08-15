@@ -1,7 +1,8 @@
 // This file proves what app.ts's own wiring adds on top of SessionSweeper
-// (covered by sweeper.test.ts's own unit tests -- not written by this task,
-// since the brief's sample below is what pins the wiring, the same split
-// retention/wiring.test.ts uses against RetentionWorker): that buildApp
+// (covered by sweeper.test.ts's own unit tests, including its error-
+// containment guarantees -- the same split retention/wiring.test.ts uses
+// against RetentionWorker, whose own unit tests live in worker.test.ts):
+// that buildApp
 // constructs the sweeper but never starts it (see app.ts's own comment for
 // why -- a live timer issuing real DELETEs against the shared test database
 // during unrelated tests is exactly the cross-file interference the
