@@ -7,7 +7,8 @@
   "main": "index.js",
   "scripts": {
     "build": "tsc -b && vite build",
-    "dev": "vite"
+    "dev": "vite",
+    "test": "vitest run"
   },
   "keywords": [],
   "author": "",
