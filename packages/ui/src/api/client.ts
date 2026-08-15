@@ -2,12 +2,18 @@ import type {
   CreatedProject,
   EventsPage,
   EventsQuery,
+  Funnel,
+  FunnelDefinition,
+  FunnelRunResult,
+  FunnelStep,
   Project,
   ProjectIdentity,
   ProjectLimits,
   ProjectPatch,
+  RangeBody,
   RejectionsPage,
   RejectionsQuery,
+  Segment,
   StatsPage,
   StatsQuery,
   Usage,
@@ -50,6 +56,29 @@ export interface ApiClient {
   events(projectId: number, q: EventsQuery): Promise<EventsPage>
   stats(projectId: number, q: StatsQuery): Promise<StatsPage>
   rejections(projectId: number, q: RejectionsQuery): Promise<RejectionsPage>
+  funnels(projectId: number): Promise<Funnel[]>
+  funnel(projectId: number, id: number): Promise<Funnel>
+  createFunnel(projectId: number, name: string, definition: FunnelDefinition): Promise<Funnel>
+  patchFunnel(
+    projectId: number,
+    id: number,
+    patch: {
+      name?: string
+      steps?: FunnelStep[]
+      window_seconds?: number
+      segment_id?: number | null
+    },
+  ): Promise<Funnel>
+  deleteFunnel(projectId: number, id: number): Promise<void>
+  // POST, not GET: both carry a range body. The server ignores query params here.
+  previewFunnel(
+    projectId: number,
+    definition: FunnelDefinition,
+    range: RangeBody,
+  ): Promise<FunnelRunResult>
+  runFunnel(projectId: number, id: number, range: RangeBody): Promise<FunnelRunResult>
+  segments(projectId: number): Promise<Segment[]>
+  schemaEvents(projectId: number, q: string): Promise<string[]>
 }
 
 function qs(params: Record<string, string | number | undefined>): string {
@@ -127,5 +156,35 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
     stats: (projectId, q) => call(`/v1/events/stats${qs({ ...q })}`, {}, projectId),
     rejections: (projectId, q) =>
       call(`/v1/events/rejections${qs({ ...q, limit: q.limit ?? DEFAULT_LIMIT })}`, {}, projectId),
+    funnels: async (projectId) =>
+      (await call<{ funnels: Funnel[] }>('/v1/funnels', {}, projectId)).funnels,
+    funnel: (projectId, id) => call(`/v1/funnels/${id}`, {}, projectId),
+    createFunnel: (projectId, name, definition) =>
+      call(
+        '/v1/funnels',
+        { method: 'POST', body: JSON.stringify({ name, ...definition }) },
+        projectId,
+      ),
+    patchFunnel: (projectId, id, patch) =>
+      call(`/v1/funnels/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }, projectId),
+    deleteFunnel: (projectId, id) => call(`/v1/funnels/${id}`, { method: 'DELETE' }, projectId),
+    previewFunnel: (projectId, definition, range) =>
+      call(
+        '/v1/funnels/preview',
+        { method: 'POST', body: JSON.stringify({ ...definition, ...range }) },
+        projectId,
+      ),
+    runFunnel: (projectId, id, range) =>
+      call(`/v1/funnels/${id}/run`, { method: 'POST', body: JSON.stringify(range) }, projectId),
+    segments: async (projectId) =>
+      (await call<{ segments: Segment[] }>('/v1/segments', {}, projectId)).segments,
+    schemaEvents: async (projectId, q) =>
+      (
+        await call<{ events: { event_name: string }[] }>(
+          `/v1/schema/events${qs({ q, limit: 50 })}`,
+          {},
+          projectId,
+        )
+      ).events.map((e) => e.event_name),
   }
 }

@@ -120,3 +120,87 @@ export interface RejectionsQuery {
   until?: string
   reason?: string
 }
+
+/** One predicate on a step's own event properties. Authored only by the CLI --
+ * the UI renders these read-only and refuses to re-save a step carrying them. */
+export interface WherePredicate {
+  property: string
+  op: string
+  value: unknown
+}
+
+export interface FunnelStep {
+  event: string
+  where?: WherePredicate[]
+}
+
+/** `GET /v1/funnels` and `GET /v1/funnels/:id`.
+ *
+ * `last_entered` / `last_converted` / `last_evaluated_at` are a CACHE, not a
+ * fact: the server writes them after each run and never recomputes them. A
+ * rate derived from them must always render beside `last_evaluated_at`, and a
+ * funnel with `last_evaluated_at === null` has never been run -- which is a
+ * different fact from a 0% conversion and must not render as one.
+ *
+ * `stale` is true when the stored `steps` no longer parse. Always present,
+ * `false` for ordinary rows, so one field is checked regardless of route. */
+export interface Funnel {
+  id: number
+  name: string
+  definition_version: number
+  steps: FunnelStep[]
+  window_seconds: number
+  segment_id: number | null
+  stale: boolean
+  last_entered: number | null
+  last_converted: number | null
+  last_evaluated_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface FunnelDefinition {
+  steps: FunnelStep[]
+  window_seconds: number
+  segment_id?: number | null
+}
+
+export interface StepResult {
+  index: number
+  event: string
+  people: number
+  /** Server-computed. NEVER derive this from `from_start`. */
+  from_previous: number
+  /** Server-computed. NEVER derive this from a chain of `from_previous`. */
+  from_start: number
+}
+
+export interface CostWarning {
+  path: string
+  reason: string
+}
+
+/** The body of `POST /v1/funnels/preview` and `POST /v1/funnels/:id/run`. */
+export interface FunnelRunResult {
+  entered: number
+  converted: number
+  conversion_rate: number
+  steps: StepResult[]
+  partial_window_entrants: number
+  range: { since: string; until: string }
+  as_of: string
+  warnings: CostWarning[]
+}
+
+export interface RangeBody {
+  since?: string
+  until?: string
+}
+
+/** `GET /v1/segments`. Only the fields the picker needs; the route returns more. */
+export interface Segment {
+  id: number
+  name: string
+  /** True when the stored tree no longer parses. Such a segment is not selectable. */
+  stale: boolean
+}

@@ -204,4 +204,102 @@ describe('createClient', () => {
       expect(url).toMatch(/[?&]reason=bad_schema(&|$)/)
     })
   })
+
+  describe('funnels', () => {
+    it('lists funnels for the active project and unwraps the envelope', async () => {
+      const fetchImpl = vi.fn(
+        async (_input: RequestInfo | URL, _init?: RequestInit) =>
+          new Response(JSON.stringify({ funnels: [{ id: 7, name: 'Signup' }] }), { status: 200 }),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      const out = await client.funnels(3)
+
+      expect(out).toEqual([{ id: 7, name: 'Signup' }])
+      const [path, init] = fetchImpl.mock.calls[0] ?? []
+      expect(path).toBe('/v1/funnels')
+      expect(new Headers(init?.headers).get('x-lyraflow-project')).toBe('3')
+      expect(new Headers(init?.headers).get('x-lyraflow-ui')).toBe('1')
+    })
+
+    it('runs a funnel with POST and sends the range in the body, not the query', async () => {
+      const fetchImpl = vi.fn(
+        async (_input: RequestInfo | URL, _init?: RequestInit) =>
+          new Response(JSON.stringify({ entered: 0, converted: 0, steps: [] }), { status: 200 }),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      await client.runFunnel(3, 7, { since: '2026-08-01T00:00:00.000Z' })
+
+      const [path, init] = fetchImpl.mock.calls[0] ?? []
+      // POST, not GET: run carries a range body. A `?since=` here would be
+      // silently ignored by the server and the range would default to 7 days.
+      expect(path).toBe('/v1/funnels/7/run')
+      expect(init?.method).toBe('POST')
+      expect(JSON.parse(init?.body as string)).toEqual({ since: '2026-08-01T00:00:00.000Z' })
+    })
+
+    it('deleteFunnel tolerates the 204 with no body', async () => {
+      const fetchImpl = vi.fn(async () => new Response(null, { status: 204 }))
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+      await expect(client.deleteFunnel(3, 7)).resolves.toBeUndefined()
+    })
+
+    // Invented: the three prescribed tests above each pin transport mechanics
+    // (path, method, headers) but none of them pin the actual JSON shape of a
+    // create/patch/preview body. `createFunnel` is exactly the case the brief
+    // calls out as consequential: the server parses one flat object twice --
+    // once as `{ name }`, once as `FunnelDefinition` -- so a caller that nests
+    // `{ name, definition: {...} }` gets a 400 that this suite would not have
+    // caught. Mutating the spread to a nested body left all prior tests green.
+    it('createFunnel sends name and the definition flattened into ONE object, not nested', async () => {
+      const fetchImpl = vi.fn(
+        async (_input: RequestInfo | URL, _init?: RequestInit) =>
+          new Response(JSON.stringify({ id: 9, name: 'Signup' }), { status: 201 }),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      await client.createFunnel(3, 'Signup', {
+        steps: [{ event: 'signed_up' }],
+        window_seconds: 604800,
+        segment_id: null,
+      })
+
+      const [path, init] = fetchImpl.mock.calls[0] ?? []
+      expect(path).toBe('/v1/funnels')
+      expect(init?.method).toBe('POST')
+      expect(JSON.parse(init?.body as string)).toEqual({
+        name: 'Signup',
+        steps: [{ event: 'signed_up' }],
+        window_seconds: 604800,
+        segment_id: null,
+      })
+    })
+
+    // Same body-shape family as createFunnel: `/v1/funnels/preview` also
+    // parses one flat object, so the definition and the range must both be
+    // flattened into it rather than nested under separate keys.
+    it('previewFunnel flattens the definition and the range into ONE body', async () => {
+      const fetchImpl = vi.fn(
+        async (_input: RequestInfo | URL, _init?: RequestInit) =>
+          new Response(JSON.stringify({ entered: 0, converted: 0, steps: [] }), { status: 200 }),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      await client.previewFunnel(
+        3,
+        { steps: [{ event: 'signed_up' }], window_seconds: 604800 },
+        { since: '2026-08-01T00:00:00.000Z' },
+      )
+
+      const [path, init] = fetchImpl.mock.calls[0] ?? []
+      expect(path).toBe('/v1/funnels/preview')
+      expect(init?.method).toBe('POST')
+      expect(JSON.parse(init?.body as string)).toEqual({
+        steps: [{ event: 'signed_up' }],
+        window_seconds: 604800,
+        since: '2026-08-01T00:00:00.000Z',
+      })
+    })
+  })
 })
