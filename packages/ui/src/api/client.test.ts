@@ -70,6 +70,16 @@ describe('createClient', () => {
     await expect(client.session()).rejects.toMatchObject({ status: 401 })
   })
 
+  // MINOR from the whole-branch review: GET /v1/auth/session answers
+  // `{ email: null }` when the session cookie is still valid but the admin
+  // row it names is gone. This must resolve, not reject -- a null email is
+  // a different session state from no session at all.
+  it('resolves with a null email rather than rejecting or coercing it', async () => {
+    const f = fakeFetch(200, { email: null })
+    const client = createClient(f as unknown as typeof fetch)
+    await expect(client.session()).resolves.toEqual({ email: null })
+  })
+
   // A 5xx from a proxy is often HTML, not JSON. Parsing must not throw a
   // SyntaxError that hides the real status from the caller.
   it('survives a non-JSON error body', async () => {

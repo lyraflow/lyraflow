@@ -25,7 +25,11 @@ export interface ApiClient {
   authState(): Promise<{ configured: boolean }>
   login(email: string, password: string): Promise<{ email: string }>
   logout(): Promise<void>
-  session(): Promise<{ email: string }>
+  // `email` is nullable: the server answers `{ email: null }` when the
+  // session cookie is still valid but the admin row it names is gone
+  // (MINOR from the whole-branch review). Typing this `string` was simply
+  // false for that real response shape.
+  session(): Promise<{ email: string | null }>
   projects(): Promise<Project[]>
   events(projectId: number, q: EventsQuery): Promise<EventsPage>
   stats(projectId: number, q: StatsQuery): Promise<StatsPage>

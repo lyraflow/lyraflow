@@ -4,13 +4,19 @@ import { ApiError, createClient } from './api/client.js'
 import type { Project } from './api/types.js'
 import { ProjectProvider } from './app/ProjectContext.js'
 import { Shell } from './app/Shell.js'
+import { applyTheme, readStoredTheme } from './app/ThemeToggle.js'
 import { Button } from './components/ui/button.js'
 import { Card, CardContent, CardHeader, CardTitle } from './components/ui/card.js'
 import { Feed } from './screens/Feed.js'
 import { Login } from './screens/Login.js'
 
 interface Session {
-  email: string
+  // MINOR from the whole-branch review: `GET /v1/auth/session` can answer
+  // `{ email: null }` when the admin row itself is gone (the session cookie
+  // is still valid, but the row it names is not) -- `ApiClient.session()`
+  // used to type this `string` unconditionally, which was simply false for
+  // that response, and `Shell` rendered it with no null check at all.
+  email: string | null
   projects: Project[]
 }
 
@@ -28,7 +34,7 @@ type Phase =
   | { kind: 'anonymous' }
   | { kind: 'authenticated'; session: Session }
 
-async function loadSession(client: ApiClient, email: string): Promise<Session> {
+async function loadSession(client: ApiClient, email: string | null): Promise<Session> {
   const projects = await client.projects()
   return { email, projects }
 }
@@ -43,6 +49,21 @@ async function loadSession(client: ApiClient, email: string): Promise<Session> {
  * time they'd reasonably give up on first.
  */
 export const SESSION_CHECK_TIMEOUT_MS = 8000
+
+/**
+ * Critical 2 from the whole-branch review. Before this, nothing in
+ * `packages/ui` ever called `session()` again after mount -- the sliding
+ * 30-day window the design spec requires ("The SPA must poll it") was dead
+ * code from the UI's side, and an admin who only ever touched
+ * project-scoped routes (the feed) was logged out at 30 days regardless of
+ * activity. `sessions.ts` (server) only slides `expires_at` inside the
+ * LAST 7 days of that 30-day window (`SESSION_RENEW_WITHIN_MS`), so this
+ * interval only needs to land comfortably more than once inside that
+ * 7-day renewal window, not to be frequent in any absolute sense -- once an
+ * hour does that with enormous margin while costing one request an hour
+ * per open tab.
+ */
+export const SESSION_POLL_INTERVAL_MS = 60 * 60 * 1000
 
 function BootScreen() {
   return (
@@ -84,6 +105,15 @@ export default function App(props: { client?: ApiClient }) {
   // Bumped by the "Try again" button to force the check effect below to
   // re-run even though `client` itself never changes identity.
   const [retryToken, setRetryToken] = useState(0)
+
+  // Applies the stored theme choice at app start, before authentication.
+  // MINOR from the whole-branch review: `ThemeToggle` previously only
+  // mounted inside `Shell`, so an explicit light/dark choice was ignored on
+  // the login, boot and unavailable screens -- all three fell back to the
+  // system preference no matter what an admin had picked last time.
+  useEffect(() => {
+    applyTheme(readStoredTheme())
+  }, [])
 
   // `retryToken` is deliberately unused inside the effect body below -- it
   // exists only to force this effect to re-run on retry, since `client`
@@ -135,6 +165,27 @@ export default function App(props: { client?: ApiClient }) {
     // effect re-runs on a `client` it already had only via `retryToken`.
   }, [client, retryToken])
 
+  // Critical 2's other half. Polls `GET /v1/auth/session` on its own
+  // interval once authenticated, independently of the feed's own polling
+  // (`Feed`'s `onUnauthorized` covers the other trigger for the same
+  // transition below) -- this is the ONLY caller that renews an admin who
+  // never touches a project-scoped route at all. A 401 means the session
+  // is gone and the SPA must hand off to the login screen exactly as it
+  // does when a feed poll 401s; any other failure (a passing 5xx, a
+  // network blip) is left for the next tick rather than bouncing to login
+  // on what may be a transient hiccup.
+  useEffect(() => {
+    if (phase.kind !== 'authenticated') return
+    const timer = setInterval(() => {
+      client.session().catch((err: unknown) => {
+        if (err instanceof ApiError && err.status === 401) {
+          setPhase({ kind: 'anonymous' })
+        }
+      })
+    }, SESSION_POLL_INTERVAL_MS)
+    return () => clearInterval(timer)
+  }, [phase.kind, client])
+
   function handleSignedIn(email: string) {
     setPhase({ kind: 'checking' })
     loadSession(client, email)
@@ -144,6 +195,14 @@ export default function App(props: { client?: ApiClient }) {
 
   function handleLogout() {
     client.logout().finally(() => setPhase({ kind: 'anonymous' }))
+  }
+
+  // The other trigger for the same transition as the session-poll effect
+  // above: any of the feed's own polled endpoints coming back 401. No
+  // `client.logout()` call here -- unlike `handleLogout`, the session is
+  // already gone server-side; there is nothing left to ask it to end.
+  function handleSessionExpired() {
+    setPhase({ kind: 'anonymous' })
   }
 
   function handleRetry() {
@@ -159,7 +218,7 @@ export default function App(props: { client?: ApiClient }) {
   return (
     <ProjectProvider projects={session.projects} initialId={session.projects[0]?.id ?? null}>
       <Shell email={session.email} onLogout={handleLogout}>
-        <Feed client={client} />
+        <Feed client={client} onUnauthorized={handleSessionExpired} />
       </Shell>
     </ProjectProvider>
   )

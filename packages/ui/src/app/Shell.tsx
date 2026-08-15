@@ -1,4 +1,4 @@
-import { ChevronDown, LayoutList, LogOut, Settings as SettingsIcon } from 'lucide-react'
+import { ChevronDown, LayoutList, LogOut } from 'lucide-react'
 import type { ReactNode } from 'react'
 import {
   DropdownMenu,
@@ -24,11 +24,6 @@ import { ThemeToggle } from './ThemeToggle.js'
 // (chevrons, checkmarks) are left at their own default since they never
 // appear next to the mark at a comparable size.
 const ICON_STROKE = 1.5
-
-const NAV: Array<{ href: string; label: string; icon: typeof LayoutList }> = [
-  { href: '/feed', label: 'Feed', icon: LayoutList },
-  { href: '/settings', label: 'Settings', icon: SettingsIcon },
-]
 
 function Mark() {
   return (
@@ -93,7 +88,7 @@ function ProjectSwitcher() {
   )
 }
 
-function AccountMenu(props: { email: string; onLogout(): void }) {
+function AccountMenu(props: { email: string | null; onLogout(): void }) {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -101,7 +96,14 @@ function AccountMenu(props: { email: string; onLogout(): void }) {
           type="button"
           className="flex min-w-0 items-center gap-1.5 rounded-md px-2 py-1.5 text-sm text-foreground hover:bg-muted"
         >
-          <span className="truncate">{props.email}</span>
+          {/*
+           * `email` is nullable (MINOR from the whole-branch review): the
+           * server answers `{ email: null }` when the session cookie is
+           * still valid but the admin row it names is gone. The account
+           * menu -- and the "sign out" it leads to -- must still render in
+           * that state rather than throwing or showing a blank label.
+           */}
+          <span className="truncate">{props.email ?? 'Unknown admin'}</span>
           <ChevronDown className="h-4 w-4 shrink-0" strokeWidth={ICON_STROKE} aria-hidden="true" />
         </button>
       </DropdownMenuTrigger>
@@ -115,18 +117,17 @@ function AccountMenu(props: { email: string; onLogout(): void }) {
   )
 }
 
-export function Shell(props: { email: string; onLogout(): void; children: ReactNode }) {
+export function Shell(props: { email: string | null; onLogout(): void; children: ReactNode }) {
   return (
     // `flex-col` below `sm`, `flex-row` at and above it: a 224px fixed
     // sidebar leaves a 390px viewport with less than half its width for
     // everything else, and no amount of truncation in the header made that
     // usable (see the two-star screenshot review that sent this back). The
-    // aside below carries the same reflow -- one set of NAV links, laid out
-    // as a vertical sidebar at `sm:` and a compact top bar under it -- on
-    // purpose: two separate DOM copies of "Feed"/"Settings" gated by
-    // `hidden`/`flex` classes would both be visible to Shell.test.tsx (jsdom
-    // has no Tailwind stylesheet loaded, so `hidden` never actually hides
-    // anything there), turning `getByRole('link', { name: /feed/i })` into a
+    // aside below carries the same reflow -- laid out as a vertical sidebar
+    // at `sm:` and a compact top bar under it -- on purpose: two separate
+    // DOM copies gated by `hidden`/`flex` classes would both be visible to
+    // Shell.test.tsx (jsdom has no Tailwind stylesheet loaded, so `hidden`
+    // never actually hides anything there), turning a text query into a
     // multiple-match failure. One element that reflows has no such seam.
     <div className="flex h-dvh flex-col bg-background text-foreground sm:flex-row">
       <aside className="flex shrink-0 items-center gap-4 border-b border-border bg-card px-4 sm:w-56 sm:flex-col sm:items-stretch sm:gap-0 sm:border-b-0 sm:border-r sm:px-0">
@@ -135,16 +136,26 @@ export function Shell(props: { email: string; onLogout(): void; children: ReactN
           Lyra
         </div>
         <nav className="flex items-center gap-1 sm:flex-col sm:items-stretch sm:gap-0.5 sm:p-2">
-          {NAV.map(({ href, label, icon: Icon }) => (
-            <a
-              key={href}
-              href={href}
-              className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-foreground hover:bg-muted"
-            >
-              <Icon className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
-              {label}
-            </a>
-          ))}
+          {/*
+           * Not an <a>, and not one of a list. There is no router in this
+           * branch -- App.tsx renders Feed unconditionally -- so an anchor
+           * to "/feed" performs a full browser navigation: it hits the SPA
+           * fallback, remounts the whole app, re-runs the bounded session
+           * check, and lands back on Feed with a changed address bar, for
+           * no reason (Important 10). The Settings link that used to sit
+           * beside it named a screen that has never existed -- see the
+           * README's own "no settings screen" line -- and did the
+           * identical pointless round trip on click. Feed is the one
+           * screen this app has; it is marked current, not clickable. A
+           * router belongs with the screen it would route to, not here.
+           */}
+          <span
+            aria-current="page"
+            className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium text-foreground"
+          >
+            <LayoutList className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
+            Feed
+          </span>
         </nav>
       </aside>
       <div className="flex min-w-0 flex-1 flex-col">
