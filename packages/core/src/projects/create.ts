@@ -1,5 +1,20 @@
 import { createHash, randomBytes } from 'node:crypto'
-import type { Pool } from '@lyraflow/db'
+
+/**
+ * The one database capability `createProject` needs, declared locally rather
+ * than imported.
+ *
+ * `core` is pure domain logic with no I/O, so it takes no database
+ * dependency: importing `Pool` from `@lyraflow/db` is a circular project
+ * reference (`db` already references `core`), and depending on `pg` directly
+ * would put a database driver in the dependencies of a package that is also
+ * consumed, via tests, alongside a browser bundle with a hard size ceiling.
+ * A structural type costs nothing and `pg`'s own Pool satisfies it, so every
+ * existing caller passes unchanged.
+ */
+export interface ProjectStore {
+  query(text: string, params: unknown[]): Promise<unknown>
+}
 
 export interface CreatedProject {
   name: string
@@ -37,7 +52,7 @@ function isUniqueViolation(err: unknown): boolean {
   return (err as { code?: unknown } | null)?.code === '23505'
 }
 
-export async function createProject(pg: Pool, name: string): Promise<CreatedProject> {
+export async function createProject(pg: ProjectStore, name: string): Promise<CreatedProject> {
   const slug = slugify(name)
   const writeKey = `wk_${randomBytes(16).toString('hex')}`
   const serverKey = `sk_${randomBytes(24).toString('hex')}`

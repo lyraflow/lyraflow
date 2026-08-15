@@ -15,9 +15,8 @@ import {
 import type { ClickHouseClient, Pool } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import type { Project, ProjectCache } from '../auth/project-cache.js'
-import type { Readiness } from '../health.js'
-import { SERVER_KEY_HEADER, makeAuthenticator } from '../ingest/routes.js'
+import type { Authenticate } from '../auth/bridge.js'
+import type { Project } from '../auth/project-cache.js'
 import { type WalkCursor, makeWalkCursorCodec } from '../query/walk-cursor.js'
 import { SegmentTimeoutError } from '../segments/execute.js'
 import { SegmentStore, StoredTreeError } from '../segments/store.js'
@@ -31,8 +30,7 @@ import {
 } from './store.js'
 
 export interface FunnelDeps {
-  projects: ProjectCache
-  readiness: Readiness
+  authenticate: Authenticate
   ch: ClickHouseClient
   pg: Pool
   /** The configured ClickHouse database; the dictionaries live in it. */
@@ -106,17 +104,9 @@ function parseId(raw: string): number | null {
 }
 
 export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): void {
-  const { projects, readiness, ch, pg, database } = deps
+  const { authenticate, ch, pg, database } = deps
   const store = new FunnelStore(pg)
   const segments = new SegmentStore(pg)
-
-  const authenticateServer = makeAuthenticator(
-    readiness,
-    SERVER_KEY_HEADER,
-    (key) => projects.byServerKey(key),
-    'missing_server_key',
-    'invalid_server_key',
-  )
 
   /**
    * Resolves the range for a run. Defaults to the last seven days so a bare
@@ -241,7 +231,7 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
   }
 
   app.post('/v1/funnels', async (req, reply) => {
-    const project = await authenticateServer(req, reply)
+    const project = await authenticate(req, reply)
     if (!project) return
     const meta = CreateBody.safeParse(req.body)
     const definition = FunnelDefinition.safeParse(req.body)
@@ -271,14 +261,14 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
   })
 
   app.get('/v1/funnels', async (req, reply) => {
-    const project = await authenticateServer(req, reply)
+    const project = await authenticate(req, reply)
     if (!project) return
     const funnels = await store.list(project.id)
     return reply.code(200).send({ funnels: funnels.map(toWire) })
   })
 
   app.get<{ Params: { id: string } }>('/v1/funnels/:id', async (req, reply) => {
-    const project = await authenticateServer(req, reply)
+    const project = await authenticate(req, reply)
     if (!project) return
     const id = parseId(req.params.id)
     if (id === null) return reply.code(400).send({ error: 'invalid_funnel_id' })
@@ -297,7 +287,7 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
   })
 
   app.patch<{ Params: { id: string } }>('/v1/funnels/:id', async (req, reply) => {
-    const project = await authenticateServer(req, reply)
+    const project = await authenticate(req, reply)
     if (!project) return
     const id = parseId(req.params.id)
     if (id === null) return reply.code(400).send({ error: 'invalid_funnel_id' })
@@ -345,7 +335,7 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
   })
 
   app.delete<{ Params: { id: string } }>('/v1/funnels/:id', async (req, reply) => {
-    const project = await authenticateServer(req, reply)
+    const project = await authenticate(req, reply)
     if (!project) return
     const id = parseId(req.params.id)
     if (id === null) return reply.code(400).send({ error: 'invalid_funnel_id' })
@@ -355,7 +345,7 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
   })
 
   app.post('/v1/funnels/preview', async (req, reply) => {
-    const project = await authenticateServer(req, reply)
+    const project = await authenticate(req, reply)
     if (!project) return
     const definition = FunnelDefinition.safeParse(req.body)
     if (!definition.success) {
@@ -390,7 +380,7 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
   })
 
   app.post<{ Params: { id: string } }>('/v1/funnels/:id/run', async (req, reply) => {
-    const project = await authenticateServer(req, reply)
+    const project = await authenticate(req, reply)
     if (!project) return
     const id = parseId(req.params.id)
     if (id === null) return reply.code(400).send({ error: 'invalid_funnel_id' })
@@ -438,7 +428,7 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
    * or replayed against another route.
    */
   app.post<{ Params: { id: string } }>('/v1/funnels/:id/dropoff', async (req, reply) => {
-    const project = await authenticateServer(req, reply)
+    const project = await authenticate(req, reply)
     if (!project) return
     const id = parseId(req.params.id)
     if (id === null) return reply.code(400).send({ error: 'invalid_funnel_id' })

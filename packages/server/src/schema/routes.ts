@@ -1,13 +1,10 @@
 import type { ClickHouseClient } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import type { ProjectCache } from '../auth/project-cache.js'
-import type { Readiness } from '../health.js'
-import { SERVER_KEY_HEADER, makeAuthenticator } from '../ingest/routes.js'
+import type { Authenticate } from '../auth/bridge.js'
 
 export interface SchemaDeps {
-  projects: ProjectCache
-  readiness: Readiness
+  authenticate: Authenticate
   ch: ClickHouseClient
 }
 
@@ -34,17 +31,10 @@ const Query = z.object({
  * product, not something the browser-shipped write key should reach.
  */
 export function registerSchemaRoutes(app: FastifyInstance, deps: SchemaDeps): void {
-  const { projects, readiness, ch } = deps
-  const authenticateServer = makeAuthenticator(
-    readiness,
-    SERVER_KEY_HEADER,
-    (key) => projects.byServerKey(key),
-    'missing_server_key',
-    'invalid_server_key',
-  )
+  const { authenticate, ch } = deps
 
   app.get('/v1/schema/events', async (req, reply) => {
-    const project = await authenticateServer(req, reply)
+    const project = await authenticate(req, reply)
     if (!project) return
     const q = Query.safeParse(req.query)
     if (!q.success) return reply.code(400).send({ error: 'invalid query' })
@@ -62,7 +52,7 @@ export function registerSchemaRoutes(app: FastifyInstance, deps: SchemaDeps): vo
   })
 
   app.get('/v1/schema/properties', async (req, reply) => {
-    const project = await authenticateServer(req, reply)
+    const project = await authenticate(req, reply)
     if (!project) return
     const q = Query.safeParse(req.query)
     if (!q.success) return reply.code(400).send({ error: 'invalid query' })

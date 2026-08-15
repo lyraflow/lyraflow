@@ -114,6 +114,23 @@ export class ProjectCache {
     return this.#lookup(`s:${key}`, 'server_key_hash = $1', hashServerKey(key))
   }
 
+  /**
+   * Looks a project up by its primary key, for the session credential --
+   * which names a project by id rather than by holding one of its keys (see
+   * auth/bridge.ts).
+   *
+   * Shares the same positive/negative maps as the two key lookups, and that
+   * is deliberate: the cacheKey prefix `i:` cannot collide with `w:` or
+   * `s:`, and an id that names no project is exactly the bounded negative
+   * entry the class was built for. The caller here is authenticated, so this
+   * path cannot be driven by an anonymous scanner the way byWriteKey can --
+   * but sharing the bound costs nothing and needs no second argument about
+   * why it is safe.
+   */
+  byId(id: number): Promise<Project | null> {
+    return this.#lookup(`i:${id}`, 'id = $1', String(id))
+  }
+
   /** Reads an entry from whichever map holds it, refreshing its LRU position. */
   #read(cacheKey: string): { value: Project | null; fresh: boolean } | undefined {
     const positive = this.#positive.get(cacheKey)

@@ -1,6 +1,12 @@
+import cookie from '@fastify/cookie'
 import type { ClickHouseClient, Pool } from '@lyraflow/db'
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify'
+import { makeServerOrSessionAuthenticator } from './auth/bridge.js'
 import { ProjectCache } from './auth/project-cache.js'
+import { AttemptLimiter } from './auth/rate-limit.js'
+import { registerAuthRoutes } from './auth/routes.js'
+import { SessionStore } from './auth/sessions.js'
+import { SESSION_SWEEP_INTERVAL_MS, SessionSweeper } from './auth/sweeper.js'
 import type { Config } from './config.js'
 import { registerEventsRoutes } from './events/routes.js'
 import { registerFunnelRoutes } from './funnels/routes.js'
@@ -22,6 +28,7 @@ import { purgePerson } from './privacy/purge.js'
 import { registerPrivacyRoutes } from './privacy/routes.js'
 import { SuppressionStore } from './privacy/suppression-store.js'
 import { PurgeWorker } from './privacy/worker.js'
+import { registerAdminProjectRoutes } from './project/admin-routes.js'
 import { registerProjectRoutes } from './project/routes.js'
 import { logDroppedPartition } from './retention/logging.js'
 import { RetentionStore } from './retention/store.js'
@@ -55,6 +62,37 @@ export interface AppDeps {
    * depends on this being the real, shared object.
    */
   segmentCache: SegmentCache
+  /**
+   * Exposed for the same reason `segmentCache` is: Task 11's
+   * cache-invalidation test reaches for `app.deps.projects` to assert
+   * against the EXACT `ProjectCache` instance every route below shares --
+   * constructing a second one there would be asserting against a different
+   * object than the routes actually use.
+   */
+  projects: ProjectCache
+  /**
+   * Exposed so a test can drive a session lifecycle -- issue, verify,
+   * revoke, sweep -- against the SAME store `registerAuthRoutes` reads and
+   * writes through, rather than a second `SessionStore` pointed at the same
+   * table that happens to agree by coincidence.
+   */
+  sessions: SessionStore
+  /**
+   * Exposed so a test can inspect or reset login-attempt state on the EXACT
+   * limiter `/v1/auth/login` checks and records against -- a second
+   * `AttemptLimiter` would start its own count at zero and never see what
+   * the route path actually recorded.
+   */
+  loginLimiter: AttemptLimiter
+  /**
+   * Exposed for the same reason `purge`/`retention` are: a live timer
+   * belongs to boot succeeding, not to construction (see index.ts and
+   * shutdown.ts), and a test that wants to drive a real sweep does it
+   * through `runOnce()` on this exact instance rather than waiting on its
+   * own interval or constructing a second `SessionSweeper` that would sweep
+   * the same table on its own schedule -- see auth/boot.test.ts.
+   */
+  sessionSweeper: SessionSweeper
 }
 
 export function buildApp(input: {
@@ -87,6 +125,13 @@ export function buildApp(input: {
   // again every time, and would bury real client bugs under a false
   // "server unavailable" signal. Only an unknown error, or one that already
   // carries a 5xx status, is ours to convert.
+  // Registered before any route that reads req.cookies. @fastify/cookie is
+  // wrapped in fastify-plugin, so it decorates this instance directly and
+  // every route below sees it -- unlike @fastify/cors, it registers no
+  // wildcard route, so it carries none of the scoping hazard documented in
+  // ingest/routes.ts.
+  app.register(cookie)
+
   app.setErrorHandler((err: FastifyError, req, reply) => {
     if (req.url.startsWith('/v1/')) {
       if (err.statusCode !== undefined && err.statusCode < 500) {
@@ -121,6 +166,23 @@ export function buildApp(input: {
   // immediately, and a second ProjectCache-shaped duplicate would double the
   // Postgres load an identical lookup produces.
   const projects = new ProjectCache(pg, 60_000)
+  const sessions = new SessionStore(pg)
+  const loginLimiter = new AttemptLimiter()
+  // Wraps the SAME `sessions` instance every route above reads and writes
+  // through -- a sweep must delete rows through the identical store the
+  // login/logout routes see, not a lookalike constructed separately.
+  const sessionSweeper = new SessionSweeper({
+    sweep: () => sessions.sweep(),
+    intervalMs: SESSION_SWEEP_INTERVAL_MS,
+    onError: (err) => app.log.error({ err }, 'session sweep failed'),
+  })
+  // Built ONCE and shared by every project-scoped registration below —
+  // Task 9's whole point is that a browser session and a project server key
+  // resolve through this single implementation, never two. `registerIngestRoutes`
+  // deliberately does NOT receive this: its write-key path (and /v1/alias)
+  // stay on `makeAuthenticator` directly, so a browser cookie can never
+  // reach the ingest surface (see auth/bridge.ts's own docstring).
+  const authenticate = makeServerOrSessionAuthenticator({ readiness, projects, sessions })
   const bindings = new IdentityBindings(pg)
   const aliases = new PersonAliases(pg)
   const suppression = new SuppressionStore(pg)
@@ -190,11 +252,16 @@ export function buildApp(input: {
     purge,
     retention,
     segmentCache,
+    projects,
+    sessions,
+    loginLimiter,
+    sessionSweeper,
   } satisfies AppDeps)
   registerHealth(app, readiness)
   // Unauthenticated and dependency-free, like health — registered up front
   // for the same reason.
   registerSdkRoutes(app)
+  registerAuthRoutes(app, { pg, sessions, limiter: loginLimiter, readiness })
   // Sourced from IngestCounters, not an onResponse hook counting HTTP
   // responses: /v1/batch answers with a single response for up to 500
   // events, so a response-derived count would undercount by up to 500x and
@@ -222,44 +289,46 @@ export function buildApp(input: {
     aliases,
     allowedOrigins: config.allowedOrigins,
   })
-  registerPersonRoutes(app, { projects, readiness, ch, bindings, aliases, suppression })
-  // Shares `projects`/`bindings`/`aliases` with the registrations above and
-  // below rather than constructing new instances — same reasoning as the
-  // comment on those three above: two ProjectCache-shaped duplicates would
-  // double the Postgres load an identical lookup produces, and the person
-  // filter's resolution must see the exact same authoritative state the
-  // write path just wrote through.
+  registerPersonRoutes(app, { authenticate, ch, bindings, aliases, suppression })
+  // Shares `bindings`/`aliases` with the registrations above and below
+  // rather than constructing new instances — the person filter's resolution
+  // must see the exact same authoritative state the write path just wrote
+  // through. `authenticate` is the SAME shared instance every project-scoped
+  // registration below gets (see its own comment above) — never a
+  // per-registration authenticator, so a session and a server key resolve
+  // through identical logic everywhere.
   registerEventsRoutes(app, {
-    projects,
-    readiness,
+    authenticate,
     ch,
     bindings,
     aliases,
     database: config.ch.database,
   })
   registerSegmentRoutes(app, {
-    projects,
-    readiness,
+    authenticate,
     ch,
     pg,
     database: config.ch.database,
     cache: segmentCache,
   })
-  // Shares the same `projects`, `ch` and `pg` instances as the registrations
-  // around it, for the reason stated above registerEventsRoutes: a second
-  // ProjectCache-shaped duplicate would double the Postgres load an identical
-  // lookup produces. Deliberately NOT given `segmentCache` — a funnel is run
-  // interactively a few times a day rather than per page view, so a cache
-  // would buy little and would inherit the staleness #38 is open for.
+  // Shares the same `ch` and `pg` instances as the registrations around it —
+  // a second ProjectCache-shaped duplicate would double the Postgres load an
+  // identical lookup produces, which is why `authenticate` (built once,
+  // above) is shared rather than rebuilt here too. Deliberately NOT given
+  // `segmentCache` — a funnel is run interactively a few times a day rather
+  // than per page view, so a cache would buy little and would inherit the
+  // staleness #38 is open for.
   registerFunnelRoutes(app, {
-    projects,
-    readiness,
+    authenticate,
     ch,
     pg,
     database: config.ch.database,
   })
-  registerSchemaRoutes(app, { projects, readiness, ch })
-  registerProjectRoutes(app, { projects, readiness, pg })
+  registerSchemaRoutes(app, { authenticate, ch })
+  registerProjectRoutes(app, { authenticate, pg, projects })
+  // Session-only and NOT given `authenticate` -- see admin-routes.ts's own
+  // docstring for why these two routes must not accept a project server key.
+  registerAdminProjectRoutes(app, { pg, sessions, projects, readiness })
   // One shared object, not one built per registration: registerExportRoute
   // takes the exact same PrivacyDeps registerPrivacyRoutes does (export.ts's
   // own docstring), and constructing a second literal here is exactly the
@@ -269,8 +338,7 @@ export function buildApp(input: {
   // "failed" vs "in_progress", and a value that drifted from the worker's
   // own would make that endpoint lie about state the worker itself defines.
   const privacyDeps = {
-    projects,
-    readiness,
+    authenticate,
     pg,
     ch,
     bindings,
@@ -293,7 +361,10 @@ export function buildApp(input: {
   // reason — a live timer issuing real `ALTER TABLE ... DROP PARTITION`
   // calls against the shared test database on every unrelated test file's
   // boot would be its own cross-file interference. index.ts starts it too,
-  // conditionally on `config.retentionEnabled`.
+  // conditionally on `config.retentionEnabled`. `sessionSweeper` follows the
+  // same rule again — a live timer issuing real `DELETE FROM sessions`
+  // during unrelated tests would be the identical cross-file interference —
+  // see auth/boot.test.ts, which drives it through `runOnce()` directly.
   return app
 }
 

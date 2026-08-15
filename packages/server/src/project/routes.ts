@@ -1,17 +1,43 @@
 import type { Pool } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
+import { z } from 'zod'
+import type { Authenticate } from '../auth/bridge.js'
 import type { ProjectCache } from '../auth/project-cache.js'
-import type { Readiness } from '../health.js'
-// From ingest/routes.js -- that is where both live today, and every
-// server-key route in this codebase imports them from there. Verified
-// against schema/routes.ts:6 rather than assumed.
-import { SERVER_KEY_HEADER, makeAuthenticator } from '../ingest/routes.js'
 
 export interface ProjectDeps {
-  projects: ProjectCache
-  readiness: Readiness
+  authenticate: Authenticate
   pg: Pool
+  /**
+   * The SAME instance app.ts shares with every other project-scoped
+   * registration -- PATCH /v1/project must invalidate the exact cache the
+   * retention worker and the ingest quota check read from, not a second,
+   * lookalike instance that would leave those two acting on stale numbers
+   * for up to 60s after the API said otherwise.
+   */
+  projects: ProjectCache
 }
+
+/**
+ * Bounds copied from the column's own CHECK constraint
+ * (`projects_retention_months_range`, 001_core.sql). Validating here rather
+ * than letting Postgres refuse the write is the difference between a 400 a
+ * caller can act on and a constraint violation, which app.ts's catch-all
+ * renders as `503 {"error":"unavailable"}` -- indistinguishable from an
+ * outage.
+ */
+const PatchBody = z
+  .object({
+    retention_months: z.number().int().min(1).max(120).optional(),
+    // `.nullable()` and `.optional()` are different things here and the
+    // difference is the whole point: absent means "leave it alone", null
+    // means "unlimited", and 0 is neither -- isOverQuota THROWS on 0 rather
+    // than treating it as a limit, so admitting it would 503 every event of
+    // the project. The positive() bound is what keeps them apart.
+    monthly_event_quota: z.number().int().positive().nullable().optional(),
+  })
+  .refine((b) => b.retention_months !== undefined || b.monthly_event_quota !== undefined, {
+    message: 'empty patch',
+  })
 
 /**
  * The project's own identity, including the write key.
@@ -36,17 +62,10 @@ export interface ProjectDeps {
  * a direct Postgres read -- the cache does not carry either.
  */
 export function registerProjectRoutes(app: FastifyInstance, deps: ProjectDeps): void {
-  const { projects, readiness, pg } = deps
-  const authenticateServer = makeAuthenticator(
-    readiness,
-    SERVER_KEY_HEADER,
-    (key) => projects.byServerKey(key),
-    'missing_server_key',
-    'invalid_server_key',
-  )
+  const { authenticate, pg, projects } = deps
 
   app.get('/v1/project', async (req, reply) => {
-    const project = await authenticateServer(req, reply)
+    const project = await authenticate(req, reply)
     if (!project) return
 
     // Scoped by the authenticated project's id -- never by anything a caller
@@ -71,6 +90,76 @@ export function registerProjectRoutes(app: FastifyInstance, deps: ProjectDeps): 
       name: row.name,
       slug: row.slug,
       write_key: row.write_key,
+    })
+  })
+
+  app.patch('/v1/project', async (req, reply) => {
+    const project = await authenticate(req, reply)
+    if (!project) return
+
+    const body = PatchBody.safeParse(req.body)
+    if (!body.success) return reply.code(400).send({ error: 'invalid_body' })
+
+    // COALESCE against the parameter, so an absent field keeps its stored
+    // value in one statement without building SQL by concatenation. The
+    // quota's `undefined` is normalised to a sentinel first, because
+    // COALESCE cannot tell "absent" from "explicitly null" on its own.
+    const quotaGiven = body.data.monthly_event_quota !== undefined
+    const res = await pg.query<{ retention_months: number; monthly_event_quota: string | null }>(
+      `UPDATE projects
+          SET retention_months    = COALESCE($2, retention_months),
+              monthly_event_quota = CASE WHEN $3 THEN $4 ELSE monthly_event_quota END
+        WHERE id = $1
+        RETURNING retention_months, monthly_event_quota`,
+      [
+        project.id,
+        body.data.retention_months ?? null,
+        quotaGiven,
+        body.data.monthly_event_quota ?? null,
+      ],
+    )
+    const row = res.rows[0]
+    if (!row) return reply.code(404).send({ error: 'project_not_found' })
+
+    // ProjectCache caches retentionMonths and monthlyEventQuota for 60s, and
+    // both drive live behaviour -- the retention worker's partition drops and
+    // the ingest quota check. Without this, the API reports a new limit that
+    // is not in force for up to a minute.
+    projects.invalidate()
+
+    reply.header('cache-control', 'no-store')
+    return reply.code(200).send({
+      retention_months: row.retention_months,
+      monthly_event_quota:
+        row.monthly_event_quota === null ? null : Number(row.monthly_event_quota),
+    })
+  })
+
+  app.get('/v1/project/usage', async (req, reply) => {
+    const project = await authenticate(req, reply)
+    if (!project) return
+
+    const res = await pg.query<{
+      events_accepted: string
+      events_rejected: string
+      events_throttled: string
+    }>(
+      `SELECT events_accepted, events_rejected, events_throttled
+         FROM ingest_counters
+        WHERE project_id = $1 AND month = date_trunc('month', now())::date`,
+      [project.id],
+    )
+    // A project's first event of the month has no row, and that is ordinary
+    // rather than exceptional -- so every field defaults to 0 rather than
+    // going through Number(undefined), which is NaN and serialises to null.
+    const row = res.rows[0]
+    reply.header('cache-control', 'no-store')
+    return reply.code(200).send({
+      month: new Date().toISOString().slice(0, 7),
+      events_accepted: row ? Number(row.events_accepted) : 0,
+      events_rejected: row ? Number(row.events_rejected) : 0,
+      events_throttled: row ? Number(row.events_throttled) : 0,
+      monthly_event_quota: project.monthlyEventQuota,
     })
   })
 }

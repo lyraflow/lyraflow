@@ -9,7 +9,6 @@ import {
   personEventsPredicate,
   resolvePersonScope,
 } from '../identity/scope.js'
-import { SERVER_KEY_HEADER, makeAuthenticator } from '../ingest/routes.js'
 import { parseChDateTime } from '../ingest/row.js'
 import { SEGMENT_MAX_MEMORY_BYTES } from '../segments/execute.js'
 import type { PrivacyDeps } from './routes.js'
@@ -140,18 +139,10 @@ async function readTraits(
  * split at it the way an event can.
  */
 export function registerExportRoute(app: FastifyInstance, deps: PrivacyDeps): void {
-  const { projects, readiness, ch, bindings, aliases, suppression } = deps
-
-  const authenticateServer = makeAuthenticator(
-    readiness,
-    SERVER_KEY_HEADER,
-    (key) => projects.byServerKey(key),
-    'missing_server_key',
-    'invalid_server_key',
-  )
+  const { authenticate, ch, bindings, aliases, suppression } = deps
 
   app.get<{ Params: ExportParams }>('/v1/persons/:id/export', async (req, reply) => {
-    const project = await authenticateServer(req, reply)
+    const project = await authenticate(req, reply)
     if (!project) return
 
     // The exact same resolution GET /v1/persons/:id uses, including its

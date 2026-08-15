@@ -23,6 +23,17 @@ services:
       LYRAFLOW_CLICKHOUSE_USER: lyraflow
       LYRAFLOW_CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
       LYRAFLOW_CLICKHOUSE_DB: lyraflow
+      # `:-` for the same reason LYRAFLOW_DOMAIN gets it below (Caddy's own
+      # block): an install whose .env predates the admin account has neither
+      # variable, and without the fallback every `up`/`ps`/`exec` warns
+      # "variable is not set" for something that is a legitimate, documented
+      # state (see auth/bootstrap.ts's `not_configured` outcome), not an
+      # error. Compose passes the container only the variables this block
+      # names — omitting these two here would leave `LYRAFLOW_ADMIN_EMAIL`/
+      # `LYRAFLOW_ADMIN_PASSWORD` sitting in `.env` and never reaching
+      # `loadConfig`, no matter what install.sh wrote.
+      LYRAFLOW_ADMIN_EMAIL: ${LYRAFLOW_ADMIN_EMAIL:-}
+      LYRAFLOW_ADMIN_PASSWORD: ${LYRAFLOW_ADMIN_PASSWORD:-}
     # Interpolated so domain mode can drop this to loopback without a second
     # compose file. Unset it is 3000:3000 -- byte-for-byte today's behaviour.
     # The three-part IP:host:container form is required in domain mode;

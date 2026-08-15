@@ -3,12 +3,17 @@ import { writeSync } from 'node:fs'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { pathToFileURL } from 'node:url'
-import { SCHEMA_VERSION } from '@lyraflow/core'
+import { ProjectExistsError, SCHEMA_VERSION, createProject } from '@lyraflow/core'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
 import { UsageError, hasRawFlag, parseCommandArgs } from './api/args.js'
 import { Client } from './api/client.js'
 import { runDeletions, runSchema, runSegments } from './api/commands/catalog.js'
-import { reportParseFailure } from './api/commands/command-support.js'
+import {
+  checkNoPositionals,
+  checkStrayFlags,
+  reportParseFailure,
+  reportUsageError,
+} from './api/commands/command-support.js'
 import { runEvents } from './api/commands/events.js'
 import { runFunnels } from './api/commands/funnels.js'
 import { runPersons } from './api/commands/persons.js'
@@ -22,7 +27,12 @@ import {
   emitObject,
   resolveMode,
 } from './api/output.js'
-import { ProjectExistsError, createProject } from './create-project.js'
+import {
+  EmptyPasswordError,
+  StdinTimeoutError,
+  readAllStdin,
+  setAdminPassword,
+} from './set-admin-password.js'
 
 // Re-exported so existing call sites (`import type { CommandContext } from
 // './index.js'`) keep working — the interface itself lives in
@@ -544,6 +554,86 @@ async function main(): Promise<void> {
       break
     }
 
+    case 'set-admin-password': {
+      const isTty = process.stdout.isTTY ?? false
+      const write = (s: string) => process.stdout.write(s)
+      const writeErr = (s: string) => process.stderr.write(s)
+
+      let flags: Record<string, string | boolean>
+      let positionals: string[]
+      let positionalIndexes: number[]
+      let positionalContext: (string | undefined)[]
+      try {
+        ;({ flags, positionals, positionalIndexes, positionalContext } = parseCommandArgs(args, {
+          booleans: ['json', 'human'],
+        }))
+      } catch (err) {
+        if (!(err instanceof UsageError)) throw err
+        process.exitCode = reportParseFailure(err, args, { writeErr, isTty })
+        break
+      }
+
+      const mode = resolveMode(flags, isTty)
+
+      const strayFlagsCode = checkStrayFlags(flags, new Set(['json', 'human']), mode, { writeErr })
+      if (strayFlagsCode !== undefined) {
+        process.exitCode = strayFlagsCode
+        break
+      }
+
+      const USAGE = 'usage: lyraflow set-admin-password <email>  (password on stdin)'
+      const [email] = positionals
+      if (email === undefined) {
+        process.exitCode = reportUsageError(new UsageError(USAGE), mode, { writeErr })
+        break
+      }
+      // Anything past the email is unexpected -- same "one place this
+      // message is built" primitive persons.ts uses, offset to the one
+      // positional (email) this command already consumed.
+      const positionalsCode = checkNoPositionals(
+        {
+          positionals: positionals.slice(1),
+          positionalContext: positionalContext.slice(1),
+          positionalIndexes: positionalIndexes.slice(1),
+        },
+        mode,
+        { writeErr },
+      )
+      if (positionalsCode !== undefined) {
+        process.exitCode = positionalsCode
+        break
+      }
+
+      // Read from stdin, never from argv: an argument lands in shell
+      // history and in `ps` output for every user on the box.
+      let password: string
+      try {
+        password = await readAllStdin(process.stdin)
+      } catch (err) {
+        if (!(err instanceof StdinTimeoutError)) throw err
+        // Rendered as `{error, code}` directly (not via `emitError`,
+        // which fixes every non-ApiError/UsageError `code` to the single
+        // literal `'error'`) so `--json` mode gives `stdin_timeout` a code
+        // distinct from `empty_password` below -- the whole point of these
+        // being two different exception classes rather than one.
+        emitObject({ error: err.message, code: err.code }, mode, writeErr)
+        process.exitCode = 1
+        break
+      }
+      const { pg } = clients()
+      try {
+        const outcome = await setAdminPassword(pg, email, password)
+        emitObject({ command: 'set-admin-password', email, outcome }, mode, write)
+      } catch (err) {
+        if (!(err instanceof EmptyPasswordError)) throw err
+        emitObject({ error: err.message, code: err.code }, mode, writeErr)
+        process.exitCode = 1
+      } finally {
+        await pg.end()
+      }
+      break
+    }
+
     case 'healthcheck': {
       const url = process.env.LYRAFLOW_URL ?? 'http://localhost:3000'
       const res = await fetch(`${url}/ready`)
@@ -675,7 +765,7 @@ async function main(): Promise<void> {
 
     default:
       console.error(
-        'Usage: lyraflow <--version|migrate|create-project|healthcheck|events|stats|persons|deletions|segments|funnels|schema|snippet>',
+        'Usage: lyraflow <--version|migrate|create-project|set-admin-password|healthcheck|events|stats|persons|deletions|segments|funnels|schema|snippet>',
       )
       process.exit(2)
   }

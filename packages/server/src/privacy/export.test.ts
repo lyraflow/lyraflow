@@ -10,7 +10,9 @@ import {
 import Fastify, { type FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { buildApp } from '../app.js'
+import type { Authenticate } from '../auth/bridge.js'
 import { hashServerKey } from '../auth/project-cache.js'
+import type { Project } from '../auth/project-cache.js'
 import { loadConfig } from '../config.js'
 import { Readiness } from '../health.js'
 import { type PgDictionarySource, ensureIdentityDictionaries } from '../identity/dictionaries.js'
@@ -651,12 +653,14 @@ describe('GET /v1/persons/:id/export (mocked ClickHouse): mid-stream failure', (
       },
     } as unknown as ClickHouseClient
 
-    const fakeProjects = {
-      byServerKey: async (key: string) =>
-        key === 'sk_fake_export'
-          ? { id: 1, slug: 'fake', retentionMonths: 1, monthlyEventQuota: 1 }
-          : null,
-    } as unknown as PrivacyDeps['projects']
+    // A fake `authenticate` standing in for the bridge (auth/bridge.ts) —
+    // this test's own concern is the mid-stream failure behaviour, not
+    // auth, so it reproduces just enough of the real server-key check (a
+    // header match to a canned Project).
+    const fakeAuthenticate: Authenticate = async (req) =>
+      req.headers['x-lyraflow-server-key'] === 'sk_fake_export'
+        ? ({ id: 1, slug: 'fake', retentionMonths: 1, monthlyEventQuota: 1 } as Project)
+        : null
     const fakeBindings = {
       devicesForAny: async () => [],
       mostRecentPersonFor: async () => null,
@@ -672,12 +676,9 @@ describe('GET /v1/persons/:id/export (mocked ClickHouse): mid-stream failure', (
       boundaryFor: async () => new Date('2026-01-01T00:00:00.000Z'),
     } as unknown as PrivacyDeps['suppression']
 
-    const readiness = new Readiness()
-    readiness.markReady()
     const mockedApp = Fastify()
     registerExportRoute(mockedApp, {
-      projects: fakeProjects,
-      readiness,
+      authenticate: fakeAuthenticate,
       ch: fakeCh,
       bindings: fakeBindings,
       aliases: fakeAliases,
@@ -754,12 +755,13 @@ describe('ClickHouse execution-time ceiling: personEventSummary override', () =>
       },
     } as unknown as ClickHouseClient
 
-    const fakeProjects = {
-      byServerKey: async (key: string) =>
-        key === 'sk_fake_ceiling'
-          ? { id: 1, slug: 'fake', retentionMonths: 1, monthlyEventQuota: 1 }
-          : null,
-    } as unknown as PrivacyDeps['projects'] & PersonDeps['projects']
+    // A fake `authenticate` standing in for the bridge (auth/bridge.ts) —
+    // shared by both registrations below, same as the real app.ts shares
+    // one instance across every project-scoped route.
+    const fakeAuthenticate: Authenticate = async (req) =>
+      req.headers['x-lyraflow-server-key'] === 'sk_fake_ceiling'
+        ? ({ id: 1, slug: 'fake', retentionMonths: 1, monthlyEventQuota: 1 } as Project)
+        : null
     const fakeBindings = {
       devicesForAny: async () => [],
       mostRecentPersonFor: async () => null,
@@ -775,20 +777,16 @@ describe('ClickHouse execution-time ceiling: personEventSummary override', () =>
       boundaryFor: async () => new Date('2026-01-01T00:00:00.000Z'),
     } as unknown as PrivacyDeps['suppression']
 
-    const readiness = new Readiness()
-    readiness.markReady()
     const mockedApp = Fastify()
     registerPersonRoutes(mockedApp, {
-      projects: fakeProjects,
-      readiness,
+      authenticate: fakeAuthenticate,
       ch: fakeCh,
       bindings: fakeBindings,
       aliases: fakeAliases,
       suppression: fakeSuppression,
     })
     registerExportRoute(mockedApp, {
-      projects: fakeProjects,
-      readiness,
+      authenticate: fakeAuthenticate,
       ch: fakeCh,
       bindings: fakeBindings,
       aliases: fakeAliases,

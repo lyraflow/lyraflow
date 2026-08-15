@@ -2,6 +2,7 @@ import { join } from 'node:path'
 import { SCHEMA_VERSION } from '@lyraflow/core'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
 import { buildApp } from './app.js'
+import { ensureAdminUser } from './auth/bootstrap.js'
 import { loadConfig } from './config.js'
 import { Readiness } from './health.js'
 import { ensureIdentityDictionaries, parsePgUrl } from './identity/dictionaries.js'
@@ -28,6 +29,7 @@ installShutdownHandlers({
   counters: app.deps.counters,
   purge: app.deps.purge,
   retention: app.deps.retention,
+  sessionSweeper: app.deps.sessionSweeper,
   drainDeadlineMs: config.drainDeadlineMs,
 })
 
@@ -88,10 +90,28 @@ try {
 // fire-and-forget interval can never become an unhandled rejection.
 setInterval(() => void app.deps.counters.flush(), 10_000).unref()
 
+// Bootstrap runs after migrations (013 must exist) and before listen, so
+// that the first request never races the admin row's creation. It is not
+// fatal on failure to configure -- an install upgrading from a build with
+// no admin account has no password in its .env, and must still boot. See
+// auth/bootstrap.ts.
+const adminOutcome = await ensureAdminUser(pg, {
+  email: config.adminEmail,
+  password: config.adminPassword,
+})
+if (adminOutcome === 'created') {
+  app.log.info('admin account created from LYRAFLOW_ADMIN_EMAIL/LYRAFLOW_ADMIN_PASSWORD')
+} else if (adminOutcome === 'not_configured') {
+  app.log.warn(
+    'no admin account and none configured — the web UI cannot be signed into until `lyraflow set-admin-password <email>` is run',
+  )
+}
+
 // Started only after the dictionaries are up: a purge resolves identity from
 // Postgres and does not need them, but a process that failed either boot step
 // exits, and starting a timer that outlives that decision is pointless.
 app.deps.purge.start()
+app.deps.sessionSweeper.start()
 
 // Same reasoning as purge above, plus one more: off is a legitimate choice
 // for an operator managing retention some other way, but silently doing

@@ -1,7 +1,6 @@
 import type { ClickHouseClient, Pool } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
-import type { ProjectCache } from '../auth/project-cache.js'
-import type { Readiness } from '../health.js'
+import type { Authenticate } from '../auth/bridge.js'
 import type { PersonAliases } from '../identity/aliases.js'
 import type { IdentityBindings } from '../identity/bindings.js'
 import {
@@ -10,14 +9,12 @@ import {
   personEventSummary,
   resolvePersonScope,
 } from '../identity/scope.js'
-import { SERVER_KEY_HEADER, makeAuthenticator } from '../ingest/routes.js'
 import type { SegmentCache } from '../segments/cache.js'
 import type { DeletionStore } from './deletion-store.js'
 import type { SuppressionStore } from './suppression-store.js'
 
 export interface PrivacyDeps {
-  projects: ProjectCache
-  readiness: Readiness
+  authenticate: Authenticate
   pg: Pool
   ch: ClickHouseClient
   bindings: IdentityBindings
@@ -68,15 +65,14 @@ function parseDeletionId(raw: string): number | null {
 
 /**
  * DELETE /v1/persons/:id and GET /v1/deletions/:id — the public surface of
- * erasure. Server-key only, through the same makeAuthenticator/
- * SERVER_KEY_HEADER as every other route that reads or mutates a person's
- * data: the write key ships in browser JavaScript, and a deletion endpoint
- * reachable with it would be a public erase button.
+ * erasure. Gated on `authenticate` (a project server key or an admin
+ * session — see auth/bridge.ts), the same as every other route that reads
+ * or mutates a person's data: the write key ships in browser JavaScript,
+ * and a deletion endpoint reachable with it would be a public erase button.
  */
 export function registerPrivacyRoutes(app: FastifyInstance, deps: PrivacyDeps): void {
   const {
-    projects,
-    readiness,
+    authenticate,
     ch,
     bindings,
     aliases,
@@ -87,16 +83,8 @@ export function registerPrivacyRoutes(app: FastifyInstance, deps: PrivacyDeps): 
     leaseMs,
   } = deps
 
-  const authenticateServer = makeAuthenticator(
-    readiness,
-    SERVER_KEY_HEADER,
-    (key) => projects.byServerKey(key),
-    'missing_server_key',
-    'invalid_server_key',
-  )
-
   app.delete<{ Params: PersonParams }>('/v1/persons/:id', async (req, reply) => {
-    const project = await authenticateServer(req, reply)
+    const project = await authenticate(req, reply)
     if (!project) return
 
     // The exact same resolution GET /v1/persons/:id uses, including its
@@ -265,7 +253,7 @@ export function registerPrivacyRoutes(app: FastifyInstance, deps: PrivacyDeps): 
   })
 
   app.get<{ Params: DeletionParams }>('/v1/deletions/:id', async (req, reply) => {
-    const project = await authenticateServer(req, reply)
+    const project = await authenticate(req, reply)
     if (!project) return
 
     const id = parseDeletionId(req.params.id)

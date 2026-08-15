@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
@@ -35,8 +36,15 @@ const WRITE_KEY_B = 'wk_proj_route_b'
 const SERVER_KEY_B = 'sk_proj_route_b'
 const WRITE_KEY_C = 'wk_proj_route_c'
 const SERVER_KEY_C = 'sk_proj_route_c'
+// A real browser UA, not a bare token -- isBot (ingest/routes.ts) would
+// reject anything else before the event ever reaches the counters this
+// suite's Step 6 test depends on.
+const TRACK_UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/131.0 Safari/537.36'
 
 let app: FastifyInstance
+let PROJECT_ID_A = 0
+let PROJECT_ID_B = 0
 
 async function makeProject(slug: string, name: string, writeKey: string, serverKey: string) {
   await pg.query('DELETE FROM projects WHERE slug = $1', [slug])
@@ -65,8 +73,8 @@ beforeAll(async () => {
   })
   await cleanup()
 
-  await makeProject(SLUG_A, PROJECT_NAME_A, WRITE_KEY_A, SERVER_KEY_A)
-  await makeProject(SLUG_B, PROJECT_NAME_B, WRITE_KEY_B, SERVER_KEY_B)
+  PROJECT_ID_A = await makeProject(SLUG_A, PROJECT_NAME_A, WRITE_KEY_A, SERVER_KEY_A)
+  PROJECT_ID_B = await makeProject(SLUG_B, PROJECT_NAME_B, WRITE_KEY_B, SERVER_KEY_B)
   await makeProject(SLUG_C, PROJECT_NAME_C, WRITE_KEY_C, SERVER_KEY_C)
 
   const config = loadConfig({
@@ -247,5 +255,287 @@ describe('GET /v1/project', () => {
     expect(res.statusCode).toBe(404)
     expect(Object.keys(res.json())).toEqual(['error'])
     expect(res.body).not.toContain(hashServerKey(SERVER_KEY_C))
+  })
+})
+
+describe('PATCH /v1/project', () => {
+  it('updates retention and quota', async () => {
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/v1/project',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_A },
+      payload: { retention_months: 6, monthly_event_quota: 1000 },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toMatchObject({ retention_months: 6, monthly_event_quota: 1000 })
+  })
+
+  // null is "unlimited" and 0 is a value isOverQuota refuses to evaluate at
+  // all -- it throws, which becomes a 503 on every event of the project.
+  // The two must never collapse into each other.
+  it('accepts null as unlimited and keeps it distinct from 0', async () => {
+    const ok = await app.inject({
+      method: 'PATCH',
+      url: '/v1/project',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_A },
+      payload: { monthly_event_quota: null },
+    })
+    expect(ok.statusCode).toBe(200)
+    expect(ok.json()).toMatchObject({ monthly_event_quota: null })
+
+    const stored = await pg.query<{ monthly_event_quota: string | null }>(
+      'SELECT monthly_event_quota FROM projects WHERE slug = $1',
+      [SLUG_A],
+    )
+    expect(stored.rows[0]?.monthly_event_quota).toBeNull()
+
+    const zero = await app.inject({
+      method: 'PATCH',
+      url: '/v1/project',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_A },
+      payload: { monthly_event_quota: 0 },
+    })
+    expect(zero.statusCode).toBe(400)
+  })
+
+  // The schema's own CHECK is BETWEEN 1 AND 120. Letting an out-of-range
+  // value through turns a validation error into a Postgres constraint
+  // violation, which app.ts's catch-all renders as a 503 outage.
+  it.each([
+    ['zero', 0],
+    ['negative', -1],
+    ['too large', 121],
+    ['float', 1.5],
+  ])('refuses retention_months: %s', async (_n, months) => {
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/v1/project',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_A },
+      payload: { retention_months: months },
+    })
+    expect(res.statusCode).toBe(400)
+  })
+
+  it('refuses an empty patch rather than silently doing nothing', async () => {
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/v1/project',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_A },
+      payload: {},
+    })
+    expect(res.statusCode).toBe(400)
+  })
+
+  it('cannot touch another project', async () => {
+    await app.inject({
+      method: 'PATCH',
+      url: '/v1/project',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_A },
+      payload: { retention_months: 9 },
+    })
+    const b = await pg.query<{ retention_months: number }>(
+      'SELECT retention_months FROM projects WHERE slug = $1',
+      [SLUG_B],
+    )
+    expect(b.rows[0]?.retention_months).not.toBe(9)
+  })
+
+  // ProjectCache holds retentionMonths and monthlyEventQuota for 60s. A
+  // write that does not evict it leaves the retention worker and the quota
+  // check acting on the old numbers for up to a minute after the API said
+  // otherwise.
+  it('invalidates the cache, so the new quota is in force immediately', async () => {
+    await app.inject({
+      method: 'GET',
+      url: '/v1/project',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_A },
+    })
+    await app.inject({
+      method: 'PATCH',
+      url: '/v1/project',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_A },
+      payload: { monthly_event_quota: 7 },
+    })
+    const cached = await app.deps.projects.byServerKey(SERVER_KEY_A)
+    expect(cached?.monthlyEventQuota).toBe(7)
+  })
+
+  // Invented, beyond the brief's mutation table: every mutation test above
+  // proves a value OUTSIDE [1, 120] / OUTSIDE positive is refused, but none
+  // proves the two ENDPOINTS of those ranges are actually admitted. A
+  // schema mutated to `.min(2)` or `.max(119)` -- an off-by-one in either
+  // direction -- would make every existing test in this file still pass,
+  // because none of them sends exactly 1 or exactly 120.
+  it('accepts retention_months at both boundaries of the CHECK range', async () => {
+    const low = await app.inject({
+      method: 'PATCH',
+      url: '/v1/project',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_A },
+      payload: { retention_months: 1 },
+    })
+    expect(low.statusCode).toBe(200)
+    expect(low.json()).toMatchObject({ retention_months: 1 })
+
+    const high = await app.inject({
+      method: 'PATCH',
+      url: '/v1/project',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_A },
+      payload: { retention_months: 120 },
+    })
+    expect(high.statusCode).toBe(200)
+    expect(high.json()).toMatchObject({ retention_months: 120 })
+  })
+
+  // Invented, and motivated by the mutation table itself: "bind the WHERE id
+  // from a request field instead of project.id" turns out to be unobserved
+  // by every test above, including "cannot touch another project" -- that
+  // test's own payload never carries an id-shaped field, so a route that
+  // read one from raw `req.body` (bypassing PatchBody's parsed output,
+  // which strips unknown keys) and fell back to `project.id` only when
+  // absent would pass every existing test unchanged. This sends exactly
+  // such a field, authenticated as A, naming B -- the one shape that
+  // distinguishes "scoped by the authenticated project" from "scoped by
+  // whatever the request happened to carry."
+  it('ignores an id-shaped field in the body and still scopes to the authenticated project', async () => {
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/v1/project',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_A },
+      payload: { retention_months: 42, id: PROJECT_ID_B },
+    })
+    expect(res.statusCode).toBe(200)
+
+    const a = await pg.query<{ retention_months: number }>(
+      'SELECT retention_months FROM projects WHERE slug = $1',
+      [SLUG_A],
+    )
+    expect(a.rows[0]?.retention_months).toBe(42)
+
+    const b = await pg.query<{ retention_months: number }>(
+      'SELECT retention_months FROM projects WHERE slug = $1',
+      [SLUG_B],
+    )
+    expect(b.rows[0]?.retention_months).not.toBe(42)
+  })
+
+  // Invented, beyond the brief's mutation table: every quota test above uses
+  // either null, 0, or a value far from the positive/zero boundary (7,
+  // 1000). None proves that 1 -- the smallest value `isOverQuota` can
+  // legally evaluate -- is actually accepted, so a schema mutated to
+  // `.min(2)` (rejecting 1 as too small) would pass every other test here.
+  // Also proves a PATCH touching only `monthly_event_quota` leaves
+  // `retention_months` at its previously stored value, not COALESCE-d into
+  // something else -- the two fields must not leak into each other.
+  it('accepts a quota of 1, and leaves retention_months untouched by a quota-only patch', async () => {
+    const before = await pg.query<{ retention_months: number }>(
+      'SELECT retention_months FROM projects WHERE slug = $1',
+      [SLUG_A],
+    )
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/v1/project',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_A },
+      payload: { monthly_event_quota: 1 },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toMatchObject({
+      monthly_event_quota: 1,
+      retention_months: before.rows[0]?.retention_months,
+    })
+  })
+})
+
+describe('GET /v1/project/usage', () => {
+  it('reports this month against the quota', async () => {
+    await pg.query(
+      `INSERT INTO ingest_counters (project_id, month, events_accepted, events_rejected, events_throttled)
+       VALUES ($1, date_trunc('month', now())::date, 42, 3, 1)
+       ON CONFLICT (project_id, month) DO UPDATE
+         SET events_accepted = 42, events_rejected = 3, events_throttled = 1`,
+      [PROJECT_ID_A],
+    )
+    await app.inject({
+      method: 'PATCH',
+      url: '/v1/project',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_A },
+      payload: { monthly_event_quota: 100 },
+    })
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/v1/project/usage',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_A },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toMatchObject({
+      events_accepted: 42,
+      events_rejected: 3,
+      events_throttled: 1,
+      monthly_event_quota: 100,
+    })
+  })
+
+  // A project's first event of the month has no counter row at all, and
+  // that is the ordinary state rather than an error. Number(undefined) is
+  // NaN, which serialises to null and would render as a blank usage bar.
+  it('reports zeroes when no counter row exists yet', async () => {
+    await pg.query('DELETE FROM ingest_counters WHERE project_id = $1', [PROJECT_ID_B])
+    const res = await app.inject({
+      method: 'GET',
+      url: '/v1/project/usage',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_B },
+    })
+    expect(res.json()).toMatchObject({
+      events_accepted: 0,
+      events_rejected: 0,
+      events_throttled: 0,
+    })
+  })
+
+  it('reports an unlimited project as null, not 0', async () => {
+    await app.inject({
+      method: 'PATCH',
+      url: '/v1/project',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_B },
+      payload: { monthly_event_quota: null },
+    })
+    const res = await app.inject({
+      method: 'GET',
+      url: '/v1/project/usage',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_B },
+    })
+    expect((res.json() as { monthly_event_quota: unknown }).monthly_event_quota).toBeNull()
+  })
+
+  // The brief's Step 6: proves the figure is a real, live count and not a
+  // fixture this endpoint happens to return. Every test above only ever
+  // reads a hand-inserted `ingest_counters` row, which cannot distinguish
+  // this endpoint from one that returns its own constant -- posting a real
+  // event through ingest, forcing a flush, and asserting the count moved by
+  // exactly one is the only thing that can.
+  it('reflects a real event posted through ingest, after a counter flush', async () => {
+    const before = await app.inject({
+      method: 'GET',
+      url: '/v1/project/usage',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_A },
+    })
+    const beforeAccepted = (before.json() as { events_accepted: number }).events_accepted
+
+    const track = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': WRITE_KEY_A, 'user-agent': TRACK_UA },
+      payload: { message_id: randomUUID(), anonymous_id: 'usage-real-event', event: 'usage_probe' },
+    })
+    expect(track.statusCode).toBe(202)
+
+    await app.deps.counters.flush()
+
+    const after = await app.inject({
+      method: 'GET',
+      url: '/v1/project/usage',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_A },
+    })
+    expect((after.json() as { events_accepted: number }).events_accepted).toBe(beforeAccepted + 1)
   })
 })

@@ -7,5 +7,6 @@
   "types": "./dist/index.d.ts",
   "engines": { "node": ">=22 <23" },
   "scripts": { "build": "tsc -b" },
-  "dependencies": { "zod": "^3.23.0" }
+  "dependencies": { "zod": "^3.23.0" },
+  "devDependencies": { "pg": "^8.13.0", "@types/pg": "^8.11.0" }
 }

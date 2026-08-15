@@ -12,9 +12,8 @@ import {
 import type { ClickHouseClient, Pool } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import type { Project, ProjectCache } from '../auth/project-cache.js'
-import type { Readiness } from '../health.js'
-import { SERVER_KEY_HEADER, makeAuthenticator } from '../ingest/routes.js'
+import type { Authenticate } from '../auth/bridge.js'
+import type { Project } from '../auth/project-cache.js'
 import { makeWalkCursorCodec } from '../query/walk-cursor.js'
 import type { MemberRow, SegmentCache } from './cache.js'
 import { SegmentTimeoutError, runSegment, runSegmentMembers } from './execute.js'
@@ -27,8 +26,7 @@ import {
 } from './store.js'
 
 export interface SegmentDeps {
-  projects: ProjectCache
-  readiness: Readiness
+  authenticate: Authenticate
   ch: ClickHouseClient
   pg: Pool
   /** The configured ClickHouse database; the dictionaries live in it. */
@@ -172,15 +170,7 @@ interface UnusedWalkCursor {
 const walkCursors = makeWalkCursorCodec('lyraflow.segment-cursor.v1')
 
 export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): void {
-  const { projects, readiness, ch, pg, database, cache } = deps
-
-  const authenticateServer = makeAuthenticator(
-    readiness,
-    SERVER_KEY_HEADER,
-    (key) => projects.byServerKey(key),
-    'missing_server_key',
-    'invalid_server_key',
-  )
+  const { authenticate, ch, pg, database, cache } = deps
 
   const store = new SegmentStore(pg)
 
@@ -317,7 +307,7 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
   }
 
   app.post('/v1/segments/preview', async (req, reply) => {
-    const project = await authenticateServer(req, reply)
+    const project = await authenticate(req, reply)
     if (!project) return
 
     const parsed = SegmentQuery.safeParse(req.body)
@@ -396,7 +386,7 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
   })
 
   app.get('/v1/segments', async (req, reply) => {
-    const project = await authenticateServer(req, reply)
+    const project = await authenticate(req, reply)
     if (!project) return
     // Unlike get/patch/run below, list() never throws StoredTreeError — a
     // row that fails to parse comes back marked `stale: true` instead (see
@@ -407,7 +397,7 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
   })
 
   app.post('/v1/segments', async (req, reply) => {
-    const project = await authenticateServer(req, reply)
+    const project = await authenticate(req, reply)
     if (!project) return
     const meta = CreateBody.safeParse(req.body)
     const query = SegmentQuery.safeParse(req.body)
@@ -436,7 +426,7 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
   })
 
   app.get<{ Params: { id: string } }>('/v1/segments/:id', async (req, reply) => {
-    const project = await authenticateServer(req, reply)
+    const project = await authenticate(req, reply)
     if (!project) return
     const id = parseSegmentId(req.params.id)
     if (id === null) return reply.code(400).send({ error: 'invalid_segment_id' })
@@ -453,7 +443,7 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
   })
 
   app.patch<{ Params: { id: string } }>('/v1/segments/:id', async (req, reply) => {
-    const project = await authenticateServer(req, reply)
+    const project = await authenticate(req, reply)
     if (!project) return
     const id = parseSegmentId(req.params.id)
     if (id === null) return reply.code(400).send({ error: 'invalid_segment_id' })
@@ -506,7 +496,7 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
   })
 
   app.delete<{ Params: { id: string } }>('/v1/segments/:id', async (req, reply) => {
-    const project = await authenticateServer(req, reply)
+    const project = await authenticate(req, reply)
     if (!project) return
     const id = parseSegmentId(req.params.id)
     if (id === null) return reply.code(400).send({ error: 'invalid_segment_id' })
@@ -522,7 +512,7 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
    * diverge on cursor signing, caching, or the window ceiling.
    */
   app.post<{ Params: { id: string } }>('/v1/segments/:id/preview', async (req, reply) => {
-    const project = await authenticateServer(req, reply)
+    const project = await authenticate(req, reply)
     if (!project) return
     const id = parseSegmentId(req.params.id)
     if (id === null) return reply.code(400).send({ error: 'invalid_segment_id' })

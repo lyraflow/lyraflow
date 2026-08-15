@@ -180,4 +180,18 @@ describe('postgres schema', () => {
   it('deletes a project’s funnels with the project', async () => {
     expect(await deleteRuleFor('funnels', 'project_id')).toBe('CASCADE')
   })
+
+  it('sessions carries created_at and an index for the expiry sweep', async () => {
+    const col = await pg.query<{ column_name: string; is_nullable: string }>(
+      `SELECT column_name, is_nullable FROM information_schema.columns
+       WHERE table_name = 'sessions' AND column_name = 'created_at'`,
+    )
+    expect(col.rows[0]?.is_nullable).toBe('NO')
+
+    const idx = await pg.query<{ indexname: string }>(
+      `SELECT indexname FROM pg_indexes
+       WHERE tablename = 'sessions' AND indexname = 'sessions_expires_at_idx'`,
+    )
+    expect(idx.rows).toHaveLength(1)
+  })
 })

@@ -1,8 +1,6 @@
 import type { ClickHouseClient } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
-import type { ProjectCache } from '../auth/project-cache.js'
-import type { Readiness } from '../health.js'
-import { SERVER_KEY_HEADER, makeAuthenticator } from '../ingest/routes.js'
+import type { Authenticate } from '../auth/bridge.js'
 import { parseChDateTime } from '../ingest/row.js'
 import type { SuppressionStore } from '../privacy/suppression-store.js'
 import type { PersonAliases } from './aliases.js'
@@ -14,8 +12,7 @@ import { MAX_PERSON_RANGE_CLAUSES, personEventSummary, resolvePersonScope } from
 export { MAX_PERSON_RANGE_CLAUSES } from './scope.js'
 
 export interface PersonDeps {
-  projects: ProjectCache
-  readiness: Readiness
+  authenticate: Authenticate
   ch: ClickHouseClient
   bindings: IdentityBindings
   aliases: PersonAliases
@@ -85,18 +82,10 @@ interface PersonParams {
  * suppression dictionary.
  */
 export function registerPersonRoutes(app: FastifyInstance, deps: PersonDeps): void {
-  const { projects, readiness, ch, bindings, aliases, suppression } = deps
-
-  const authenticateServer = makeAuthenticator(
-    readiness,
-    SERVER_KEY_HEADER,
-    (key) => projects.byServerKey(key),
-    'missing_server_key',
-    'invalid_server_key',
-  )
+  const { authenticate, ch, bindings, aliases, suppression } = deps
 
   app.get<{ Params: PersonParams }>('/v1/persons/:id', async (req, reply) => {
-    const project = await authenticateServer(req, reply)
+    const project = await authenticate(req, reply)
     if (!project) return
 
     const scope = await resolvePersonScope({ bindings, aliases }, project.id, req.params.id)
