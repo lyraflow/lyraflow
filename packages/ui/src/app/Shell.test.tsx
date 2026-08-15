@@ -5,6 +5,7 @@ import { render, screen } from '@testing-library/react'
 // namespace, which has no `.click` -- `vitest run` doesn't type-check, so it
 // passed while `pnpm typecheck` failed. The named export is the same object.
 import { userEvent } from '@testing-library/user-event'
+import { MemoryRouter } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { ProjectProvider, useProject } from './ProjectContext.js'
 import { Shell } from './Shell.js'
@@ -30,11 +31,13 @@ const PROJECTS = [
 
 function renderShell(onLogout = vi.fn()) {
   return render(
-    <ProjectProvider projects={PROJECTS} initialId={1}>
-      <Shell email="admin@localhost" onLogout={onLogout}>
-        <p>content</p>
-      </Shell>
-    </ProjectProvider>,
+    <MemoryRouter initialEntries={['/feed']}>
+      <ProjectProvider projects={PROJECTS} initialId={1}>
+        <Shell email="admin@localhost" onLogout={onLogout}>
+          <p>content</p>
+        </Shell>
+      </ProjectProvider>
+    </MemoryRouter>,
   )
 }
 
@@ -45,19 +48,17 @@ describe('Shell', () => {
     expect(screen.getByText('admin@localhost')).toBeInTheDocument()
   })
 
-  // Important 10 from the whole-branch review: there is no router in this
-  // branch (App.tsx renders Feed unconditionally), so a real <a href>
-  // performs a full browser navigation for no reason -- it hits the SPA
-  // fallback, remounts the app, re-runs the bounded session check, and
-  // lands back on Feed with a changed address bar. Feed must be a
-  // non-navigating current-page marker, and Settings -- a screen that has
-  // never existed, per the README's own "no settings screen" line -- must
-  // not be advertised at all.
-  it('does not render Feed as a link, and does not advertise a Settings screen', () => {
+  // `Router.tsx` (Task 2) is what gives this app somewhere to route to --
+  // Feed and Settings are both real navigation links now, and the current
+  // one is marked for assistive technology by `NavLink` itself rather than
+  // by anything Shell does by hand. `Router.test.tsx` covers the
+  // navigation and aria-current behaviour end-to-end; this only pins that
+  // both destinations are advertised.
+  it('renders Feed and Settings as navigation links', () => {
     renderShell()
-    expect(screen.queryByRole('link', { name: /feed/i })).not.toBeInTheDocument()
-    expect(screen.queryByText(/settings/i)).not.toBeInTheDocument()
-    expect(screen.getByText('Feed')).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('link', { name: /feed/i })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /settings/i })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /feed/i })).toHaveAttribute('aria-current', 'page')
   })
 
   it('shows the active project in the switcher', () => {
@@ -67,11 +68,13 @@ describe('Shell', () => {
     // indistinguishable from a correct one -- every assertion in this file
     // still passes. This is the mutation that slipped through.
     render(
-      <ProjectProvider projects={PROJECTS} initialId={2}>
-        <Shell email="admin@localhost" onLogout={vi.fn()}>
-          <p>content</p>
-        </Shell>
-      </ProjectProvider>,
+      <MemoryRouter initialEntries={['/feed']}>
+        <ProjectProvider projects={PROJECTS} initialId={2}>
+          <Shell email="admin@localhost" onLogout={vi.fn()}>
+            <p>content</p>
+          </Shell>
+        </ProjectProvider>
+      </MemoryRouter>,
     )
     expect(screen.getByRole('button', { name: /beta/i })).toBeInTheDocument()
   })
@@ -88,11 +91,13 @@ describe('Shell', () => {
       return null
     }
     render(
-      <ProjectProvider projects={PROJECTS} initialId={1}>
-        <Shell email="a@b.c" onLogout={vi.fn()}>
-          <Probe />
-        </Shell>
-      </ProjectProvider>,
+      <MemoryRouter initialEntries={['/feed']}>
+        <ProjectProvider projects={PROJECTS} initialId={1}>
+          <Shell email="a@b.c" onLogout={vi.fn()}>
+            <Probe />
+          </Shell>
+        </ProjectProvider>
+      </MemoryRouter>,
     )
     await userEvent.click(screen.getByRole('button', { name: /alpha/i }))
     await userEvent.click(screen.getByRole('option', { name: /beta/i }))
@@ -106,11 +111,13 @@ describe('Shell', () => {
   // label (or, before the type fix, hide a real bug at the type level).
   it('renders a fallback, not a blank label, when email is null', () => {
     render(
-      <ProjectProvider projects={PROJECTS} initialId={1}>
-        <Shell email={null} onLogout={vi.fn()}>
-          <p>content</p>
-        </Shell>
-      </ProjectProvider>,
+      <MemoryRouter initialEntries={['/feed']}>
+        <ProjectProvider projects={PROJECTS} initialId={1}>
+          <Shell email={null} onLogout={vi.fn()}>
+            <p>content</p>
+          </Shell>
+        </ProjectProvider>
+      </MemoryRouter>,
     )
     expect(screen.getByRole('button', { name: /unknown admin/i })).toBeInTheDocument()
   })

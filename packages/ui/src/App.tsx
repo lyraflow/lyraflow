@@ -3,11 +3,10 @@ import type { ApiClient } from './api/client.js'
 import { ApiError, createClient } from './api/client.js'
 import type { Project } from './api/types.js'
 import { ProjectProvider } from './app/ProjectContext.js'
-import { Shell } from './app/Shell.js'
+import { AppRouter } from './app/Router.js'
 import { applyTheme, readStoredTheme } from './app/ThemeToggle.js'
 import { Button } from './components/ui/button.js'
 import { Card, CardContent, CardHeader, CardTitle } from './components/ui/card.js'
-import { Feed } from './screens/Feed.js'
 import { Login } from './screens/Login.js'
 
 interface Session {
@@ -266,9 +265,12 @@ export default function App(props: { client?: ApiClient; sessionPollIntervalMs?:
   const { session } = phase
   return (
     <ProjectProvider projects={session.projects} initialId={session.projects[0]?.id ?? null}>
-      <Shell email={session.email} onLogout={handleLogout}>
-        <Feed client={client} onUnauthorized={handleSessionExpired} />
-      </Shell>
+      <AppRouter
+        client={client}
+        email={session.email}
+        onLogout={handleLogout}
+        onUnauthorized={handleSessionExpired}
+      />
     </ProjectProvider>
   )
 }
