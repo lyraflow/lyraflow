@@ -1,6 +1,6 @@
 import { ChevronDown, LayoutList, LogOut, Settings as SettingsIcon } from 'lucide-react'
 import type { ReactNode } from 'react'
-import { NavLink } from 'react-router'
+import { Link, NavLink, useLocation } from 'react-router'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -120,6 +120,16 @@ function AccountMenu(props: { email: string | null; onLogout(): void }) {
 }
 
 export function Shell(props: { email: string | null; onLogout(): void; children: ReactNode }) {
+  // `Router.tsx` answers `/` with the SAME element as `/feed` (a bare hard
+  // refresh at the root has to land somewhere), but `NavLink`'s own
+  // `isActive` match is computed from `to` against the current location, so
+  // a Feed link `to="/feed" end` never matches `/` itself -- neither nav
+  // item got `aria-current` there, the exact state every operator lands on
+  // right after login (and right after the wizard, which has no route of
+  // its own to redirect through). Computed by hand here, rather than
+  // relying on `NavLink`'s own match, only for the Feed link's extra case.
+  const { pathname } = useLocation()
+  const feedActive = pathname === '/' || pathname === ROUTES.feed
   return (
     // `flex-col` below `sm`, `flex-row` at and above it: a 224px fixed
     // sidebar leaves a 390px viewport with less than half its width for
@@ -139,29 +149,33 @@ export function Shell(props: { email: string | null; onLogout(): void; children:
         </div>
         <nav className="flex items-center gap-1 sm:flex-col sm:items-stretch sm:gap-0.5 sm:p-2">
           {/*
-           * Real `NavLink`s now that `Router.tsx` gives this app somewhere
-           * to route to -- Important 10 previously ruled out a plain
-           * anchor here because there was no router, so any `<a href>`
-           * performed a full browser navigation for no reason. `NavLink`
-           * itself supplies `aria-current="page"` for the active route and
-           * renders the current destination as a link that simply doesn't
-           * navigate to itself, so that behaviour doesn't need reimplementing
-           * here.
+           * Real links now that `Router.tsx` gives this app somewhere to
+           * route to -- Important 10 previously ruled out a plain anchor
+           * here because there was no router, so any `<a href>` performed a
+           * full browser navigation for no reason. Settings uses `NavLink`
+           * directly below, which supplies `aria-current="page"` for its own
+           * route with nothing more needed.
+           *
+           * Feed uses a plain `Link` instead, with `aria-current` computed
+           * by hand from `feedActive` above: `NavLink`'s OWN `isActive`
+           * match is computed from `to` against the current location
+           * internally, and cannot be overridden by passing an
+           * `aria-current` prop -- react-router only uses that prop as the
+           * VALUE to apply once its own match says active, not as a way to
+           * force the match itself, so it can't be made to also cover `/`.
            */}
-          <NavLink
+          <Link
             to={ROUTES.feed}
-            end
-            className={({ isActive }) =>
-              `flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium ${
-                isActive
-                  ? 'text-foreground'
-                  : 'text-muted-foreground hover:bg-muted hover:text-foreground'
-              }`
-            }
+            aria-current={feedActive ? 'page' : undefined}
+            className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium ${
+              feedActive
+                ? 'text-foreground'
+                : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+            }`}
           >
             <LayoutList className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
             Feed
-          </NavLink>
+          </Link>
           <NavLink
             to={ROUTES.settings}
             className={({ isActive }) =>

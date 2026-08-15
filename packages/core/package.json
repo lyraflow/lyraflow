@@ -11,7 +11,8 @@
     "./snippet/build.js": {
       "types": "./dist/snippet/build.d.ts",
       "default": "./dist/snippet/build.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "engines": { "node": ">=22 <23" },
   "scripts": { "build": "tsc -b" },

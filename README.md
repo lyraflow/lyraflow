@@ -435,8 +435,9 @@ would let a single project's credential enumerate every other project on the
 install. In practice this means: the CLI's `create-project` and these two
 routes are the only ways to create a project, and only an admin signed into
 the [Web UI](#web-ui) (or holding its session cookie) can list every project
-or create a new one over HTTP. `GET /v1/projects` returns every project's
-`{"id", "name", "slug", "created_at", "retention_months",
+or create a new one over HTTP. `GET /v1/projects` returns
+`{"projects": [...]}`, wrapped rather than a bare array, with each entry
+shaped `{"id", "name", "slug", "created_at", "retention_months",
 "monthly_event_quota"}` and **no key of either kind** — the one response in
 this API that names every project at once, so a key leaking here would leak
 the whole install rather than one project. `POST /v1/projects` takes

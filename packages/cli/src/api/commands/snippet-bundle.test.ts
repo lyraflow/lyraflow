@@ -24,9 +24,10 @@ import { runSnippet } from './snippet.js'
  * `packages/sdk-browser/src/snippet.test.ts` already does this for the
  * README's own copy of the snippet. This file is its sibling, not a
  * duplicate: the snippet under test here comes from `runSnippet`'s own
- * output, so a change to `buildSnippet` (snippet.ts) that breaks the
- * template — while leaving the README's hand-written copy untouched — fails
- * here and nowhere else.
+ * output, so a change to `buildSnippet` (now `packages/core/src/snippet/
+ * build.ts`, shared with the web UI) that breaks the template — while
+ * leaving the README's hand-written copy untouched — fails here and
+ * nowhere else.
  *
  * Two things a first pass at this file left resting on a review's word
  * rather than the harness's own construction, closed here: the bundle read
