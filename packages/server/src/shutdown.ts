@@ -43,6 +43,12 @@ export interface ShutdownOptions {
   // This field's job is bounding future WORK, not bounding an exposure
   // that per-partition logging already closes almost entirely on its own.
   retention: { stop(): void }
+  // Same narrowing as `purge`/`retention`, stopped for the same reason
+  // `retention` is: bounds FUTURE ticks only. A `DELETE FROM sessions`
+  // already issued to Postgres completes server-side whether or not this
+  // process is still watching, and there is nothing to gain from trying to
+  // abandon it -- see auth/sweeper.ts's own `stop()` docstring.
+  sessionSweeper: { stop(): void }
   drainDeadlineMs: number
   onExit?: (code: number) => void
 }
@@ -53,7 +59,8 @@ export interface ShutdownOptions {
  * is buffered, which would make the upgrade story dishonest.
  */
 export function installShutdownHandlers(opts: ShutdownOptions): () => Promise<void> {
-  const { app, readiness, buffer, counters, purge, retention, drainDeadlineMs } = opts
+  const { app, readiness, buffer, counters, purge, retention, sessionSweeper, drainDeadlineMs } =
+    opts
   const exit = opts.onExit ?? ((code: number) => process.exit(code))
   let running: Promise<void> | null = null
 
@@ -75,6 +82,10 @@ export function installShutdownHandlers(opts: ShutdownOptions): () => Promise<vo
       // option's own docstring above for what this does and does not
       // protect against.
       retention.stop()
+      // Housekeeping only (see auth/sweeper.ts) — stopped here purely so a
+      // draining process is not still installing timers, not because a
+      // missed tick risks anything.
+      sessionSweeper.stop()
 
       const result = await buffer.drain(drainDeadlineMs)
       if (result.dropped > 0) {

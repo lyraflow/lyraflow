@@ -18,8 +18,9 @@ function harness(insert: (rows: unknown[]) => Promise<void>) {
   const counters = { flush: vi.fn(async () => {}) } as unknown as IngestCounters
   const purge = { stop: vi.fn() }
   const retention = { stop: vi.fn() }
+  const sessionSweeper = { stop: vi.fn() }
   const app = Fastify()
-  return { readiness, buffer, counters, purge, retention, app }
+  return { readiness, buffer, counters, purge, retention, sessionSweeper, app }
 }
 
 // installShutdownHandlers only calls buffer.add()/drain() generically — it
@@ -46,6 +47,7 @@ describe('installShutdownHandlers', () => {
       counters: h.counters,
       purge: h.purge,
       retention: h.retention,
+      sessionSweeper: h.sessionSweeper,
       drainDeadlineMs: 5000,
       onExit: () => {},
     })
@@ -58,6 +60,7 @@ describe('installShutdownHandlers', () => {
     expect(h.counters.flush).toHaveBeenCalled()
     expect(h.purge.stop).toHaveBeenCalled()
     expect(h.retention.stop).toHaveBeenCalled()
+    expect(h.sessionSweeper.stop).toHaveBeenCalled()
   })
 
   it('stops the retention worker beside the purge worker, before the drain completes', async () => {
@@ -80,6 +83,7 @@ describe('installShutdownHandlers', () => {
       counters: h.counters,
       purge: h.purge,
       retention: h.retention,
+      sessionSweeper: h.sessionSweeper,
       drainDeadlineMs: 5000,
       onExit: () => {},
     })
@@ -121,6 +125,7 @@ describe('installShutdownHandlers', () => {
       counters: h.counters,
       purge: h.purge,
       retention: h.retention,
+      sessionSweeper: h.sessionSweeper,
       drainDeadlineMs: 5000,
       onExit: () => {},
     })
@@ -159,6 +164,7 @@ describe('installShutdownHandlers', () => {
       counters: h.counters,
       purge: h.purge,
       retention: h.retention,
+      sessionSweeper: h.sessionSweeper,
       drainDeadlineMs: 50,
       onExit: (code) => exits.push(code),
     })
@@ -180,6 +186,7 @@ describe('installShutdownHandlers', () => {
       counters: h.counters,
       purge: h.purge,
       retention: h.retention,
+      sessionSweeper: h.sessionSweeper,
       drainDeadlineMs: 5000,
       onExit: () => {},
     })

@@ -1696,6 +1696,45 @@ no certificate at all is **Flexible**, and it leaves the leg between
 Cloudflare and your server unencrypted, carrying your server key and your
 event data. Your visitors would see a padlock that stops being true partway.
 
+### Admin login
+
+There is no screen behind this yet — this release ships the API a future
+web UI will sit behind, not the UI itself. What exists today is one admin
+account, a session-cookie login (`POST /v1/auth/login`), and the
+project-scoped routes it protects. It matters to what you expose even
+without a UI to look at, so it is documented here rather than left for
+whoever builds the screen.
+
+`./install.sh` generates the admin account the same way it generates the
+database passwords: a random one, written into `.env`, and **printed once at
+the end of a successful install** — the only time you will see it. Losing it
+after that is not a special case; it is the same situation as forgetting any
+other password, and the fix is the same one:
+
+```sh
+echo 'a new password' | docker compose exec -T lyraflow \
+  node packages/cli/dist/index.js set-admin-password admin@localhost
+```
+
+`set-admin-password` takes the password on stdin, never as an argument — an
+argument lands in shell history and in `ps` output for every user on the
+box.
+
+**If you are upgrading an install that predates the admin account,** its
+`.env` has no `LYRAFLOW_ADMIN_PASSWORD` — the installer only ever writes it
+into a brand-new `.env`, and an upgrade keeps the `.env` you already have.
+The app still boots; it logs a warning at startup and there is nothing to
+sign in with until you run the command above, once.
+
+**Stated plainly, because it is a real trade and not an oversight:** the
+admin login is served on the exact same public origin as ingest. There is no
+separate port, no separate host, and no network boundary between them — an
+install reachable from the internet for `/v1/track` is reachable from the
+internet for `/v1/auth/login` too, protected by the password above and
+nothing else. That is the price of an install this simple. At minimum, put
+it behind [HTTPS](#serving-over-https), and treat the admin password with
+the same care as the server key.
+
 ### Retention
 
 A background worker drops events older than each project's own

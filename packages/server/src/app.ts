@@ -6,6 +6,7 @@ import { ProjectCache } from './auth/project-cache.js'
 import { AttemptLimiter } from './auth/rate-limit.js'
 import { registerAuthRoutes } from './auth/routes.js'
 import { SessionStore } from './auth/sessions.js'
+import { SESSION_SWEEP_INTERVAL_MS, SessionSweeper } from './auth/sweeper.js'
 import type { Config } from './config.js'
 import { registerEventsRoutes } from './events/routes.js'
 import { registerFunnelRoutes } from './funnels/routes.js'
@@ -83,6 +84,15 @@ export interface AppDeps {
    * the route path actually recorded.
    */
   loginLimiter: AttemptLimiter
+  /**
+   * Exposed for the same reason `purge`/`retention` are: a live timer
+   * belongs to boot succeeding, not to construction (see index.ts and
+   * shutdown.ts), and a test that wants to drive a real sweep does it
+   * through `runOnce()` on this exact instance rather than waiting on its
+   * own interval or constructing a second `SessionSweeper` that would sweep
+   * the same table on its own schedule -- see auth/boot.test.ts.
+   */
+  sessionSweeper: SessionSweeper
 }
 
 export function buildApp(input: {
@@ -158,6 +168,14 @@ export function buildApp(input: {
   const projects = new ProjectCache(pg, 60_000)
   const sessions = new SessionStore(pg)
   const loginLimiter = new AttemptLimiter()
+  // Wraps the SAME `sessions` instance every route above reads and writes
+  // through -- a sweep must delete rows through the identical store the
+  // login/logout routes see, not a lookalike constructed separately.
+  const sessionSweeper = new SessionSweeper({
+    sweep: () => sessions.sweep(),
+    intervalMs: SESSION_SWEEP_INTERVAL_MS,
+    onError: (err) => app.log.error({ err }, 'session sweep failed'),
+  })
   // Built ONCE and shared by every project-scoped registration below —
   // Task 9's whole point is that a browser session and a project server key
   // resolve through this single implementation, never two. `registerIngestRoutes`
@@ -237,6 +255,7 @@ export function buildApp(input: {
     projects,
     sessions,
     loginLimiter,
+    sessionSweeper,
   } satisfies AppDeps)
   registerHealth(app, readiness)
   // Unauthenticated and dependency-free, like health — registered up front
@@ -342,7 +361,10 @@ export function buildApp(input: {
   // reason — a live timer issuing real `ALTER TABLE ... DROP PARTITION`
   // calls against the shared test database on every unrelated test file's
   // boot would be its own cross-file interference. index.ts starts it too,
-  // conditionally on `config.retentionEnabled`.
+  // conditionally on `config.retentionEnabled`. `sessionSweeper` follows the
+  // same rule again — a live timer issuing real `DELETE FROM sessions`
+  // during unrelated tests would be the identical cross-file interference —
+  // see auth/boot.test.ts, which drives it through `runOnce()` directly.
   return app
 }
 

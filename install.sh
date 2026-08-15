@@ -52,6 +52,8 @@ else
     {
       printf 'POSTGRES_PASSWORD=%s\n' "$(head -c 24 /dev/urandom | base64 | tr -d '/+=')"
       printf 'CLICKHOUSE_PASSWORD=%s\n' "$(head -c 24 /dev/urandom | base64 | tr -d '/+=')"
+      printf 'LYRAFLOW_ADMIN_EMAIL=%s\n' "admin@localhost"
+      printf 'LYRAFLOW_ADMIN_PASSWORD=%s\n' "$(head -c 24 /dev/urandom | base64 | tr -d '/+=')"
     } > .env
   )
 fi
@@ -136,6 +138,16 @@ else
   HOST="http://localhost:3000"
 fi
 
+# Read back rather than assumed: on an install whose .env predates the admin
+# account, these are both empty, and that is the one case worth saying
+# something different for -- printing a blank password would look like a bug,
+# not like the upgrade note it actually is. Only ever read here, never
+# written: this script writes LYRAFLOW_ADMIN_PASSWORD exactly once, above,
+# and printing it is the only way an operator who never opens .env finds out
+# it exists at all.
+ADMIN_EMAIL="$(sed -n 's/^LYRAFLOW_ADMIN_EMAIL=//p' .env | tr -d '\r' | head -n 1)"
+ADMIN_PASSWORD="$(sed -n 's/^LYRAFLOW_ADMIN_PASSWORD=//p' .env | tr -d '\r' | head -n 1)"
+
 echo
 echo "Lyraflow is running. Create your first project:"
 echo "  docker compose exec lyraflow node packages/cli/dist/index.js create-project \"My App\""
@@ -144,3 +156,16 @@ echo "Then get your snippet:"
 echo "  docker compose exec -e LYRAFLOW_HOST=$HOST \\"
 echo "    -e LYRAFLOW_SERVER_KEY=sk_... \\"
 echo "    lyraflow node packages/cli/dist/index.js snippet"
+echo
+if [ -n "$ADMIN_PASSWORD" ]; then
+  echo "Admin login, at $HOST:"
+  echo "  email:    $ADMIN_EMAIL"
+  echo "  password: $ADMIN_PASSWORD"
+  echo "This is printed once. Change it with:"
+  echo "  docker compose exec lyraflow node packages/cli/dist/index.js set-admin-password $ADMIN_EMAIL"
+else
+  echo "This install predates the admin account, so .env has no"
+  echo "LYRAFLOW_ADMIN_PASSWORD and there is nothing to log in with yet. Set one:"
+  echo "  echo 'your-new-password' | docker compose exec -T lyraflow \\"
+  echo "    node packages/cli/dist/index.js set-admin-password admin@localhost"
+fi
