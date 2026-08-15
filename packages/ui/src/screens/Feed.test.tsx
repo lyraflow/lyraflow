@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import { userEvent } from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
@@ -109,6 +109,7 @@ function renderFeed(
     client?: ReturnType<typeof fakeClient>
     projectId?: number
     pollIntervalMs?: number
+    onUnauthorized?: () => void
   } = {},
 ) {
   const client = opts.client ?? fakeClient()
@@ -132,7 +133,11 @@ function renderFeed(
   ]
   const view = render(
     <ProjectProvider projects={projects} initialId={opts.projectId ?? 1}>
-      <Feed client={client} pollIntervalMs={opts.pollIntervalMs} />
+      <Feed
+        client={client}
+        pollIntervalMs={opts.pollIntervalMs}
+        onUnauthorized={opts.onUnauthorized}
+      />
     </ProjectProvider>,
   )
   return {
@@ -140,7 +145,11 @@ function renderFeed(
     rerenderWithProject: (id: number) =>
       view.rerender(
         <ProjectProvider projects={projects} initialId={id}>
-          <Feed client={client} pollIntervalMs={opts.pollIntervalMs} />
+          <Feed
+            client={client}
+            pollIntervalMs={opts.pollIntervalMs}
+            onUnauthorized={opts.onUnauthorized}
+          />
         </ProjectProvider>,
       ),
   }
@@ -305,5 +314,108 @@ describe('Feed', () => {
     await waitFor(() => expect(tab.textContent).toMatch(/0/))
     await userEvent.click(tab)
     expect(await screen.findByText(/no rejections/i)).toBeInTheDocument()
+  })
+
+  // Important 5 from the whole-branch review. GET /v1/events deliberately
+  // returns its page OLDEST-first (so it reads like a log and --follow can
+  // continue from the last row shown -- see that route's own docstring).
+  // With DEFAULT_LIMIT = 100, a newly-arriving event lands at row 100,
+  // below the fold, on a screen whose own empty state promises "it will
+  // show up here within a few seconds". The fix is display-only: the API
+  // contract itself must stay oldest-first for the CLI's --follow.
+  it('renders the Accepted tab newest-first, reversing the oldest-first API page', async () => {
+    const client = fakeClient()
+    const orderedEvents = [
+      { ...EVENTS[0], event_id: 'ord-1', event_name: 'oldest_event' },
+      { ...EVENTS[0], event_id: 'ord-2', event_name: 'middle_event' },
+      { ...EVENTS[0], event_id: 'ord-3', event_name: 'newest_event' },
+    ]
+    client.events = vi.fn(async () => ({
+      events: orderedEvents,
+      next_cursor: null,
+    })) as unknown as typeof client.events
+    renderFeed({ client })
+    await screen.findByText('newest_event')
+    const rows = screen.getAllByRole('row').slice(1) // drop the header row
+    const names = rows.map((r) => within(r).getByText(/_event$/).textContent)
+    expect(names).toEqual(['newest_event', 'middle_event', 'oldest_event'])
+  })
+
+  // Important 6 from the whole-branch review, first half. GET /v1/events
+  // defaults `since` to the last 24 hours when omitted; GET
+  // /v1/events/rejections has NO default of its own -- only the
+  // dead-letter table's 30-day TTL bounds it. Left unmatched, the two tabs'
+  // counts describe different spans side by side as if comparable.
+  it('sends an explicit since on the rejections poll matching the feed default window', async () => {
+    const client = fakeClient()
+    renderFeed({ client })
+    await waitFor(() => expect(client.rejections).toHaveBeenCalled())
+    const call = client.rejections.mock.calls[0]?.[1] as { since?: string }
+    expect(call.since).toBeDefined()
+    const sinceMs = new Date(call.since as string).getTime()
+    const nowMs = Date.now()
+    // Within a few seconds of exactly 24h ago -- not "some date in the
+    // past", which a default-less call would also satisfy.
+    expect(nowMs - sinceMs).toBeGreaterThan(24 * 60 * 60 * 1000 - 5000)
+    expect(nowMs - sinceMs).toBeLessThan(24 * 60 * 60 * 1000 + 5000)
+  })
+
+  // Important 9 from the whole-branch review. Shell.test.tsx's own comment
+  // names this exact failure -- "every screen quietly keeps reading the old
+  // project while the header says otherwise" -- and only tested that the
+  // CONTEXT updated, never the rendered rows. This is the test that looks
+  // at the rows: switching to a project whose poll then fails must show NO
+  // rows, not the previous project's, even though usePolling never clears
+  // `data` on an error by itself.
+  it('shows no rows, not the previous project rows, when switching to a project whose poll fails', async () => {
+    const client = fakeClient()
+    client.events = vi.fn(async (projectId: number) => {
+      if (projectId === 2) throw new ApiError(503, 'unavailable')
+      return { events: EVENTS, next_cursor: null }
+    }) as unknown as typeof client.events
+    const { rerenderWithProject } = renderFeed({ client, projectId: 1 })
+    expect(await screen.findByText('page_view')).toBeInTheDocument()
+
+    rerenderWithProject(2)
+    await waitFor(() => expect(client.events).toHaveBeenCalledWith(2, expect.anything()))
+    await waitFor(() => expect(screen.queryByText('page_view')).not.toBeInTheDocument())
+    expect(await screen.findByText(/no events yet/i)).toBeInTheDocument()
+  })
+
+  // Critical 2 from the whole-branch review. A 401 from ANY polled endpoint
+  // means the session is gone -- indistinguishable, without this, from the
+  // server merely being slow, and the operator is left staring at frozen
+  // rows behind a banner that reads like a transient hiccup forever, at
+  // roughly one request per second, with no route back to login.
+  it('calls onUnauthorized when a poll comes back 401', async () => {
+    await withFakeTimers(async () => {
+      const client = fakeClient()
+      let n = 0
+      client.events = vi.fn(async () => {
+        if (n++ > 0) throw new ApiError(401, 'invalid_session')
+        return { events: EVENTS, next_cursor: null }
+      }) as unknown as typeof client.events
+      const onUnauthorized = vi.fn()
+      renderFeed({ client, onUnauthorized })
+      expect(await screen.findByText('page_view')).toBeInTheDocument()
+      await vi.advanceTimersByTimeAsync(DEFAULT_POLL_INTERVAL_MS)
+      await waitFor(() => expect(onUnauthorized).toHaveBeenCalled())
+    })
+  })
+
+  // The negative case for the same fix: an ordinary non-401 failure must
+  // NOT trigger the login bounce -- that is exactly the generic "Could not
+  // refresh" banner's job below, and conflating the two would send an
+  // operator to login over a transient 503.
+  it('does not call onUnauthorized for a non-401 failure', async () => {
+    await withFakeTimers(async () => {
+      const client = failingAfterFirstCall()
+      const onUnauthorized = vi.fn()
+      renderFeed({ client, onUnauthorized })
+      expect(await screen.findByText('page_view')).toBeInTheDocument()
+      await vi.advanceTimersByTimeAsync(DEFAULT_POLL_INTERVAL_MS)
+      await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
+      expect(onUnauthorized).not.toHaveBeenCalled()
+    })
   })
 })

@@ -1,4 +1,4 @@
-import { renderHook, waitFor } from '@testing-library/react'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { usePolling } from './usePolling.js'
 
@@ -50,5 +50,58 @@ describe('usePolling', () => {
     unmount()
     await vi.advanceTimersByTimeAsync(5000)
     expect(fn).toHaveBeenCalledTimes(1)
+  })
+
+  // Important 9 from the whole-branch review. `fn`'s identity changing is
+  // the caller's own signal that the underlying query changed -- `Feed`
+  // rebuilds its poll callbacks on `activeId` -- and the OLD `data` belongs
+  // to the OLD query. Combined with "keeps polling after a rejection"
+  // above (data is never cleared on error), leaving `data` in place across
+  // an `fn` change is exactly how switching to a project whose poll then
+  // fails pins the previous project's rows on screen under the new
+  // project's name indefinitely.
+  it('resets data and error when fn identity changes, so a fresh query never shows a stale answer', async () => {
+    const fnAlpha = vi.fn(async () => 'alpha-data')
+    let releaseBeta: (v: string) => void = () => {}
+    const fnBeta = vi.fn(
+      () =>
+        new Promise<string>((r) => {
+          releaseBeta = r
+        }),
+    )
+
+    const { result, rerender } = renderHook(({ fn }) => usePolling(fn, 1000), {
+      initialProps: { fn: fnAlpha as () => Promise<string> },
+    })
+    await waitFor(() => expect(result.current.data).toBe('alpha-data'))
+
+    act(() => {
+      rerender({ fn: fnBeta })
+    })
+    // Before fnBeta's own promise has even settled: the reset must be
+    // synchronous with the fn change, not something that waits for the
+    // new poll to complete.
+    expect(result.current.data).toBeNull()
+    expect(result.current.error).toBeNull()
+
+    releaseBeta('beta-data')
+    await waitFor(() => expect(result.current.data).toBe('beta-data'))
+  })
+
+  // The other half: intervalMs changing ALONE (fn's own identity unchanged)
+  // must not reset -- that would throw away rows that are still valid for
+  // the identical query, the same "never clear data" guarantee the
+  // rejection test above pins for a failed poll.
+  it('does not reset data when only intervalMs changes', async () => {
+    const fn = vi.fn(async () => 'steady-data')
+    const { result, rerender } = renderHook(({ ms }) => usePolling(fn, ms), {
+      initialProps: { ms: 1000 },
+    })
+    await waitFor(() => expect(result.current.data).toBe('steady-data'))
+
+    act(() => {
+      rerender({ ms: 2000 })
+    })
+    expect(result.current.data).toBe('steady-data')
   })
 })

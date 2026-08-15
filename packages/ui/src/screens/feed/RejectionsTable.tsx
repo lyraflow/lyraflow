@@ -7,12 +7,7 @@ import {
   TableHeader,
   TableRow,
 } from '../../components/ui/table.js'
-
-function formatTime(iso: string): string {
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return iso
-  return d.toLocaleTimeString(undefined, { hour12: false })
-}
+import { formatEventTime } from './format.js'
 
 export function RejectionsTable(props: { rejections: Rejection[] }) {
   const { rejections } = props
@@ -50,7 +45,7 @@ export function RejectionsTable(props: { rejections: Rejection[] }) {
           // biome-ignore lint/suspicious/noArrayIndexKey: see comment above
           <TableRow key={index}>
             <TableCell className="font-mono text-muted-foreground">
-              {formatTime(rejection.received_at)}
+              {formatEventTime(rejection.received_at)}
             </TableCell>
             <TableCell className="font-medium text-destructive">{rejection.reason}</TableCell>
             {/*
