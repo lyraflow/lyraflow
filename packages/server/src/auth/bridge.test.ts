@@ -412,7 +412,9 @@ describe('IMPORTANT 2: the bridge does not renew', () => {
     const local = Fastify()
     await local.register(cookie)
     local.get('/v1/auth/session', async (req, reply) => {
-      const rec = await routeSessions.verify(req.cookies?.lf_session ?? '')
+      // Mirrors the real GET /v1/auth/session's own call: the one deliberate
+      // opt-in, since verify()'s default is now non-renewing.
+      const rec = await routeSessions.verify(req.cookies?.lf_session ?? '', { renew: true })
       if (!rec) return reply.code(401).send({ error: 'no_session' })
       if (rec.renewed) reply.header('set-cookie', 'lf_session=renewed')
       return reply.code(200).send({ renewed: rec.renewed })

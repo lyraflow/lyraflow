@@ -92,7 +92,7 @@ describe('SessionStore', () => {
     expect(await store.verify(token)).toBeNull()
   })
 
-  it('renews a session inside the renewal window and reports it', async () => {
+  it('renews a session inside the renewal window when { renew: true } is passed', async () => {
     // Issued with a 10s TTL, renewed by a store whose TTL is 10 minutes: the
     // renewed expiry is later by construction, not by however many
     // milliseconds happened to elapse between the two calls. The original
@@ -103,7 +103,7 @@ describe('SessionStore', () => {
     const issuer = new SessionStore(pg, 10_000, 60_000)
     const { token, expiresAt } = await issuer.issue(adminId)
     const renewer = new SessionStore(pg, 600_000, 60_000)
-    const rec = await renewer.verify(token)
+    const rec = await renewer.verify(token, { renew: true })
     expect(rec?.renewed).toBe(true)
     expect(rec?.expiresAt.getTime()).toBeGreaterThan(expiresAt.getTime())
 
@@ -114,15 +114,16 @@ describe('SessionStore', () => {
     expect(stored.rows[0]?.expires_at.getTime()).toBeGreaterThan(expiresAt.getTime())
   })
 
-  // IMPORTANT 2: a caller that cannot resend the cookie (auth/bridge.ts)
-  // must be able to verify without sliding expires_at forward, even when
-  // the session IS inside its renewal window.
-  it('does not renew a session inside the renewal window when renew: false is passed', async () => {
+  // IMPORTANT 2 (and its rhyme in project/admin-routes.ts's requireSession):
+  // non-renewing is the DEFAULT, not something a caller has to know to ask
+  // for -- verify() must not slide expires_at forward for any caller that
+  // never opted in, even when the session IS inside its renewal window.
+  it('does not renew a session inside the renewal window by default', async () => {
     const issuer = new SessionStore(pg, 10_000, 60_000)
     const { token, expiresAt } = await issuer.issue(adminId)
     const reader = new SessionStore(pg, 600_000, 60_000)
 
-    const rec = await reader.verify(token, { renew: false })
+    const rec = await reader.verify(token)
     expect(rec?.renewed).toBe(false)
     expect(rec?.expiresAt.getTime()).toBe(expiresAt.getTime())
 
@@ -136,18 +137,18 @@ describe('SessionStore', () => {
     expect(stored.rows[0]?.expires_at.getTime()).toBe(expiresAt.getTime())
   })
 
-  // Companion: the same token, same store, verified normally (the default)
-  // right after, DOES renew -- proving the row was never touched by the
-  // `renew: false` call above, not merely that this particular call
-  // happened not to renew for some unrelated reason (e.g. already outside
-  // the window).
-  it('a subsequent default verify() still renews after a renew: false read', async () => {
+  // Companion: the same token, same store, verified with an explicit
+  // { renew: true } right after, DOES renew -- proving the row was never
+  // touched by the default (non-renewing) call above, not merely that this
+  // particular call happened not to renew for some unrelated reason (e.g.
+  // already outside the window).
+  it('an explicit { renew: true } still renews after a default (non-renewing) read', async () => {
     const issuer = new SessionStore(pg, 10_000, 60_000)
     const { token, expiresAt } = await issuer.issue(adminId)
     const store = new SessionStore(pg, 600_000, 60_000)
 
-    await store.verify(token, { renew: false })
-    const rec = await store.verify(token)
+    await store.verify(token)
+    const rec = await store.verify(token, { renew: true })
     expect(rec?.renewed).toBe(true)
     expect(rec?.expiresAt.getTime()).toBeGreaterThan(expiresAt.getTime())
   })
@@ -191,7 +192,7 @@ describe('SessionStore', () => {
     const issuer = new SessionStore(pg, 10_000, 60_000, SESSION_MAX_AGE_MS)
     const { token, expiresAt } = await issuer.issue(adminId)
     const renewer = new SessionStore(pg, 600_000, 60_000, SESSION_MAX_AGE_MS)
-    const rec = await renewer.verify(token)
+    const rec = await renewer.verify(token, { renew: true })
     expect(rec?.adminUserId).toBe(adminId)
     expect(rec?.renewed).toBe(true)
     expect(rec?.expiresAt.getTime()).toBeGreaterThan(expiresAt.getTime())

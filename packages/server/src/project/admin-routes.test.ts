@@ -1,12 +1,15 @@
 import { join } from 'node:path'
+import cookiePlugin from '@fastify/cookie'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
-import type { FastifyInstance } from 'fastify'
+import Fastify, { type FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { buildApp } from '../app.js'
 import { ensureAdminUser } from '../auth/bootstrap.js'
-import { hashServerKey } from '../auth/project-cache.js'
+import { ProjectCache, hashServerKey } from '../auth/project-cache.js'
+import { SessionStore, hashSessionToken } from '../auth/sessions.js'
 import { loadConfig } from '../config.js'
 import { Readiness } from '../health.js'
+import { registerAdminProjectRoutes } from './admin-routes.js'
 
 const CH = {
   url: 'http://localhost:8123',
@@ -317,5 +320,56 @@ describe('the drain gate', () => {
     expect(res.statusCode).toBe(503)
     expect(res.json()).toEqual({ error: 'draining' })
     await local.close()
+  })
+})
+
+// Follow-up to Important 2 (feat/admin-sessions whole-branch review):
+// requireSession had the SAME discarded-renewal pattern the bridge did,
+// on GET /v1/projects -- the route a project switcher polls routinely.
+// Fixed structurally, by flipping SessionStore.verify's own default to
+// non-renewing (see sessions.ts's docstring), rather than as a second
+// `{ renew: false }` call site here. This test pins that a session inside
+// its renewal window, used through THIS route, still does not move
+// expires_at -- built directly against registerAdminProjectRoutes (not
+// buildApp, whose SessionStore uses fixed production TTLs) so the renewal
+// window can actually be reached without a 7-day wait.
+describe('a session inside its renewal window, used through GET /v1/projects', () => {
+  it('does not move expires_at', async () => {
+    const admin = await pg.query<{ id: string }>('SELECT id FROM admin_user WHERE email = $1', [
+      EMAIL,
+    ])
+    const adminId = Number(admin.rows[0]?.id)
+
+    // 10s TTL, 60s renew-within: issued already inside its own window --
+    // same shape as bridge.test.ts's equivalent proof.
+    const issuer = new SessionStore(pg, 10_000, 60_000)
+    const { token } = await issuer.issue(adminId)
+    const before = await pg.query<{ expires_at: Date }>(
+      'SELECT expires_at FROM sessions WHERE id = $1',
+      [hashSessionToken(token)],
+    )
+
+    const routeSessions = new SessionStore(pg, 600_000, 60_000)
+    const readiness = new Readiness()
+    readiness.markReady()
+    const projects = new ProjectCache(pg, 60_000)
+    const local = Fastify()
+    await local.register(cookiePlugin)
+    registerAdminProjectRoutes(local, { pg, sessions: routeSessions, projects, readiness })
+    await local.ready()
+
+    const res = await local.inject({
+      method: 'GET',
+      url: '/v1/projects',
+      headers: { cookie: `lf_session=${token}`, 'x-lyraflow-ui': '1' },
+    })
+    expect(res.statusCode).toBe(200)
+    await local.close()
+
+    const after = await pg.query<{ expires_at: Date }>(
+      'SELECT expires_at FROM sessions WHERE id = $1',
+      [hashSessionToken(token)],
+    )
+    expect(after.rows[0]?.expires_at.getTime()).toBe(before.rows[0]?.expires_at.getTime())
   })
 })

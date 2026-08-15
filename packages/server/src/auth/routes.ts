@@ -103,7 +103,11 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): void {
     if (refuseIfDraining(readiness, reply)) return
     const token = req.cookies?.[SESSION_COOKIE]
     if (!token) return reply.code(401).send({ error: 'no_session' })
-    const rec = await sessions.verify(token)
+    // The one deliberate opt-in: this is the only route that can act on
+    // `renewed` by re-sending the cookie below, so it is the only caller
+    // that asks verify() for the renewing form rather than relying on its
+    // (non-renewing) default. See SessionStore.verify's own docstring.
+    const rec = await sessions.verify(token, { renew: true })
     if (!rec) return reply.code(401).send({ error: 'no_session' })
     if (rec.renewed) setSessionCookie(reply, req, token, rec.expiresAt)
 

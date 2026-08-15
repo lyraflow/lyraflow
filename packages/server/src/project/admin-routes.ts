@@ -37,6 +37,12 @@ export function registerAdminProjectRoutes(app: FastifyInstance, deps: AdminProj
     if (refuseIfDraining(readiness, reply)) return false
     if (!requireUiHeader(req, reply)) return false
     const token = req.cookies?.[SESSION_COOKIE]
+    // Non-renewing by default (see SessionStore.verify's own docstring):
+    // this is the same "verify a session cookie" call the bridge makes,
+    // and neither route can re-send a cookie, so it must not opt in to the
+    // renewing form either. GET /v1/projects is the one place a project
+    // switcher hits routinely, which is exactly why this one mattered as
+    // much as the bridge's copy did.
     if (!token || !(await sessions.verify(token))) {
       reply.code(401).send({ error: 'invalid_session' })
       return false
