@@ -5,6 +5,14 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./snippet": { "types": "./dist/snippet/build.d.ts", "default": "./dist/snippet/build.js" },
+    "./snippet/build.js": {
+      "types": "./dist/snippet/build.d.ts",
+      "default": "./dist/snippet/build.js"
+    }
+  },
   "engines": { "node": ">=22 <23" },
   "scripts": { "build": "tsc -b" },
   "dependencies": { "zod": "^3.23.0" },

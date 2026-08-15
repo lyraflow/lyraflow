@@ -65,6 +65,21 @@ describe('Settings — snippet', () => {
     renderSettings()
     expect(await screen.findByText(/shown once/i)).toBeInTheDocument()
   })
+
+  // The async clipboard API REJECTS -- it doesn't just no-op -- when the
+  // document isn't focused, and is unavailable entirely on a non-secure
+  // origin that isn't localhost: exactly a self-hoster on plain HTTP over
+  // a private network. Nothing above drives a rejecting `writeText`, so a
+  // regression in the `catch` branch would be invisible.
+  it('tells the person to copy by hand when the clipboard write is rejected', async () => {
+    const writeText = vi.fn(async (_text: string) => {
+      throw new DOMException('Document is not focused', 'NotAllowedError')
+    })
+    Object.assign(navigator, { clipboard: { writeText } })
+    renderSettings()
+    await userEvent.click(await screen.findByRole('button', { name: /copy/i }))
+    expect(await screen.findByText(/copy it by hand/i)).toBeInTheDocument()
+  })
 })
 
 describe('Settings — usage', () => {

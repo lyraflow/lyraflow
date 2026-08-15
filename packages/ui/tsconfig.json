@@ -6,7 +6,10 @@
     "composite": true,
     "jsx": "react-jsx",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["vitest/globals"],
+    // "vite/client" augments `ImportMeta` for `import.meta.glob`, used by
+    // build-output.test.ts to reach `dist/assets` without any Node ambient
+    // types -- see that file's own comment for why those are avoided here.
+    "types": ["vitest/globals", "vite/client"],
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"]

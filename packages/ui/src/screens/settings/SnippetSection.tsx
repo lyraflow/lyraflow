@@ -1,4 +1,17 @@
-import { buildSnippet, normalizeHost } from '@lyraflow/core'
+// The subpath, NOT the package root -- `@lyraflow/core`'s root barrel
+// (`index.ts`) re-exports `auth/password.ts`, which calls
+// `promisify(scrypt)` at MODULE SCOPE, not inside a function. Rollup can
+// tree-shake the unused `hashPassword` export itself, but it cannot prove
+// that top-level call has no side effects, so it stays in the bundle --
+// where `node:crypto`/`node:util` are externalized to an empty stub, and
+// `Bm.promisify` (the stub) is undefined. The result was a `TypeError`
+// thrown at module-evaluation time, before React ever mounts: a white
+// screen with nothing in the console but the throw. `build.ts` has no
+// internal imports, so this subpath resolves without pulling any of that
+// in -- see `packages/core/package.json`'s `exports` map, which pins this
+// path so a later refactor of `core`'s barrel can't silently break it
+// again.
+import { buildSnippet, normalizeHost } from '@lyraflow/core/snippet/build.js'
 import { SNIPPET_METHODS } from '@lyraflow/sdk-browser'
 import { useState } from 'react'
 import { Button } from '../../components/ui/button.js'
