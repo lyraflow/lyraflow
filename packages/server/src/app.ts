@@ -306,7 +306,7 @@ export function buildApp(input: {
     database: config.ch.database,
   })
   registerSchemaRoutes(app, { authenticate, ch })
-  registerProjectRoutes(app, { authenticate, pg })
+  registerProjectRoutes(app, { authenticate, pg, projects })
   // Session-only and NOT given `authenticate` -- see admin-routes.ts's own
   // docstring for why these two routes must not accept a project server key.
   registerAdminProjectRoutes(app, { pg, sessions, projects, readiness })
