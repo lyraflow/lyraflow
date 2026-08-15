@@ -129,41 +129,67 @@ export class AttemptLimiter {
       // newly recorded key at the end of the order.
       ns.delete(key)
       ns.set(key, kept)
-      this.#evict(ns)
+      this.#evict(ns, key)
     }
   }
 
   /**
    * Keeps one namespace's map at or under `maxKeys`, preferring to evict an
-   * entry that is NOT currently blocked (`attempts.length < maxAttempts`)
-   * over one that is -- oldest first among whichever group it picks from.
+   * entry that is NOT currently blocked over one that is -- oldest first
+   * among whichever group it picks from -- and NEVER the key `record()`
+   * just inserted, regardless of that key's own state.
    *
-   * This is what makes a blocked key survive a flood of unrelated ones: as
-   * long as at least one entry in the namespace is still under the limit,
-   * that is what gets evicted, never the blocked victim, regardless of
-   * which key the flood keeps refreshing.
+   * "Not currently blocked" is judged by LIVE attempt count (post-window
+   * pruning via the same cutoff `#live` uses), not the raw stored array
+   * length. Without that, a key that was blocked and then never touched
+   * again looks permanently blocked here even once its attempts have all
+   * aged out of the window -- `attempts.length` stays at `maxAttempts`
+   * forever, because nothing prunes an untouched entry's array. Judging by
+   * live count instead means a saturated namespace decays as its entries
+   * age past the window, rather than staying wedged for the process's
+   * whole lifetime.
    *
-   * The map still cannot grow without bound: only when EVERY entry in the
-   * namespace is blocked does this fall back to evicting the oldest one
-   * outright, so `ns.size` never exceeds `maxKeys` no matter what arrives.
-   * Reaching that fallback at all requires an attacker to drive `maxKeys`
-   * distinct keys in this namespace over the limit -- `maxKeys *
-   * maxAttempts` requests at minimum, not the `maxKeys` requests the old
-   * shared-map eviction took -- and even then it evicts whichever blocked
-   * entry has gone longest untouched, not preferentially the newest
-   * (freshly-blocked) one, since every read/write already moves a touched
-   * entry to the end of the order.
+   * CRITICAL REGRESSION, FIXED: the previous version chose ANY
+   * under-the-limit entry as its preferred victim, without excluding the
+   * key `record()` had just inserted. Once a namespace filled entirely
+   * with blocked entries, the key just recorded -- freshly inserted with
+   * only 1 attempt, i.e. the ONLY entry under the limit -- became the
+   * preferred victim of its own insertion and was deleted immediately,
+   * silently dropping every attempt against it. That made the limiter
+   * self-disable the instant an attacker saturated a namespace (proved:
+   * 40,960 requests to saturate 4096 email keys, then unlimited guesses
+   * against any email not already resident, zero 429s) -- cheaper to
+   * defeat than the shared-map version this fix wave replaced. Excluding
+   * `justRecorded` from candidacy at every tier -- preferred and
+   * fallback -- closes it: the key just recorded can never be its own
+   * victim, so it always survives its own `record()` call.
+   *
+   * The map still cannot grow without bound: only when EVERY entry other
+   * than the one just recorded is live-blocked does this fall through to
+   * evicting the oldest of THOSE outright, so `ns.size` never exceeds
+   * `maxKeys` no matter what arrives.
    */
-  #evict(ns: Map<string, number[]>): void {
+  #evict(ns: Map<string, number[]>, justRecorded: string): void {
+    if (ns.size <= this.maxKeys) return
+    const cutoff = Date.now() - this.windowMs
     while (ns.size > this.maxKeys) {
       let victim: string | undefined
       for (const [k, attempts] of ns) {
-        if (attempts.length < this.maxAttempts) {
+        if (k === justRecorded) continue
+        const live = attempts.reduce((n, t) => (t > cutoff ? n + 1 : n), 0)
+        if (live < this.maxAttempts) {
           victim = k
           break
         }
       }
-      if (victim === undefined) victim = ns.keys().next().value
+      if (victim === undefined) {
+        for (const k of ns.keys()) {
+          if (k !== justRecorded) {
+            victim = k
+            break
+          }
+        }
+      }
       if (victim === undefined) break
       ns.delete(victim)
     }

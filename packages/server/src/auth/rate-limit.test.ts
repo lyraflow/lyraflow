@@ -146,4 +146,36 @@ describe('AttemptLimiter', () => {
     for (let i = 0; i < 50; i++) l.record([`email:e${i}@example.test`])
     expect(l.size).toBeLessThanOrEqual(4)
   })
+
+  // CRITICAL REGRESSION: "is bounded even when every entry in a namespace
+  // is blocked" above only ever asserted `size <= maxKeys` -- true for both
+  // the broken code and the fix, and never checked that a FRESH key
+  // survives being recorded once its namespace is already saturated with
+  // blocked entries. The old #evict chose ANY under-the-limit entry as its
+  // preferred victim, without excluding the key `record()` had just
+  // inserted -- so once a namespace filled entirely with blocked entries,
+  // the just-recorded key (fresh, and so the only entry under the limit)
+  // became the preferred victim of its own insertion and was deleted
+  // immediately. That silently dropped every attempt against any key not
+  // already resident in a saturated namespace, disabling the limiter for
+  // new keys entirely.
+  it('a fresh key still accumulates attempts and blocks after its namespace is saturated with at-limit entries', () => {
+    const l = new AttemptLimiter(3, 60_000, 5)
+    // Saturate the namespace: 5 throwaway emails, each driven to the limit
+    // -- exactly full, nothing left under the limit.
+    for (let i = 0; i < 5; i++) {
+      for (let j = 0; j < 3; j++) l.record([`email:saturate-${i}@example.test`])
+    }
+    expect(l.size).toBeLessThanOrEqual(5)
+
+    const fresh = 'email:fresh@example.test'
+    // Record the fresh key up to the limit. The regression: the first of
+    // these three calls temporarily pushes the namespace to 6 entries and
+    // must evict someone -- if it evicts the key it just inserted (itself
+    // the only under-the-limit entry among an otherwise-saturated
+    // namespace), this key never accumulates past 1 attempt before being
+    // wiped, and never blocks.
+    for (let j = 0; j < 3; j++) l.record([fresh])
+    expect(l.check([fresh])).toBe(false)
+  })
 })
