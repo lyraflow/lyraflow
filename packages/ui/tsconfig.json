@@ -6,7 +6,20 @@
     "composite": true,
     "jsx": "react-jsx",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["vitest/globals"]
+    "types": ["vitest/globals"],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    },
+    // Overrides the base's NodeNext: this package is Vite-bundled, never run
+    // directly by Node, and vendored shadcn files import "@/lib/utils" with
+    // no extension. Under NodeNext that only resolves a directory, not a
+    // file, so tsc reports it missing while Vite (which uses the same
+    // resolution Vite itself does) builds it fine -- a silent split between
+    // typecheck and build. "bundler" matches what actually resolves the
+    // import at build and dev time.
+    "module": "ESNext",
+    "moduleResolution": "bundler"
   },
   "include": ["src/**/*"]
 }

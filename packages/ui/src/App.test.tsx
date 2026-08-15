@@ -3,8 +3,9 @@ import { describe, expect, it } from 'vitest'
 import App from './App.js'
 
 describe('App', () => {
-  it('renders the placeholder heading', () => {
+  it('renders the shell around the placeholder content', () => {
     render(<App />)
-    expect(screen.getByRole('heading', { name: 'Lyraflow' })).toBeVisible()
+    expect(screen.getByRole('link', { name: /feed/i })).toBeInTheDocument()
+    expect(screen.getByText('The interface is being built.')).toBeInTheDocument()
   })
 })
