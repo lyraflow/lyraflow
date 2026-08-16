@@ -360,6 +360,32 @@ describe('SegmentBuilder -- Task 9: the rename rule', () => {
     await waitFor(() => expect(client.renameSegment).toHaveBeenCalledWith(1, 7, 'New'))
     expect(client.updateSegmentTree).not.toHaveBeenCalled()
   })
+
+  // Fix round 1: an edit save can issue TWO PATCHes (rename + tree update),
+  // and `Promise.all` rejects the instant either one does -- possibly AFTER
+  // the other has already committed. The error copy used to say "nothing
+  // was changed on the server", which is false in exactly this shape. This
+  // fixture forces that shape (the rename succeeds, the tree update fails)
+  // and pins that the banner never claims it.
+  it('a failed edit save (rename succeeds, tree update fails) says to retry, and never claims nothing was changed on the server', async () => {
+    const client = fakeClient({
+      updateSegmentTree: vi.fn(async () => {
+        throw new ApiError(500, 'server_error')
+      }),
+    })
+    renderEdit(client, { id: 7, name: 'Old', filter: TREE })
+    await screen.findByTestId('condition-0')
+    await userEvent.clear(screen.getByLabelText(/name/i))
+    await userEvent.type(screen.getByLabelText(/name/i), 'New')
+    await negateTheFirstCondition()
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+
+    await waitFor(() => expect(client.renameSegment).toHaveBeenCalledWith(1, 7, 'New'))
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(/could not save this segment/i)
+    expect(alert).not.toHaveTextContent(/nothing was changed/i)
+    expect(alert).not.toHaveTextContent(/nothing changed/i)
+  })
 })
 
 // --- Task 6: the three server-side tree caps, enforced end to end through

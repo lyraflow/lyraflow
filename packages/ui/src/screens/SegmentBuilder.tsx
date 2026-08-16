@@ -319,7 +319,17 @@ export function SegmentBuilder(props: {
           onUnauthorized?.()
           return
         }
-        setSaveError('Could not save this segment. Nothing was changed on the server.')
+        // Deliberately NOT "nothing was changed on the server" (the create
+        // branch's own message, true there because one request is
+        // atomic) -- when both fields changed this fires two PATCHes, and
+        // `Promise.all` rejects the instant either one does, which can be
+        // AFTER the other has already committed. Claiming nothing changed
+        // here would be false in exactly that case, with no way for the
+        // operator to check it. Retry is still honest advice without that
+        // claim: `originalName`/`originalRoot` are never refreshed after a
+        // failed save, so a second Save re-sends only whatever still
+        // differs -- idempotent for whichever side already landed.
+        setSaveError('Could not save this segment. Try again.')
       })
       .finally(() => setSaving(false))
   }
