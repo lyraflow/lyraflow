@@ -107,7 +107,29 @@ fi
 # modes -- in domain mode there is no host port on 3000 to poll.
 echo
 echo "Starting Lyraflow..."
-docker compose up -d --wait
+if ! docker compose up -d --wait; then
+  echo >&2
+  echo "Startup failed: a container did not become healthy in time." >&2
+  # Caddy depends on Lyraflow's own healthcheck passing before it even
+  # starts, so this is never wrong-looking: if Caddy is the one that broke,
+  # its status here is neither empty nor "(healthy)"; if something else
+  # broke, Caddy either never started (empty status) or is fine (healthy),
+  # and this stays quiet instead of pointing at the wrong log.
+  CADDY_STATUS="$(docker compose ps caddy --format '{{.Status}}' 2>/dev/null)" || CADDY_STATUS=''
+  case "$CADDY_STATUS" in
+    '' | *'(healthy)') ;;
+    *)
+      echo "Caddy: $CADDY_STATUS" >&2
+      echo "Its recent log -- a typo in a file under docker/caddy/tls.d/ is" >&2
+      echo "the usual cause:" >&2
+      docker compose logs --tail=20 caddy >&2 || true
+      echo >&2
+      ;;
+  esac
+  echo "Full logs:" >&2
+  echo "  docker compose logs" >&2
+  exit 1
+fi
 
 # The domain the running stack actually serves, which is what every URL printed
 # below has to be built from. .env wins over this invocation because add_setting

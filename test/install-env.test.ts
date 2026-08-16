@@ -47,10 +47,42 @@ const runInstallRaw = (args: string[], opts: InstallOpts = {}): InstallResult =>
 
   const bin = join(dir, 'bin')
   mkdirSync(bin)
-  for (const cmd of ['docker', 'curl']) {
-    writeFileSync(join(bin, cmd), '#!/bin/sh\nexit 0\n')
-    chmodSync(join(bin, cmd), 0o755)
-  }
+  writeFileSync(join(bin, 'curl'), '#!/bin/sh\nexit 0\n')
+  chmodSync(join(bin, 'curl'), 0o755)
+
+  // `docker` is almost always a no-op stub -- everything succeeds. The one
+  // case that needs otherwise is `up -d --wait` itself: with FAIL_UP_WAIT set
+  // in the environment, it fails the way Compose does when a container never
+  // reports healthy, and the two follow-up commands install.sh runs to
+  // diagnose that (`ps caddy`, `logs --tail=20 caddy`) answer from
+  // CADDY_STATUS/CADDY_LOG_LINE instead of the default "exit 0, say nothing".
+  writeFileSync(
+    join(bin, 'docker'),
+    [
+      '#!/bin/sh',
+      'case "$*" in',
+      '  "compose up -d --wait")',
+      '    if [ -n "${FAIL_UP_WAIT:-}" ]; then',
+      '      echo "container test-caddy-1 is unhealthy" >&2',
+      '      exit 1',
+      '    fi',
+      '    exit 0',
+      '    ;;',
+      '  "compose ps caddy --format {{.Status}}")',
+      '    [ -n "${CADDY_STATUS:-}" ] && printf \'%s\\n\' "$CADDY_STATUS"',
+      '    exit 0',
+      '    ;;',
+      '  "compose logs --tail=20 caddy")',
+      '    [ -n "${CADDY_LOG_LINE:-}" ] && printf \'%s\\n\' "$CADDY_LOG_LINE"',
+      '    exit 0',
+      '    ;;',
+      '  *)',
+      '    exit 0',
+      '    ;;',
+      'esac',
+    ].join('\n'),
+  )
+  chmodSync(join(bin, 'docker'), 0o755)
 
   // install.sh calls `ss -ltnH "sport = :$port"` and treats any output at all
   // as "taken". The stub reproduces that shape: one LISTEN line for a port
@@ -259,5 +291,46 @@ describe('the host it tells the operator to use', () => {
   it('comes from this invocation on a first TLS install, where .env has none yet', () => {
     const { stdout } = runInstall(['analytics.example.com'])
     expect(stdout).toContain('LYRAFLOW_HOST=https://analytics.example.com')
+  })
+})
+
+// Issue #64: `set -e` used to abort the instant `docker compose up -d --wait`
+// failed, so the only thing an operator ever saw was Compose's own
+// "container ... is unhealthy" line -- never the pointer to the logs, which
+// lived further down on the success path and was unreachable from here. The
+// fix has to still fail the install (this is diagnosis, not tolerance) while
+// saying something a stranger can act on without having read install.sh.
+describe('when a container never becomes healthy', () => {
+  it('still fails the install, non-zero', () => {
+    const r = runInstallRaw([], { env: { FAIL_UP_WAIT: '1' } })
+    expect(r.status).toBe(1)
+  })
+
+  it('names Caddy and shows its recent log when Caddy is the one that is unhealthy', () => {
+    const r = runInstallRaw(['analytics.example.com'], {
+      env: {
+        FAIL_UP_WAIT: '1',
+        CADDY_STATUS: 'Restarting (1) 3 seconds ago',
+        CADDY_LOG_LINE: 'Error: adapting config using caddyfile: unrecognized directive: oops',
+      },
+    })
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('Startup failed')
+    expect(r.stderr).toContain('Caddy: Restarting (1) 3 seconds ago')
+    expect(r.stderr).toContain('unrecognized directive: oops')
+    // The full-log command is still offered, on top of the specific one.
+    expect(r.stderr).toContain('docker compose logs')
+  })
+
+  it('does not blame Caddy when Caddy itself is healthy or never started', () => {
+    // Empty CADDY_STATUS is what the `docker compose ps caddy` stub returns
+    // by default -- the shape of a non-TLS install, where the service was
+    // never created at all.
+    const r = runInstallRaw([], { env: { FAIL_UP_WAIT: '1' } })
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('Startup failed')
+    expect(r.stderr).not.toContain('Caddy:')
+    // Still actionable on its own, since nothing more specific was found.
+    expect(r.stderr).toContain('docker compose logs')
   })
 })
