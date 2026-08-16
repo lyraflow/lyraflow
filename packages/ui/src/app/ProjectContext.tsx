@@ -11,16 +11,19 @@ interface ProjectState {
   // section -- agrees with what a successful save just changed, without
   // a second round trip to re-fetch the whole list.
   updateProject(id: number, patch: Partial<Project>): void
-  // Replaces the whole list -- the one operation `updateProject` cannot do,
-  // because a brand-new project has no existing entry to merge a patch
-  // into. This is deliberately the ONLY other write path: a caller that
-  // just created a project re-fetches the authoritative list (the create
-  // response itself lacks `id`/`retention_months`/`monthly_event_quota`)
-  // and hands the result here, so the header switcher and every other
-  // consumer of `projects` see it too. A second, component-local copy of
-  // the list is exactly the divergence this exists to prevent -- the
-  // switcher and a screen's own list disagreeing while both look correct.
-  setProjects(projects: Project[]): void
+  // Appends a newly-created project to the list -- the one operation
+  // `updateProject` cannot do, because a brand-new project has no existing
+  // entry to merge a patch into. Additive ONLY: this must never be a
+  // whole-list replace fed by a re-fetch (#89). A `POST /v1/projects`
+  // followed by `GET /v1/projects` has no ordering guarantee against a
+  // concurrent `PATCH /v1/project` elsewhere in the same tab -- if the GET
+  // was issued before the PATCH committed server-side, its stale response
+  // would win a replace even though `updateProject`'s merge already applied
+  // the newer value, and the header switcher and this screen's own list
+  // would silently disagree with what was just saved. `POST /v1/projects`'s
+  // response now carries every field a `Project` needs (`CreatedProject`,
+  // `api/types.ts`), so there is no re-fetch to race in the first place.
+  addProject(project: Project): void
 }
 
 const Ctx = createContext<ProjectState | null>(null)
@@ -42,10 +45,14 @@ export function ProjectProvider(props: {
   const [projects, setProjects] = useState<Project[]>(props.projects)
 
   // Same reasoning as the `activeId` sync below: the caller's `projects`
-  // prop can legitimately change (a re-fetched list after creating a
-  // project), and this provider's own local edits from `updateProject`
-  // must not survive past that -- the fresh list from the server is
-  // always the newer truth.
+  // prop can legitimately change (a freshly-mounted provider given a newly
+  // loaded session -- `App`'s post-wizard and post-login paths, both of
+  // which replace this provider rather than update it in place), and this
+  // provider's own local edits from `updateProject`/`addProject` must not
+  // survive past that -- the fresh list from the server is always the
+  // newer truth. NOT how a project created from inside an already-mounted
+  // provider reaches this list -- that is `addProject`, deliberately never
+  // a re-fetch; see its own doc comment (#89).
   useEffect(() => {
     setProjects(props.projects)
   }, [props.projects])
@@ -66,9 +73,19 @@ export function ProjectProvider(props: {
     setProjects((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)))
   }, [])
 
+  // Guards against ever appending the same project twice -- a caller
+  // retrying after a slow response whose creation actually succeeded is the
+  // ordinary way that would happen. Silently a no-op rather than replacing
+  // the existing entry: any edit to it since creation (an `updateProject`
+  // merge from a limits save) would otherwise be exactly the kind of
+  // clobber this method exists to prevent.
+  const addProject = useCallback((project: Project) => {
+    setProjects((prev) => (prev.some((p) => p.id === project.id) ? prev : [...prev, project]))
+  }, [])
+
   const value = useMemo(
-    () => ({ projects, activeId, setActiveId, updateProject, setProjects }),
-    [projects, activeId, updateProject],
+    () => ({ projects, activeId, setActiveId, updateProject, addProject }),
+    [projects, activeId, updateProject, addProject],
   )
   return <Ctx.Provider value={value}>{props.children}</Ctx.Provider>
 }

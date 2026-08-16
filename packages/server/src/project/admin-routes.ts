@@ -115,10 +115,22 @@ export function registerAdminProjectRoutes(app: FastifyInstance, deps: AdminProj
     // The server key appears here and nowhere else, ever: only its SHA-256
     // is stored. `no-store` for the same reason GET /v1/project carries it
     // -- this 200 body is a credential.
+    //
+    // Every other field GET /v1/projects lists for a project is included
+    // too (#89): the UI adds the new row to its in-memory list from this
+    // response alone, without a second GET /v1/projects whose result could
+    // race a concurrent PATCH and clobber it. Converted the same way that
+    // route's own row mapping does -- id/monthly_event_quota come back from
+    // Postgres as strings.
     reply.header('cache-control', 'no-store')
     return reply.code(201).send({
+      id: Number(created.id),
       name: created.name,
       slug: created.slug,
+      created_at: created.createdAt.toISOString(),
+      retention_months: created.retentionMonths,
+      monthly_event_quota:
+        created.monthlyEventQuota === null ? null : Number(created.monthlyEventQuota),
       write_key: created.writeKey,
       server_key: created.serverKey,
     })

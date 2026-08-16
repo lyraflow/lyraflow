@@ -215,6 +215,72 @@ describe('POST /v1/projects', () => {
     expect(again.body).not.toContain(body.server_key)
   })
 
+  // #89: the UI adds the created project to its in-memory list straight
+  // from this response, so it needs the id -- POST /v1/projects didn't
+  // return one before this fix.
+  it('returns the created project id', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/projects',
+      headers: { cookie, 'x-lyraflow-ui': '1' },
+      payload: { name: 'Admin Routes Id' },
+    })
+    expect(res.statusCode).toBe(201)
+    const body = res.json() as Record<string, unknown>
+    expect(typeof body.id).toBe('number')
+    expect(body.id).toBeGreaterThan(0)
+
+    const list = await app.inject({
+      method: 'GET',
+      url: '/v1/projects',
+      headers: { cookie, 'x-lyraflow-ui': '1' },
+    })
+    const projects = (list.json() as { projects: Array<Record<string, unknown>> }).projects
+    const mine = projects.find((p) => p.slug === 'admin-routes-id')
+    expect(mine?.id).toBe(body.id)
+
+    await pg.query('DELETE FROM projects WHERE slug = $1', ['admin-routes-id'])
+  })
+
+  // Every field GET /v1/projects lists for a project, matching exactly --
+  // not merely present, so a field GET reports that this response silently
+  // omitted (or a stale/defaulted value that disagrees with what GET would
+  // say) is caught. This is what makes the UI's "add this row without a
+  // second fetch" additive-insert safe: the created entry must be
+  // indistinguishable from one that came from GET /v1/projects.
+  it('returns every field GET /v1/projects reports for the same project, with matching values', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/projects',
+      headers: { cookie, 'x-lyraflow-ui': '1' },
+      payload: { name: 'Admin Routes Full Shape' },
+    })
+    expect(res.statusCode).toBe(201)
+    const body = res.json() as Record<string, unknown>
+
+    const list = await app.inject({
+      method: 'GET',
+      url: '/v1/projects',
+      headers: { cookie, 'x-lyraflow-ui': '1' },
+    })
+    const projects = (list.json() as { projects: Array<Record<string, unknown>> }).projects
+    const fromList = projects.find((p) => p.slug === 'admin-routes-full-shape')
+    expect(fromList).toBeDefined()
+
+    for (const field of [
+      'id',
+      'name',
+      'slug',
+      'created_at',
+      'retention_months',
+      'monthly_event_quota',
+    ]) {
+      expect(body[field]).toEqual(fromList?.[field])
+    }
+
+    await pg.query('DELETE FROM projects WHERE slug = $1', ['admin-routes-full-shape'])
+  })
+
   it('refuses a duplicate name with 409, not a 503', async () => {
     await app.inject({
       method: 'POST',
