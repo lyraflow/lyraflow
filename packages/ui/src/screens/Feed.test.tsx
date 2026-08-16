@@ -297,6 +297,12 @@ describe('Feed', () => {
     renderFeed({ client })
     expect(await screen.findByText(/no events yet/i)).toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    // Fix round 2 on #82: the asymmetric half of the badge fix. A confirmed
+    // zero (the events poll succeeded and returned nothing) must show a
+    // genuine "0", not the dash `loadFailed` cases get -- swallowing a real
+    // zero into "unknown" is its own false claim, and the one a self-hoster
+    // checking whether tracking works actually needs to be true.
+    expect((await screen.findByRole('tab', { name: /accepted/i })).textContent).toMatch(/\b0\b/)
   })
 
   // Matrix row 2 (no data, error) -- issue #82's own bug. Nothing has ever
