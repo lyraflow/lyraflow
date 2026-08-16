@@ -1743,6 +1743,14 @@ itself. Nothing else about the install changes, and every example in this
 document works against `https://analytics.example.com` in place of
 `http://localhost:3000`.
 
+`lyraflow snippet` picks this up automatically: with a hostname configured
+this way, `-e LYRAFLOW_HOST=...` can be dropped from the `docker compose exec`
+call in [*Put the snippet on your website*](#2-put-the-snippet-on-your-website)
+— the command defaults to `https://` plus the domain you gave the installer,
+so the one place a wrong scheme silently produces a broken (mixed-content)
+snippet no longer needs typing out by hand. Every other command still needs
+`--host`/`LYRAFLOW_HOST` set explicitly (see [`packages/cli/README.md`](packages/cli/README.md)).
+
 Leaving the hostname out keeps today's behaviour exactly: three containers,
 port 3000, no certificate. That is the right choice if you already run a
 reverse proxy — put it in front of port 3000 as you would anything else.

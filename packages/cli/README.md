@@ -77,6 +77,9 @@ Missing both the flag and the env var for either one is a usage error (exit
 Error: LYRAFLOW_HOST and LYRAFLOW_SERVER_KEY must be set (or pass --host/--server-key) (usage_error)
 ```
 
+`lyraflow snippet` alone has a third fallback for `--host` — see *`lyraflow
+snippet`* below.
+
 ### Which project a command talks to
 
 One Lyraflow install can hold many projects (see *Tracking more than one site*
@@ -654,6 +657,27 @@ ignored.
 ```
 lyraflow snippet [--since <duration>] [--json|--human]
 ```
+
+**The only command with a third source for `--host`.** Every other command
+needs `--host` or `LYRAFLOW_HOST` (see *Configuration* above) or fails with a
+usage error. `snippet` additionally falls back to `LYRAFLOW_DOMAIN` — the same
+`.env` value a domain/TLS install already has (see *Serving over HTTPS* in the
+main README) — as `https://$LYRAFLOW_DOMAIN`, so an install that was given a
+domain does not have to be told its own host a second time just to print a
+snippet:
+
+```sh
+docker compose exec -e LYRAFLOW_SERVER_KEY=$LYRAFLOW_SERVER_KEY \
+  lyraflow node packages/cli/dist/index.js snippet
+# host defaults to https://analytics.example.com — no -e LYRAFLOW_HOST needed
+```
+
+Precedence is `--host` \> `LYRAFLOW_HOST` \> `LYRAFLOW_DOMAIN`; with none of
+the three set, `snippet` fails with the same usage error every other command
+does. An `LYRAFLOW_DOMAIN` that already carries a scheme, a trailing slash, or
+stray surrounding whitespace is handled the same way an equivalent `--host`
+value would be — see `hostFromDomain` (`packages/cli/src/index.ts`) if you
+need the exact rule.
 
 Prints a paste-ready browser install snippet — this project's own host and
 write key already substituted into the exact block documented under *Sending

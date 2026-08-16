@@ -549,6 +549,12 @@ function renderHuman(snippet: string, events: EventsSection): string {
 /**
  * `lyraflow snippet [--since <duration>] [--json|--human]`
  *
+ * `ctx.host` (and the `Client` in `ctx`) is resolved by `main()`'s dispatch
+ * (index.ts) before this function ever runs — `--host` > `LYRAFLOW_HOST` >,
+ * for THIS command alone, `LYRAFLOW_DOMAIN` (see `resolveHost`/
+ * `hostFromDomain` there, and issue #61). Nothing below needs to know that
+ * fallback happened; it only ever sees the one resolved value.
+ *
  * Returns the process exit code: 0 success, 1 the request failed, 2 usage
  * error.
  */
