@@ -115,4 +115,70 @@ describe('summarise', () => {
     const t = { kind: 'trait', key: 'age', operator: 'between', value: [18, 65] }
     expect(summarise(t as never)).toBe('age between 18 and 65')
   })
+
+  // --- Fix round 2: `behavior.where` was previously unexercised -----------
+  //
+  // `grep -n "where" summarise.test.ts` returned nothing before this round:
+  // the phrasing, the join separator between predicates and the per-
+  // predicate format were all unverified. A single-predicate fixture alone
+  // would not pin the join, since its rendering is identical whether the
+  // predicates are joined with ', ' or concatenated with nothing at all --
+  // so the two-predicate case below uses two predicates that differ from
+  // each other in every field, so swapping their order or the separator
+  // changes the string.
+
+  it('appends a single where predicate as a readable clause', () => {
+    const b = {
+      kind: 'behavior',
+      event: 'checkout',
+      aggregate: 'count',
+      where: [{ property: 'amount', operator: '>', value: 100 }],
+      window: { kind: 'last', n: 30, unit: 'days' },
+      operator: '>=',
+      value: 3,
+    }
+    expect(summarise(b as never)).toBe('count of checkout in last 30 days >= 3 where amount > 100')
+  })
+
+  it('joins two or more where predicates with ", ", in order -- not concatenated, not reversed', () => {
+    const b = {
+      kind: 'behavior',
+      event: 'checkout',
+      aggregate: 'count',
+      where: [
+        { property: 'amount', operator: '>', value: 100 },
+        { property: 'currency', operator: '=', value: 'USD' },
+      ],
+      window: { kind: 'last', n: 30, unit: 'days' },
+      operator: '>=',
+      value: 3,
+    }
+    expect(summarise(b as never)).toBe(
+      'count of checkout in last 30 days >= 3 where amount > 100, currency = USD',
+    )
+  })
+
+  it('renders an empty where array the same as no where at all -- no dangling "where"', () => {
+    const withEmptyWhere = {
+      kind: 'behavior',
+      event: 'checkout',
+      aggregate: 'count',
+      where: [],
+      window: { kind: 'last', n: 30, unit: 'days' },
+      operator: '>=',
+      value: 3,
+    }
+    const withoutWhere = {
+      kind: 'behavior',
+      event: 'checkout',
+      aggregate: 'count',
+      window: { kind: 'last', n: 30, unit: 'days' },
+      operator: '>=',
+      value: 3,
+    }
+    const expected = 'count of checkout in last 30 days >= 3'
+    expect(summarise(withEmptyWhere as never)).toBe(expected)
+    expect(summarise(withoutWhere as never)).toBe(expected)
+    expect(summarise(withEmptyWhere as never)).not.toContain('where')
+  })
 })
