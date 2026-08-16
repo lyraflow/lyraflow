@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
-import type { Funnel, FunnelRunResult } from '../api/types.js'
+import type { Funnel, FunnelRunResult, Segment } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
 import { ROUTES, funnelEditPath } from '../app/Router.js'
 import { Button } from '../components/ui/button.js'
@@ -24,6 +24,40 @@ import { formatRangeDays, formatRelative } from './funnels/format.js'
  */
 function segmentFilterBroken(result: FunnelRunResult | null): boolean {
   return result?.warnings.some((w) => w.path === 'segment_id') ?? false
+}
+
+/**
+ * How the segment subtitle should read, given what `GET /v1/segments`
+ * returned (issue #94). Three states, deliberately distinguished rather than
+ * collapsed into one fallback:
+ *
+ * - Resolved: `segmentId` matches an entry in the list -- render its name,
+ *   WITH the id (`Paying customers (#4)`). The id stays visible because it's
+ *   what actually appears in the API response and in logs; an operator
+ *   cross-referencing either needs it on screen, not just the friendly name.
+ * - Not loaded yet, or the lookup itself failed (including a non-401 error)
+ *   -- fall back to the bare id rather than blocking rendering or hiding the
+ *   subtitle. A failed *lookup* is not the same fact as a *deleted* segment
+ *   and must never be presented as one.
+ * - Loaded successfully and genuinely absent from the list: `segment_id`
+ *   carries no foreign key, deliberately, so this is a designed state (the
+ *   segment was deleted elsewhere) and not an edge case -- say so plainly,
+ *   in the same words `SegmentPicker` already uses for the same state,
+ *   rather than rendering a name it doesn't have or silently reading as "no
+ *   filter".
+ */
+function segmentLabel(
+  segmentId: number,
+  segments: Segment[],
+  loaded: boolean,
+  loadError: boolean,
+): string {
+  if (loaded && !loadError) {
+    const match = segments.find((s) => s.id === segmentId)
+    if (match != null) return `${match.name} (#${segmentId})`
+    return `#${segmentId} -- cannot be resolved (deleted, or unreadable)`
+  }
+  return `#${segmentId}`
 }
 
 /**
@@ -72,6 +106,15 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+
+  // Issue #94: resolves `funnel.segment_id` to a name via `GET /v1/segments`.
+  // Deliberately three flags, not one -- `segmentLabel` above needs to tell
+  // "still loading" and "loaded, but the request itself failed" apart from
+  // "loaded fine, and the id is genuinely absent from the list", and a
+  // single boolean can't carry that distinction.
+  const [segments, setSegments] = useState<Segment[]>([])
+  const [segmentsLoaded, setSegmentsLoaded] = useState(false)
+  const [segmentsError, setSegmentsError] = useState(false)
 
   // C1 fix round 2 (targeted re-review): the original guard compared the
   // RANGE a response was issued for against the range now selected -- but
@@ -213,6 +256,50 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
       cancelled = true
     }
   }, [client, activeId, validId, onUnauthorized])
+
+  // Issue #94: fetches `GET /v1/segments` only once the open funnel actually
+  // names one -- state 1 (no filter, `segment_id === null`) fetches nothing
+  // at all, deliberately: a screen that pulls a list it will not use on
+  // every funnel view is a cost with no benefit. Keyed on `funnel?.segment_id`
+  // rather than the whole `funnel` object so this doesn't refire on every
+  // funnel refetch that leaves the filter unchanged, and resets to the
+  // "not loaded" state whenever the id (or the active project) changes, so a
+  // stale name never carries over onto a different funnel while the new
+  // lookup is still in flight.
+  useEffect(() => {
+    const segmentId = funnel?.segment_id ?? null
+    if (activeId == null || segmentId == null) {
+      setSegments([])
+      setSegmentsLoaded(false)
+      setSegmentsError(false)
+      return
+    }
+    let cancelled = false
+    setSegmentsLoaded(false)
+    setSegmentsError(false)
+    client
+      .segments(activeId)
+      .then((list) => {
+        if (cancelled) return
+        setSegments(list)
+        setSegmentsLoaded(true)
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return
+        if (err instanceof ApiError && err.status === 401) {
+          onUnauthorized?.()
+          return
+        }
+        // A failed lookup falls back to the bare id (`segmentLabel` above) --
+        // it must not blank the subtitle, and must not break the rest of the
+        // page, which has nothing to do with this fetch.
+        setSegmentsLoaded(true)
+        setSegmentsError(true)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [client, activeId, funnel?.segment_id, onUnauthorized])
 
   const handleRangeChange = (newDays: RangeDays) => {
     // Bumps `answerIdRef` even though it issues no request of its own: a
@@ -392,7 +479,7 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
            * only rendering that cannot be read as "the filter applied". */}
           {funnel != null && funnel.segment_id != null && !brokenSegment && (
             <p data-testid="funnel-segment-filter" className="text-sm text-muted-foreground">
-              Segment: #{funnel.segment_id}
+              Segment: {segmentLabel(funnel.segment_id, segments, segmentsLoaded, segmentsError)}
             </p>
           )}
           <WarningPanel warnings={result.warnings} />
