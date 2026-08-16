@@ -135,6 +135,20 @@ function allSucceedThenAllFail() {
   return c
 }
 
+/** Events fails on every call, from the very first one; rejections and
+ * stats keep succeeding. Fix round 1 on #82: the mixed case where the
+ * events poll specifically has never once succeeded while the SCREEN as a
+ * whole has data (from the other two), so the top banner reads "showing
+ * the last data received" while the Accepted badge, unguarded, would still
+ * show a confirmed-looking "0". */
+function eventsFailingFromStart() {
+  const c = fakeClient()
+  c.events = vi.fn(async () => {
+    throw new ApiError(503, 'unavailable')
+  }) as unknown as typeof c.events
+  return c
+}
+
 // Invented: every existing "shows an error" fixture fails the *events*
 // poll specifically. Nothing in the given suite would notice a mutation
 // that wired the alert to `eventsState.error` alone and dropped the other
@@ -298,6 +312,31 @@ describe('Feed', () => {
     expect(alert.textContent).toMatch(/could not load the feed/i)
     expect(screen.queryByText(/no events yet/i)).not.toBeInTheDocument()
     expect(screen.queryByText('page_view')).not.toBeInTheDocument()
+    // Fix round 1 on #82: the badge is the same claim as the table body,
+    // relocated -- "Accepted 0" is just as false as "No events yet" when
+    // the events poll has never once succeeded.
+    expect(await screen.findByRole('tab', { name: /accepted/i })).toHaveTextContent('—')
+  })
+
+  // Fix round 1 on #82. The bug had moved rather than being fixed: the
+  // table body correctly stopped rendering "No events yet", but
+  // `TabsTrigger` still rendered `formatCount(events.length, ...)`, and
+  // `events.length === 0` cannot distinguish "confirmed zero" from "never
+  // confirmed" -- so the Accepted badge kept showing "0" the whole time the
+  // events poll was failing, sitting right next to a banner reading
+  // "Could not refresh the feed. Showing the last data received." This is
+  // the exact mixed case that exposed it: events has never succeeded, but
+  // the screen as a whole has data (from rejections/stats), so the banner
+  // is in its "showing the last data received" branch while the Accepted
+  // badge must still say "unknown", not "0".
+  it('shows a dash on the Accepted badge, not a confirmed zero, when the events poll has never succeeded', async () => {
+    const client = eventsFailingFromStart()
+    renderFeed({ client })
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toMatch(/could not refresh the feed/i)
+    const tab = await screen.findByRole('tab', { name: /accepted/i })
+    expect(tab.textContent).toMatch(/—/)
+    expect(tab.textContent).not.toMatch(/\b0\b/)
   })
 
   // Matrix row 3 (data, error): the only row where "showing the last data
@@ -434,7 +473,12 @@ describe('Feed', () => {
     }) as unknown as typeof client.rejections
     renderFeed({ client })
     await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
-    await userEvent.click(await screen.findByRole('tab', { name: /rejected/i }))
+    const tab = await screen.findByRole('tab', { name: /rejected/i })
+    // Fix round 1 on #82: the Rejected badge has the same "0 vs unknown"
+    // problem the Accepted one did.
+    expect(tab.textContent).toMatch(/—/)
+    expect(tab.textContent).not.toMatch(/\b0\b/)
+    await userEvent.click(tab)
     expect(screen.queryByText(/no rejections/i)).not.toBeInTheDocument()
   })
 

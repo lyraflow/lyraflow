@@ -52,6 +52,24 @@ function formatCount(n: number, limit: number): string {
   return n >= limit ? `${limit}+` : n.toLocaleString()
 }
 
+/**
+ * Fix round 1 on #82: the tab badge is the same bug relocated, not a
+ * different one. `events.length === 0` cannot distinguish "confirmed zero"
+ * from "this poll has never once succeeded" -- the table body already
+ * stopped claiming "No events yet" in that state, but the badge kept
+ * rendering "Accepted 0" the whole time an events poll was failing, right
+ * next to a banner that (once some OTHER poll has data) reads "showing the
+ * last data received". An operator has no way to tell 0 was never
+ * confirmed. An em dash says "unknown" rather than asserting a count the
+ * poll never established; the alternative (freezing the last known number)
+ * was rejected because a frozen "3" reads as current, which is the exact
+ * false confidence #82 was filed over.
+ */
+function formatBadgeCount(n: number, limit: number, loadFailed: boolean): string {
+  if (loadFailed) return '—'
+  return formatCount(n, limit)
+}
+
 export function Feed(props: {
   client: ApiClient
   pollIntervalMs?: number
@@ -197,7 +215,7 @@ export function Feed(props: {
          */}
         <TabsList className="max-w-full overflow-x-auto">
           <TabsTrigger value="accepted">
-            Accepted {formatCount(events.length, DEFAULT_LIMIT)}
+            Accepted {formatBadgeCount(events.length, DEFAULT_LIMIT, eventsLoadFailed)}
           </TabsTrigger>
           {/* The rejected count lives on this trigger even while "accepted"
            * is the active tab -- Radix renders every TabsTrigger regardless
@@ -205,7 +223,7 @@ export function Feed(props: {
            * screen: an operator on Accepted must see something is being
            * refused without going looking for it. */}
           <TabsTrigger value="rejected">
-            Rejected {formatCount(rejections.length, DEFAULT_LIMIT)}
+            Rejected {formatBadgeCount(rejections.length, DEFAULT_LIMIT, rejectionsLoadFailed)}
           </TabsTrigger>
         </TabsList>
         <TabsContent value="accepted" className="min-w-0">
