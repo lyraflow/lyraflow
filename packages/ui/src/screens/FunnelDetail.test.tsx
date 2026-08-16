@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -48,6 +48,25 @@ const RUN: FunnelRunResult = {
     { index: 1, event: 'page_view', people: 1204, from_previous: 1, from_start: 1 },
     { index: 2, event: 'signup_completed', people: 491, from_previous: 0.4078, from_start: 0.4078 },
   ],
+}
+
+/**
+ * Every fixture above resolves instantly and ignores the range it was asked
+ * for, which is exactly the blind spot the whole-branch review named: no
+ * test built on it can tell "the numbers for the range you asked for" apart
+ * from "some numbers", or observe a response landing AFTER a state change.
+ * `deferred()` gives a test a promise it controls, so a mutation like C1's
+ * (a run landing after a range change un-dims wrong-range numbers) can
+ * actually be provoked rather than merely asserted against.
+ */
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
 }
 
 function fakeClient(over: Record<string, unknown> = {}) {
@@ -143,6 +162,49 @@ describe('FunnelDetail', () => {
     )
     expect(client.runFunnel).toHaveBeenCalledTimes(2)
     expect(client.runFunnel.mock.calls[1]?.[2]).toMatchObject({ since: expect.any(String) })
+  })
+
+  // C1 (CRITICAL, whole-branch review): repro was opening the funnel,
+  // picking "Last 30 days", clicking Run, then picking "Last 90 days" WHILE
+  // that run was still in flight -- the 30-day response then landed and
+  // un-dimmed the screen under a "Last 90 days" subtitle showing 30-day
+  // numbers. The mutation this pins: drop the `runDays !== daysRef.current`
+  // guard in `runNow`'s `.then`, and this test alone fails (data-stale flips
+  // to "false" for a response that does not answer the selected range).
+  it('discards a response whose range no longer matches the one now selected', async () => {
+    const inFlight = deferred<FunnelRunResult>()
+    const runFunnel = vi
+      .fn()
+      .mockResolvedValueOnce(RUN) // the mount auto-run, for the default 7-day range
+      .mockReturnValueOnce(inFlight.promise) // the explicit Run for 30 days, held open
+    const client = fakeClient({ runFunnel })
+    renderDetail(client)
+    await screen.findByTestId('funnel-step-1')
+
+    await userEvent.selectOptions(screen.getByLabelText(/range/i), '30')
+    await userEvent.click(screen.getByRole('button', { name: /^run$/i }))
+    expect(runFunnel).toHaveBeenCalledTimes(2)
+
+    // Still in flight for 30 days -- the range moves on to 90 before it lands.
+    await userEvent.selectOptions(screen.getByLabelText(/range/i), '90')
+    expect(screen.getByTestId('funnel-result')).toHaveAttribute('data-stale', 'true')
+
+    // The 30-day response lands now, after the selection moved to 90. Wrapped
+    // in act() and given a real turn of the microtask queue so the state
+    // update the fix DOESN'T make (and the bug WOULD make) has every chance
+    // to land before the assertion below runs.
+    await act(async () => {
+      inFlight.resolve({
+        ...RUN,
+        range: { since: '2026-07-16T00:00:00.000Z', until: '2026-08-15T00:00:00.000Z' },
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    // Must still read stale: the 30-day answer is not an answer to the
+    // 90-day range currently selected.
+    expect(screen.getByTestId('funnel-result')).toHaveAttribute('data-stale', 'true')
   })
 
   it('renders every warning the run returned', async () => {

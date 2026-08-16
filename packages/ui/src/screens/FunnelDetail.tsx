@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
@@ -57,6 +57,20 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
 
+  // C1 (whole-branch review): nothing tied a landing response to the range
+  // it was actually computed for, so a slow run for one range could resolve
+  // AFTER the picker moved on to another and still clear staleness -- the
+  // screen would then show the new range in its subtitle (I1) over the old
+  // range's numbers, undimmed, with no warning anything was wrong. A ref,
+  // not `days` captured in the closure: `days` inside `.then` would still be
+  // whatever it was when THIS run started, which is exactly the stale value
+  // that can't tell "still selected" from "moved on" -- the ref is mutated
+  // by every render, including ones after this promise was created.
+  const daysRef = useRef(days)
+  useEffect(() => {
+    daysRef.current = days
+  }, [days])
+
   // Not scoped to the mount effect's own `cancelled` flag: an explicit Run
   // click happens while the screen is already mounted (it is what the user
   // is looking at when they click it), so there is no unmount race for it
@@ -70,6 +84,17 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
       client
         .runFunnel(activeId, validId, { since })
         .then((r) => {
+          // The range picker is deliberately never disabled while a run is
+          // in flight (disabling it only hides this race, and would lock
+          // the whole screen behind a slow scan) -- so `runDays` and the
+          // range selected NOW can genuinely differ by the time this
+          // resolves. A response that no longer answers the range currently
+          // selected is discarded outright, not merely left dimmed: it is
+          // not an answer to anything on screen, and applying it under a
+          // stale flag would still let its numbers render as this range's
+          // result the instant a later click cleared staleness for an
+          // unrelated reason.
+          if (runDays !== daysRef.current) return
           setResult(r)
           setStale(false)
         })
@@ -78,6 +103,7 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
             onUnauthorized?.()
             return
           }
+          if (runDays !== daysRef.current) return
           setError(describeError(err))
         })
         .finally(() => setRunning(false))
