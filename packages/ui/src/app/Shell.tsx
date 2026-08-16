@@ -143,9 +143,24 @@ export function Shell(props: { email: string | null; onLogout(): void; children:
     // multiple-match failure. One element that reflows has no such seam.
     <div className="flex h-dvh flex-col bg-background text-foreground sm:flex-row">
       <aside className="flex shrink-0 items-center gap-4 border-b border-border bg-card px-4 sm:w-56 sm:flex-col sm:items-stretch sm:gap-0 sm:border-b-0 sm:border-r sm:px-0">
-        <div className="flex h-14 items-center gap-2 font-semibold sm:border-b sm:border-border sm:px-4">
+        {/* The product is Lyraflow, not "Lyra" -- pre-existing on `main`,
+         * predating this branch, but this file is already touched here and
+         * the wordmark spec's hand-set kern pairs (e.g. `fl`) only exist in
+         * the full name. `role="group"` + `aria-label` gives this element a
+         * stable accessible name a test can pin without depending on the
+         * `Mark` SVG's own `aria-hidden` text content. */}
+        {/* biome-ignore lint/a11y/useSemanticElements: biome's suggested
+         * <fieldset> is for grouping form controls, which this isn't -- a
+         * mark plus a wordmark, not inputs. `role="group"` on a `div` is
+         * the correct ARIA choice for "a set of UI objects" that aren't
+         * form controls. */}
+        <div
+          role="group"
+          aria-label="Lyraflow"
+          className="flex h-14 items-center gap-2 font-semibold sm:border-b sm:border-border sm:px-4"
+        >
           <Mark />
-          Lyra
+          Lyraflow
         </div>
         <nav className="flex items-center gap-1 sm:flex-col sm:items-stretch sm:gap-0.5 sm:p-2">
           {/*

@@ -48,6 +48,18 @@ describe('Shell', () => {
     expect(screen.getByText('admin@localhost')).toBeInTheDocument()
   })
 
+  // Defect 3 from the Task 8 visual pass: the wordmark rendered "Lyra" on
+  // every screen this Shell wraps -- the product is Lyraflow, and the
+  // brand's wordmark spec hand-sets a kern pair (`fl`) that exists only in
+  // the full name. Pinned via accessible name, not `getByText`, so a
+  // regression (or a markup change that hides the string from assistive
+  // tech while still painting the old text) fails this the same way.
+  it('names the brand element "Lyraflow", not "Lyra"', () => {
+    renderShell()
+    expect(screen.getByRole('group', { name: 'Lyraflow' })).toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: 'Lyra' })).toBeNull()
+  })
+
   // `Router.tsx` (Task 2) is what gives this app somewhere to route to --
   // Feed and Settings are both real navigation links now, and the current
   // one is marked for assistive technology by `NavLink` itself rather than
