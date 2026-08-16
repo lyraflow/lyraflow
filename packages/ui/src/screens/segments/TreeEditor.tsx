@@ -1,4 +1,5 @@
 import type { FilterNode, Group } from '@lyraflow/core/segments/ast.js'
+import type { ApiClient } from '../../api/client.js'
 import { GroupCard } from './GroupCard.js'
 
 /**
@@ -40,9 +41,29 @@ function normalise(value: FilterNode): Group {
  * kind), so once normalised the root stays a group through every
  * subsequent edit -- there is no un-wrapping step, because the wrapped
  * shape and the bare one compile identically.
+ *
+ * `client`/`projectId`/`onUnauthorized` are passed straight through to
+ * `GroupCard` -- this component owns no state and makes no requests of its
+ * own; they exist only so a `behavior` leaf, at whatever depth, can reach
+ * `BehaviourForm` (Task 6).
  */
-export function TreeEditor(props: { value: FilterNode; onChange: (next: FilterNode) => void }) {
-  const { value, onChange } = props
+export function TreeEditor(props: {
+  value: FilterNode
+  onChange: (next: FilterNode) => void
+  client: ApiClient
+  projectId: number
+  onUnauthorized?: () => void
+}) {
+  const { value, onChange, client, projectId, onUnauthorized } = props
   const root = normalise(value)
-  return <GroupCard root={root} path={[]} onChange={onChange} />
+  return (
+    <GroupCard
+      root={root}
+      path={[]}
+      onChange={onChange}
+      client={client}
+      projectId={projectId}
+      onUnauthorized={onUnauthorized}
+    />
+  )
 }

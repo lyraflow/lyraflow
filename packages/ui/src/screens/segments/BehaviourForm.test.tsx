@@ -1,0 +1,269 @@
+import type { Behavior } from '@lyraflow/core/segments/ast.js'
+import { render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { describe, expect, it, vi } from 'vitest'
+import type { ApiClient } from '../../api/client.js'
+import { BehaviourForm } from './BehaviourForm.js'
+
+/** A minimal legal `Behavior`, overridable per test -- mirrors the brief's
+ * own `beh()` helper. */
+function beh(over: Partial<Behavior> = {}): Behavior {
+  return {
+    kind: 'behavior',
+    event: 'checkout_completed',
+    aggregate: 'count',
+    window: { kind: 'last', n: 7, unit: 'days' },
+    operator: '>=',
+    value: 1,
+    ...over,
+  } as Behavior
+}
+
+function fakeClient(): ApiClient {
+  return {
+    schemaEvents: vi.fn(async () => []),
+    schemaProperties: vi.fn(async () => []),
+  } as unknown as ApiClient
+}
+
+describe('BehaviourForm', () => {
+  // --- Brief Step 1, verbatim rule -----------------------------------
+
+  it('hides the property field for count and requires it for the others', async () => {
+    const { rerender } = render(
+      <BehaviourForm
+        id="beh"
+        node={beh({ aggregate: 'count' })}
+        onChange={vi.fn()}
+        client={fakeClient()}
+        projectId={1}
+      />,
+    )
+    expect(screen.queryByLabelText(/property/i)).toBeNull()
+    rerender(
+      <BehaviourForm
+        id="beh"
+        node={beh({ aggregate: 'sum', property: 'amount' })}
+        onChange={vi.fn()}
+        client={fakeClient()}
+        projectId={1}
+      />,
+    )
+    expect(screen.getByLabelText(/property/i)).toBeInTheDocument()
+  })
+
+  it('drops the property when switching to count, rather than sending an invalid node', async () => {
+    const onChange = vi.fn()
+    render(
+      <BehaviourForm
+        id="beh"
+        node={beh({ aggregate: 'sum', property: 'amount' })}
+        onChange={onChange}
+        client={fakeClient()}
+        projectId={1}
+      />,
+    )
+    await userEvent.selectOptions(screen.getByLabelText(/aggregate/i), 'count')
+    // Stub check (Task 6 report): `onChange.mock.calls.at(-1)?.[0].property`
+    // evaluates to `undefined` -- and so passes `.toBeUndefined()` -- when
+    // `onChange` was NEVER CALLED AT ALL, because the `?.` short-circuits
+    // the whole chain including `.property`, not just the `[0]` index. A
+    // component that dropped the wire-up entirely (calls nothing) passed
+    // this exact assertion from the brief verbatim. Guarding on the call
+    // actually having happened, and on WHAT changed (not just what's
+    // absent), is what makes this pin the real behaviour rather than the
+    // absence of one.
+    expect(onChange).toHaveBeenCalled()
+    const call = onChange.mock.calls.at(-1)?.[0] as Behavior
+    expect(call.aggregate).toBe('count')
+    expect(call.property).toBeUndefined()
+  })
+
+  it('switching away from count seeds an empty property, not a stale or undefined one', async () => {
+    // The other direction of the rule above -- the AST refuses
+    // sum/min/max/distinct WITHOUT a property (`.refine` in ast.ts), so
+    // leaving it `undefined` here would produce a node the server rejects
+    // the instant the operator picks a non-count aggregate, before they've
+    // typed anything wrong.
+    const onChange = vi.fn()
+    render(
+      <BehaviourForm
+        id="beh"
+        node={beh({ aggregate: 'count' })}
+        onChange={onChange}
+        client={fakeClient()}
+        projectId={1}
+      />,
+    )
+    await userEvent.selectOptions(screen.getByLabelText(/aggregate/i), 'sum')
+    const call = onChange.mock.calls.at(-1)?.[0] as Behavior
+    expect(call.aggregate).toBe('sum')
+    expect(call.property).toBe('')
+  })
+
+  // --- Every field reachable, and reading FROM the right one --------
+
+  it('renders event, aggregate, operator and value seeded from the node', () => {
+    render(
+      <BehaviourForm
+        id="beh"
+        node={beh({ event: 'trial_started', aggregate: 'count', operator: '>=', value: 3 })}
+        onChange={vi.fn()}
+        client={fakeClient()}
+        projectId={1}
+      />,
+    )
+    expect(screen.getByLabelText(/event/i)).toHaveValue('trial_started')
+    expect(screen.getByLabelText(/aggregate/i)).toHaveValue('count')
+    expect(screen.getByLabelText(/operator/i)).toHaveValue('>=')
+    expect(screen.getByRole('textbox', { name: /^value$/i })).toHaveValue('3')
+  })
+
+  it('editing the event does not touch aggregate/operator/value/window', async () => {
+    // Fixture-coincidence guard: the event fixture ('signup') and the
+    // property fixture would render identically if the code accidentally
+    // read one field where it meant another -- these are deliberately
+    // distinct strings/numbers from everything else in this test, and the
+    // window's own `n` (30) is distinct from every other number used here.
+    const onChange = vi.fn()
+    render(
+      <BehaviourForm
+        id="beh"
+        node={beh({
+          event: 'old_event',
+          aggregate: 'sum',
+          property: 'revenue_cents',
+          operator: '>',
+          value: 500,
+          window: { kind: 'last', n: 30, unit: 'hours' },
+        })}
+        onChange={onChange}
+        client={fakeClient()}
+        projectId={1}
+      />,
+    )
+    await userEvent.clear(screen.getByLabelText(/event/i))
+    await userEvent.type(screen.getByLabelText(/event/i), 'new_event')
+    const call = onChange.mock.calls.at(-1)?.[0] as Behavior
+    expect(call.event).toBe('new_event')
+    expect(call.aggregate).toBe('sum')
+    expect(call.property).toBe('revenue_cents')
+    expect(call.operator).toBe('>')
+    expect(call.value).toBe(500)
+    expect(call.window).toEqual({ kind: 'last', n: 30, unit: 'hours' })
+  })
+
+  it('editing the property does not touch the event -- reading from the right field, not a coincidental match', async () => {
+    const onChange = vi.fn()
+    render(
+      <BehaviourForm
+        id="beh"
+        node={beh({ event: 'checkout_completed', aggregate: 'sum', property: 'old_property' })}
+        onChange={onChange}
+        client={fakeClient()}
+        projectId={1}
+      />,
+    )
+    await userEvent.type(screen.getByLabelText(/property/i), 'x')
+    const call = onChange.mock.calls.at(-1)?.[0] as Behavior
+    expect(call.property).toBe('old_propertyx')
+    expect(call.event).toBe('checkout_completed')
+  })
+
+  it('changing the operator does not touch the value, and vice versa', async () => {
+    const onChange = vi.fn()
+    render(
+      <BehaviourForm
+        id="beh"
+        node={beh({ operator: '>=', value: 42 })}
+        onChange={onChange}
+        client={fakeClient()}
+        projectId={1}
+      />,
+    )
+    await userEvent.selectOptions(screen.getByLabelText(/operator/i), '<')
+    const call = onChange.mock.calls.at(-1)?.[0] as Behavior
+    expect(call.operator).toBe('<')
+    expect(call.value).toBe(42)
+  })
+
+  // --- Window is embedded, not reimplemented -------------------------
+
+  it('renders the window fields, seeded from the node, and reports a change through the same onChange', async () => {
+    const onChange = vi.fn()
+    render(
+      <BehaviourForm
+        id="beh"
+        node={beh({ window: { kind: 'last', n: 14, unit: 'days' } })}
+        onChange={onChange}
+        client={fakeClient()}
+        projectId={1}
+      />,
+    )
+    expect(screen.getByLabelText('Window amount')).toHaveValue(14)
+    await userEvent.selectOptions(screen.getByLabelText('Window'), 'ever')
+    const call = onChange.mock.calls.at(-1)?.[0] as Behavior
+    expect(call.window).toEqual({ kind: 'ever' })
+    // Nothing else on the node moved when only the window changed.
+    expect(call.event).toBe('checkout_completed')
+    expect(call.aggregate).toBe('count')
+  })
+
+  // --- Where predicates are embedded, scoped to the chosen event -----
+
+  it('renders existing where predicates and scopes property suggestions to the chosen event', async () => {
+    const schemaProperties = vi.fn(async () => [])
+    render(
+      <BehaviourForm
+        id="beh"
+        node={beh({
+          event: 'checkout_completed',
+          where: [{ property: 'plan', operator: '=', value: 'pro' }],
+        })}
+        onChange={vi.fn()}
+        client={{ schemaEvents: vi.fn(async () => []), schemaProperties } as unknown as ApiClient}
+        projectId={9}
+      />,
+    )
+    const whereRow = within(screen.getByTestId('beh-where-0'))
+    expect(whereRow.getByLabelText('Property')).toHaveValue('plan')
+    await userEvent.type(whereRow.getByLabelText('Property'), 'x')
+    await waitFor(() =>
+      expect(schemaProperties).toHaveBeenCalledWith(9, 'checkout_completed', 'planx'),
+    )
+  })
+
+  it('scopes property suggestions to undefined, not the literal string, when event is `*`', async () => {
+    const schemaProperties = vi.fn(async () => [])
+    render(
+      <BehaviourForm
+        id="beh"
+        node={beh({ event: '*', aggregate: 'sum', property: '' })}
+        onChange={vi.fn()}
+        client={{ schemaEvents: vi.fn(async () => []), schemaProperties } as unknown as ApiClient}
+        projectId={1}
+      />,
+    )
+    await userEvent.type(screen.getByLabelText(/property/i), 'q')
+    await waitFor(() => expect(schemaProperties).toHaveBeenCalledWith(1, undefined, 'q'))
+  })
+
+  it('adding a where predicate through the form updates the node, not a detached copy', async () => {
+    const onChange = vi.fn()
+    render(
+      <BehaviourForm
+        id="beh"
+        node={beh({ where: undefined })}
+        onChange={onChange}
+        client={fakeClient()}
+        projectId={1}
+      />,
+    )
+    await userEvent.click(screen.getByRole('button', { name: /add predicate/i }))
+    const call = onChange.mock.calls.at(-1)?.[0] as Behavior
+    expect(call.where).toEqual([{ property: '', operator: '=', value: '' }])
+    // Nothing else on the node moved.
+    expect(call.event).toBe('checkout_completed')
+    expect(call.aggregate).toBe('count')
+  })
+})

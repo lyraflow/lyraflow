@@ -1,8 +1,22 @@
 import type { FilterNode, Group } from '@lyraflow/core/segments/ast.js'
+import {
+  MAX_BEHAVIOR_NODES,
+  MAX_TREE_DEPTH,
+  MAX_TREE_NODES,
+} from '@lyraflow/core/segments/validate.js'
+import type { ApiClient } from '../../api/client.js'
 import { Button } from '../../components/ui/button.js'
 import { Label } from '../../components/ui/label.js'
 import { ConditionRow } from './ConditionRow.js'
-import { insertAt, negateAt, nodeAt, removeAt, replaceAt } from './tree.js'
+import {
+  countBehaviours,
+  countNodes,
+  insertAt,
+  negateAt,
+  nodeAt,
+  removeAt,
+  replaceAt,
+} from './tree.js'
 
 /** A new, empty leaf inserted by "Add condition". Tasks 5 and 6 give an
  * operator real fields to fill in; until then it renders through
@@ -35,6 +49,63 @@ function newGroup(): FilterNode {
   return { kind: 'group', op: 'and', children: [newCondition()] }
 }
 
+/** Whether a control is blocked by one of the three server-side caps
+ * (`packages/core/src/segments/validate.js`), and which one -- so the
+ * button can say what it's waiting on rather than merely refuse.
+ *
+ * `extraNodes`/`extraDepth` are how many nodes, and how many levels deeper
+ * than THIS group's own `depth`, the control being checked would add:
+ * "Add condition" inserts one leaf one level below this group (1, 1); "Add
+ * group" inserts a group AND the one condition it is seeded with -- never
+ * empty, `newGroup`'s own doc comment -- so it costs two nodes, and its
+ * seeded child sits two levels below this group, not one (2, 2). Checking
+ * the deeper of a control's own two new nodes against `MAX_TREE_DEPTH` is
+ * sufficient: the shallower one can never be the one that first exceeds the
+ * cap, since it is strictly less deep.
+ *
+ * Node and behaviour counts are GLOBAL -- adding anywhere in the tree
+ * consumes the same shared budget, so every `GroupCard` at every depth
+ * checks the same `nodeCount`/`behaviorCount` computed from the whole
+ * `root`, not its own subtree. Depth is LOCAL -- a group nine levels down
+ * one branch does not cap a group two levels down another -- so it is
+ * checked against `depth` (this group's own `path.length`), not
+ * `maxDepth(root)`.
+ *
+ * The behaviour cap is included even though NEITHER control this task ships
+ * can itself create a `behavior` node -- there is no kind-switcher in this
+ * plan, so a behaviour condition only ever arrives already in a fetched
+ * tree. Checked anyway, defensively, against the day a kind-switcher lands
+ * and "Add condition" can produce one; see the Task 6 report for the
+ * reasoning this is a forward guard, not a defect fix, today.
+ */
+function capBlock(
+  nodeCount: number,
+  behaviorCount: number,
+  depth: number,
+  extraNodes: number,
+  extraDepth: number,
+): { blocked: boolean; message: string } {
+  if (nodeCount + extraNodes > MAX_TREE_NODES) {
+    return {
+      blocked: true,
+      message: `This segment already has ${MAX_TREE_NODES} conditions, the maximum allowed in one segment.`,
+    }
+  }
+  if (depth + extraDepth >= MAX_TREE_DEPTH) {
+    return {
+      blocked: true,
+      message: `This branch is nested as deep as segments allow (${MAX_TREE_DEPTH} levels).`,
+    }
+  }
+  if (behaviorCount >= MAX_BEHAVIOR_NODES) {
+    return {
+      blocked: true,
+      message: `This segment already has ${MAX_BEHAVIOR_NODES} behavioural conditions, the maximum allowed.`,
+    }
+  }
+  return { blocked: false, message: '' }
+}
+
 /**
  * Renders the group addressed by `path` inside `root` as a card: a
  * "Match" operator select, its children (each a nested `GroupCard` or a
@@ -62,13 +133,27 @@ function newGroup(): FilterNode {
  * own terminal target, because a `not` never consumes a path segment. The
  * only way to add a child here is to turn negation off first, which the
  * Negate control right beside the disabled ones does.
+ *
+ * `client`/`projectId`/`onUnauthorized` are threaded through, unused by this
+ * component itself, purely to reach `BehaviourForm` (Task 6) at whatever
+ * depth a `behavior` leaf sits -- the same reason `StepRows` threads them to
+ * `EventCombobox` in the funnels builder.
+ *
+ * Task 6 also adds the three server-side caps (`MAX_TREE_NODES`,
+ * `MAX_TREE_DEPTH`, `MAX_BEHAVIOR_NODES`, all from
+ * `packages/core/src/segments/validate.js`) as a DISABLE here, computed
+ * fresh on every render from `root` -- see `capBlock`'s own doc comment for
+ * why node/behaviour counts are global but depth is local to this group.
  */
 export function GroupCard(props: {
   root: FilterNode
   path: number[]
   onChange: (next: FilterNode) => void
+  client: ApiClient
+  projectId: number
+  onUnauthorized?: () => void
 }) {
-  const { root, path, onChange } = props
+  const { root, path, onChange, client, projectId, onUnauthorized } = props
   const node = nodeAt(root, path)
   // Defensive only -- every caller of GroupCard (TreeEditor for the root,
   // this component for a nested group) resolves `path` from the tree it is
@@ -80,6 +165,14 @@ export function GroupCard(props: {
   const isRoot = path.length === 0
   const testId = `group-${path.join('-')}`
   const matchId = `${testId}-match`
+
+  // Global counts (the whole tree shares one budget for these), local depth
+  // (this group's own position) -- see `capBlock`'s own doc comment.
+  const nodeCount = countNodes(root)
+  const behaviorCount = countBehaviours(root)
+  const depth = path.length
+  const conditionCap = capBlock(nodeCount, behaviorCount, depth, 1, 1)
+  const groupCap = capBlock(nodeCount, behaviorCount, depth, 2, 2)
 
   function setOp(op: 'and' | 'or') {
     const nextGroup: Group = { ...group, op }
@@ -153,7 +246,17 @@ export function GroupCard(props: {
           const key = childPath.join('-')
           const inner = child.kind === 'not' ? child.child : child
           if (inner.kind === 'group') {
-            return <GroupCard key={key} root={root} path={childPath} onChange={onChange} />
+            return (
+              <GroupCard
+                key={key}
+                root={root}
+                path={childPath}
+                onChange={onChange}
+                client={client}
+                projectId={projectId}
+                onUnauthorized={onUnauthorized}
+              />
+            )
           }
           return (
             <ConditionRow
@@ -163,30 +266,56 @@ export function GroupCard(props: {
               onChange={(next) => onChange(replaceAt(root, childPath, next))}
               onRemove={() => onChange(removeAt(root, childPath))}
               onNegate={() => onChange(negateAt(root, childPath))}
+              client={client}
+              projectId={projectId}
+              onUnauthorized={onUnauthorized}
             />
           )
         })}
       </div>
 
-      <div className="flex gap-2">
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={negated}
-          onClick={() => onChange(insertAt(root, path, newCondition()))}
-        >
-          Add condition
-        </Button>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={negated}
-          onClick={() => onChange(insertAt(root, path, newGroup()))}
-        >
-          Add group
-        </Button>
+      {/* `data-testid` here, same reasoning as `${testId}-controls` above:
+       * a nested group's OWN "Add condition"/"Add group" render inside
+       * this card too (as part of a child `GroupCard`), so an unscoped
+       * `getByRole('button', { name: /add condition/i })` against the
+       * whole document -- or even against this card alone, once it has
+       * any nested-group child -- is ambiguous the moment there is more
+       * than one group in the tree. Scoping to this wrapper's own testid
+       * disambiguates "this group's own Add controls" from a
+       * descendant's. */}
+      <div className="flex flex-col gap-1" data-testid={`${testId}-add`}>
+        <div className="flex gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={negated || conditionCap.blocked}
+            onClick={() => onChange(insertAt(root, path, newCondition()))}
+          >
+            Add condition
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={negated || groupCap.blocked}
+            onClick={() => onChange(insertAt(root, path, newGroup()))}
+          >
+            Add group
+          </Button>
+        </div>
+        {/* Whichever control's own cap fires first gets said -- "Add
+         * condition" is disabled strictly before, or together with, "Add
+         * group" (capBlock's own doc comment: it costs fewer nodes and sits
+         * one level shallower), so its message is shown first when both are
+         * blocked, and the group-only message only when condition alone
+         * still has room. */}
+        {conditionCap.blocked && (
+          <p className="text-xs text-muted-foreground">{conditionCap.message}</p>
+        )}
+        {!conditionCap.blocked && groupCap.blocked && (
+          <p className="text-xs text-muted-foreground">{groupCap.message}</p>
+        )}
       </div>
     </div>
   )

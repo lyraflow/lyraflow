@@ -1,4 +1,9 @@
 import type { FilterNode } from '@lyraflow/core/segments/ast.js'
+import {
+  MAX_BEHAVIOR_NODES,
+  MAX_TREE_DEPTH,
+  MAX_TREE_NODES,
+} from '@lyraflow/core/segments/validate.js'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router'
@@ -177,4 +182,107 @@ describe('SegmentBuilder -- edit', () => {
     expect(screen.queryByTestId('group-')).toBeNull()
     expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
   })
+})
+
+// --- Task 6: the three server-side tree caps, enforced end to end through
+// SegmentBuilder -- GroupCard computes them from the SAME `root` this
+// screen owns (see SegmentBuilder's own doc comment on why the wiring
+// lives here), so these pin the whole chain rather than GroupCard in
+// isolation (already covered directly by GroupCard.test.tsx). Each fixture
+// is deliberately seeded via EDIT mode (a fetched segment already at, or
+// one below, its cap) rather than reached by clicking through 100 times.
+
+describe('SegmentBuilder -- the three server-side tree caps', () => {
+  const trait = (key: string): FilterNode => ({ kind: 'trait', key, operator: '=', value: 'x' })
+  const behaviorLeaf = (event: string): FilterNode => ({
+    kind: 'behavior',
+    event,
+    aggregate: 'count',
+    window: { kind: 'last', n: 1, unit: 'days' },
+    operator: '>=',
+    value: 1,
+  })
+
+  /** A flat root with `n` leaves -- countNodes = n + 1 (the root group
+   * counts too). Flat and single-level so exactly one "Add condition"
+   * button exists on the whole page -- no `within(...)` scoping needed. */
+  function flatRoot(n: number, leaf: (key: string) => FilterNode): FilterNode {
+    return {
+      kind: 'group',
+      op: 'and',
+      children: Array.from({ length: n }, (_, i) => leaf(`k${i}`)),
+    }
+  }
+
+  it('disables add-condition at the node cap, says which cap, and never requests a preview or a save', async () => {
+    const client = fakeClient({
+      segment: vi.fn(async () => ({
+        ...SEGMENT,
+        filter: flatRoot(MAX_TREE_NODES - 1, trait), // countNodes === MAX_TREE_NODES
+      })),
+      previewSegment: vi.fn(),
+    })
+    renderBuilder(client, SEGMENT.id)
+    const add = await screen.findByRole('button', { name: /^add condition$/i })
+    expect(add).toBeDisabled()
+    expect(screen.getByText(new RegExp(String(MAX_TREE_NODES)))).toBeInTheDocument()
+    // Letting the server reject a tree the operator spent five minutes
+    // building is the failure being prevented -- so nothing this screen
+    // can send (today or once Task 7 wires previewSegment in) fires.
+    expect(client.previewSegment).not.toHaveBeenCalled()
+    expect(client.createSegment).not.toHaveBeenCalled()
+    expect(client.updateSegmentTree).not.toHaveBeenCalled()
+  }, 15000)
+
+  it('disables add-condition at the depth cap, and says which cap', async () => {
+    // A chain of MAX_TREE_DEPTH - 1 nested single-child groups, bottoming
+    // out in a group at depth MAX_TREE_DEPTH - 1 whose own child is a
+    // leaf at depth MAX_TREE_DEPTH -- the deepest node validateTree still
+    // accepts. Every level along the chain renders its OWN Add-condition
+    // (all but the deepest stay enabled), so this scopes to the deepest
+    // group's own testid rather than an unscoped query, which would be
+    // ambiguous the moment the tree has more than one group in it.
+    let filter: FilterNode = { kind: 'group', op: 'and', children: [trait('leaf')] }
+    for (let i = 0; i < MAX_TREE_DEPTH - 1; i++) {
+      filter = { kind: 'group', op: 'and', children: [filter] }
+    }
+    const client = fakeClient({
+      segment: vi.fn(async () => ({ ...SEGMENT, filter })),
+      previewSegment: vi.fn(),
+    })
+    renderBuilder(client, SEGMENT.id)
+    const deepPath = Array.from({ length: MAX_TREE_DEPTH - 1 }, () => 0)
+    const deepGroup = await screen.findByTestId(`group-${deepPath.join('-')}`)
+    const add = within(deepGroup).getByRole('button', { name: /^add condition$/i })
+    expect(add).toBeDisabled()
+    expect(within(deepGroup).getByText(new RegExp(String(MAX_TREE_DEPTH)))).toBeInTheDocument()
+    expect(client.previewSegment).not.toHaveBeenCalled()
+  })
+
+  it('disables add-condition at the behaviour cap, and says which cap', async () => {
+    const client = fakeClient({
+      segment: vi.fn(async () => ({
+        ...SEGMENT,
+        filter: flatRoot(MAX_BEHAVIOR_NODES, behaviorLeaf),
+      })),
+      previewSegment: vi.fn(),
+    })
+    renderBuilder(client, SEGMENT.id)
+    const add = await screen.findByRole('button', { name: /^add condition$/i })
+    expect(add).toBeDisabled()
+    expect(screen.getByText(new RegExp(String(MAX_BEHAVIOR_NODES)))).toBeInTheDocument()
+    expect(client.previewSegment).not.toHaveBeenCalled()
+  })
+
+  it('one condition below the node cap, save is still reachable: Add condition is enabled', async () => {
+    // The inverse check -- a cap test that only ever asserts the disabled
+    // side could pass against code that disables Add-condition
+    // unconditionally.
+    const client = fakeClient({
+      segment: vi.fn(async () => ({ ...SEGMENT, filter: flatRoot(MAX_TREE_NODES - 2, trait) })),
+    })
+    renderBuilder(client, SEGMENT.id)
+    const add = await screen.findByRole('button', { name: /^add condition$/i })
+    expect(add).toBeEnabled()
+  }, 15000)
 })

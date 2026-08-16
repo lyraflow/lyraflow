@@ -1,5 +1,13 @@
-import type { Context, FilterNode, Lifecycle, Trait } from '@lyraflow/core/segments/ast.js'
+import type {
+  Behavior,
+  Context,
+  FilterNode,
+  Lifecycle,
+  Trait,
+} from '@lyraflow/core/segments/ast.js'
+import type { ApiClient } from '../../api/client.js'
 import { Button } from '../../components/ui/button.js'
+import { BehaviourForm } from './BehaviourForm.js'
 import { ContextForm } from './ContextForm.js'
 import { LifecycleForm } from './LifecycleForm.js'
 import { TraitForm } from './TraitForm.js'
@@ -9,9 +17,12 @@ import { summarise } from './summarise.js'
  * The leaf renderer: dispatches on `node.kind` -- unwrapping a `not` first,
  * the same way `summarise` already does, so a negated leaf still shows the
  * real form for what it negates rather than falling back to plain text.
- * `trait`/`context`/`lifecycle` get their real per-kind forms (Task 5);
- * `behavior` (Task 6's `BehaviourForm`) still falls back to the one-line
- * `summarise` text below, same as every kind did before this task.
+ * `trait`/`context`/`lifecycle` get their real per-kind forms (Task 5), and
+ * `behavior` gets `BehaviourForm` (Task 6) -- every leaf kind the AST
+ * defines now has one. The `default` branch below is defensive only: it
+ * stays reachable in the TYPE system (nothing here asserts exhaustiveness),
+ * so a leaf kind added to the AST later without a matching form here still
+ * renders the one-line `summarise` text instead of nothing at all.
  *
  * This component's actual job, unchanged from Task 4, is the STRUCTURE
  * around whatever body renders: the `condition-<path>` testid the
@@ -41,8 +52,11 @@ export function ConditionRow(props: {
   onChange: (next: FilterNode) => void
   onRemove: () => void
   onNegate: () => void
+  client: ApiClient
+  projectId: number
+  onUnauthorized?: () => void
 }) {
-  const { node, path, onChange, onRemove, onNegate } = props
+  const { node, path, onChange, onRemove, onNegate, client, projectId, onUnauthorized } = props
   // Whether THIS node is currently negated -- drives `aria-pressed` AND
   // which node the per-kind form below actually edits (the one `node`
   // wraps, never the `not` itself). `onNegate` toggles it either way
@@ -62,12 +76,23 @@ export function ConditionRow(props: {
         return <ContextForm id={testId} node={inner as Context} onChange={handleChange} />
       case 'lifecycle':
         return <LifecycleForm id={testId} node={inner as Lifecycle} onChange={handleChange} />
+      case 'behavior':
+        return (
+          <BehaviourForm
+            id={testId}
+            node={inner as Behavior}
+            client={client}
+            projectId={projectId}
+            onChange={handleChange}
+            onUnauthorized={onUnauthorized}
+          />
+        )
       default:
-        // `behavior` (Task 6) and any other kind not yet given a real
-        // form: the one-line summary every row had for free before this
-        // task, computed on `node` (not `inner`) so a negated behaviour
-        // still reads "not (...)" rather than dropping the negation from
-        // view.
+        // Unreachable for any leaf kind the AST defines today -- every one
+        // has a real form above. Kept as the one-line summary (computed on
+        // `node`, not `inner`, so a negated leaf still reads "not (...)"
+        // rather than dropping the negation from view) as a defensive
+        // fallback for a future kind added here before it gets a form.
         return <span className="text-sm text-foreground">{summarise(node)}</span>
     }
   }

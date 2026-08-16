@@ -3,10 +3,18 @@ import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
+import type { ApiClient } from '../../api/client.js'
 import { TreeEditor } from './TreeEditor.js'
 
 const trait = (key: string): FilterNode => ({ kind: 'trait', key, operator: '=', value: 'x' })
 const group = (...children: FilterNode[]): Group => ({ kind: 'group', op: 'and', children })
+
+// None of this file's fixtures carry a `behavior` leaf, so nothing here
+// ever reaches the network -- a stub is enough to satisfy `TreeEditor`'s
+// required `client`/`projectId` props (threaded through for Task 6's
+// `BehaviourForm`, see `TreeEditor`'s own doc comment).
+const client = {} as unknown as ApiClient
+const projectId = 1
 
 /** The root `onChange` was last called with -- `mock.calls[0][0]` alone is
  * `possibly undefined` to `tsc -b` (an empty-array read), so every test
@@ -21,20 +29,41 @@ function lastRoot(onChange: Mock): Group {
 
 describe('TreeEditor', () => {
   it('renders a group as a card whose header carries one operator', () => {
-    render(<TreeEditor value={group(trait('a'), trait('b'))} onChange={vi.fn()} />)
+    render(
+      <TreeEditor
+        value={group(trait('a'), trait('b'))}
+        onChange={vi.fn()}
+        client={client}
+        projectId={projectId}
+      />,
+    )
     const card = screen.getByTestId('group-')
     expect(within(card).getByRole('combobox', { name: /match/i })).toHaveValue('and')
   })
 
   it('nests a child group inside its parent card', () => {
-    render(<TreeEditor value={group(trait('a'), group(trait('b')))} onChange={vi.fn()} />)
+    render(
+      <TreeEditor
+        value={group(trait('a'), group(trait('b')))}
+        onChange={vi.fn()}
+        client={client}
+        projectId={projectId}
+      />,
+    )
     const outer = screen.getByTestId('group-')
     expect(within(outer).getByTestId('group-1')).toBeInTheDocument()
   })
 
   it('removing a condition leaves its siblings in order', async () => {
     const onChange = vi.fn()
-    render(<TreeEditor value={group(trait('a'), trait('b'), trait('c'))} onChange={onChange} />)
+    render(
+      <TreeEditor
+        value={group(trait('a'), trait('b'), trait('c'))}
+        onChange={onChange}
+        client={client}
+        projectId={projectId}
+      />,
+    )
     await userEvent.click(
       within(screen.getByTestId('condition-1')).getByRole('button', { name: /remove/i }),
     )
@@ -47,7 +76,14 @@ describe('TreeEditor', () => {
     // over the wrong index edits the neighbour, and a test with one child
     // cannot see it.
     const onChange = vi.fn()
-    render(<TreeEditor value={group(trait('a'), trait('b'))} onChange={onChange} />)
+    render(
+      <TreeEditor
+        value={group(trait('a'), trait('b'))}
+        onChange={onChange}
+        client={client}
+        projectId={projectId}
+      />,
+    )
     await userEvent.click(
       within(screen.getByTestId('condition-0')).getByRole('button', { name: /negate/i }),
     )
@@ -58,7 +94,14 @@ describe('TreeEditor', () => {
 
   it('negating a nested condition applies at its own level, not its parent', async () => {
     const onChange = vi.fn()
-    render(<TreeEditor value={group(group(trait('a')))} onChange={onChange} />)
+    render(
+      <TreeEditor
+        value={group(group(trait('a')))}
+        onChange={onChange}
+        client={client}
+        projectId={projectId}
+      />,
+    )
     await userEvent.click(
       within(screen.getByTestId('condition-0-0')).getByRole('button', { name: /negate/i }),
     )
@@ -80,7 +123,9 @@ describe('TreeEditor', () => {
       // `trait('z')`, not `trait('a')` -- a distinct key from every other
       // fixture in this file, so this can't coincidentally pass against a
       // stub that happens to hardcode 'a'/'b' as its own placeholder text.
-      render(<TreeEditor value={trait('z')} onChange={vi.fn()} />)
+      render(
+        <TreeEditor value={trait('z')} onChange={vi.fn()} client={client} projectId={projectId} />,
+      )
       expect(screen.getByTestId('group-')).toBeInTheDocument()
       // Task 5 replaced the placeholder leaf (a `summarise` text span) with
       // a real `TraitForm`, whose fields don't concatenate into "z = x" as
@@ -96,7 +141,9 @@ describe('TreeEditor', () => {
 
     it('edits inside a normalised root reach the server root wrapped, not bare', async () => {
       const onChange = vi.fn()
-      render(<TreeEditor value={trait('a')} onChange={onChange} />)
+      render(
+        <TreeEditor value={trait('a')} onChange={onChange} client={client} projectId={projectId} />,
+      )
       await userEvent.click(
         within(screen.getByTestId('condition-0')).getByRole('button', { name: /negate/i }),
       )
@@ -114,7 +161,9 @@ describe('TreeEditor', () => {
       // when the root only became a group via this screen's own
       // normalisation, not because the operator authored one.
       const onChange = vi.fn()
-      render(<TreeEditor value={trait('a')} onChange={onChange} />)
+      render(
+        <TreeEditor value={trait('a')} onChange={onChange} client={client} projectId={projectId} />,
+      )
       await userEvent.click(
         within(screen.getByTestId('condition-0')).getByRole('button', { name: /remove/i }),
       )
@@ -123,7 +172,14 @@ describe('TreeEditor', () => {
     })
 
     it('renders an empty root without crashing, still offering Add condition', () => {
-      render(<TreeEditor value={{ kind: 'group', op: 'and', children: [] }} onChange={vi.fn()} />)
+      render(
+        <TreeEditor
+          value={{ kind: 'group', op: 'and', children: [] }}
+          onChange={vi.fn()}
+          client={client}
+          projectId={projectId}
+        />,
+      )
       expect(screen.getByTestId('group-')).toBeInTheDocument()
       expect(screen.queryByTestId(/^condition-/)).toBeNull()
       expect(screen.getByRole('button', { name: /add condition/i })).toBeEnabled()
@@ -140,7 +196,12 @@ describe('TreeEditor', () => {
     it('removing a nested group removes only that subtree, leaving its outer sibling untouched', async () => {
       const onChange = vi.fn()
       render(
-        <TreeEditor value={group(trait('a'), group(trait('b'), trait('c')))} onChange={onChange} />,
+        <TreeEditor
+          value={group(trait('a'), group(trait('b'), trait('c')))}
+          onChange={onChange}
+          client={client}
+          projectId={projectId}
+        />,
       )
       // Scoped to the group's OWN controls testid, not the whole card --
       // the card also contains descendant leaves with their own
@@ -153,7 +214,14 @@ describe('TreeEditor', () => {
 
     it('negating a nested group wraps only that group, leaving a sibling group untouched', async () => {
       const onChange = vi.fn()
-      render(<TreeEditor value={group(group(trait('a')), group(trait('b')))} onChange={onChange} />)
+      render(
+        <TreeEditor
+          value={group(group(trait('a')), group(trait('b')))}
+          onChange={onChange}
+          client={client}
+          projectId={projectId}
+        />,
+      )
       const controls = screen.getByTestId('group-0-controls')
       await userEvent.click(within(controls).getByRole('button', { name: /negate/i }))
       const next = lastRoot(onChange)
@@ -168,7 +236,9 @@ describe('TreeEditor', () => {
         op: 'and',
         children: [{ kind: 'not', child: group(trait('a')) }],
       }
-      render(<TreeEditor value={negatedRoot} onChange={vi.fn()} />)
+      render(
+        <TreeEditor value={negatedRoot} onChange={vi.fn()} client={client} projectId={projectId} />,
+      )
       const nested = screen.getByTestId('group-0')
       expect(within(nested).getByRole('button', { name: /add condition/i })).toBeDisabled()
       expect(within(nested).getByRole('button', { name: /add group/i })).toBeDisabled()
@@ -186,7 +256,14 @@ describe('TreeEditor', () => {
 
   it('addresses leaves at the same local index but different depth independently', async () => {
     const onChange = vi.fn()
-    render(<TreeEditor value={group(trait('a'), group(trait('b')))} onChange={onChange} />)
+    render(
+      <TreeEditor
+        value={group(trait('a'), group(trait('b')))}
+        onChange={onChange}
+        client={client}
+        projectId={projectId}
+      />,
+    )
     // Both exist, distinctly -- a local-index-only scheme would collide
     // these into one ambiguous "condition-0".
     const outer = screen.getByTestId('condition-0')
@@ -205,7 +282,14 @@ describe('TreeEditor', () => {
 
   it('Add condition appends a new leaf to the addressed group, at the end', async () => {
     const onChange = vi.fn()
-    render(<TreeEditor value={group(trait('a'))} onChange={onChange} />)
+    render(
+      <TreeEditor
+        value={group(trait('a'))}
+        onChange={onChange}
+        client={client}
+        projectId={projectId}
+      />,
+    )
     await userEvent.click(screen.getByRole('button', { name: /add condition/i }))
     const next = lastRoot(onChange)
     expect(next.children).toHaveLength(2)
@@ -220,7 +304,14 @@ describe('TreeEditor', () => {
     // anything wrong. Seeded with the SAME default condition "Add
     // condition" itself inserts, so the two controls agree.
     const onChange = vi.fn()
-    render(<TreeEditor value={group(trait('a'))} onChange={onChange} />)
+    render(
+      <TreeEditor
+        value={group(trait('a'))}
+        onChange={onChange}
+        client={client}
+        projectId={projectId}
+      />,
+    )
     await userEvent.click(screen.getByRole('button', { name: /add group/i }))
     const next = lastRoot(onChange)
     expect(next.children).toHaveLength(2)
@@ -238,7 +329,14 @@ describe('TreeEditor', () => {
     // `toEqual` above would otherwise also flag as a failure for the wrong
     // reason.
     const onChange = vi.fn()
-    render(<TreeEditor value={group(trait('a'))} onChange={onChange} />)
+    render(
+      <TreeEditor
+        value={group(trait('a'))}
+        onChange={onChange}
+        client={client}
+        projectId={projectId}
+      />,
+    )
     await userEvent.click(screen.getByRole('button', { name: /add group/i }))
     const next = lastRoot(onChange)
     const nested = next.children[1] as Group
@@ -248,7 +346,14 @@ describe('TreeEditor', () => {
 
   it('changing the Match operator replaces op without touching children', async () => {
     const onChange = vi.fn()
-    render(<TreeEditor value={group(trait('a'), trait('b'))} onChange={onChange} />)
+    render(
+      <TreeEditor
+        value={group(trait('a'), trait('b'))}
+        onChange={onChange}
+        client={client}
+        projectId={projectId}
+      />,
+    )
     await userEvent.selectOptions(screen.getByRole('combobox', { name: /match/i }), 'or')
     const next = lastRoot(onChange)
     expect(next.op).toBe('or')

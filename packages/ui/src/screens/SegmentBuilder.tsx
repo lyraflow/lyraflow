@@ -32,6 +32,17 @@ const EMPTY_ROOT: FilterNode = { kind: 'group', op: 'and', children: [] }
  * name reverts to the server's copy on next load. This does not reach the
  * server merely from opening a segment -- see `TreeEditor`'s own doc
  * comment on why that matters -- only from an explicit Save.
+ *
+ * Task 6 threads `client`/`projectId`/`onUnauthorized` down into
+ * `TreeEditor` -- unused directly by this component, needed only so a
+ * `behavior` leaf's `BehaviourForm`, at whatever depth, can reach the
+ * schema-autocomplete endpoints. Gated on `activeId != null` the same way
+ * `canSave` already is: there is no project to scope those requests to
+ * otherwise. The three server-side tree caps (`MAX_TREE_NODES`,
+ * `MAX_TREE_DEPTH`, `MAX_BEHAVIOR_NODES`) are also enforced from here down
+ * -- computed inside `GroupCard` from the SAME `root` this component owns,
+ * so "Add condition"/"Add group" disable before a save could ever reach the
+ * server's own `validateTree` rejection.
  */
 export function SegmentBuilder(props: { client: ApiClient; onUnauthorized?: () => void }) {
   const { client, onUnauthorized } = props
@@ -153,7 +164,15 @@ export function SegmentBuilder(props: { client: ApiClient; onUnauthorized?: () =
         )}
       </div>
 
-      {!stale && <TreeEditor value={root} onChange={setRoot} />}
+      {!stale && activeId != null && (
+        <TreeEditor
+          value={root}
+          onChange={setRoot}
+          client={client}
+          projectId={activeId}
+          onUnauthorized={onUnauthorized}
+        />
+      )}
 
       {!stale && !hasConditions && (
         <p className="text-sm text-muted-foreground">
