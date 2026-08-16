@@ -156,6 +156,64 @@ describe('ConditionRow', () => {
     )
   })
 
+  // Task 10 (visual pass): a negated leaf used to render pixel-identical to
+  // a non-negated one. `aria-pressed` on the Negate button was the ONLY
+  // signal, and the vendored Button has no pressed styling, so
+  // `not (status = churned)` read on screen as `status = churned` -- the
+  // operator believes the segment includes exactly the people it excludes.
+  // The detail screen's `summarise` line has always rendered the `not (...)`
+  // correctly; only the builder was silent, and only for LEAVES (`GroupCard`
+  // already says "This group is negated" in words).
+  const churnedNot: FilterNode = {
+    kind: 'not',
+    child: { kind: 'trait', key: 'status', operator: '=', value: 'churned' },
+  }
+
+  it('renders a visible "Not" badge on a negated leaf, additive to the form it negates', () => {
+    render(
+      <ConditionRow
+        node={churnedNot}
+        path={[1, 2]}
+        onChange={vi.fn()}
+        onRemove={vi.fn()}
+        onNegate={vi.fn()}
+        client={fakeClient()}
+        projectId={1}
+      />,
+    )
+    const row = screen.getByTestId('condition-1-2')
+    // Queried by exact text and then explicitly excluded from being a
+    // button: the point of the badge is that it is a STATIC mark on the
+    // row, not the Negate control (whose accessible name is "Negate", and
+    // which would therefore never satisfy an exact "Not" match anyway --
+    // this assertion makes that requirement explicit rather than
+    // incidental).
+    const badge = within(row).getByText('Not', { selector: ':not(button)' })
+    expect(badge).toBeInTheDocument()
+    expect(badge.closest('button')).toBeNull()
+    expect(within(row).getByRole('button', { name: /negate/i })).not.toBe(badge)
+    // Additive, not a replacement: the trait's own fields still render.
+    expect(within(row).getByRole('textbox', { name: /key/i })).toHaveValue('status')
+    expect(within(row).getByRole('textbox', { name: /^value$/i })).toHaveValue('churned')
+  })
+
+  it('renders no "Not" badge on the same leaf un-negated', () => {
+    render(
+      <ConditionRow
+        node={{ kind: 'trait', key: 'status', operator: '=', value: 'churned' }}
+        path={[1, 2]}
+        onChange={vi.fn()}
+        onRemove={vi.fn()}
+        onNegate={vi.fn()}
+        client={fakeClient()}
+        projectId={1}
+      />,
+    )
+    const row = screen.getByTestId('condition-1-2')
+    expect(within(row).queryByText('Not', { selector: ':not(button)' })).toBeNull()
+    expect(within(row).getByRole('textbox', { name: /key/i })).toHaveValue('status')
+  })
+
   /** `ConditionRow` is fully controlled, same as every form it renders --
    * a static `onChange` mock that never feeds back into `node` leaves the
    * DOM glued to the ORIGINAL value between keystrokes, which is what

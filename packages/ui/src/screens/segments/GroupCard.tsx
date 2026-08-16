@@ -241,6 +241,7 @@ export function GroupCard(props: {
               variant="outline"
               size="sm"
               aria-pressed={negated}
+              className="aria-pressed:border-foreground aria-pressed:font-semibold"
               onClick={() => onChange(negateAt(root, path))}
             >
               Negate
@@ -263,7 +264,12 @@ export function GroupCard(props: {
         </p>
       )}
 
-      <div className="flex flex-col gap-2 border-l border-border pl-3">
+      {/* Depth is signalled GEOMETRICALLY -- rail width and indent -- not by
+       * fill. Every surface in this palette sits within ~1.1:1 of its
+       * neighbours by design, so tinting nested cards differently would be
+       * a change no one can see; indentation has no contrast requirement
+       * and is the only lever that actually reads at depth three. */}
+      <div className="flex flex-col gap-3 border-l-2 border-border pl-5">
         {group.children.map((child, i) => {
           const childPath = [...path, i]
           const key = childPath.join('-')

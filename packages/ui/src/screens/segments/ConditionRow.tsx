@@ -127,22 +127,58 @@ export function ConditionRow(props: {
       data-testid={testId}
       className="flex flex-col gap-2 rounded-md border border-border bg-background px-3 py-2"
     >
-      <div className="flex flex-wrap items-center justify-between gap-2">
+      {/* Body row, then controls row -- never one wrapping row that relies
+       * on `justify-between` plus a wrap to separate them.
+       *
+       * That older shape put the result at the mercy of each per-kind
+       * form's FLEX-BASIS, which is not something this component controls
+       * or should have to know. `BehaviourForm`'s root is the only one
+       * carrying `flex-1` (`flex: 1 1 0%`), so its hypothetical width when
+       * the row decides where to break is 0: it can never push the button
+       * group onto a line of its own. It then absorbed the free space, sat
+       * beside the buttons, and -- being several rows tall against a
+       * one-row button group -- `items-center` parked Negate/Remove at
+       * exactly its vertical middle, level with the Window select and
+       * directly above Where, reading as a control on one of those rather
+       * than on the whole condition. The other three forms have a
+       * content-based `flex-basis: auto` whose max-content exceeds what
+       * the button group leaves, so they broke onto two lines and looked
+       * right by accident.
+       *
+       * Note the measured trap in the obvious explanation: "the behaviour
+       * form is narrower than the row" is true of the trait form too (480
+       * of 598px at 1180px wide) and yet the trait's buttons still wrapped.
+       * Width after layout does not predict the break; flex-basis does.
+       * Splitting the rows makes all four kinds identical regardless. */}
+      <div className="flex flex-wrap items-center gap-2">
+        {/* A negated leaf must SAY it is negated. `aria-pressed` on the
+         * Negate button alone was invisible: the vendored Button has no
+         * pressed styling, so `not (status = churned)` rendered
+         * pixel-identical to `status = churned` -- an operator reads the
+         * row as including exactly the people it excludes. `GroupCard`
+         * already announces its own negation in words; only leaves were
+         * silent. */}
+        {negated && (
+          <span className="rounded-sm border border-border bg-muted px-1.5 py-0.5 text-xs font-semibold uppercase tracking-wide text-foreground">
+            Not
+          </span>
+        )}
         {body()}
-        <div className="flex gap-1">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            aria-pressed={negated}
-            onClick={onNegate}
-          >
-            Negate
-          </Button>
-          <Button type="button" variant="outline" size="sm" onClick={onRemove}>
-            Remove
-          </Button>
-        </div>
+      </div>
+      <div className="flex gap-1">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          aria-pressed={negated}
+          className="aria-pressed:border-foreground aria-pressed:font-semibold"
+          onClick={onNegate}
+        >
+          Negate
+        </Button>
+        <Button type="button" variant="outline" size="sm" onClick={onRemove}>
+          Remove
+        </Button>
       </div>
       {ownWarnings.length > 0 && (
         <ul className="flex flex-col gap-1">
