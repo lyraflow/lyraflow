@@ -195,6 +195,22 @@ describe('FunnelBuilder', () => {
     expect(screen.getByTestId('builder-preview-result')).toHaveAttribute('data-stale', 'false')
   })
 
+  // I3 (whole-branch review): spec §3 requires both `as_of` and the resolved
+  // range on any rendered result "so a cached result can never be mistaken
+  // for a live one" -- this preview showed neither.
+  it('shows as_of and the resolved range on the preview, not just the numbers', async () => {
+    const client = fakeBuilderClient()
+    renderBuilder(client)
+    await fillTwoSteps()
+    await userEvent.click(screen.getByRole('button', { name: /preview/i }))
+    expect(await screen.findByTestId('builder-preview-range')).toHaveTextContent('Last 7 days')
+    // RUN.as_of is 2 minutes before RUN.range.until in wall-clock terms, but
+    // this only pins that the field renders something derived from the
+    // response -- FunnelDetail.test.tsx's fake-timer test already pins the
+    // exact "2 minutes ago" value by number.
+    expect(screen.getByTestId('builder-preview-as-of')).not.toBeEmptyDOMElement()
+  })
+
   it('surfaces a 409 on the name field rather than as a page error', async () => {
     const client = fakeBuilderClient({
       createFunnel: vi.fn(async () => {

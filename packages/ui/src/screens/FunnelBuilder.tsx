@@ -15,6 +15,7 @@ import { WarningPanel } from './funnels/WarningPanel.js'
 import type { WindowUnit } from './funnels/WindowField.js'
 import { WindowField, secondsToWindowInput, toWindowSeconds } from './funnels/WindowField.js'
 import { describeError } from './funnels/errors.js'
+import { formatRangeDays, formatRelative } from './funnels/format.js'
 
 /** A brand-new funnel's starting step list -- one empty step. `StepRows`'
  * own two-step floor governs removal, not the initial count: an operator
@@ -314,6 +315,22 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
           className={`flex min-w-0 flex-col gap-3 ${previewStale ? 'opacity-50' : ''}`}
         >
           <WarningPanel warnings={previewResult.warnings} />
+          {/* I3 (whole-branch review): spec §3 requires both `as_of` and the
+           * resolved range on a rendered result "so a cached result can
+           * never be mistaken for a live one" -- this preview showed
+           * neither, unlike the detail screen's subtitle it otherwise
+           * mirrors. Sourced from `previewResult.range`/`.as_of`, the SAME
+           * fields I1 fixed the detail screen's subtitle to read from, for
+           * the same reason: never derived from form state. */}
+          <p className="text-sm text-muted-foreground">
+            <span data-testid="builder-preview-range">
+              {formatRangeDays(previewResult.range)}
+            </span>{' '}
+            · as of{' '}
+            <span data-testid="builder-preview-as-of">
+              {formatRelative(previewResult.as_of, new Date())}
+            </span>
+          </p>
           <StepBars result={previewResult} />
         </div>
       )}
