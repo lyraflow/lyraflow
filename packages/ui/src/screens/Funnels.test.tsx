@@ -88,6 +88,20 @@ describe('Funnels list', () => {
     expect(row).not.toHaveTextContent('0%')
   })
 
+  // I4 (whole-branch review): a funnel that RAN and found nobody used to
+  // render identically to a funnel that has NEVER run -- both said "Not run
+  // yet", losing the timestamp and the fact that it ran at all. Existing
+  // coverage (above) only exercised `last_evaluated_at: null`; this is the
+  // distinct case, `last_evaluated_at` SET with `last_entered: 0`.
+  it('says a funnel that ran and found nobody actually ran, and when -- not "not run yet"', async () => {
+    vi.setSystemTime(new Date('2026-08-15T12:00:00.000Z'))
+    renderList([{ ...RUN_ONCE, last_entered: 0, last_converted: 0 }])
+    const row = await screen.findByRole('link', { name: /Signup flow/ })
+    expect(row).not.toHaveTextContent(/not run yet/i)
+    expect(row).toHaveTextContent('0 entered')
+    expect(row).toHaveTextContent('2 minutes ago')
+  })
+
   it('never calls a run endpoint to freshen the list', async () => {
     const run = vi.fn()
     const client = {

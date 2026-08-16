@@ -18,15 +18,20 @@ import { formatPercent, formatRelative, formatWindow } from './funnels/format.js
  *
  * Two SEPARATE guards, deliberately not merged into one null-check: the
  * first says "this funnel has never been run"; the second says "it was run
- * but nothing entered in that window" (a real, distinct case). Both read
- * "Not run yet" today, but they guard against different failures --
- * dividing by a denominator that is genuinely 0 would produce `Infinity`,
- * not `NaN`, and `formatPercent` promises nothing about that input (see its
- * own doc comment).
+ * but nothing entered in that window" (a real, distinct case).
+ *
+ * I4 (whole-branch review, CRITICAL-class conflation): the second guard
+ * used to ALSO read "Not run yet" -- the same no-data/real-zero conflation
+ * this branch already fixed in `StepBars`, inverted. A funnel that ran and
+ * found nobody must show that it ran, when, and that nobody entered; folding
+ * it into "not run yet" loses the timestamp and reads as a funnel nobody has
+ * touched, when the truth is it ran and answered "zero". Dividing by a
+ * denominator that is genuinely 0 would produce `Infinity`, not `NaN` --
+ * this guard exists so that division is never reached for either case.
  */
 function funnelRateLabel(f: Funnel, now: Date): string {
   if (f.last_evaluated_at === null) return 'Not run yet'
-  if (f.last_entered === 0) return 'Not run yet'
+  if (f.last_entered === 0) return `0 entered · ${formatRelative(f.last_evaluated_at, now)}`
   const rate = Number(f.last_converted) / Number(f.last_entered)
   return `${formatPercent(rate)} · ${formatRelative(f.last_evaluated_at, now)}`
 }
