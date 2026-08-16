@@ -96,8 +96,17 @@ function fakeClient(over: Record<string, unknown> = {}) {
     funnel: vi.fn(async () => FUNNEL),
     runFunnel: vi.fn(async () => RUN),
     deleteFunnel: vi.fn(async () => undefined),
+    // Issue #94's default: no test that doesn't override this exercises a
+    // segment lookup for real (every fixture funnel but the segment-filter
+    // ones below has `segment_id: null`, so state 1 never calls it at all).
+    segments: vi.fn(async () => []),
     ...over,
-  } as unknown as ApiClient & { funnel: Mock; runFunnel: Mock; deleteFunnel: Mock }
+  } as unknown as ApiClient & {
+    funnel: Mock
+    runFunnel: Mock
+    deleteFunnel: Mock
+    segments: Mock
+  }
 }
 
 function renderDetail(client: ApiClient, onUnauthorized?: () => void) {
@@ -798,9 +807,18 @@ describe('FunnelDetail — broken segment filter', () => {
     )
   })
 
+  // State 4 (issue #94 brief), pinned so it survives resolution being added:
+  // `segments` resolves a REAL match for id 4 here, deliberately -- if the
+  // `!brokenSegment` suppression were ever "simplified away", the subtitle
+  // would render "Segment: Paying customers (#4)" instead of nothing, which
+  // is the exact contradiction (a named filter above numbers that in fact
+  // ran over everyone) this state exists to prevent. A test that left
+  // `segments` empty could pass this assertion by accident, off an
+  // unresolved-id rendering, without the suppression doing any work at all.
   it('does not present the funnel segment filter as applied when the run warns it could not be', async () => {
     const client = fakeClient({
       funnel: vi.fn(async () => ({ ...FUNNEL, segment_id: 4 })),
+      segments: vi.fn(async () => [{ id: 4, name: 'Paying customers', stale: false }]),
       runFunnel: vi.fn(async () => ({
         ...RUN,
         warnings: [{ path: 'segment_id', reason: 'segment 4 no longer exists or cannot be read' }],
@@ -809,15 +827,97 @@ describe('FunnelDetail — broken segment filter', () => {
     renderDetail(client)
     await screen.findByTestId('funnel-step-1')
     expect(screen.queryByTestId('funnel-segment-filter')).toBeNull()
-    expect(screen.queryByText(/Segment: #4/)).toBeNull()
+    expect(screen.queryByText(/Segment/)).toBeNull()
+    expect(screen.queryByText(/Paying customers/)).toBeNull()
+  })
+})
+
+// Issue #94: `GET /v1/funnels/:id` returns `segment_id` with no name, so the
+// screen resolves it itself via `client.segments(projectId)`. Each of the
+// four states the brief names gets its own test, plus the lookup failing
+// outright and a 401 on that lookup specifically.
+describe('FunnelDetail — segment name resolution (issue #94)', () => {
+  // State 1: no filter at all. The mutation this pins: fetch segments
+  // unconditionally on every funnel view -- this is the one assertion that
+  // would catch a `client.segments` call for a funnel that never named one.
+  it('does not fetch segments at all when the funnel has no filter', async () => {
+    const client = fakeClient() // FUNNEL.segment_id is null
+    renderDetail(client)
+    await screen.findByTestId('funnel-step-1')
+    expect(screen.queryByTestId('funnel-segment-filter')).toBeNull()
+    expect(client.segments).not.toHaveBeenCalled()
   })
 
-  it('does present the segment filter as applied when the run has no such warning', async () => {
+  // State 2: the filter resolves. The mutation this pins: render only the
+  // bare id (the pre-fix behaviour) -- this fails unless the name itself is
+  // on screen.
+  it('renders the segment name, with the id alongside it, once resolved', async () => {
     const client = fakeClient({
       funnel: vi.fn(async () => ({ ...FUNNEL, segment_id: 4 })),
+      segments: vi.fn(async () => [{ id: 4, name: 'Paying customers', stale: false }]),
+    })
+    renderDetail(client)
+    expect(await screen.findByTestId('funnel-segment-filter')).toHaveTextContent(
+      'Paying customers (#4)',
+    )
+    expect(client.segments).toHaveBeenCalledWith(1)
+  })
+
+  // State 3: `segment_id` deliberately carries no foreign key, so a deleted
+  // segment leaves a dangling id -- this is a designed state, not an edge
+  // case. The mutation this pins: fall back to the bare id (or blank) for an
+  // unresolved id exactly the way a failed lookup does -- this fails unless
+  // the "cannot be resolved" wording is on screen, distinct from both the
+  // resolved-name text and a bare id.
+  it('renders an honest "cannot be resolved" state when the id is not in the list', async () => {
+    const client = fakeClient({
+      funnel: vi.fn(async () => ({ ...FUNNEL, segment_id: 4 })),
+      segments: vi.fn(async () => [{ id: 9, name: 'Trial users', stale: false }]),
+    })
+    renderDetail(client)
+    const el = await screen.findByTestId('funnel-segment-filter')
+    expect(el).toHaveTextContent('#4')
+    expect(el).toHaveTextContent(/cannot be resolved/i)
+    expect(el).not.toHaveTextContent('Trial users')
+  })
+
+  // The segments fetch failing outright (not a 401): must not blank the
+  // subtitle or break the rest of the page -- falls back to the id. The
+  // mutation this pins: let the rejection propagate unhandled (or render
+  // nothing) -- this fails either by the page crashing before
+  // `funnel-step-1` appears, or by the subtitle being absent.
+  it('falls back to the bare id when the segments fetch fails outright', async () => {
+    const client = fakeClient({
+      funnel: vi.fn(async () => ({ ...FUNNEL, segment_id: 4 })),
+      segments: vi.fn(async () => {
+        throw new ApiError(503, 'unavailable')
+      }),
     })
     renderDetail(client)
     await screen.findByTestId('funnel-step-1')
-    expect(screen.getByTestId('funnel-segment-filter')).toHaveTextContent('#4')
+    const el = await screen.findByTestId('funnel-segment-filter')
+    expect(el).toHaveTextContent('#4')
+    expect(el).not.toHaveTextContent(/cannot be resolved/i)
+  })
+
+  // A 401 on the segments lookup specifically routes to `onUnauthorized`,
+  // the same as every other fetch on this screen -- not a banner, and not a
+  // silent blank. The mutation this pins: swallow a 401 from `segments` into
+  // the generic failure branch instead of routing it -- `onUnauthorized`
+  // would never fire.
+  it('routes a 401 from the segments lookup to onUnauthorized', async () => {
+    const onUnauthorized = vi.fn()
+    const client = fakeClient({
+      funnel: vi.fn(async () => ({ ...FUNNEL, segment_id: 4 })),
+      segments: vi.fn(async () => {
+        throw new ApiError(401, 'unauthorized')
+      }),
+    })
+    renderDetail(client, onUnauthorized)
+    await screen.findByTestId('funnel-step-1')
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalled())
+    // The rest of the page must not break just because this one lookup 401ed.
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.getByText(/Entered 1,204/)).toBeInTheDocument()
   })
 })
