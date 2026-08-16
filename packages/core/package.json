@@ -12,6 +12,14 @@
       "types": "./dist/snippet/build.d.ts",
       "default": "./dist/snippet/build.js"
     },
+    "./segments/ast.js": {
+      "types": "./dist/segments/ast.d.ts",
+      "default": "./dist/segments/ast.js"
+    },
+    "./segments/validate.js": {
+      "types": "./dist/segments/validate.d.ts",
+      "default": "./dist/segments/validate.js"
+    },
     "./package.json": "./package.json"
   },
   "engines": { "node": ">=22 <23" },

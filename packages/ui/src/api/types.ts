@@ -199,10 +199,49 @@ export interface RangeBody {
   until?: string
 }
 
-/** `GET /v1/segments`. Only the fields the picker needs; the route returns more. */
+/** `GET /v1/segments` and `GET /v1/segments/:id`.
+ *
+ * `last_count` and `last_evaluated_at` are a CACHE, not a fact -- written
+ * after an evaluation and never recomputed. A count must always render beside
+ * its timestamp, and `last_evaluated_at === null` means never evaluated, which
+ * is a different fact from a count of zero.
+ *
+ * `stale` is true when the stored tree no longer parses. Always present. */
 export interface Segment {
   id: number
   name: string
-  /** True when the stored tree no longer parses. Such a segment is not selectable. */
+  ast_version: number
+  filter: unknown
   stale: boolean
+  last_count: number | null
+  last_evaluated_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface MemberRow {
+  person_id: string
+  first_seen: string
+  last_seen: string
+  [field: string]: string | number
+}
+
+/** Both preview routes. `members`, `next_cursor` and `window_exhausted` are
+ * present only when members were requested.
+ *
+ * The two endings of a walk are distinguished by these two fields together:
+ * `next_cursor: null` with `window_exhausted: false` means the population is
+ * exhausted; with `true` it means the walk's budget is spent and more exist. */
+export interface SegmentPreview {
+  person_count: number
+  warnings: { path: string; reason: string }[]
+  as_of: string
+  members?: MemberRow[]
+  next_cursor?: string | null
+  window_exhausted?: boolean
+}
+
+export interface PreviewOptions {
+  include?: ['members']
+  cursor?: string
 }

@@ -91,6 +91,18 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
+// The fields these segment-picker tests don't care about, so a literal
+// resolved through a typed `deferred<Segment[]>()` doesn't have to restate
+// them at every call site.
+const SEGMENT_DEFAULTS = {
+  ast_version: 1,
+  filter: null,
+  last_count: null,
+  last_evaluated_at: null,
+  created_at: '2026-01-01T00:00:00.000Z',
+  updated_at: '2026-01-01T00:00:00.000Z',
+}
+
 function fakeClient(over: Record<string, unknown> = {}) {
   return {
     funnel: vi.fn(async () => FUNNEL),
@@ -1010,7 +1022,7 @@ describe('FunnelDetail — segments response identity survives a project switch 
 
     // Project 1's stale response lands now, AFTER the switch to project 2.
     await act(async () => {
-      segP1.resolve([{ id: 4, name: 'Alpha Paying customers', stale: false }])
+      segP1.resolve([{ ...SEGMENT_DEFAULTS, id: 4, name: 'Alpha Paying customers', stale: false }])
       await Promise.resolve()
       await Promise.resolve()
     })
@@ -1021,7 +1033,7 @@ describe('FunnelDetail — segments response identity survives a project switch 
 
     // Now project 2's own response lands.
     await act(async () => {
-      segP2.resolve([{ id: 4, name: 'Beta Paying customers', stale: false }])
+      segP2.resolve([{ ...SEGMENT_DEFAULTS, id: 4, name: 'Beta Paying customers', stale: false }])
       await Promise.resolve()
       await Promise.resolve()
     })

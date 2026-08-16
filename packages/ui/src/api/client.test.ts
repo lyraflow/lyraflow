@@ -434,4 +434,103 @@ describe('createClient', () => {
       expect(new Headers(init?.headers).get('x-lyraflow-project')).toBe('3')
     })
   })
+
+  describe('segments', () => {
+    it('previews an ad-hoc tree with the tree and the options in one flat body', async () => {
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response(JSON.stringify({ person_count: 3, warnings: [], as_of: 'x' }), {
+            status: 200,
+          }),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+      const filter = { kind: 'trait', key: 'plan', operator: '=', value: 'pro' }
+
+      await client.previewSegment(3, { ast_version: 1, filter }, { include: ['members'] })
+
+      const [path, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+      expect(path).toBe('/v1/segments/preview')
+      expect(init.method).toBe('POST')
+      // The route parses the SAME body twice -- once as SegmentQuery, once as
+      // PreviewOptions. A nested { query, options } shape fails both.
+      expect(JSON.parse(init.body as string)).toEqual({
+        ast_version: 1,
+        filter,
+        include: ['members'],
+      })
+      expect(new Headers(init.headers).get('x-lyraflow-project')).toBe('3')
+    })
+
+    it('renames without sending a tree', async () => {
+      const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ id: 1 }), { status: 200 }))
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      await client.renameSegment(3, 7, 'New name')
+
+      const [path, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+      expect(path).toBe('/v1/segments/7')
+      expect(init.method).toBe('PATCH')
+      // The server decides whether to touch the filter by whether the body
+      // carries a tree AT ALL. A rename that ships the tree resets the count
+      // snapshot -- the same defect as #92, except here the client owns it.
+      expect(JSON.parse(init.body as string)).toEqual({ name: 'New name' })
+    })
+
+    it('updates a tree by sending it', async () => {
+      const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ id: 1 }), { status: 200 }))
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+      const filter = { kind: 'trait', key: 'plan', operator: '=', value: 'pro' }
+
+      await client.updateSegmentTree(3, 7, { ast_version: 1, filter })
+
+      const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+      const body = JSON.parse(init.body as string)
+      expect(body).toEqual({ ast_version: 1, filter })
+      expect(body.name).toBeUndefined()
+    })
+
+    it('deleteSegment tolerates the 204 with no body', async () => {
+      const fetchImpl = vi.fn(async () => new Response(null, { status: 204 }))
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+      await expect(client.deleteSegment(3, 7)).resolves.toBeUndefined()
+    })
+
+    it('schemaProperties sends event and q in the query string and maps to property_key', async () => {
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              properties: [
+                { property_key: 'plan', value_kind: 'string' },
+                { property_key: 'plan_price', value_kind: 'number' },
+              ],
+            }),
+            { status: 200 },
+          ),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      const out = await client.schemaProperties(3, 'signed_up', 'pla')
+
+      expect(out).toEqual(['plan', 'plan_price'])
+      const [path, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+      const url = String(path)
+      expect(url).toMatch(/^\/v1\/schema\/properties\?/)
+      expect(url).toMatch(/[?&]event=signed_up(&|$)/)
+      expect(url).toMatch(/[?&]q=pla(&|$)/)
+      expect(new Headers(init.headers).get('x-lyraflow-project')).toBe('3')
+    })
+
+    it('schemaProperties omits event when undefined', async () => {
+      const fetchImpl = vi.fn(
+        async () => new Response(JSON.stringify({ properties: [] }), { status: 200 }),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      await client.schemaProperties(3, undefined, 'pla')
+
+      const [path] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+      expect(String(path)).not.toMatch(/[?&]event=/)
+    })
+  })
 })
