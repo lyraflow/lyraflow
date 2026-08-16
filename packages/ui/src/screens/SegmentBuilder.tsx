@@ -49,7 +49,9 @@ export const DEBOUNCE_MS = 600
  * the SERVER holds -- seeded by the load effect and advanced by
  * `handleSave` for whichever of its two requests actually commits, since
  * after a partial failure the fetched values describe a state that no
- * longer exists. That is the reference `handleSave` compares the CURRENT
+ * longer exists. A belief about one segment under one project, so that
+ * advance happens only while this screen still describes the segment the
+ * request was issued for (`guardedByIdentity`). That is the reference `handleSave` compares the CURRENT
  * `name`/`root` against to decide what actually changed. Content equality
  * (`JSON.stringify`), not the `dirty` flag already tracked: `dirty`
  * answers "has TreeEditor's onChange ever fired", which a negate-twice
@@ -158,6 +160,17 @@ export function SegmentBuilder(props: {
   // render -- with no window in which the previous segment's tree is
   // saveable under the new project's id.
   const identity = `${activeId ?? 'none'}:${editId ?? 'new'}`
+  // The identity the LATEST render describes, readable from a callback
+  // created under an EARLIER one. Every closure captures the `identity`
+  // const of the render that made it, which is exactly what makes a write
+  // after an await dangerous: the closure remembers the identity its
+  // request was issued under and has no way to notice the screen has moved
+  // on. Written during render rather than from an effect for the same
+  // reason `loaded` is compared during render -- an effect leaves a window
+  // in which this ref still names the identity just navigated away from,
+  // and a promise settling inside that window would pass the guard.
+  const identityRef = useRef(identity)
+  identityRef.current = identity
   const [loadedIdentity, setLoadedIdentity] = useState<string | null>(null)
   // Create mode has nothing to load; an empty form IS its loaded state.
   // Set ONLY by a load that succeeded, so a 404/500 leaves it false and
@@ -187,6 +200,18 @@ export function SegmentBuilder(props: {
   const requestIdRef = useRef(0)
   const answerIdRef = useRef(0)
 
+  // The address the FORM belongs to, which is not the same thing as
+  // `identity`. An existing segment is addressed by both the project and
+  // the id -- project 1's segment 7 and project 2's segment 7 are two
+  // different segments and their forms must never be confused. A segment
+  // that does not exist yet is addressed by the ROUTE alone: `/segments/new`
+  // is one blank form, and `createSegment` takes the project as an argument
+  // at save time, so nothing an operator composes there is bound to the
+  // project it was drafted under.
+  const formIdentity = isEditing ? identity : 'new'
+  const resetIdentityRef = useRef<string | null>(null)
+  const resetFormIdentityRef = useRef<string | null>(null)
+
   // The invariant: this screen's state must never describe a segment other
   // than the one addressed by (`activeId`, `editId`) right now.
   //
@@ -204,30 +229,72 @@ export function SegmentBuilder(props: {
   // reconciles onto the SAME component instance) are four doors on one
   // room; this closes the room.
   //
-  // The create route runs it too -- `isEditing` is false there, which is
-  // precisely the case the old early return skipped, leaving a builder
-  // navigated to from an edit route pre-filled with the segment it had
-  // just left and one click away from silently duplicating it.
+  // It is TWO resets, keyed differently, because the state below is not all
+  // bound to the same thing:
+  //
+  // - Anything bound to the IDENTITY -- a count that was computed under one
+  //   project, a save attempt issued against one segment -- is invalid the
+  //   moment either half moves, in create mode as much as in edit mode. A
+  //   count for the project just switched away from must not sit under the
+  //   tree that is still on screen.
+  // - The FORM -- name, tree, and this screen's belief about what the server
+  //   holds -- is bound to the address. Every edit-mode identity change
+  //   resets it, including the edit -> `/segments/new` door, which is
+  //   precisely the case an early return at the top of this effect used to
+  //   skip, leaving a builder navigated to from an edit route pre-filled
+  //   with the segment it had just left and one click from silently
+  //   duplicating it. But a project switch while composing a NEW segment
+  //   does not: there is no identity for that form to be wrong about, and
+  //   throwing away half-composed work silently is not a correctness fix.
+  //
+  // Both are keyed off a ref rather than left to the dependency array so
+  // that a re-run for some OTHER reason (`onUnauthorized` is re-created by
+  // every render of `App`, so a parent render re-runs this effect) cannot
+  // clear a save that is still in flight or a count that still answers the
+  // tree on screen.
   useEffect(() => {
-    setName('')
-    setOriginalName('')
-    setRoot(EMPTY_ROOT)
-    setOriginalRoot(null)
-    setStale(false)
-    setDirty(false)
-    setPreviewResult(null)
-    setPreviewedRoot(null)
-    setPreviewError(null)
-    setPreviewing(false)
-    setSaveError(null)
-    setLoadError(null)
-    setLoadedIdentity(null)
-    // A preview issued for the segment/project just navigated away from
-    // must not land against this one, and must not be able to re-enable
-    // Run underneath it -- same two-counter reasoning as `runPreview`
-    // below, bumped here before this identity has issued anything at all.
-    answerIdRef.current += 1
-    requestIdRef.current += 1
+    if (resetIdentityRef.current !== identity) {
+      resetIdentityRef.current = identity
+      setPreviewResult(null)
+      setPreviewedRoot(null)
+      setPreviewError(null)
+      setPreviewing(false)
+      setSaveError(null)
+      // A save issued under the identity just left may still be in flight.
+      // Its own completion is dropped by `guardedByIdentity` below, which
+      // is why this has to clear the flag here rather than wait for a
+      // `.finally` that will never write: otherwise Save stays disabled on
+      // the segment now on screen until a request that no longer concerns
+      // it happens to settle.
+      setSaving(false)
+      // A preview issued for the segment/project just navigated away from
+      // must not land against this one, and must not be able to re-enable
+      // Run underneath it -- same two-counter reasoning as `runPreview`
+      // below, bumped here before this identity has issued anything at all.
+      answerIdRef.current += 1
+      requestIdRef.current += 1
+    }
+
+    if (resetFormIdentityRef.current !== formIdentity) {
+      resetFormIdentityRef.current = formIdentity
+      setName('')
+      setOriginalName('')
+      setRoot(EMPTY_ROOT)
+      setOriginalRoot(null)
+      setStale(false)
+      setDirty(false)
+      setLoadError(null)
+      // Load-bearing on its own, and pinned on its own (this file's test
+      // `a segment that loaded once is not saveable...`). `loaded` compares
+      // `loadedIdentity` against the CURRENT identity, so leaving a
+      // successful load's value standing is invisible until the operator
+      // RETURNS to an identity that once loaded and now fails: edit 7 (ok)
+      // -> edit 8 (fails) -> edit 7 (fails) leaves `loadedIdentity` still
+      // reading `1:7` while `identity` reads `1:7` too, and `canSave`'s
+      // second mechanism reports a segment as loaded that this screen has
+      // just failed to read.
+      setLoadedIdentity(null)
+    }
 
     if (!isEditing || editId == null || activeId == null) return
     const requestedIdentity = identity
@@ -264,7 +331,7 @@ export function SegmentBuilder(props: {
     return () => {
       cancelled = true
     }
-  }, [client, activeId, editId, isEditing, identity, onUnauthorized])
+  }, [client, activeId, editId, isEditing, identity, formIdentity, onUnauthorized])
 
   const trimmedName = name.trim()
   // The root can legitimately be empty
@@ -365,25 +432,71 @@ export function SegmentBuilder(props: {
     previewedRoot != null &&
     JSON.stringify(root) !== JSON.stringify(previewedRoot)
 
+  /**
+   * The one way this screen writes state after an await.
+   *
+   * Called ONCE where an async operation is issued, it captures the
+   * identity that operation belongs to and returns a wrapper; wrapping
+   * every continuation (`.then`, `.catch`, `.finally`) is what makes it
+   * structurally impossible for a completion landing after the header
+   * project switcher or the router has moved on to write state describing
+   * a segment or a project this screen no longer shows. The reset above
+   * closes that door for state already on screen; this closes it for state
+   * that has not landed yet, which is the same invariant with a delay in
+   * it. `runPreview`'s `answerIdRef` is the same guard, written out by
+   * hand for the one case that needed it first.
+   *
+   * A wrapper rather than a guard clause at the top of each continuation
+   * deliberately: a `.then` that is not wrapped is visible at a glance,
+   * whereas one that quietly omits a clause is not -- and the two writes
+   * this was introduced for were added, correctly, by a fix that simply
+   * did not think about the switcher.
+   *
+   * What must NOT be wrapped is anything that is true regardless of which
+   * segment is on screen: `onUnauthorized` reports a dead session, not a
+   * stale screen, and dropping it would leave the operator typing into a
+   * form whose every request will 401.
+   */
+  function guardedByIdentity() {
+    const issuedFor = identityRef.current
+    return function stillCurrent<A extends unknown[]>(write: (...args: A) => void) {
+      return (...args: A) => {
+        if (identityRef.current !== issuedFor) return
+        write(...args)
+      }
+    }
+  }
+
   function handleSave() {
     if (!canSave || activeId == null) return
     setSaving(true)
     setSaveError(null)
+    const stillCurrent = guardedByIdentity()
 
     if (!isEditing || editId == null) {
       // Create has no "what changed" to compute -- the whole definition is
       // new, and lands on the LIST.
       client
         .createSegment(activeId, trimmedName, { ast_version: AST_VERSION, filter: root })
+        // The one continuation in this file deliberately left UNGUARDED.
+        // Its destination is the segment list, which names no identity, and
+        // it is the only acknowledgement a create ever gets: a guard would
+        // leave the operator looking at a form whose contents have already
+        // been created, with Save enabled, one click from creating a second
+        // copy of it under the project they just switched to. Unmounting
+        // the form is the safe outcome even when the list on the other side
+        // is a different project's.
         .then(() => navigate(ROUTES.segments))
         .catch((err: unknown) => {
           if (err instanceof ApiError && err.status === 401) {
             onUnauthorized?.()
             return
           }
-          setSaveError('Could not save this segment. Nothing was changed on the server.')
+          stillCurrent(setSaveError)(
+            'Could not save this segment. Nothing was changed on the server.',
+          )
         })
-        .finally(() => setSaving(false))
+        .finally(stillCurrent(() => setSaving(false)))
       return
     }
 
@@ -404,7 +517,7 @@ export function SegmentBuilder(props: {
     const requests: Promise<unknown>[] = []
     if (nameChanged) {
       requests.push(
-        client.renameSegment(activeId, editId, trimmedName).then((r) => {
+        client.renameSegment(activeId, editId, trimmedName).then(
           // The baseline advances the instant THIS request commits, not
           // when the save as a whole succeeds. An edit save can fire two
           // PATCHes and `Promise.all` rejects on the first failure, with
@@ -415,24 +528,41 @@ export function SegmentBuilder(props: {
           // dropped whichever field they reverted: rename Old -> New, tree
           // update fails, type `Old` back, save -- and no rename was sent
           // at all, leaving the server holding `New`.
-          setOriginalName(trimmedName)
-          return r
-        }),
+          //
+          // Guarded, because a baseline is a belief about ONE segment under
+          // ONE project. Writing this one against whatever the screen shows
+          // by the time the PATCH lands is how a save that crossed a header
+          // project switch made the next segment's untouched Save issue a
+          // real request -- and for the tree below, a request that costs
+          // that segment its cached count for a tree nobody edited.
+          stillCurrent(() => {
+            setOriginalName(trimmedName)
+          }),
+        ),
       )
     }
     if (treeChanged) {
       requests.push(
         client
           .updateSegmentTree(activeId, editId, { ast_version: AST_VERSION, filter: savedRoot })
-          .then((r) => {
-            setOriginalRoot(savedRoot)
-            return r
-          }),
+          .then(
+            stillCurrent(() => {
+              setOriginalRoot(savedRoot)
+            }),
+          ),
       )
     }
 
     Promise.all(requests)
-      .then(() => navigate(segmentPath(editId)))
+      // Guarded: unlike the create branch above, this destination NAMES a
+      // segment, and under a project the operator has since switched to it
+      // names a different one -- presented as the result of a save that was
+      // not made to it.
+      .then(
+        stillCurrent(() => {
+          navigate(segmentPath(editId))
+        }),
+      )
       .catch((err: unknown) => {
         if (err instanceof ApiError && err.status === 401) {
           onUnauthorized?.()
@@ -449,9 +579,13 @@ export function SegmentBuilder(props: {
         // so a second Save -- whether a verbatim retry or one the operator
         // has edited further -- re-sends exactly what still differs from
         // what the server now holds.
-        setSaveError('Could not save this segment. Try again.')
+        //
+        // Guarded for the same reason the delete confirmation on
+        // `SegmentDetail` is: an error naming "this segment" rendered over
+        // a segment that was never saved is a claim about the wrong thing.
+        stillCurrent(setSaveError)('Could not save this segment. Try again.')
       })
-      .finally(() => setSaving(false))
+      .finally(stillCurrent(() => setSaving(false)))
   }
 
   // Derived from the same `loaded` the save guard reads, rather than from

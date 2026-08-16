@@ -1176,6 +1176,7 @@ function renderLiveBuilder(client: ApiClient, initialPath: string) {
     <MemoryRouter initialEntries={[initialPath]}>
       <ProjectProvider projects={PROJECTS_TWO} initialId={1}>
         <SwitchProject />
+        <GoTo to={segmentEditPath(7)} label="go to segment 7" />
         <GoTo to={segmentEditPath(8)} label="go to segment 8" />
         <GoTo to={ROUTES.segmentNew} label="go to create" />
         <Routes>
@@ -1275,6 +1276,48 @@ describe('SegmentBuilder -- the identity its state describes', () => {
     expect(client.createSegment).not.toHaveBeenCalled()
   })
 
+  it('a segment that loaded once is not saveable when a later visit to it fails to load', async () => {
+    // The one shape in which the two mechanisms behind this invariant can
+    // disagree, and the only one that pins the reset's own
+    // `setLoadedIdentity(null)`: `loaded` compares `loadedIdentity` against
+    // the CURRENT identity, so a value left standing from an earlier,
+    // SUCCESSFUL load of the same identity is invisible until the operator
+    // comes back to it -- 7 loads, 8 fails, 7 fails. Without the line,
+    // `loadedIdentity` still reads `1:7`, `identity` reads `1:7`, and a
+    // segment this screen has just failed to read reports itself loaded.
+    let sevenFetches = 0
+    const client = fakeClient({
+      segment: vi.fn(async (_projectId: number, id: number) => {
+        if (id !== 7) throw new ApiError(500, 'server_error')
+        sevenFetches += 1
+        if (sevenFetches > 1) throw new ApiError(500, 'server_error')
+        return SEGMENT
+      }),
+    })
+    renderLiveBuilder(client, segmentEditPath(7))
+    await screen.findByTestId('condition-0')
+
+    await userEvent.click(screen.getByRole('button', { name: /go to segment 8/i }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not load this segment/i)
+
+    await userEvent.click(screen.getByRole('button', { name: /go to segment 7/i }))
+    await waitFor(() => expect(client.segment).toHaveBeenCalledTimes(3))
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent(/could not load this segment/i),
+    )
+
+    // Filled in by hand, as in the sibling test above: the reset leaves an
+    // empty form, so the completed-load term is the only thing between two
+    // clicks and a write to a segment whose definition was never read.
+    await userEvent.type(screen.getByLabelText(/name/i), 'Anything at all')
+    await userEvent.click(screen.getByRole('button', { name: /add condition/i }))
+    const save = screen.getByRole('button', { name: /^save$/i })
+    expect(save).toBeDisabled()
+    await userEvent.click(save)
+    expect(client.updateSegmentTree).not.toHaveBeenCalled()
+    expect(client.renameSegment).not.toHaveBeenCalled()
+  })
+
   it('a count run for the previous segment is not left standing against the next one', async () => {
     // The same invariant applied to the derived state a save does not read:
     // a preview belongs to the tree that answered it, and that tree is gone.
@@ -1290,5 +1333,236 @@ describe('SegmentBuilder -- the identity its state describes', () => {
     await waitFor(() => expect(client.segment).toHaveBeenCalledTimes(2))
     await screen.findByTestId('condition-0')
     expect(screen.queryByTestId('segment-preview-count')).toBeNull()
+  })
+})
+
+// --- A segment that does not exist yet has no identity to be wrong about.
+// It is addressed by the ROUTE alone: `createSegment` takes the project as
+// an argument at save time, so nothing composed here is bound to the
+// project it was drafted under, and there is no correctness argument for
+// throwing the work away when the header moves. What a switch DOES
+// invalidate is the count -- that was computed under one project and
+// answers a question about its people, not the new one's.
+//
+// The other half of this -- that the reset still fires for every EDIT-mode
+// identity change, which is what closes the four doors above -- is pinned by
+// the block above, not here: keying the form reset to the route alone (so it
+// never fires in edit mode) fails three of its tests plus the return-visit
+// one. This block is only about the case where there is no identity to be
+// wrong about.
+
+describe('SegmentBuilder -- composing a new segment across a project switch', () => {
+  it('keeps a half-composed new segment when the header project changes', async () => {
+    const client = fakeClient()
+    renderLiveBuilder(client, ROUTES.segmentNew)
+    await screen.findByTestId('group-')
+    await userEvent.type(screen.getByLabelText(/name/i), 'VIPs')
+    await userEvent.click(screen.getByRole('button', { name: /add condition/i }))
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeEnabled()
+
+    await userEvent.click(screen.getByRole('button', { name: /switch project/i }))
+
+    expect(screen.getByLabelText(/name/i)).toHaveValue('VIPs')
+    expect(screen.getByTestId('condition-0')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeEnabled()
+  })
+
+  it('drops a count computed under the project that was just switched away from', async () => {
+    // The count is the half a switch genuinely invalidates. `previewSegment`
+    // answers only its FIRST call so that the debounce firing later cannot
+    // put a number back on screen and make this pass for the wrong reason.
+    let previews = 0
+    const client = fakeClient({
+      previewSegment: vi.fn(() => {
+        previews += 1
+        return previews === 1 ? Promise.resolve(PREVIEW) : new Promise<SegmentPreview>(() => {})
+      }),
+    })
+    renderLiveBuilder(client, ROUTES.segmentNew)
+    await screen.findByTestId('group-')
+    await userEvent.type(screen.getByLabelText(/name/i), 'VIPs')
+    await userEvent.click(screen.getByRole('button', { name: /add condition/i }))
+    await userEvent.click(screen.getByRole('button', { name: /^run$/i }))
+    expect(await screen.findByTestId('segment-preview-count')).toHaveTextContent('42')
+
+    await userEvent.click(screen.getByRole('button', { name: /switch project/i }))
+
+    expect(screen.queryByTestId('segment-preview-count')).toBeNull()
+    // The work itself is still there -- this is the count going, not the
+    // form going with it.
+    expect(screen.getByTestId('condition-0')).toBeInTheDocument()
+  })
+})
+
+// --- A save is state that has not landed yet, and the header project
+// switcher is reachable for the whole time it is in flight. `PATCH
+// /v1/segments/:id` decides whether to touch the filter tree by whether the
+// body carries one AT ALL, so a baseline written against the wrong segment
+// is not a cosmetic error: the next Save on that segment, with nothing
+// changed, sends a tree and costs it the cached count snapshot the two-method
+// split exists to protect.
+
+type Deferred<T> = {
+  promise: Promise<T>
+  resolve: (value: T) => void
+  reject: (reason: unknown) => void
+}
+
+/** A request the test settles by hand, so a save can be held open across a
+ * project switch. */
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
+const TREE_BETA: FilterNode = {
+  kind: 'group',
+  op: 'and',
+  children: [{ kind: 'trait', key: 'tier', operator: '=', value: 'free' }],
+}
+
+/** Segment 7 exists in BOTH projects, with a different name and a different
+ * tree in each -- the case the id alone cannot tell apart. Every PATCH is
+ * held open until the test settles it. */
+function gatedSaveClient() {
+  const renames: Deferred<Segment>[] = []
+  const trees: Deferred<Segment>[] = []
+  const client = fakeClient({
+    segment: vi.fn(async (projectId: number, id: number) =>
+      projectId === 1
+        ? { ...SEGMENT, id, name: 'Alpha seven', filter: TREE }
+        : { ...SEGMENT, id, name: 'Beta seven', filter: TREE_BETA },
+    ),
+    renameSegment: vi.fn(() => {
+      const gate = deferred<Segment>()
+      renames.push(gate)
+      return gate.promise
+    }),
+    updateSegmentTree: vi.fn(() => {
+      const gate = deferred<Segment>()
+      trees.push(gate)
+      return gate.promise
+    }),
+  })
+  return { client, renames, trees }
+}
+
+/** Opens Alpha's segment 7, changes BOTH fields, saves, and switches the
+ * header to Beta with both PATCHes still open. Returns with Beta's segment
+ * 7 loaded and on screen. */
+async function saveAlphaThenSwitchToBeta(client: ApiClient & { segment: Mock }) {
+  renderLiveBuilder(client, segmentEditPath(7))
+  await screen.findByTestId('condition-0')
+  await userEvent.clear(screen.getByLabelText(/name/i))
+  await userEvent.type(screen.getByLabelText(/name/i), 'Renamed')
+  await userEvent.click(
+    within(screen.getByTestId('condition-0')).getByRole('button', { name: /negate/i }),
+  )
+  await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+  await waitFor(() => expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled())
+
+  await userEvent.click(screen.getByRole('button', { name: /switch project/i }))
+  await waitFor(() => expect(screen.getByLabelText(/name/i)).toHaveValue('Beta seven'))
+}
+
+describe('SegmentBuilder -- a save still in flight when the project changes', () => {
+  it('does not advance the tree baseline onto the segment now on screen, so its untouched Save sends nothing', async () => {
+    const { client, renames, trees } = gatedSaveClient()
+    await saveAlphaThenSwitchToBeta(client)
+
+    // The partial failure: the tree PATCH commits, the rename does not, so
+    // `Promise.all` rejects and nothing navigates.
+    await act(async () => {
+      trees[0]?.resolve(SEGMENT)
+      renames[0]?.reject(new ApiError(500, 'server_error'))
+    })
+
+    // Beta's segment 7, untouched. The promise this screen makes is that
+    // this issues no request at all.
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    expect(await screen.findByText('segment detail')).toBeInTheDocument()
+    expect(client.updateSegmentTree).toHaveBeenCalledTimes(1)
+    expect(client.updateSegmentTree).not.toHaveBeenCalledWith(2, 7, expect.anything())
+  })
+
+  it('does not advance the name baseline onto the segment now on screen', async () => {
+    const { client, renames, trees } = gatedSaveClient()
+    await saveAlphaThenSwitchToBeta(client)
+
+    // The other half of the partial failure: the rename commits, the tree
+    // PATCH does not.
+    await act(async () => {
+      renames[0]?.resolve(SEGMENT)
+      trees[0]?.reject(new ApiError(500, 'server_error'))
+    })
+
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    expect(await screen.findByText('segment detail')).toBeInTheDocument()
+    expect(client.renameSegment).toHaveBeenCalledTimes(1)
+    expect(client.renameSegment).not.toHaveBeenCalledWith(2, 7, 'Beta seven')
+  })
+
+  it('does not report the failure over the segment now on screen, which was never saved', async () => {
+    const { client, renames, trees } = gatedSaveClient()
+    await saveAlphaThenSwitchToBeta(client)
+
+    await act(async () => {
+      trees[0]?.resolve(SEGMENT)
+      renames[0]?.reject(new ApiError(500, 'server_error'))
+    })
+
+    expect(screen.queryByText(/could not save this segment/i)).toBeNull()
+  })
+
+  it('does not navigate to the detail of the segment the URL now names', async () => {
+    // Both PATCHes commit -- against ALPHA's segment 7. Navigating to
+    // `/segments/7` now would present BETA's segment 7 as the result of a
+    // save that was never made to it.
+    const { client, renames, trees } = gatedSaveClient()
+    await saveAlphaThenSwitchToBeta(client)
+
+    await act(async () => {
+      renames[0]?.resolve(SEGMENT)
+      trees[0]?.resolve(SEGMENT)
+    })
+
+    expect(screen.queryByText('segment detail')).toBeNull()
+    expect(screen.getByLabelText(/name/i)).toHaveValue('Beta seven')
+  })
+
+  it('re-enables Save on the segment now on screen rather than waiting for the abandoned save to settle', async () => {
+    // The in-flight flag belongs to the identity that issued the save. Left
+    // standing, it disables Save on a segment whose own save has not even
+    // been attempted -- and the abandoned request's own completion is
+    // dropped, so nothing else would ever clear it.
+    const { client } = gatedSaveClient()
+    await saveAlphaThenSwitchToBeta(client)
+
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeEnabled()
+  })
+
+  it('does not let an abandoned save clear the in-flight flag of the save that replaced it', async () => {
+    const { client, renames, trees } = gatedSaveClient()
+    await saveAlphaThenSwitchToBeta(client)
+
+    // Beta's own save, held open too.
+    await userEvent.click(
+      within(screen.getByTestId('condition-0')).getByRole('button', { name: /negate/i }),
+    )
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    await waitFor(() => expect(client.updateSegmentTree).toHaveBeenCalledTimes(2))
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+
+    await act(async () => {
+      trees[0]?.resolve(SEGMENT)
+      renames[0]?.reject(new ApiError(500, 'server_error'))
+    })
+
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
   })
 })
