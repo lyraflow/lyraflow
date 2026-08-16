@@ -93,6 +93,56 @@ describe('public surface', () => {
     expect(sent(f).filter((e) => e.type === 'page')).toHaveLength(1)
   })
 
+  it('fires a page view on init when autoPageView is left unset — the default', async () => {
+    // Deliberately not using setup(): that helper hardcodes autoPageView:
+    // false as ITS OWN default (see the helper's own definition above) so
+    // every other test in this file stays unaffected by the SDK's default.
+    // Pinning the SDK's actual default has to call init() directly, or this
+    // test would pass even if the default were reverted back to false.
+    const fetchImpl = vi.fn(ok) as unknown as typeof fetch
+    sdk.init({ host: 'https://a.test', writeKey: 'wk_test', fetchImpl })
+    await sdk.flush()
+    expect(sent(fetchImpl).filter((e) => e.type === 'page')).toHaveLength(1)
+  })
+
+  it('sends nothing on init when autoPageView is explicitly false', async () => {
+    const f = setup({ autoPageView: false })
+    await sdk.flush()
+    expect(sent(f)).toHaveLength(0)
+  })
+
+  it('the automatic page view is a normal $page — same shape as a manual page() call', async () => {
+    const autoFetch = vi.fn(ok) as unknown as typeof fetch
+    sdk.init({ host: 'https://a.test', writeKey: 'wk_test', fetchImpl: autoFetch })
+    await sdk.flush()
+    const [autoEvent] = sent(autoFetch)
+    expect(IngestPayload.safeParse(autoEvent).success).toBe(true)
+
+    const manualFetch = vi.fn(ok) as unknown as typeof fetch
+    sdk.init({
+      host: 'https://a.test',
+      writeKey: 'wk_test',
+      autoPageView: false,
+      fetchImpl: manualFetch,
+    })
+    sdk.page()
+    await sdk.flush()
+    const [manualEvent] = sent(manualFetch)
+
+    // message_id and timestamp are unique per call by design; anonymous_id
+    // is a fresh identity per init() — none of the three is part of "same
+    // shape". Everything else (type, name, context's keys, absence of
+    // properties/traits/user_id) must match exactly.
+    const shape = (e: Record<string, unknown>) => {
+      const { message_id, timestamp, anonymous_id, ...rest } = e
+      void message_id
+      void timestamp
+      void anonymous_id
+      return rest
+    }
+    expect(shape(autoEvent)).toEqual(shape(manualEvent))
+  })
+
   it('attaches the user id to events after identify', async () => {
     const f = setup()
     sdk.identify('user-42', { plan: 'pro' })

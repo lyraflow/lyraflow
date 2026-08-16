@@ -21,6 +21,19 @@ here as it happened rather than tagged retroactively, for the same reason 0.1.0
 is: a tag created after the fact names a moment nobody could have fetched. Its
 one fix is contained in 0.3.0.
 
+## Unreleased
+
+### Changed
+
+- **`@lyraflow/sdk-browser`'s `autoPageView` now defaults to `true`.** A
+  pasted install snippet with nothing else written now sends one page view on
+  load, instead of recording nothing until the site calls `lyraflow.page()`
+  itself. Opting out is `autoPageView: false`. A site that already calls
+  `lyraflow.page()` on its own will now send two page views per hard load —
+  remove that call, or set `autoPageView: false`, whichever is less work. The
+  automatic call still fires only once per hard load and never on a
+  client-side route change; see the README's *Single-page apps* section.
+
 ## 0.3.0 — 2026-08-16
 
 Lyraflow gets a web interface. Everything before this release was reachable only

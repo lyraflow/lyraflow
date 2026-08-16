@@ -305,12 +305,18 @@ describe('the snippet runSnippet emits, against the built bundle', () => {
     api().track('after_load', { plan: 'pro' })
     await api().flush()
 
-    // Both events, and the pre-load one first: the queued `init` has to be
-    // replayed ahead of the `track` sitting in front of it in the queue, or
-    // that track is dropped as "called before init()".
-    expect(delivered(sent)).toEqual(['early_signup', 'after_load'])
-    const first = (JSON.parse(sent[0] as string) as { batch: unknown[] }).batch[0]
-    expect(first).toMatchObject({
+    // Three events, not two: the emitted init block no longer opts out of
+    // `autoPageView`, so `init()` itself fires one `page()` call (an empty
+    // `event` name — `delivered()` maps a page event's missing `.event` to
+    // `''`) ahead of anything the replayed queue produces. It lands first
+    // because `replay()` runs `init` in its own pass, before the `track`
+    // sitting in front of it in the queue — the pre-load track still comes
+    // right after, proving the queued `init` really was replayed ahead of
+    // it, or that track would have been dropped as "called before init()".
+    expect(delivered(sent)).toEqual(['', 'early_signup', 'after_load'])
+    const batch = (JSON.parse(sent[0] as string) as { batch: { event?: string }[] }).batch
+    const early = batch.find((e) => e.event === 'early_signup')
+    expect(early).toMatchObject({
       type: 'track',
       event: 'early_signup',
       properties: { plan: 'trial' },
@@ -354,7 +360,14 @@ describe('the snippet runSnippet emits, against the built bundle', () => {
     api().track('after_load', { plan: 'pro' })
     await api().flush()
 
-    expect(delivered(sent)).toEqual(['early_signup', 'after_load'])
+    // Here the auto page view lands in the MIDDLE: `init()` runs directly
+    // (not through the stub, since the bundle already took over
+    // `window.lyraflow` before this block executed), and inside it
+    // `drainSnippetQueue()` — which replays the pre-load `early_signup` —
+    // runs before the `autoPageView` check that fires the page view. Same
+    // three events as the test above, different order, because this test
+    // exists specifically to pin that the ordering differs by cache state.
+    expect(delivered(sent)).toEqual(['early_signup', '', 'after_load'])
     expect(requests.length).toBeGreaterThan(0)
     for (const req of requests) {
       expect(req.url).toBe(`${HOST}/v1/batch`)

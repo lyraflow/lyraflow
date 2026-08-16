@@ -177,12 +177,18 @@ describe('the README snippet, against the built bundle', () => {
     api().track('after_load', { plan: 'pro' })
     await api().flush()
 
-    // Both events, and the pre-load one first: the queued `init` has to be
-    // replayed ahead of the `track` sitting in front of it in the queue, or
-    // that track is dropped as "called before init()".
-    expect(delivered(sent)).toEqual(['early_signup', 'after_load'])
-    const first = (JSON.parse(sent[0] as string) as { batch: unknown[] }).batch[0]
-    expect(first).toMatchObject({
+    // Three events, not two: the README's init block no longer opts out of
+    // `autoPageView`, so `init()` itself fires one `page()` call (an empty
+    // `event` name — `delivered()` maps a page event's missing `.event` to
+    // `''`) ahead of anything the replayed queue produces. It lands first
+    // because `replay()` runs `init` in its own pass, before the `track`
+    // sitting in front of it in the queue — the pre-load track still comes
+    // right after, proving the queued `init` really was replayed ahead of
+    // it, or that track would have been dropped as "called before init()".
+    expect(delivered(sent)).toEqual(['', 'early_signup', 'after_load'])
+    const batch = (JSON.parse(sent[0] as string) as { batch: { event?: string }[] }).batch
+    const early = batch.find((e) => e.event === 'early_signup')
+    expect(early).toMatchObject({
       type: 'track',
       event: 'early_signup',
       properties: { plan: 'trial' },
@@ -214,7 +220,14 @@ describe('the README snippet, against the built bundle', () => {
     api().track('after_load', { plan: 'pro' })
     await api().flush()
 
-    expect(delivered(sent)).toEqual(['early_signup', 'after_load'])
+    // Here the auto page view lands in the MIDDLE: `init()` runs directly
+    // (not through the stub, since the bundle already took over
+    // `window.lyraflow` before this block executed), and inside it
+    // `drainSnippetQueue()` — which replays the pre-load `early_signup` —
+    // runs before the `autoPageView` check that fires the page view. Same
+    // three events as the test above, different order, because this test
+    // exists specifically to pin that the ordering differs by cache state.
+    expect(delivered(sent)).toEqual(['early_signup', '', 'after_load'])
   })
 })
 
@@ -240,11 +253,17 @@ describe('a quota refusal, against the built bundle', () => {
   it('reports an over-quota 202 to the console and does not keep the events queued', async () => {
     // The batch that CROSSES the quota, not one long past it: the ingest
     // checks per item, so this response stores the first event and refuses
-    // the second — `accepted` and `over_quota` both non-zero. It is the first
+    // the rest — `accepted` and `over_quota` both non-zero. It is the first
     // response a project ever sees on running out, and a guard that only
     // looked at `over_quota` when nothing was accepted would say nothing
     // about it. (transport.test.ts pins the same shape at the module level;
     // this is the one that proves it survives into the shipped bundle.)
+    //
+    // `over_quota: count - 1` rather than a literal, because the batch this
+    // page actually flushes is three events, not two: `bootedPage()` boots
+    // through the real README init block, which — `autoPageView` now
+    // defaulting to `true` — fires one page view of its own before either
+    // `track()` call below runs.
     const { sent, api, warnings, queued } = bootedPage((count) => ({
       status: 202,
       headers: { get: () => null },
@@ -258,7 +277,8 @@ describe('a quota refusal, against the built bundle', () => {
 
     api().track('checkout_completed')
     api().track('checkout_completed_again')
-    expect(queued()).toHaveLength(2)
+    // 1 automatic page view (see above) + the 2 tracks just fired.
+    expect(queued()).toHaveLength(3)
     await api().flush()
 
     expect(sent).toHaveLength(1)
@@ -291,8 +311,10 @@ describe('a quota refusal, against the built bundle', () => {
     await api().flush()
 
     expect(sent).toHaveLength(1)
-    // Kept, not destroyed.
-    expect(queued()).toHaveLength(1)
+    // Kept, not destroyed. 2, not 1: `bootedPage()`'s real README init block
+    // fires its own automatic page view before this `track()` runs (see the
+    // test above), and the 429 keeps the whole batch, not just the track.
+    expect(queued()).toHaveLength(2)
     // And not blamed on a quota.
     expect(warnings).toEqual([])
 
@@ -300,6 +322,6 @@ describe('a quota refusal, against the built bundle', () => {
     // throttled client does not hammer whatever is throttling it.
     await api().flush()
     expect(sent).toHaveLength(1)
-    expect(queued()).toHaveLength(1)
+    expect(queued()).toHaveLength(2)
   })
 })
