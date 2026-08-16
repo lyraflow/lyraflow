@@ -290,6 +290,33 @@ describe('FunnelDetail', () => {
   })
 })
 
+// MINOR (whole-branch review): decision 8 gives a 404 (deleted elsewhere)
+// the remedy "offer the list" -- a bare error banner left an operator with a
+// message and no way to act on it.
+describe('FunnelDetail — a server 404 offers a way back to the list', () => {
+  it('shows a link back to the list when the funnel fetch 404s', async () => {
+    const client = fakeClient({
+      funnel: vi.fn(async () => {
+        throw new ApiError(404, 'funnel_not_found')
+      }),
+    })
+    renderDetail(client)
+    expect(await screen.findByRole('alert')).toHaveTextContent(/no longer exists/i)
+    expect(screen.getByRole('link', { name: /back to funnels/i })).toBeInTheDocument()
+  })
+
+  it('does not offer a list link for a non-404 fetch failure', async () => {
+    const client = fakeClient({
+      funnel: vi.fn(async () => {
+        throw new ApiError(503, 'unavailable')
+      }),
+    })
+    renderDetail(client)
+    expect(await screen.findByRole('alert')).toHaveTextContent(/temporarily unavailable/i)
+    expect(screen.queryByRole('link', { name: /back to funnels/i })).toBeNull()
+  })
+})
+
 // MINOR (whole-branch review): `/funnels/abc` used to be a dead screen --
 // `validId` nulled out, nothing fetched, no alert, heading read "Funnel".
 // Decision 8 treats an unreachable-from-the-UI `invalid_funnel_id` as a 404.

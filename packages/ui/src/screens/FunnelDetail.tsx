@@ -60,6 +60,12 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
   // recent caller gets to clear.
   const [funnelError, setFunnelError] = useState<string | null>(null)
   const [runError, setRunError] = useState<string | null>(null)
+  // MINOR (whole-branch review): decision 8 gives 404 (`funnel_not_found`,
+  // "deleted elsewhere") the remedy "offer the list" -- the generic error
+  // banner alone left an operator with a message and no way to act on it.
+  // Tracked separately from `funnelError`'s TEXT so the link doesn't have to
+  // pattern-match a rendered string to know when to appear.
+  const [funnelNotFound, setFunnelNotFound] = useState(false)
   const [running, setRunning] = useState(false)
   const [stale, setStale] = useState(false)
   const [days, setDays] = useState<RangeDays>(DEFAULT_RANGE_DAYS)
@@ -136,6 +142,7 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
     setFunnel(null)
     setResult(null)
     setFunnelError(null)
+    setFunnelNotFound(false)
     setRunError(null)
     setStale(false)
     setDays(DEFAULT_RANGE_DAYS)
@@ -151,6 +158,7 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
           onUnauthorized?.()
           return
         }
+        if (err instanceof ApiError && err.status === 404) setFunnelNotFound(true)
         setFunnelError(describeError(err))
       })
 
@@ -284,9 +292,16 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
        * subtitle -- can be trusted either); either error suppresses the
        * result entirely rather than rendering beside it. */}
       {funnelError != null ? (
-        <p role="alert" className="text-sm text-destructive">
-          {funnelError}
-        </p>
+        <div className="flex flex-col gap-1">
+          <p role="alert" className="text-sm text-destructive">
+            {funnelError}
+          </p>
+          {funnelNotFound && (
+            <Link to={ROUTES.funnels} className="text-sm font-medium text-primary hover:underline">
+              Back to funnels
+            </Link>
+          )}
+        </div>
       ) : (
         runError != null && (
           <p role="alert" className="text-sm text-destructive">
