@@ -298,7 +298,12 @@ export function init(options: InitOptions): void {
     }
     if (gate.allowed()) activateSending()
     drainSnippetQueue()
-    if (options.autoPageView) page()
+    // Defaults on: a pasted snippet with nothing else written must produce
+    // at least one event, or an install looks identical to a broken one.
+    // Opting out is `autoPageView: false`. Fires once, on this hard load,
+    // never again on client-side navigation — see the README's *Single-page
+    // apps* section.
+    if (options.autoPageView ?? true) page()
   })
 }
 

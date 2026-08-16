@@ -652,7 +652,7 @@ lyraflow.init({
   writeKey: 'wk_live_…',
   cookieDomain: '.example.com', // optional; auto-detected if omitted, see below
   requireConsent: false,        // optional; default false, see Consent below
-  autoPageView: false,          // optional; default false — fire one page() at init
+  autoPageView: true,           // optional; default true — fires one page() at init, see Single-page apps below
   debug: false,                 // optional; default false — verbose console.debug logging
 })
 ```
@@ -719,8 +719,12 @@ page source and any non-browser sender ignores CORS entirely.
 
 ### Single-page apps
 
-The SDK does not patch `history.pushState` or listen for route changes — call
-`lyraflow.page()` yourself after each client-side navigation completes.
+The SDK does not patch `history.pushState` or listen for route changes, and
+`autoPageView` does not change that: its one automatic `page()` call fires
+once, on this hard load, and never again for the life of the tab. A visitor
+who navigates client-side through five routes without a full reload produces
+exactly one page view unless you call `lyraflow.page()` yourself after each
+client-side navigation completes.
 
 ## Identity resolution
 
