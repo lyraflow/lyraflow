@@ -27,13 +27,13 @@
 import { join } from 'node:path'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { buildApp } from '../app.js'
 import { hashServerKey } from '../auth/project-cache.js'
 import { loadConfig } from '../config.js'
 import { Readiness } from '../health.js'
 import { IdentityBindings } from '../identity/bindings.js'
-import { RETENTION_TABLES, RetentionStore } from './store.js'
+import { RETENTION_TABLES } from './store.js'
 
 const CH_DB = 'lyraflow_test'
 const CH = {
@@ -233,8 +233,10 @@ beforeAll(async () => {
   const readiness = new Readiness()
   readiness.markReady()
   // buildApp never starts the retention worker's own timer (see app.ts) —
-  // this file drives RetentionStore directly instead, exactly like
-  // store.test.ts, scoped to this file's own project only.
+  // this file drives it itself, through `app.deps.retention.runOnce()`,
+  // exactly like wiring.test.ts, never through a private `RetentionStore` of
+  // its own (see the mutation site below for why that distinction matters
+  // for lyraflow#38).
   app = buildApp({ config, pg, ch, readiness })
   await app.ready()
 })
@@ -274,25 +276,38 @@ describe('retention consequences: base population, traits, identity', () => {
     expect(beforeFeed.statusCode).toBe(200)
     expect(beforeFeed.json().events.length).toBeGreaterThan(0)
 
-    // --- The mutation under test.
-    const store = new RetentionStore({ pg, ch, dryRun: false })
-    const results = await store.dropExpired({ projectId, retentionMonths: RETENTION_MONTHS }, NOW)
-    expect(results.some((r) => r.dropped)).toBe(true)
+    // --- The mutation under test. Driven through `app.deps.retention` (the
+    // real `RetentionWorker` `buildApp` wires in app.ts), NOT a private
+    // `new RetentionStore(...)` — wiring.test.ts's own header comment
+    // already flags exactly this: a test that constructs its own store
+    // bypasses app.ts's wiring entirely and cannot see anything wired
+    // there, including the segment-cache invalidation this file exists to
+    // pin (lyraflow#38). `runOnce()` sweeps every project in the shared test
+    // database — the same "whole-database sweep" wiring.test.ts's own
+    // comment describes — so the drop is confirmed by filtering the real
+    // "retention dropped partition" log line down to this project's id,
+    // rather than by a per-call return value `runOnce()` does not expose.
+    const infoSpy = vi.spyOn(app.log, 'info')
+    await app.deps.retention.runOnce()
+    const dropLinesForProject = infoSpy.mock.calls.filter(
+      (call): call is [Record<string, unknown>, string] =>
+        call[1] === 'retention dropped partition' &&
+        (call[0] as Record<string, unknown>).projectId === projectId,
+    )
+    expect(dropLinesForProject.length).toBeGreaterThan(0)
+    infoSpy.mockRestore()
 
-    // RetentionStore never touches SegmentCache — nothing in this feature
-    // does; app.ts wires retention and the segment cache as two independent
-    // things, and DELETE /v1/persons/:id (privacy/routes.ts) is the only
-    // caller that ever invalidates it. The `beforePreview` call above cached
-    // this exact filter's count under its 30s TTL, and that entry would
-    // otherwise still be live here, making every assertion below pass
-    // against a stale, pre-drop count regardless of what retention actually
-    // did. Cleared explicitly so this test measures retention's real,
-    // immediate effect rather than racing the cache's own TTL — the
-    // identical tool DELETE's route reaches for, on the identical shared
-    // instance (`app.deps.segmentCache`, exposed for exactly this reason;
-    // see app.ts's own docstring on it).
-    app.deps.segmentCache.clearProject(projectId)
-
+    // No explicit `segmentCache.clearProject()` here (lyraflow#38 fixed
+    // this): the `runOnce()` call above goes through the real, wired
+    // `RetentionStore` (app.ts), whose `onDrop` hook now clears this
+    // project's segment cache entries itself the instant a partition
+    // actually drops — the same production path `DELETE /v1/persons/:id`
+    // uses, not a test-only shortcut. The `beforePreview` call above cached
+    // this exact filter's count under its 30s TTL; if retention's own
+    // invalidation regressed, that entry would still be live here and every
+    // assertion below would pass against a stale, pre-drop count instead of
+    // exercising retention's real, immediate effect.
+    //
     // --- Consequence 1: the expired person no longer counts in the segment
     // BASE population, and the recent person still does. This is the
     // assertion Step 3's mutation (skipping device_index in

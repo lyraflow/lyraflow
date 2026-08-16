@@ -372,6 +372,23 @@ describe('retention wiring (app.ts)', () => {
     expect(lastRunValue).toBeLessThanOrEqual(Math.floor(Date.now() / 1000) + 5)
   })
 
+  // lyraflow#38's other half, and its own test on purpose: the fix is a
+  // `segmentCache.clearProject()` call wired into `onDrop` (app.ts), which
+  // only ever fires for a REAL drop (`dropped: true` — see store.ts). A run
+  // that finds nothing expired for this project must leave its cache
+  // generation untouched, not just "not obviously broken" — otherwise a
+  // later change could invalidate every project's cache on every tick
+  // regardless of whether that tick did anything, defeating the whole
+  // point of scoping the call to `onDrop` in the first place (a quiet run
+  // is supposed to cost nothing). `beforeEach` above already wiped this
+  // project's partitions and this test seeds no new events, so
+  // `dropExpired` has nothing to find for `projectId` here.
+  it("a run that drops nothing for a project leaves that project's segment cache generation untouched", async () => {
+    const before = app.deps.segmentCache.generation(projectId)
+    await app.deps.retention.runOnce()
+    expect(app.deps.segmentCache.generation(projectId)).toBe(before)
+  })
+
   // `retentionPartitionsDropped` in app.ts is a running total across every
   // run for the life of the process (`+=` in `onRun`), not the LATEST run's
   // own count (`=`). The single-run test above cannot tell those two apart:

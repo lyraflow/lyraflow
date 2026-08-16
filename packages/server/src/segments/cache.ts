@@ -159,6 +159,16 @@ export class SegmentCache {
    * — deleting the CURRENT key mid-iteration over a live `Map` iterator is
    * documented-safe, but taking a copy first removes any doubt without
    * relying on that.
+   *
+   * Two callers today, both wired in app.ts, both following the same rule:
+   * call this the instant a project's underlying data actually changes in a
+   * way a cached preview could disagree with, never speculatively. `DELETE
+   * /v1/persons/:id` (privacy/routes.ts) calls it once a deletion is
+   * accepted. The retention worker's `onDrop` hook calls it once a partition
+   * is REALLY gone — never for a project whose sweep dropped nothing, so a
+   * quiet run costs nothing. Anyone adding a third path that changes what a
+   * segment preview could return should call this too, at the point that
+   * change becomes real, not merely requested.
    */
   clearProject(projectId: number): void {
     this.#generations.set(projectId, this.generation(projectId) + 1)

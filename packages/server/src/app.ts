@@ -227,7 +227,24 @@ export function buildApp(input: {
     pg,
     ch,
     dryRun: false,
-    onDrop: (result) => logDroppedPartition(app.log, result),
+    // Two invalidation callers now share `segmentCache`, and the rule for
+    // both is the same: clear a project's entries the instant its data
+    // actually changes underneath a cached preview, never speculatively.
+    // DELETE /v1/persons/:id (privacy/routes.ts) does it once a deletion is
+    // accepted; this does it once a partition is REALLY gone — `onDrop`
+    // fires only for `dropped: true` (see store.ts), so a project whose
+    // sweep found nothing to drop never touches the cache. A person past
+    // retention is not merely hidden, they no longer exist in ClickHouse at
+    // all, so a preview still reporting them for up to CACHE_TTL_MS would be
+    // counting rows that are gone everywhere, not just stale. Anyone adding
+    // a third path that changes what a segment preview could return should
+    // call `segmentCache.clearProject(projectId)` here too. See
+    // segments/cache.ts's own docstring on `clearProject` for the race this
+    // closes.
+    onDrop: (result) => {
+      logDroppedPartition(app.log, result)
+      segmentCache.clearProject(result.projectId)
+    },
   })
   const retention = new RetentionWorker({
     listProjects: () => retentionStore.listProjects(),
