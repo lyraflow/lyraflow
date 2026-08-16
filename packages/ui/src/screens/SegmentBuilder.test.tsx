@@ -1150,12 +1150,16 @@ const PROJECTS_TWO = [
 
 /** The header project switcher, reduced to the one thing it does that
  * matters here -- it is reachable from every screen, including an open
- * segment editor. */
-function SwitchProject() {
+ * segment editor. Takes the target project so a test can drive a ROUND TRIP
+ * (away and back), which is the shape every in-flight fixture below the
+ * first block used to be unable to express: the label of the "back" button
+ * deliberately does not contain "switch project", so the existing queries
+ * for it stay unambiguous. */
+function SwitchProject(props: { to: number; label: string }) {
   const { setActiveId } = useProject()
   return (
-    <button type="button" onClick={() => setActiveId(2)}>
-      switch project
+    <button type="button" onClick={() => setActiveId(props.to)}>
+      {props.label}
     </button>
   )
 }
@@ -1171,17 +1175,24 @@ function GoTo(props: { to: string; label: string }) {
 
 /** Like `renderBuilder`, but the project and the route can both change
  * while the builder stays mounted. */
-function renderLiveBuilder(client: ApiClient, initialPath: string) {
+function renderLiveBuilder(client: ApiClient, initialPath: string, onUnauthorized?: () => void) {
   render(
     <MemoryRouter initialEntries={[initialPath]}>
       <ProjectProvider projects={PROJECTS_TWO} initialId={1}>
-        <SwitchProject />
+        <SwitchProject to={2} label="switch project" />
+        <SwitchProject to={1} label="return to project 1" />
         <GoTo to={segmentEditPath(7)} label="go to segment 7" />
         <GoTo to={segmentEditPath(8)} label="go to segment 8" />
         <GoTo to={ROUTES.segmentNew} label="go to create" />
         <Routes>
-          <Route path={ROUTES.segmentNew} element={<SegmentBuilder client={client} />} />
-          <Route path="/segments/:id/edit" element={<SegmentBuilder client={client} />} />
+          <Route
+            path={ROUTES.segmentNew}
+            element={<SegmentBuilder client={client} onUnauthorized={onUnauthorized} />}
+          />
+          <Route
+            path="/segments/:id/edit"
+            element={<SegmentBuilder client={client} onUnauthorized={onUnauthorized} />}
+          />
           <Route path={ROUTES.segments} element={<p>segments list</p>} />
           <Route path="/segments/:id" element={<p>segment detail</p>} />
         </Routes>
@@ -1564,5 +1575,320 @@ describe('SegmentBuilder -- a save still in flight when the project changes', ()
     })
 
     expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+  })
+})
+
+// --- Every fixture in the block above moves the form's address ONCE, away,
+// and leaves it there. That shape cannot tell a guard that compares
+// addresses apart from one that counts them, because the two only disagree
+// on a ROUND TRIP: leave a form and come back to it and the address reads
+// exactly as it did when the abandoned save was issued, so an equality check
+// lets that save land on top of the save that replaced it. What follows is
+// that round trip. `formGenerationRef` only ever increases, so a returned-to
+// form is a different generation from the identical-looking one it left, and
+// the case below cannot be expressed at all rather than merely going
+// untested.
+
+describe('SegmentBuilder -- a save abandoned by a round trip back to its own form', () => {
+  /** Opens Alpha's segment 7, renames it, saves with the PATCH held open,
+   * then leaves for Beta and comes straight back. Returns with Alpha's
+   * segment 7 loaded again and save A still in flight. */
+  async function saveAlphaThenLeaveAndReturn(client: ApiClient & { segment: Mock }) {
+    renderLiveBuilder(client, segmentEditPath(7))
+    await screen.findByTestId('condition-0')
+    await userEvent.clear(screen.getByLabelText(/name/i))
+    await userEvent.type(screen.getByLabelText(/name/i), 'Renamed')
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    await waitFor(() => expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled())
+
+    await userEvent.click(screen.getByRole('button', { name: /switch project/i }))
+    await waitFor(() => expect(screen.getByLabelText(/name/i)).toHaveValue('Beta seven'))
+    await userEvent.click(screen.getByRole('button', { name: /return to project 1/i }))
+    await waitFor(() => expect(screen.getByLabelText(/name/i)).toHaveValue('Alpha seven'))
+  }
+
+  /** A second save, against the very same segment under the very same
+   * project the abandoned one was issued for -- held open too. */
+  async function saveTheSameSegmentAgain(client: ApiClient & { updateSegmentTree: Mock }) {
+    await userEvent.click(
+      within(screen.getByTestId('condition-0')).getByRole('button', { name: /negate/i }),
+    )
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    await waitFor(() => expect(client.updateSegmentTree).toHaveBeenCalledTimes(1))
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+  }
+
+  it('a succeeding abandoned save neither clears the live save in-flight flag nor navigates off the form', async () => {
+    const { client, renames, trees } = gatedSaveClient()
+    await saveAlphaThenLeaveAndReturn(client)
+    await saveTheSameSegmentAgain(client)
+
+    // The abandoned save COMMITS. Its baseline advance is not even wrong --
+    // it really is this segment under this project -- which is exactly why
+    // nothing above can see the rest of what it does.
+    await act(async () => {
+      renames[0]?.resolve(SEGMENT)
+    })
+
+    // Its `.finally` must not clear the flag of the save that replaced it,
+    // and its `.then` must not yank the operator to the detail route off a
+    // form they are still editing.
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+    expect(screen.queryByText('segment detail')).toBeNull()
+    expect(screen.getByLabelText(/name/i)).toHaveValue('Alpha seven')
+
+    // Not stuck: the live save's own completion still lands.
+    await act(async () => {
+      trees[0]?.resolve(SEGMENT)
+    })
+    expect(await screen.findByText('segment detail')).toBeInTheDocument()
+  })
+
+  it('a failing abandoned save does not report itself over the live save that replaced it', async () => {
+    const { client, renames } = gatedSaveClient()
+    await saveAlphaThenLeaveAndReturn(client)
+    await saveTheSameSegmentAgain(client)
+
+    await act(async () => {
+      renames[0]?.reject(new ApiError(500, 'server_error'))
+    })
+
+    expect(screen.queryByText(/could not save this segment/i)).toBeNull()
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+  })
+})
+
+// --- A segment that does not exist yet outlives a project switch, and so
+// must the create still open against it. The two halves are individually
+// defensible and compose badly: keeping the half-composed form while
+// clearing the in-flight flag on the same switch hands the operator a fully
+// populated form with Save re-enabled and the first `createSegment` still
+// open -- two clicks, two segments, one under each project. The in-flight
+// flag and the failure banner are therefore reset WITH THE FORM, not with
+// the identity, and every continuation of a create is guarded by the form's
+// generation to match.
+
+/** Every `createSegment` and `updateSegmentTree` held open until the test
+ * settles it, so a create can be kept in flight across a project switch or a
+ * navigation to a different form. */
+function gatedCreateClient() {
+  const creates: Deferred<Segment>[] = []
+  const trees: Deferred<Segment>[] = []
+  const client = fakeClient({
+    segment: vi.fn(async (_projectId: number, id: number) => ({ ...SEGMENT, id })),
+    createSegment: vi.fn(() => {
+      const gate = deferred<Segment>()
+      creates.push(gate)
+      return gate.promise
+    }),
+    updateSegmentTree: vi.fn(() => {
+      const gate = deferred<Segment>()
+      trees.push(gate)
+      return gate.promise
+    }),
+  })
+  return { client, creates, trees }
+}
+
+/** Composes a new segment and saves it, with the create held open. */
+async function composeAndSaveANewSegment(client: ApiClient & { createSegment: Mock }) {
+  await screen.findByTestId('group-')
+  await userEvent.type(screen.getByLabelText(/name/i), 'VIPs')
+  await userEvent.click(screen.getByRole('button', { name: /add condition/i }))
+  await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+  await waitFor(() => expect(client.createSegment).toHaveBeenCalledTimes(1))
+  expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+}
+
+describe('SegmentBuilder -- a create still in flight when the project changes', () => {
+  it('keeps the half-composed segment AND keeps Save disabled, so the switch cannot produce a second copy', async () => {
+    const { client, creates } = gatedCreateClient()
+    renderLiveBuilder(client, ROUTES.segmentNew)
+    await composeAndSaveANewSegment(client)
+
+    await userEvent.click(screen.getByRole('button', { name: /switch project/i }))
+
+    // The work survives, as it must -- nothing composed here is bound to the
+    // project it was drafted under.
+    expect(screen.getByLabelText(/name/i)).toHaveValue('VIPs')
+    expect(screen.getByTestId('condition-0')).toBeInTheDocument()
+
+    // And the create that is still open still holds Save down. Asserted on
+    // the REQUEST as well as the control: a screen that disables the wrong
+    // button but still fires the call would pass a control-only test.
+    const save = screen.getByRole('button', { name: /^save$/i })
+    expect(save).toBeDisabled()
+    await userEvent.click(save)
+    expect(client.createSegment).toHaveBeenCalledTimes(1)
+    expect(client.createSegment).not.toHaveBeenCalledWith(2, 'VIPs', expect.anything())
+
+    // Not stuck either: the create settling releases it.
+    await act(async () => {
+      creates[0]?.resolve({ ...SEGMENT, id: 42 })
+    })
+    expect(await screen.findByText('segments list')).toBeInTheDocument()
+  })
+})
+
+describe('SegmentBuilder -- a create abandoned by leaving the form', () => {
+  /** Starts a create, then walks off to segment 7 and starts a save there,
+   * with both requests held open. */
+  async function startACreateThenSaveSegmentSeven(
+    client: ApiClient & { createSegment: Mock; updateSegmentTree: Mock },
+  ) {
+    renderLiveBuilder(client, ROUTES.segmentNew)
+    await composeAndSaveANewSegment(client)
+
+    await userEvent.click(screen.getByRole('button', { name: /go to segment 7/i }))
+    await waitFor(() => expect(screen.getByLabelText(/name/i)).toHaveValue('Paying customers'))
+
+    await userEvent.click(
+      within(screen.getByTestId('condition-0')).getByRole('button', { name: /negate/i }),
+    )
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    await waitFor(() => expect(client.updateSegmentTree).toHaveBeenCalledTimes(1))
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+  }
+
+  it('does not let the abandoned create clear the in-flight flag of the save that replaced it', async () => {
+    const { client, creates } = gatedCreateClient()
+    await startACreateThenSaveSegmentSeven(client)
+
+    await act(async () => {
+      creates[0]?.reject(new ApiError(500, 'server_error'))
+    })
+
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+  })
+
+  it('does not report the abandoned create failure over the segment now on screen', async () => {
+    const { client, creates } = gatedCreateClient()
+    await startACreateThenSaveSegmentSeven(client)
+
+    await act(async () => {
+      creates[0]?.reject(new ApiError(500, 'server_error'))
+    })
+
+    // The create branch's own copy -- true of a create, and a claim about
+    // the wrong thing over a segment whose save is still open.
+    expect(screen.queryByText(/nothing was changed on the server/i)).toBeNull()
+  })
+
+  // The one continuation in `SegmentBuilder` deliberately left UNGUARDED,
+  // pinned so a later tidy-up cannot wrap it in silence. The segment list
+  // names no segment and no project, and this navigation is the only
+  // acknowledgement a create ever gets: guarded, a create that lands after
+  // the operator moved on would commit with nothing anywhere saying so.
+  it('a create that lands after the operator moved to another form still reports itself on the list', async () => {
+    const { client, creates } = gatedCreateClient()
+    renderLiveBuilder(client, ROUTES.segmentNew)
+    await composeAndSaveANewSegment(client)
+
+    await userEvent.click(screen.getByRole('button', { name: /go to segment 7/i }))
+    await waitFor(() => expect(screen.getByLabelText(/name/i)).toHaveValue('Paying customers'))
+
+    await act(async () => {
+      creates[0]?.resolve({ ...SEGMENT, id: 42 })
+    })
+    expect(await screen.findByText('segments list')).toBeInTheDocument()
+  })
+})
+
+// --- The rest of what the in-flight work left unpinned: two writes in the
+// reset that are load-bearing but invisible to every fixture above, the
+// preview counter bump beside them, and the second of the two continuations
+// deliberately left unguarded.
+
+describe('SegmentBuilder -- what the reset clears, and what stays unguarded', () => {
+  it('a failed save banner does not stand over the segment a project switch put on screen', async () => {
+    // Same class as the guarded catch, reached with no request in flight at
+    // all: the banner is a fact about the attempt that raised it, and that
+    // attempt was made against a form that is gone.
+    const { client, renames } = gatedSaveClient()
+    renderLiveBuilder(client, segmentEditPath(7))
+    await screen.findByTestId('condition-0')
+    await userEvent.clear(screen.getByLabelText(/name/i))
+    await userEvent.type(screen.getByLabelText(/name/i), 'Renamed')
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    await waitFor(() => expect(client.renameSegment).toHaveBeenCalledTimes(1))
+
+    await act(async () => {
+      renames[0]?.reject(new ApiError(500, 'server_error'))
+    })
+    expect(await screen.findByText(/could not save this segment/i)).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: /switch project/i }))
+    await waitFor(() => expect(screen.getByLabelText(/name/i)).toHaveValue('Beta seven'))
+
+    expect(screen.queryByText(/could not save this segment/i)).toBeNull()
+  })
+
+  it('a failed load banner does not stand over the segment that loads next', async () => {
+    const client = fakeClient({
+      segment: vi.fn(async (_projectId: number, id: number) => {
+        if (id !== 7) throw new ApiError(500, 'server_error')
+        return SEGMENT
+      }),
+    })
+    renderLiveBuilder(client, segmentEditPath(8))
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not load this segment/i)
+
+    await userEvent.click(screen.getByRole('button', { name: /go to segment 7/i }))
+    await screen.findByTestId('condition-0')
+
+    expect(screen.queryByText(/could not load this segment/i)).toBeNull()
+  })
+
+  it('a count still in flight for the project just left never lands on the segment now on screen', async () => {
+    // The existing sibling test settles its preview BEFORE the switch, so
+    // the reset's own `setPreviewResult(null)` is enough to pass it. This
+    // one holds the request open across the switch, which is the only shape
+    // that reaches the counter bump: without it the abandoned response is
+    // applied, putting Alpha's count under Beta's segment.
+    const gate = deferred<SegmentPreview>()
+    const client = fakeClient({
+      segment: vi.fn(async (projectId: number, id: number) =>
+        projectId === 1
+          ? { ...SEGMENT, id, name: 'Alpha seven', filter: TREE }
+          : { ...SEGMENT, id, name: 'Beta seven', filter: TREE_BETA },
+      ),
+      previewSegment: vi.fn(() => gate.promise),
+    })
+    renderLiveBuilder(client, segmentEditPath(7))
+    await screen.findByTestId('condition-0')
+    await userEvent.click(screen.getByRole('button', { name: /^run$/i }))
+    await waitFor(() => expect(client.previewSegment).toHaveBeenCalledTimes(1))
+
+    await userEvent.click(screen.getByRole('button', { name: /switch project/i }))
+    await waitFor(() => expect(screen.getByLabelText(/name/i)).toHaveValue('Beta seven'))
+
+    await act(async () => {
+      gate.resolve(PREVIEW)
+    })
+    expect(screen.queryByTestId('segment-preview-count')).toBeNull()
+  })
+
+  // The second continuation deliberately left unguarded, pinned so a later
+  // tidy-up cannot wrap it in silence: a 401 reports a DEAD SESSION, which
+  // is true whichever segment is on screen. Dropped, it would leave the
+  // operator typing into a form whose every request will 401.
+  it('a 401 from a save abandoned by a project switch still reports the dead session', async () => {
+    const onUnauthorized = vi.fn()
+    const { client, renames } = gatedSaveClient()
+    renderLiveBuilder(client, segmentEditPath(7), onUnauthorized)
+    await screen.findByTestId('condition-0')
+    await userEvent.clear(screen.getByLabelText(/name/i))
+    await userEvent.type(screen.getByLabelText(/name/i), 'Renamed')
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    await waitFor(() => expect(client.renameSegment).toHaveBeenCalledTimes(1))
+
+    await userEvent.click(screen.getByRole('button', { name: /switch project/i }))
+    await waitFor(() => expect(screen.getByLabelText(/name/i)).toHaveValue('Beta seven'))
+
+    await act(async () => {
+      renames[0]?.reject(new ApiError(401, 'unauthorized'))
+    })
+
+    expect(onUnauthorized).toHaveBeenCalled()
   })
 })

@@ -1,7 +1,7 @@
 import type { FilterNode, Group } from '@lyraflow/core/segments/ast.js'
 import { AST_VERSION } from '@lyraflow/core/segments/ast.js'
 import { costWarnings } from '@lyraflow/core/segments/validate.js'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
@@ -51,7 +51,7 @@ export const DEBOUNCE_MS = 600
  * after a partial failure the fetched values describe a state that no
  * longer exists. A belief about one segment under one project, so that
  * advance happens only while this screen still describes the segment the
- * request was issued for (`guardedByIdentity`). That is the reference `handleSave` compares the CURRENT
+ * request was issued for (`guardedByFormGeneration`). That is the reference `handleSave` compares the CURRENT
  * `name`/`root` against to decide what actually changed. Content equality
  * (`JSON.stringify`), not the `dirty` flag already tracked: `dirty`
  * answers "has TreeEditor's onChange ever fired", which a negate-twice
@@ -160,17 +160,6 @@ export function SegmentBuilder(props: {
   // render -- with no window in which the previous segment's tree is
   // saveable under the new project's id.
   const identity = `${activeId ?? 'none'}:${editId ?? 'new'}`
-  // The identity the LATEST render describes, readable from a callback
-  // created under an EARLIER one. Every closure captures the `identity`
-  // const of the render that made it, which is exactly what makes a write
-  // after an await dangerous: the closure remembers the identity its
-  // request was issued under and has no way to notice the screen has moved
-  // on. Written during render rather than from an effect for the same
-  // reason `loaded` is compared during render -- an effect leaves a window
-  // in which this ref still names the identity just navigated away from,
-  // and a promise settling inside that window would pass the guard.
-  const identityRef = useRef(identity)
-  identityRef.current = identity
   const [loadedIdentity, setLoadedIdentity] = useState<string | null>(null)
   // Create mode has nothing to load; an empty form IS its loaded state.
   // Set ONLY by a load that succeeded, so a 404/500 leaves it false and
@@ -212,6 +201,62 @@ export function SegmentBuilder(props: {
   const resetIdentityRef = useRef<string | null>(null)
   const resetFormIdentityRef = useRef<string | null>(null)
 
+  // How many times the COMMITTED form address has changed. Every
+  // continuation of a save captures this number where the request is issued
+  // and writes only while it is still the current one.
+  //
+  // A monotonic generation rather than the address itself, deliberately.
+  // Comparing addresses cannot tell "never left this form" from "left it and
+  // came back": project 1's segment 7 -> project 2's segment 7 -> back to
+  // project 1's segment 7 reads EQUAL on both sides, so a save abandoned two
+  // navigations ago passes the comparison and lands on top of the save that
+  // replaced it -- clearing that save's in-flight flag, rendering its own
+  // failure banner over it, and, when it succeeded, navigating the operator
+  // off a form they are still typing into, discarding the work in it. A
+  // counter that only ever increases cannot express that case at all: a
+  // return trip is strictly two bumps, so a form returned to is a different
+  // generation from the identical-looking one it left, and no amount of
+  // address equality is consulted. Same reason `runPreview` below counts
+  // rather than compares.
+  const formGenerationRef = useRef(0)
+  const committedFormIdentityRef = useRef(formIdentity)
+  // Written from a LAYOUT effect, which runs synchronously inside the commit
+  // phase, before the stack unwinds and before any microtask (so before any
+  // promise continuation) can interleave. That makes this ref mean exactly
+  // "the address of the most recently COMMITTED render", which is the
+  // guard's actual definition.
+  //
+  // NOT written during render. `<BrowserRouter>`/`<MemoryRouter>` wrap every
+  // location update in `startTransition` unless passed `useTransitions={false}`,
+  // and `AppRouter` does not pass it, so a route change here is a
+  // transition-lane render -- one React may yield partway through, replay, or
+  // abandon without ever committing. A render-phase write therefore runs
+  // AHEAD of the commit, and a Save clicked during such a yield captures an
+  // address the operator has not arrived at yet, so its stale write PASSES
+  // the guard that exists to drop it. The same write can also be left naming
+  // a render that never committed, in which case a live save has every
+  // continuation dropped -- including the one that clears the in-flight flag
+  // -- and Save strands disabled with no address change left to reset it.
+  //
+  // NOT a passive `useEffect` either: those are deferred past paint, so the
+  // ref genuinely lags a committed change and a promise settling in that gap
+  // passes a guard it should fail.
+  //
+  // NOT COVERED BY A TEST, and deliberately not given one that looks as
+  // though it is. `act()` flushes passive effects before any assertion runs
+  // and before any hand-settled promise resolves, so a render-phase write, a
+  // `useEffect` write and this one are indistinguishable to every fixture in
+  // this screen's suite; telling them apart needs a render React abandons or
+  // has not yet committed, which nothing available in these tests can
+  // produce. This choice rests on the router's transition behaviour
+  // described above, not on a passing test.
+  useLayoutEffect(() => {
+    if (committedFormIdentityRef.current !== formIdentity) {
+      committedFormIdentityRef.current = formIdentity
+      formGenerationRef.current += 1
+    }
+  })
+
   // The invariant: this screen's state must never describe a segment other
   // than the one addressed by (`activeId`, `editId`) right now.
   //
@@ -237,8 +282,9 @@ export function SegmentBuilder(props: {
   //   moment either half moves, in create mode as much as in edit mode. A
   //   count for the project just switched away from must not sit under the
   //   tree that is still on screen.
-  // - The FORM -- name, tree, and this screen's belief about what the server
-  //   holds -- is bound to the address. Every edit-mode identity change
+  // - The FORM -- name, tree, this screen's belief about what the server
+  //   holds, and the state of the last save ATTEMPT made from it -- is bound
+  //   to the address. Every edit-mode identity change
   //   resets it, including the edit -> `/segments/new` door, which is
   //   precisely the case an early return at the top of this effect used to
   //   skip, leaving a builder navigated to from an edit route pre-filled
@@ -246,6 +292,17 @@ export function SegmentBuilder(props: {
   //   duplicating it. But a project switch while composing a NEW segment
   //   does not: there is no identity for that form to be wrong about, and
   //   throwing away half-composed work silently is not a correctness fix.
+  //
+  // In edit mode the two buckets are the same set of changes (`formIdentity`
+  // IS `identity` there), so the split only ever shows in create mode -- and
+  // that is where putting the in-flight flag in the wrong bucket bites.
+  // Keeping the half-composed form across a project switch while ALSO
+  // clearing `saving` on that switch hands the operator a fully populated
+  // form with Save re-enabled and the first `createSegment` still open: two
+  // clicks, two segments, one under each project. So `saving` and
+  // `saveError` describe the last save attempt made from THIS FORM and are
+  // reset with the form, which keeps both halves at once -- the work
+  // survives the switch, and Save stays disabled until the create settles.
   //
   // Both are keyed off a ref rather than left to the dependency array so
   // that a re-run for some OTHER reason (`onUnauthorized` is re-created by
@@ -259,19 +316,21 @@ export function SegmentBuilder(props: {
       setPreviewedRoot(null)
       setPreviewError(null)
       setPreviewing(false)
-      setSaveError(null)
-      // A save issued under the identity just left may still be in flight.
-      // Its own completion is dropped by `guardedByIdentity` below, which
-      // is why this has to clear the flag here rather than wait for a
-      // `.finally` that will never write: otherwise Save stays disabled on
-      // the segment now on screen until a request that no longer concerns
-      // it happens to settle.
-      setSaving(false)
       // A preview issued for the segment/project just navigated away from
-      // must not land against this one, and must not be able to re-enable
-      // Run underneath it -- same two-counter reasoning as `runPreview`
+      // must not land against this one -- same reasoning as `runPreview`
       // below, bumped here before this identity has issued anything at all.
+      // Load-bearing and pinned on its own: `setPreviewResult(null)` above
+      // only clears a count that has ALREADY landed, so a request still open
+      // across the switch needs this to be discarded when it lands (this
+      // file's test `a count still in flight for the project just left...`).
       answerIdRef.current += 1
+      // The mirror, kept for symmetry and honestly UNPINNABLE: removing it
+      // changes nothing observable, because `setPreviewing(false)` beside it
+      // has already cleared the flag this counter gates, and `requestIdRef`
+      // only ever increases, so any preview issued after the switch already
+      // outranks the abandoned one. It earns its place as the invariant
+      // ("nothing issued under the identity just left may write") applied
+      // without exception rather than as a second mechanism.
       requestIdRef.current += 1
     }
 
@@ -284,6 +343,19 @@ export function SegmentBuilder(props: {
       setStale(false)
       setDirty(false)
       setLoadError(null)
+      // A save issued from the form just left may still be in flight. Its
+      // own completion is dropped by `guardedByFormGeneration` below, which
+      // is why this has to clear the flag here rather than wait for a
+      // `.finally` that will never write: otherwise Save stays disabled on
+      // the segment now on screen until a request that no longer concerns
+      // it happens to settle.
+      setSaving(false)
+      // The banner belongs to the attempt that raised it, and that attempt
+      // was made against the form being replaced. Left standing it reports a
+      // failure over a segment that was never saved -- the same class as the
+      // guarded catch below, reached without any request being in flight at
+      // all.
+      setSaveError(null)
       // Load-bearing on its own, and pinned on its own (this file's test
       // `a segment that loaded once is not saveable...`). `loaded` compares
       // `loadedIdentity` against the CURRENT identity, so leaving a
@@ -436,15 +508,34 @@ export function SegmentBuilder(props: {
    * The one way this screen writes state after an await.
    *
    * Called ONCE where an async operation is issued, it captures the
-   * identity that operation belongs to and returns a wrapper; wrapping
+   * GENERATION that operation belongs to and returns a wrapper; wrapping
    * every continuation (`.then`, `.catch`, `.finally`) is what makes it
    * structurally impossible for a completion landing after the header
    * project switcher or the router has moved on to write state describing
-   * a segment or a project this screen no longer shows. The reset above
+   * a form this screen no longer shows. The reset above
    * closes that door for state already on screen; this closes it for state
    * that has not landed yet, which is the same invariant with a delay in
    * it. `runPreview`'s `answerIdRef` is the same guard, written out by
-   * hand for the one case that needed it first.
+   * hand for the one case that needed it first -- a counter there too, and
+   * for the same reason: equality on what is being tracked cannot see a
+   * value that left and came back.
+   *
+   * Guarded by the FORM's generation rather than the identity's, because
+   * every state write below belongs to the form bucket of the reset above
+   * -- the baselines, the failure banner and the in-flight flag are all
+   * facts about one form and its last save attempt. That is the rule, and
+   * it is what keeps the two in step: state reset with the form is written
+   * only while the form is the same one. In edit mode the two generations
+   * move together (`formIdentity` IS `identity` there); in create mode the
+   * form outlives a project switch, and so must the in-flight flag of the
+   * `createSegment` still open against it.
+   *
+   * The generation is read where the request is ISSUED, from inside a
+   * discrete event handler, so it is the generation of the render that
+   * handler came from: React dispatches the most recently committed
+   * handler, and this ref is written in the commit phase, so the two cannot
+   * disagree. Comparing the closure's own `formIdentity` on top would be
+   * strictly redundant -- one generation names exactly one address.
    *
    * A wrapper rather than a guard clause at the top of each continuation
    * deliberately: a `.then` that is not wrapped is visible at a glance,
@@ -457,11 +548,11 @@ export function SegmentBuilder(props: {
    * stale screen, and dropping it would leave the operator typing into a
    * form whose every request will 401.
    */
-  function guardedByIdentity() {
-    const issuedFor = identityRef.current
+  function guardedByFormGeneration() {
+    const issuedFor = formGenerationRef.current
     return function stillCurrent<A extends unknown[]>(write: (...args: A) => void) {
       return (...args: A) => {
-        if (identityRef.current !== issuedFor) return
+        if (formGenerationRef.current !== issuedFor) return
         write(...args)
       }
     }
@@ -471,21 +562,28 @@ export function SegmentBuilder(props: {
     if (!canSave || activeId == null) return
     setSaving(true)
     setSaveError(null)
-    const stillCurrent = guardedByIdentity()
+    const stillCurrent = guardedByFormGeneration()
 
     if (!isEditing || editId == null) {
       // Create has no "what changed" to compute -- the whole definition is
       // new, and lands on the LIST.
       client
         .createSegment(activeId, trimmedName, { ast_version: AST_VERSION, filter: root })
-        // The one continuation in this file deliberately left UNGUARDED.
-        // Its destination is the segment list, which names no identity, and
-        // it is the only acknowledgement a create ever gets: a guard would
-        // leave the operator looking at a form whose contents have already
-        // been created, with Save enabled, one click from creating a second
-        // copy of it under the project they just switched to. Unmounting
-        // the form is the safe outcome even when the list on the other side
-        // is a different project's.
+        // The one continuation in this file deliberately left UNGUARDED, and
+        // pinned as such (this file's test `a create that lands after a
+        // project switch still leaves the form...`). Its destination is the
+        // segment list, which names no segment and no project, and it is the
+        // only acknowledgement a create ever gets: guarded, it would leave
+        // the operator looking at a form whose contents have already been
+        // created, with nothing on screen to say so. Unmounting the form is
+        // the safe outcome even when the list on the other side is a
+        // different project's.
+        //
+        // What this does NOT rest on any more is "otherwise Save is one
+        // click from a duplicate" -- Save is held disabled for the whole
+        // time the create is open, by the in-flight flag now sitting in the
+        // form bucket of the reset above, whether this navigation happens or
+        // not.
         .then(() => navigate(ROUTES.segments))
         .catch((err: unknown) => {
           if (err instanceof ApiError && err.status === 401) {
