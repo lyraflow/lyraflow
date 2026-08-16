@@ -32,6 +32,7 @@ function renderAt(path: string) {
     })),
     projects: vi.fn(async () => PROJECTS),
     funnels: vi.fn(async () => []),
+    segments: vi.fn(async () => []),
   } as never
   return render(
     <ProjectProvider projects={PROJECTS} initialId={1}>
@@ -108,6 +109,25 @@ describe('AppRouter', () => {
   it('marks Funnels as current at /funnels', async () => {
     renderAt('/funnels')
     const link = await screen.findByRole('link', { name: /funnels/i })
+    expect(link).toHaveAttribute('aria-current', 'page')
+  })
+
+  // Task 3's own trap: there is no declaration-order guarantee to pin
+  // (`<Routes>` ranks by path specificity via `matchRoutes()`, verified on
+  // the funnels branch by moving routes after the catch-all and watching
+  // every test stay green) -- so this pins resolution instead, exactly
+  // mirroring the funnels test above: the positive (Segments' own heading)
+  // alongside the negative (no Feed tab reachable), so a component that
+  // renders *something* at both destinations can't pass by accident.
+  it('resolves /segments to Segments, not the feed catch-all', async () => {
+    renderAt('/segments')
+    expect(await screen.findByRole('heading', { name: /^segments$/i })).toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: /accepted/i })).not.toBeInTheDocument()
+  })
+
+  it('marks Segments as current at /segments', async () => {
+    renderAt('/segments')
+    const link = await screen.findByRole('link', { name: /segments/i })
     expect(link).toHaveAttribute('aria-current', 'page')
   })
 
