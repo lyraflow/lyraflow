@@ -310,4 +310,27 @@ describe('funnel routes', () => {
     expect(body.steps[0]).toHaveProperty('from_start')
     expect(body.conversion_rate).toBe(0)
   })
+
+  // Regression for issue #92's fix: the store now opens a transaction around
+  // the read-compare-write in update() (SELECT ... FOR UPDATE, plain BEGIN —
+  // see store.ts for why not SERIALIZABLE). A first attempt at that fix used
+  // SERIALIZABLE, which measurably turned concurrent PATCHes to one funnel
+  // into a wave of 40001 serialization failures surfacing as 503s. This
+  // fires 8 concurrent PATCHes at a single funnel through the real route and
+  // requires every one of them to succeed — with plain BEGIN + row lock, the
+  // second writer onward simply blocks until the first commits rather than
+  // aborting, so this is deterministic, not a race the test hopes to win.
+  it('serialises, rather than fails, concurrent PATCHes to the same funnel', async () => {
+    const created = await call('POST', '/v1/funnels', {
+      name: `concurrent-${randomUUID()}`,
+      ...signup,
+    })
+    const id = created.json().id
+    const results = await Promise.all(
+      Array.from({ length: 8 }, (_, i) =>
+        call('PATCH', `/v1/funnels/${id}`, { name: `concurrent-renamed-${i}-${randomUUID()}` }),
+      ),
+    )
+    for (const r of results) expect(r.statusCode).toBe(200)
+  })
 })
