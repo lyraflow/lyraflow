@@ -199,16 +199,44 @@ describe('FunnelBuilder', () => {
   // range on any rendered result "so a cached result can never be mistaken
   // for a live one" -- this preview showed neither.
   it('shows as_of and the resolved range on the preview, not just the numbers', async () => {
-    const client = fakeBuilderClient()
+    // Stub-check gap (targeted re-review): a `formatRelative` hardcoded to
+    // a constant string would still satisfy `not.toBeEmptyDOMElement()`.
+    // Fake timers pin the actual value here -- deliberately a DIFFERENT
+    // offset from FunnelDetail.test.tsx's "shows as_of by value" test
+    // ("2 minutes ago"), so a stub hardcoded to THAT specific string
+    // (plausible, since it's the value another test in this codebase pins)
+    // cannot coincidentally satisfy this one too.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      vi.setSystemTime(new Date('2026-08-15T12:10:00.000Z'))
+      const client = fakeBuilderClient()
+      renderBuilder(client)
+      await fillTwoSteps()
+      await userEvent.click(screen.getByRole('button', { name: /preview/i }))
+      expect(await screen.findByTestId('builder-preview-range')).toHaveTextContent('Last 7 days')
+      expect(screen.getByTestId('builder-preview-as-of')).toHaveTextContent('12 minutes ago')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // Stub-check gap (targeted re-review): every OTHER fixture in this file
+  // resolves a 7-day range, which is also what a `formatRangeDays` hardcoded
+  // to the constant string "Last 7 days" would print regardless of its
+  // argument -- format.test.ts is the only place that would have caught it.
+  // This is the one assertion in THIS file a constant-returning stub cannot
+  // satisfy.
+  it('labels a preview range other than the default 7 days (stub-check gap)', async () => {
+    const client = fakeBuilderClient({
+      previewFunnel: vi.fn(async () => ({
+        ...RUN,
+        range: { since: '2026-07-16T00:00:00.000Z', until: '2026-08-15T00:00:00.000Z' },
+      })),
+    })
     renderBuilder(client)
     await fillTwoSteps()
     await userEvent.click(screen.getByRole('button', { name: /preview/i }))
-    expect(await screen.findByTestId('builder-preview-range')).toHaveTextContent('Last 7 days')
-    // RUN.as_of is 2 minutes before RUN.range.until in wall-clock terms, but
-    // this only pins that the field renders something derived from the
-    // response -- FunnelDetail.test.tsx's fake-timer test already pins the
-    // exact "2 minutes ago" value by number.
-    expect(screen.getByTestId('builder-preview-as-of')).not.toBeEmptyDOMElement()
+    expect(await screen.findByTestId('builder-preview-range')).toHaveTextContent('Last 30 days')
   })
 
   it('surfaces a 409 on the name field rather than as a page error', async () => {
