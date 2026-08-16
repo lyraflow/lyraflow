@@ -582,7 +582,9 @@ describe('GET /v1/deletions/:id', () => {
   // notation all coerce to a normal-looking finite integer. Each must be
   // rejected the same way `'not-a-number'` is above, matching the
   // `/^\d+$/`-first convention `parseId` (funnels/routes.ts) and
-  // `parseProjectId` (auth/bridge.ts) already use.
+  // `parseProjectId` (auth/bridge.ts) already use. Zero passes that shape
+  // check — it is `id > 0` that rejects it — and is pinned here so a
+  // local parser reintroduced without that boundary would be caught.
   it.each([
     ['0x10', 'hex notation'],
     ['+5', 'a leading plus sign'],
@@ -590,6 +592,7 @@ describe('GET /v1/deletions/:id', () => {
     ['1e3', 'exponent notation'],
     ['', 'an empty string'],
     ['-1', 'a negative number'],
+    ['0', 'zero'],
     ['1.0', 'a decimal point'],
     ['99999999999999999999', 'a value beyond MAX_SAFE_INTEGER'],
   ])('rejects a deletion id with %s (%s)', async (raw) => {
