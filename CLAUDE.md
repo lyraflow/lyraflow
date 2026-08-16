@@ -267,3 +267,73 @@ version had dropped. A lint you cannot reproduce locally cannot be fixed, only g
 - **`brand/` is generated output. Do not hand-edit it.** The generator is not in this
   repo, and a rebuild overwrites every file there. Changes have to go upstream — say so
   rather than patching an asset.
+
+## Cutting a release
+
+**A pushed tag is not a release.** GitHub's Releases page lists *release objects*, and
+pushing a tag creates none — the tag simply exists, invisible on that page, while the
+previous release still reads as Latest. That is the step most easily forgotten, and it
+is silent: nothing fails, nothing warns, and the project looks unreleased to anyone who
+goes looking. v0.3.0 sat tagged and unlisted until someone checked the page.
+
+The whole sequence, in order:
+
+1. **Branch `chore/release-X.Y.Z`.**
+
+2. **Bump the version in eight places.** Six manifests — `packages/{cli,core,db,sdk-browser,server,ui}/package.json` — and two constants that are compiled into shipped output:
+   - `packages/sdk-browser/src/index.ts` → `export const VERSION`
+   - `packages/cli/src/api/output.ts` → `export const CLI_VERSION`
+
+   `CHANGELOG.md` opens by promising every package carries the same version. That has
+   been false twice: `packages/ui` was scaffolded at `1.0.0` and missed by two
+   consecutive release bumps, because a `sed` for the previous version number cannot
+   match a package that was never on it. **Grep for the new version afterwards and count
+   eight**, rather than grepping for the old one and assuming.
+
+   `SCHEMA_VERSION` in `packages/core/src/index.ts` is **not** part of this. It tracks
+   migrations, bumps when one is added, and is unrelated to the release number.
+
+3. **Write the `CHANGELOG.md` entry.** Added / Fixed / Changed, plus what the release
+   still cannot do. The known-limitations section is not optional and not a courtesy: a
+   release note that lists only what works is the kind of overclaiming this project's
+   voice exists to avoid, and the limits are what stop someone filing a bug against a
+   documented gap.
+
+4. **Open the PR and wait for CI to finish.** Every job, not just `test`. Do not merge on
+   a local green run — the local stack contends for memory with anything else running and
+   produces spurious file-level failures that CI, on isolated runners, does not.
+
+5. **Merge.**
+
+6. **Tag the merge commit, annotated, never lightweight:**
+
+   ```sh
+   git fetch origin
+   git tag -a vX.Y.Z <merge-commit> -F <message-file>
+   git push origin vX.Y.Z
+   ```
+
+   Tag the commit explicitly rather than `HEAD` — you may be on another branch, and this
+   avoids disturbing a worktree mid-task. The message carries what shipped, the schema
+   version and whether the migration is additive, the limits, and the standing line that
+   **a release is this tag and the source at it** — no container image is published, so
+   upgrading means pulling the tag and rebuilding.
+
+7. **Create the GitHub release** — the step in the heading above:
+
+   ```sh
+   gh release create vX.Y.Z --verify-tag --title "vX.Y.Z — <name>" --notes-file <file>
+   ```
+
+   `--verify-tag` refuses to invent a tag that does not exist, which is what you want:
+   the tag is the artefact, the release object points at it. The body is **not** the
+   changelog entry and not the tag message — it is the most user-facing text the project
+   publishes, and it earns examples. Read the previous release before writing one.
+
+8. **Confirm it is Latest:** `gh release list`. If the new release is not marked, the
+   page still advertises the old version.
+
+**Version numbers are cheap; a wrong one is not.** If a bump ships without its tag, the
+manifests claim a release that `git tag` cannot name. That happened to `0.2.1`, and the
+fix is to record it in the changelog rather than tag it afterwards — a tag created later
+names a moment nobody could have fetched.
