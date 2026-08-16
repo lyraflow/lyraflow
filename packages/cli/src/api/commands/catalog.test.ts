@@ -278,9 +278,15 @@ describe('runSegments > run', () => {
     next_cursor: null,
     window_exhausted: true,
   }
+  // The server always sends `warnings` (#21) — an empty array on these fixtures
+  // where the point of the test is something else. `warnings` is stripped from
+  // the printed summary regardless of shape, so the expected SUMMARY_ONLY/
+  // WITH_MEMBERS objects below stay warnings-free even though the mocked
+  // response carries the field.
+  const noWarnings = <T extends object>(body: T) => ({ ...body, warnings: [] })
 
   it('runs a saved segment by id (count only, no --members)', async () => {
-    const { client, calls } = makeClient({ post: SUMMARY_ONLY })
+    const { client, calls } = makeClient({ post: noWarnings(SUMMARY_ONLY) })
     const { ctx, out } = makeCtx(client)
     const code = await runSegments(['run', '1'], ctx)
     expect(code).toBe(0)
@@ -289,7 +295,7 @@ describe('runSegments > run', () => {
   })
 
   it('--members sends include: ["members"], prints member rows on stdout and the summary on stderr', async () => {
-    const { client, calls } = makeClient({ post: WITH_MEMBERS })
+    const { client, calls } = makeClient({ post: noWarnings(WITH_MEMBERS) })
     const { ctx, out, errOut } = makeCtx(client)
     const code = await runSegments(['run', '1', '--members'], ctx)
     expect(code).toBe(0)
@@ -299,13 +305,42 @@ describe('runSegments > run', () => {
     const summary = parseJsonLines(errOut)[0]
     expect(summary?.person_count).toBe(2)
     expect(summary?.members).toBeUndefined()
+    expect(summary?.warnings).toBeUndefined()
   })
 
   it('--cursor rides along in the request body', async () => {
-    const { client, calls } = makeClient({ post: WITH_MEMBERS })
+    const { client, calls } = makeClient({ post: noWarnings(WITH_MEMBERS) })
     const { ctx } = makeCtx(client)
     await runSegments(['run', '1', '--members', '--cursor', 'abc123'], ctx)
     expect(calls[0]?.arg).toEqual({ include: ['members'], cursor: 'abc123' })
+  })
+
+  it('sends the SAME warnings a preview would to stderr, count-only path — the bug #21 fixed', async () => {
+    // The specific reason string is not the point; that a saved run reports a
+    // cost warning at all, the same way the ad-hoc preview does, is.
+    const withWarning = {
+      ...SUMMARY_ONLY,
+      warnings: [{ path: 'filter', reason: 'this condition scans all history' }],
+    }
+    const { client } = makeClient({ post: withWarning })
+    const { ctx, out, errOut } = makeCtx(client)
+    const code = await runSegments(['run', '1'], ctx)
+    expect(code).toBe(0)
+    expect(out.join('')).not.toContain('warning')
+    expect(errOut.join('')).toContain('warning: filter: this condition scans all history')
+  })
+
+  it('sends warnings to stderr on the --members path too, alongside the member rows on stdout', async () => {
+    const withWarning = {
+      ...WITH_MEMBERS,
+      warnings: [{ path: 'filter', reason: 'this condition scans all history' }],
+    }
+    const { client } = makeClient({ post: withWarning })
+    const { ctx, out, errOut } = makeCtx(client)
+    const code = await runSegments(['run', '1', '--members'], ctx)
+    expect(code).toBe(0)
+    expect(out.join('')).not.toContain('warning')
+    expect(errOut.join('')).toContain('warning: filter: this condition scans all history')
   })
 
   it('requires an id', async () => {
@@ -324,14 +359,14 @@ describe('runSegments > run', () => {
   })
 
   it('URL-encodes the id in the preview path', async () => {
-    const { client, calls } = makeClient({ post: SUMMARY_ONLY })
+    const { client, calls } = makeClient({ post: noWarnings(SUMMARY_ONLY) })
     const { ctx } = makeCtx(client)
     await runSegments(['run', 'a b'], ctx)
     expect(calls[0]?.path).toBe('/v1/segments/a%20b/preview')
   })
 
   it('rejects --cursor without --members, without calling the API — a cursor with no members page to resume can only 400 or silently pin a stale as_of', async () => {
-    const { client, calls } = makeClient({ post: WITH_MEMBERS })
+    const { client, calls } = makeClient({ post: noWarnings(WITH_MEMBERS) })
     const { ctx } = makeCtx(client)
     const code = await runSegments(['run', '1', '--cursor', 'abc123'], ctx)
     expect(code).toBe(2)
@@ -339,7 +374,7 @@ describe('runSegments > run', () => {
   })
 
   it('treats an EPIPE on write as a clean stop (exit 0), count-only path', async () => {
-    const { client } = makeClient({ post: SUMMARY_ONLY })
+    const { client } = makeClient({ post: noWarnings(SUMMARY_ONLY) })
     const { ctx } = makeCtx(client, {
       write: () => {
         throw epipe()
@@ -350,7 +385,7 @@ describe('runSegments > run', () => {
   })
 
   it('treats an EPIPE on write as a clean stop (exit 0), --members path (stdout carries the member rows)', async () => {
-    const { client } = makeClient({ post: WITH_MEMBERS })
+    const { client } = makeClient({ post: noWarnings(WITH_MEMBERS) })
     const { ctx } = makeCtx(client, {
       write: () => {
         throw epipe()
@@ -398,7 +433,7 @@ describe('runSegments > usage', () => {
     for (const argv of shapes) {
       const { client } = makeClient({
         get: { segments: [] },
-        post: { person_count: 0, as_of: NOW.toISOString() },
+        post: { person_count: 0, as_of: NOW.toISOString(), warnings: [] },
       })
       const { ctx, out, errOut } = makeCtx(client)
       await runSegments(argv, ctx)

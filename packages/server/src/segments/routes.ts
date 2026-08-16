@@ -6,6 +6,7 @@ import {
   SegmentQuery,
   SegmentValidationError,
   compileSegment,
+  costWarnings,
   treeHash,
   validateTree,
 } from '@lyraflow/core'
@@ -178,6 +179,14 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
    * produced it, which is what stops a walk from claiming three different
    * instants. It also includes the select mode, because the two modes return
    * different shapes under the same tree.
+   *
+   * #21 was that the saved-run response omitted the cost warnings the ad-hoc
+   * preview returns, because each route assembled its own response and only
+   * one of them read `compileSegment`'s warnings. This is the single
+   * derivation both `/v1/segments/preview` and `/v1/segments/:id/preview` end
+   * in now: `warnings` is computed once here, from the tree alone, and
+   * returned on every path — cache hit or miss, count-only or with members —
+   * so neither caller can assemble a response missing it.
    */
   async function runTree(
     project: Project,
@@ -190,6 +199,10 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
     const cursor = walk?.cursor
     const pagesServed = walk?.pagesServed ?? 0
     const hash = treeHash({ ast_version: query.ast_version, filter: query.filter })
+    // Pure function of the tree — same value regardless of select mode or
+    // cache state, so it costs nothing to compute unconditionally rather than
+    // only on the branches that happen to call compileSegment.
+    const warnings = costWarnings(query)
 
     // The walk's instant: minted on page 1, echoed by every later page from
     // its cursor. Never re-minted mid-walk.
@@ -245,6 +258,7 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
         asOf: countAsOf,
         windowExhausted: false,
         pagesServed: 0,
+        warnings,
       }
     }
 
@@ -252,7 +266,14 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
     // insists on walking past it is refused for the cost of a cursor decode,
     // not a ClickHouse round trip.
     if (pagesServed >= MAX_MEMBER_PAGES) {
-      return { count, members: [] as MemberRow[], asOf, windowExhausted: true, pagesServed }
+      return {
+        count,
+        members: [] as MemberRow[],
+        asOf,
+        windowExhausted: true,
+        pagesServed,
+        warnings,
+      }
     }
 
     const pageKey = `${projectId}:members:${opts.cursor ?? ''}:${hash}`
@@ -299,7 +320,14 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
     // more data to justify the label.
     const windowExhausted = pagesServedNow >= MAX_MEMBER_PAGES
 
-    return { count, members, asOf: pageAsOf, windowExhausted, pagesServed: pagesServedNow }
+    return {
+      count,
+      members,
+      asOf: pageAsOf,
+      windowExhausted,
+      pagesServed: pagesServedNow,
+      warnings,
+    }
   }
 
   app.post('/v1/segments/preview', async (req, reply) => {
@@ -314,17 +342,13 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
       })
     }
 
-    let compiled: ReturnType<typeof compileSegment>
+    // Cap-check before anything else runs, the same way POST/PATCH
+    // /v1/segments do — shape-valid (SegmentQuery.safeParse above) is not
+    // cap-valid. `runTree` below would catch this too (compileSegment calls
+    // the same validateTree on a cache miss), but failing here means a bad
+    // tree costs a walk, not a cache lookup and a cursor decode.
     try {
-      compiled = compileSegment({
-        query: parsed.data,
-        // Injected from the authenticated key. Nothing in the request body
-        // reaches this, which is why a `project_id` field in the payload is
-        // simply ignored rather than needing to be rejected.
-        projectId: project.id,
-        database,
-        now: new Date(),
-      })
+      validateTree(parsed.data)
     } catch (err) {
       if (err instanceof SegmentValidationError) {
         return reply.code(400).send({ error: err.message, code: err.code })
@@ -355,7 +379,7 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
         wantMembers && result.members.length === MEMBER_PAGE_SIZE && !result.windowExhausted
       return reply.code(200).send({
         person_count: result.count,
-        warnings: compiled.warnings,
+        warnings: result.warnings,
         as_of: result.asOf,
         ...(wantMembers
           ? {
@@ -505,7 +529,11 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
    * Runs a SAVED segment's stored tree and records the result on it. Reuses
    * `runTree` — the same walk/cache/cursor machinery the ad-hoc preview route
    * above uses — rather than a second implementation, so the two can never
-   * diverge on cursor signing, caching, or the window ceiling.
+   * diverge on cursor signing, caching, or the window ceiling. That includes
+   * `warnings` (#21): `runTree` computes them once from the tree itself and
+   * returns them on every path, so this route reports the same warnings the
+   * ad-hoc preview would for an identical tree, without assembling them
+   * separately.
    */
   app.post<{ Params: { id: string } }>('/v1/segments/:id/preview', async (req, reply) => {
     const project = await authenticate(req, reply)
@@ -545,6 +573,7 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
         wantMembers && result.members.length === MEMBER_PAGE_SIZE && !result.windowExhausted
       return reply.code(200).send({
         person_count: result.count,
+        warnings: result.warnings,
         as_of: result.asOf,
         ...(wantMembers
           ? {

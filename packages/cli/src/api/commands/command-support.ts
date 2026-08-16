@@ -208,6 +208,22 @@ export function assertWindowNotInverted(since: Date | undefined, until: Date | u
 }
 
 /**
+ * Warnings go to stderr, in both `--json` and human mode, and regardless of
+ * whether the command's own summary went to stdout or stderr: a caveat that
+ * corrupts a JSON pipeline is worse than no caveat, and a caveat only present
+ * in the JSON is one a human reading the table never sees. Shared by
+ * `funnels run`/`preview` and `segments run` — both surface the same
+ * `{ path, reason }[]` shape a server-side compiler produces, and this is the
+ * one place that turns it into terminal output.
+ */
+export function emitWarnings(
+  warnings: { path: string; reason: string }[],
+  ctx: Pick<CommandContext, 'writeErr'>,
+): void {
+  for (const w of warnings) ctx.writeErr(`warning: ${w.path}: ${w.reason}\n`)
+}
+
+/**
  * The outer catch shared by every command's main request loop:
  *
  * - `instanceof ApiError` MUST be checked before `isEpipe`: `ApiError`'s

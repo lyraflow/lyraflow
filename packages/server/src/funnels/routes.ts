@@ -197,10 +197,12 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
   /**
    * The single derivation both run paths use.
    *
-   * #21 is open because the saved-segment run response omits warnings the
-   * ad-hoc preview returns. Having two entry points is fine; computing the
-   * same thing twice is what drifts, so `/preview` and `/:id/run` both end
-   * here and neither assembles a response of its own.
+   * #21 was that the saved-segment run response omitted warnings the ad-hoc
+   * preview returns. Having two entry points is fine; computing the same
+   * thing twice is what drifts, so `/preview` and `/:id/run` both end here
+   * and neither assembles a response of its own. `/v1/segments/preview` and
+   * `/v1/segments/:id/preview` now follow the same shape via `runTree` in
+   * segments/routes.ts.
    */
   async function execute(
     project: Project,

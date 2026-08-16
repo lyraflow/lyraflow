@@ -18,6 +18,7 @@ import {
   assertWindowNotInverted,
   checkNoPositionals,
   checkStrayFlags,
+  emitWarnings,
   reportCommandFailure,
   reportParseFailure,
   reportUsageError,
@@ -128,11 +129,6 @@ function resolveWindow(
     ...(since ? { since: since.toISOString() } : {}),
     ...(until ? { until: until.toISOString() } : {}),
   }
-}
-
-/** Warnings go to stderr in both modes. See this module's docstring. */
-function emitWarnings(warnings: { path: string; reason: string }[], ctx: CommandContext): void {
-  for (const w of warnings) ctx.writeErr(`warning: ${w.path}: ${w.reason}\n`)
 }
 
 async function runList(mode: Mode, ctx: CommandContext): Promise<number> {

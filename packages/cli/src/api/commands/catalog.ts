@@ -12,6 +12,7 @@ import {
   UNIVERSAL_FLAGS,
   checkNoPositionals,
   checkStrayFlags,
+  emitWarnings,
   reportCommandFailure,
   reportParseFailure,
   reportUsageError,
@@ -139,11 +140,13 @@ interface MemberRecord {
   [field: string]: string | number
 }
 
-/** POST /v1/segments/:id/preview's response shape (segments/routes.ts,
- * the SAVED-segment run — no `warnings` field, unlike the ad-hoc preview
- * route this CLI does not call). */
+/** POST /v1/segments/:id/preview's response shape (segments/routes.ts). #21:
+ * the saved-segment run used to omit `warnings`, unlike the ad-hoc preview
+ * route this CLI does not call; both routes now derive their response from
+ * the same `runTree`, so this carries `warnings` too. */
 interface SegmentRunResponse {
   person_count: number
+  warnings: { path: string; reason: string }[]
   as_of: string
   members?: MemberRecord[]
   next_cursor?: string | null
@@ -210,6 +213,12 @@ async function runSegmentsList(mode: Mode, ctx: CommandContext): Promise<number>
  * asked to be pinned to one. Caught here, client-side, the same reasoning
  * `events.ts`'s own inverted-window check uses: a usage error the caller
  * can fix beats a request that was always going to be nonsensical.
+ *
+ * `warnings` (#21) is stripped out of the summary object and printed via
+ * `emitWarnings` to stderr instead — with or without `--members` — the same
+ * split `funnels run`/`preview` already use, so a cost warning on a saved
+ * segment is exactly as visible as it is on the ad-hoc preview this CLI
+ * doesn't call.
  */
 async function runSegmentsRun(
   id: string,
@@ -238,13 +247,17 @@ async function runSegmentsRun(
       `/v1/segments/${encodeURIComponent(id)}/preview`,
       body,
     )
-    const { members, ...summary } = res
+    // `warnings` goes to stderr regardless of mode, same as funnels' run/
+    // preview — see emitWarnings' own docstring — so it is never part of the
+    // stdout summary object either way.
+    const { members, warnings, ...summary } = res
     if (wantMembers) {
       emitRecords(members ?? [], mode, MEMBERS_COLUMNS, ctx.write)
       emitObject(summary, mode, ctx.writeErr)
     } else {
       emitObject(summary, mode, ctx.write)
     }
+    emitWarnings(warnings, ctx)
     return 0
   } catch (err) {
     return reportCommandFailure(err, mode, ctx)
