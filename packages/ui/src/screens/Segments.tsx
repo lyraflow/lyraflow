@@ -40,7 +40,12 @@ function SegmentRow(props: { segment: Segment }) {
       >
         <span className="font-medium text-foreground">{segment.name}</span>
         <span className="text-sm text-muted-foreground">{filterSummary(segment)}</span>
-        <span className="text-sm text-muted-foreground">
+        {/* `data-testid` exists so a test can assert the count and its
+         * timestamp live in the SAME element, not merely both somewhere in
+         * the row -- `toHaveTextContent` on the row matches concatenated
+         * descendant text, so scoping to the row alone would still pass if
+         * a future change split these into sibling spans (fix round 1). */}
+        <span className="text-sm text-muted-foreground" data-testid="segment-count">
           {segmentCountLabel(segment, new Date())}
         </span>
       </Link>

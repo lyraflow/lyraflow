@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/client.js'
@@ -59,11 +59,17 @@ describe('Segments list', () => {
     vi.setSystemTime(new Date('2026-08-16T12:00:00.000Z'))
     renderList([{ ...SEG, last_count: 1284, last_evaluated_at: '2026-08-16T11:58:00.000Z' }])
     const row = await screen.findByRole('link', { name: /Paying customers/ })
-    // Same element, not merely both on the page: the count is a cache, and a
-    // cache rendered without its timestamp is a stale number that looks
+    // Fix round 1 (Important 1): `toHaveTextContent` on `row` matches the
+    // concatenated text of every descendant, so asserting both substrings
+    // against `row` only proves they both appear somewhere in the row --
+    // splitting them into two sibling spans left this green. Scoping to
+    // the single element that actually holds both (`data-testid`) is what
+    // pins "same element", which is the rule this test exists to check: a
+    // cache rendered away from its timestamp is a stale number that looks
     // current.
-    expect(row).toHaveTextContent('1,284')
-    expect(row).toHaveTextContent('2 minutes ago')
+    const countEl = within(row).getByTestId('segment-count')
+    expect(countEl).toHaveTextContent('1,284')
+    expect(countEl).toHaveTextContent('2 minutes ago')
   })
 
   it('says a never-evaluated segment has not been evaluated, rather than showing 0', async () => {
@@ -80,7 +86,15 @@ describe('Segments list', () => {
 
   it('offers the builder when there are no segments', async () => {
     renderList([])
+    // Fix round 1 (Important 2): the "Create segment" link renders
+    // unconditionally, outside every conditional branch -- asserting only
+    // its presence passes whether the empty branch works, renders nothing,
+    // or even renders a stray row. This now also pins the empty-state copy
+    // and that zero rows render, so a broken empty branch fails here.
     expect(await screen.findByRole('link', { name: /create.*segment/i })).toBeInTheDocument()
+    expect(await screen.findByText(/no segments yet/i)).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /Paying customers/ })).toBeNull()
+    expect(screen.queryByRole('list')).toBeNull()
   })
 })
 
@@ -178,8 +192,9 @@ describe('Segments list — pin proof', () => {
     vi.setSystemTime(new Date('2026-08-16T12:00:00.000Z'))
     renderList([{ ...SEG, last_count: 1284, last_evaluated_at: '2026-08-16T11:58:00.000Z' }])
     const row = await screen.findByRole('link', { name: /Paying customers/ })
-    expect(row).not.toHaveTextContent('just now')
-    expect(row).toHaveTextContent('2 minutes ago')
+    const countEl = within(row).getByTestId('segment-count')
+    expect(countEl).not.toHaveTextContent('just now')
+    expect(countEl).toHaveTextContent('2 minutes ago')
   })
 })
 
