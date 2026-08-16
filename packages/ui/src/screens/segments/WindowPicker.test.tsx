@@ -85,9 +85,22 @@ describe('WindowPicker', () => {
     expect(screen.getByLabelText('Window amount')).toHaveAttribute('aria-invalid', 'true')
   })
 
-  it('a valid positive safe integer amount is not flagged invalid', () => {
+  // Fix round 1 (coordinator Important 2): `ast.ts` bounds `last.n` above
+  // too -- `z.number().int().positive().max(3650)` -- and the original
+  // version of this control checked only the lower bound. 3650 and 3651
+  // together pin the actual boundary rather than just "some large number
+  // is fine", the same shape as the safe-integer test above pinning where
+  // the lower/unsafe boundary actually falls.
+  it('a value at the AST upper bound (3650) is not flagged invalid', () => {
     const value: Window = { kind: 'last', n: 3650, unit: 'days' }
     render(<WindowPicker id="beh" value={value} onChange={vi.fn()} />)
     expect(screen.getByLabelText('Window amount')).toHaveAttribute('aria-invalid', 'false')
+  })
+
+  it('one past the AST upper bound (3651) is flagged invalid', () => {
+    const value: Window = { kind: 'last', n: 3651, unit: 'days' }
+    render(<WindowPicker id="beh" value={value} onChange={vi.fn()} />)
+    expect(screen.getByLabelText('Window amount')).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByText(/enter a whole number/i)).toBeInTheDocument()
   })
 })

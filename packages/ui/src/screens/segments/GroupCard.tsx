@@ -53,15 +53,16 @@ function newGroup(): FilterNode {
  * (`packages/core/src/segments/validate.js`), and which one -- so the
  * button can say what it's waiting on rather than merely refuse.
  *
- * `extraNodes`/`extraDepth` are how many nodes, and how many levels deeper
- * than THIS group's own `depth`, the control being checked would add:
- * "Add condition" inserts one leaf one level below this group (1, 1); "Add
- * group" inserts a group AND the one condition it is seeded with -- never
- * empty, `newGroup`'s own doc comment -- so it costs two nodes, and its
- * seeded child sits two levels below this group, not one (2, 2). Checking
- * the deeper of a control's own two new nodes against `MAX_TREE_DEPTH` is
- * sufficient: the shallower one can never be the one that first exceeds the
- * cap, since it is strictly less deep.
+ * `extraNodes`/`extraDepth`/`extraBehaviors` are how many nodes, how many
+ * levels deeper than THIS group's own `depth`, and how many `behavior`
+ * nodes the control being checked would add. "Add condition" inserts one
+ * leaf one level below this group (1, 1); "Add group" inserts a group AND
+ * the one condition it is seeded with -- never empty, `newGroup`'s own doc
+ * comment -- so it costs two nodes, and its seeded child sits two levels
+ * below this group, not one (2, 2). Checking the deeper of a control's own
+ * two new nodes against `MAX_TREE_DEPTH` is sufficient: the shallower one
+ * can never be the one that first exceeds the cap, since it is strictly
+ * less deep.
  *
  * Node and behaviour counts are GLOBAL -- adding anywhere in the tree
  * consumes the same shared budget, so every `GroupCard` at every depth
@@ -71,12 +72,21 @@ function newGroup(): FilterNode {
  * checked against `depth` (this group's own `path.length`), not
  * `maxDepth(root)`.
  *
- * The behaviour cap is included even though NEITHER control this task ships
- * can itself create a `behavior` node -- there is no kind-switcher in this
- * plan, so a behaviour condition only ever arrives already in a fetched
- * tree. Checked anyway, defensively, against the day a kind-switcher lands
- * and "Add condition" can produce one; see the Task 6 report for the
- * reasoning this is a forward guard, not a defect fix, today.
+ * `extraBehaviors` is ALWAYS 0 from both call sites below, and that is
+ * deliberate, not an oversight: `newCondition()` and `newGroup()` both
+ * hardcode a `trait` leaf -- there is no kind-switcher anywhere in this
+ * plan, so neither control this task ships can ever itself create a
+ * `behavior` node. Gating on the tree's EXISTING `behaviorCount` alone
+ * (fix round 1, replacing an earlier version of this function that did
+ * exactly that) would block "Add condition"/"Add group" on a tree the
+ * server would happily accept the trait into -- the caps exist to stop the
+ * server rejecting a tree the operator built, not the other way round.
+ * Parameterising on `extraBehaviors` instead means this check is currently
+ * always a no-op (an operator's existing tree can never itself exceed the
+ * cap it was saved under) while staying ready for the day a kind-switcher
+ * exists and can pass `1` for a leaf the operator chose to make a
+ * behaviour -- the same gate starts doing real work without being
+ * rewritten.
  */
 function capBlock(
   nodeCount: number,
@@ -84,23 +94,24 @@ function capBlock(
   depth: number,
   extraNodes: number,
   extraDepth: number,
+  extraBehaviors: number,
 ): { blocked: boolean; message: string } {
   if (nodeCount + extraNodes > MAX_TREE_NODES) {
     return {
       blocked: true,
-      message: `This segment already has ${MAX_TREE_NODES} conditions, the maximum allowed in one segment.`,
+      message: `Adding here would bring this segment to ${nodeCount + extraNodes} conditions; the maximum is ${MAX_TREE_NODES}.`,
     }
   }
   if (depth + extraDepth >= MAX_TREE_DEPTH) {
     return {
       blocked: true,
-      message: `This branch is nested as deep as segments allow (${MAX_TREE_DEPTH} levels).`,
+      message: `Adding here would nest a condition ${depth + extraDepth} levels deep; segments allow at most ${MAX_TREE_DEPTH}.`,
     }
   }
-  if (behaviorCount >= MAX_BEHAVIOR_NODES) {
+  if (behaviorCount + extraBehaviors > MAX_BEHAVIOR_NODES) {
     return {
       blocked: true,
-      message: `This segment already has ${MAX_BEHAVIOR_NODES} behavioural conditions, the maximum allowed.`,
+      message: `Adding here would bring this segment to ${behaviorCount + extraBehaviors} behavioural conditions; the maximum is ${MAX_BEHAVIOR_NODES}.`,
     }
   }
   return { blocked: false, message: '' }
@@ -143,7 +154,9 @@ function capBlock(
  * `MAX_TREE_DEPTH`, `MAX_BEHAVIOR_NODES`, all from
  * `packages/core/src/segments/validate.js`) as a DISABLE here, computed
  * fresh on every render from `root` -- see `capBlock`'s own doc comment for
- * why node/behaviour counts are global but depth is local to this group.
+ * why node/behaviour counts are global but depth is local to this group,
+ * and why the behaviour cap is parameterised on how many behaviours THIS
+ * insert would add (always 0 today) rather than the tree's existing count.
  */
 export function GroupCard(props: {
   root: FilterNode
@@ -171,8 +184,11 @@ export function GroupCard(props: {
   const nodeCount = countNodes(root)
   const behaviorCount = countBehaviours(root)
   const depth = path.length
-  const conditionCap = capBlock(nodeCount, behaviorCount, depth, 1, 1)
-  const groupCap = capBlock(nodeCount, behaviorCount, depth, 2, 2)
+  // extraBehaviors is 0 for both -- see capBlock's own doc comment on why
+  // that is deliberate, not a gap: neither control can create a
+  // `behavior` node today.
+  const conditionCap = capBlock(nodeCount, behaviorCount, depth, 1, 1, 0)
+  const groupCap = capBlock(nodeCount, behaviorCount, depth, 2, 2, 0)
 
   function setOp(op: 'and' | 'or') {
     const nextGroup: Group = { ...group, op }

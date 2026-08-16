@@ -10,13 +10,32 @@ const WINDOW_KINDS = ['last', 'absolute', 'ever'] as const
 type LastUnit = Extract<Window, { kind: 'last' }>['unit']
 
 /**
+ * `ast.ts` declares `last.n` as `z.number().int().positive().max(3650)` --
+ * inline there, not exported as a named constant (checked; there is
+ * nothing to import). Mirrored here as a literal, with this comment naming
+ * `ast.ts` as its source, the same way `ValueInput.ts` mirrors `scalar`
+ * (also a local, unexported `const` there) rather than inventing a second
+ * source of truth silently. If `ast.ts` ever exports this, import it
+ * instead of keeping two literals in sync by hand.
+ */
+const MAX_WINDOW_N = 3650
+
+/**
  * `Number.isSafeInteger`, not `Number.isInteger` -- the latter is true for
  * 1e20, which reaches the database as a bigint bind and returns a 503, an
  * input error wearing an outage's clothes. This is (at least) the sixth
  * home of that check in this repository.
+ *
+ * Fix round 1: this used to check ONLY the lower bound (positive, safe
+ * integer), which is exactly the same defect class the aggregate/property
+ * rule in `BehaviourForm` exists to prevent for a different field -- a form
+ * that lets the operator build a state the schema refuses, then reports
+ * back the schema's OWN rejection, is a worse version of a check the
+ * schema already has. `ast.ts`'s `.max(3650)` is the upper bound this was
+ * missing.
  */
 function isValidN(n: number): boolean {
-  return Number.isSafeInteger(n) && n > 0
+  return Number.isSafeInteger(n) && n > 0 && n <= MAX_WINDOW_N
 }
 
 /**
@@ -98,7 +117,7 @@ export function WindowPicker(props: {
       )}
       {value.kind === 'last' && !isValidN(value.n) && (
         <p className="text-xs text-destructive">
-          Enter a whole number of {value.unit} greater than zero.
+          Enter a whole number of {value.unit}, greater than zero and no more than {MAX_WINDOW_N}.
         </p>
       )}
 

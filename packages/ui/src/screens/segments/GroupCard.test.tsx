@@ -10,7 +10,17 @@ import { describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '../../api/client.js'
 import { GroupCard } from './GroupCard.js'
 
-const client = {} as unknown as ApiClient
+// The behaviour-cap fixtures below render REAL `behavior` leaves, each of
+// which mounts a real `BehaviourForm` -> `EventCombobox`, whose debounced
+// effect calls `client.schemaEvents` even with a non-empty seeded `value`
+// (fix round 1: an earlier `{}` stub here left this throwing
+// "schemaEvents is not a function" as an uncaught async exception once
+// those fixtures existed, since none of the OTHER fixtures in this file
+// ever reached a behavior leaf).
+const client = {
+  schemaEvents: vi.fn(async () => []),
+  schemaProperties: vi.fn(async () => []),
+} as unknown as ApiClient
 const projectId = 1
 
 const trait = (key: string): FilterNode => ({ kind: 'trait', key, operator: '=', value: 'x' })
@@ -181,25 +191,40 @@ describe('GroupCard -- the three server-side caps', () => {
     expect(rootAdd.getByRole('button', { name: /^add group$/i })).toBeEnabled()
   })
 
-  // --- MAX_BEHAVIOR_NODES: global, and (today) blocks a control that ----
-  // never itself creates a behaviour -- see the Task 6 report for why.
+  // --- MAX_BEHAVIOR_NODES: fix round 1 (coordinator Important 1). --------
+  // Gating on the tree's EXISTING behaviour count alone blocked a control
+  // that could never itself add one -- `newCondition()`/`newGroup()` both
+  // hardcode a `trait`, and there is no kind-switcher anywhere in this
+  // plan. The server would accept a trait added to a 25-behaviour tree;
+  // the earlier version of this UI refused it anyway, with no route
+  // around it short of the CLI -- the exact failure the caps exist to
+  // prevent, inverted. `capBlock` now gates on how many behaviours THIS
+  // insert would add (always 0 from these two controls today), so these
+  // pin the thing that is actually true: adding a trait stays allowed.
 
-  it('disables Add condition and Add group once the tree already has MAX_BEHAVIOR_NODES behaviours', () => {
+  it('does not disable Add condition or Add group at the behaviour cap -- neither control can create a behaviour', () => {
     const root = flatBehaviorRoot(MAX_BEHAVIOR_NODES)
     render(
       <GroupCard root={root} path={[]} onChange={vi.fn()} client={client} projectId={projectId} />,
     )
-    expect(screen.getByRole('button', { name: /^add condition$/i })).toBeDisabled()
-    expect(screen.getByRole('button', { name: /^add group$/i })).toBeDisabled()
-    expect(screen.getByText(new RegExp(String(MAX_BEHAVIOR_NODES)))).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^add condition$/i })).toBeEnabled()
+    expect(screen.getByRole('button', { name: /^add group$/i })).toBeEnabled()
+    // No behaviour-cap message renders either -- there is nothing to warn
+    // about, since the control genuinely is not blocked.
+    expect(screen.queryByText(new RegExp(String(MAX_BEHAVIOR_NODES)))).toBeNull()
   })
 
-  it('one behaviour below the cap: Add condition is enabled', () => {
-    const root = flatBehaviorRoot(MAX_BEHAVIOR_NODES - 1)
+  it('clicking Add condition at the behaviour cap actually inserts the trait, proving the control is not merely enabled but functional', async () => {
+    const onChange = vi.fn()
+    const root = flatBehaviorRoot(MAX_BEHAVIOR_NODES)
     render(
-      <GroupCard root={root} path={[]} onChange={vi.fn()} client={client} projectId={projectId} />,
+      <GroupCard root={root} path={[]} onChange={onChange} client={client} projectId={projectId} />,
     )
-    expect(screen.getByRole('button', { name: /^add condition$/i })).toBeEnabled()
+    await userEvent.click(screen.getByRole('button', { name: /^add condition$/i }))
+    expect(onChange).toHaveBeenCalledTimes(1)
+    const next = onChange.mock.calls[0]?.[0] as Group
+    expect(next.children).toHaveLength(MAX_BEHAVIOR_NODES + 1)
+    expect(next.children.at(-1)?.kind).toBe('trait')
   })
 
   // --- None of this interferes with the pre-existing negated-group disable

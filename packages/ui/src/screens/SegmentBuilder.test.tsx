@@ -50,6 +50,14 @@ function fakeClient(over: Record<string, unknown> = {}) {
     segment: vi.fn(async () => SEGMENT),
     createSegment: vi.fn(async () => ({ ...SEGMENT, id: 42 })),
     updateSegmentTree: vi.fn(async () => SEGMENT),
+    // Task 6's cap fixtures render REAL `behavior` leaves -- each one
+    // mounts a `BehaviourForm` -> `EventCombobox`, whose debounced effect
+    // calls `schemaEvents` even with a non-empty seeded value. Without
+    // this, that fires as an uncaught async exception (fix round 1) once
+    // any fixture in this file reaches a behavior leaf, since no test
+    // before Task 6 ever did.
+    schemaEvents: vi.fn(async () => []),
+    schemaProperties: vi.fn(async () => []),
     ...over,
   } as unknown as ApiClient & {
     segment: Mock
@@ -236,9 +244,12 @@ describe('SegmentBuilder -- the three server-side tree caps', () => {
 
   it('disables add-condition at the depth cap, and says which cap', async () => {
     // A chain of MAX_TREE_DEPTH - 1 nested single-child groups, bottoming
-    // out in a group at depth MAX_TREE_DEPTH - 1 whose own child is a
-    // leaf at depth MAX_TREE_DEPTH -- the deepest node validateTree still
-    // accepts. Every level along the chain renders its OWN Add-condition
+    // out in a group at depth MAX_TREE_DEPTH - 1 whose own child is a leaf
+    // at depth MAX_TREE_DEPTH -- ONE PAST the deepest node validateTree
+    // accepts (it rejects on `depth >= MAX_TREE_DEPTH`, so MAX_TREE_DEPTH -
+    // 1 is the deepest LEGAL depth, matching GroupCard.test.tsx's own
+    // fixture at the same boundary). Every level along the chain renders
+    // its OWN Add-condition
     // (all but the deepest stay enabled), so this scopes to the deepest
     // group's own testid rather than an unscoped query, which would be
     // ambiguous the moment the tree has more than one group in it.
@@ -259,7 +270,14 @@ describe('SegmentBuilder -- the three server-side tree caps', () => {
     expect(client.previewSegment).not.toHaveBeenCalled()
   })
 
-  it('disables add-condition at the behaviour cap, and says which cap', async () => {
+  // Fix round 1 (coordinator Important 1): a tree already at the
+  // behaviour cap must NOT block Add-condition -- `newCondition()` always
+  // inserts a `trait`, never a `behavior`, and there is no kind-switcher
+  // anywhere in this plan to change that. The server would accept the
+  // trait; refusing it in the UI is the caps' own failure mode inverted --
+  // rejecting a tree the server would take, with no route around it short
+  // of the CLI.
+  it('does not disable add-condition at the behaviour cap, since it can only ever add a trait', async () => {
     const client = fakeClient({
       segment: vi.fn(async () => ({
         ...SEGMENT,
@@ -269,9 +287,7 @@ describe('SegmentBuilder -- the three server-side tree caps', () => {
     })
     renderBuilder(client, SEGMENT.id)
     const add = await screen.findByRole('button', { name: /^add condition$/i })
-    expect(add).toBeDisabled()
-    expect(screen.getByText(new RegExp(String(MAX_BEHAVIOR_NODES)))).toBeInTheDocument()
-    expect(client.previewSegment).not.toHaveBeenCalled()
+    expect(add).toBeEnabled()
   })
 
   it('one condition below the node cap, save is still reachable: Add condition is enabled', async () => {
