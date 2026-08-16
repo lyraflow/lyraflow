@@ -141,6 +141,23 @@ describe('FunnelDetail', () => {
     expect(screen.getByRole('button', { name: /^run$/i })).toBeEnabled()
   })
 
+  // I1 (whole-branch review): `FunnelRunResult.range` was declared and never
+  // read anywhere in the branch -- the subtitle came from `days`, the picker's
+  // own state, which moves the instant a new range is picked, before any run
+  // has answered it. The mutation this pins: render `Last {days} days` again
+  // instead of `formatRangeDays(result.range)`, and this test alone fails.
+  it('labels the range from the result that was actually run, not from picker state', async () => {
+    const client = fakeClient()
+    renderDetail(client)
+    await screen.findByTestId('funnel-step-1')
+    expect(screen.getByTestId('funnel-range-label')).toHaveTextContent('Last 7 days')
+
+    // Picking a new range without running must not relabel numbers that were
+    // never recomputed for it.
+    await userEvent.selectOptions(screen.getByLabelText(/range/i), '30')
+    expect(screen.getByTestId('funnel-range-label')).toHaveTextContent('Last 7 days')
+  })
+
   it('marks the result stale so old numbers are never presented as current', async () => {
     // The mutation this pins: remove data-stale and this test alone fails.
     const client = fakeClient()

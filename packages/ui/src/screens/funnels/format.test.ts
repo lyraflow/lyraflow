@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatCount, formatPercent, formatRelative } from './format.js'
+import { formatCount, formatPercent, formatRangeDays, formatRelative } from './format.js'
 
 describe('formatPercent', () => {
   it('renders a server rate as one decimal place', () => {
@@ -20,5 +20,25 @@ describe('formatRelative', () => {
   })
   it('handles a run older than a day', () => {
     expect(formatRelative('2026-08-13T12:00:00.000Z', now)).toBe('2 days ago')
+  })
+})
+
+describe('formatRangeDays', () => {
+  it('states the resolved range, from the range itself, not a day count typed elsewhere', () => {
+    expect(
+      formatRangeDays({ since: '2026-08-08T00:00:00.000Z', until: '2026-08-15T00:00:00.000Z' }),
+    ).toBe('Last 7 days')
+  })
+
+  it('singularises a one-day range', () => {
+    expect(
+      formatRangeDays({ since: '2026-08-14T00:00:00.000Z', until: '2026-08-15T00:00:00.000Z' }),
+    ).toBe('Last 1 day')
+  })
+
+  it('is not fooled by an unparseable timestamp into a numeric-looking lie', () => {
+    expect(formatRangeDays({ since: 'not-a-date', until: '2026-08-15T00:00:00.000Z' })).toBe(
+      'unknown range',
+    )
   })
 })

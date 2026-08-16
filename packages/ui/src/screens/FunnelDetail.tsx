@@ -11,7 +11,7 @@ import { DEFAULT_RANGE_DAYS, RangePicker, sinceIsoForDays } from './funnels/Rang
 import { StepBars } from './funnels/StepBars.js'
 import { WarningPanel } from './funnels/WarningPanel.js'
 import { describeError } from './funnels/errors.js'
-import { formatRelative } from './funnels/format.js'
+import { formatRangeDays, formatRelative } from './funnels/format.js'
 
 /**
  * A funnel referencing a stale or deleted segment still answers `200` with
@@ -275,8 +275,16 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
             </p>
           )}
           <WarningPanel warnings={result.warnings} />
+          {/* I1 (whole-branch review): sourced from `result.range`, the
+           * range the server actually ran over -- NEVER from `days`, the
+           * picker's own state. `days` can move the moment a range is
+           * picked, before any run answers it; `result.range` only changes
+           * when a NEW result is accepted. Rendering from picker state let
+           * the subtitle relabel numbers that were never recomputed for the
+           * newly chosen range -- the same gap C1's fix closes for
+           * `data-stale`, on the label instead of the dimming. */}
           <p className="text-sm text-muted-foreground">
-            Last {days} day{days === 1 ? '' : 's'} · as of{' '}
+            <span data-testid="funnel-range-label">{formatRangeDays(result.range)}</span> · as of{' '}
             <span data-testid="funnel-as-of">{formatRelative(result.as_of, new Date())}</span>
           </p>
           <StepBars result={result} />

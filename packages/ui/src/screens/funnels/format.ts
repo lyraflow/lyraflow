@@ -43,6 +43,23 @@ function plural(n: number, unit: string): string {
   return `${n} ${unit}${n === 1 ? '' : 's'} ago`
 }
 
+/**
+ * The subtitle's range label, derived from the RESOLVED `range` a run or
+ * preview actually answered -- never from picker state. `FunnelRunResult`
+ * carries `range: { since, until }` precisely so the client never has to
+ * guess what it ran over; deriving this from a `days` selector instead (the
+ * whole-branch review's I1) can show "Last 90 days" beside numbers that were
+ * actually computed for 30, because the picker can move after the request
+ * that produced the numbers on screen was already in flight.
+ */
+export function formatRangeDays(range: { since: string; until: string }): string {
+  const since = new Date(range.since).getTime()
+  const until = new Date(range.until).getTime()
+  if (Number.isNaN(since) || Number.isNaN(until)) return 'unknown range'
+  const days = Math.round((until - since) / DAY)
+  return `Last ${days} day${days === 1 ? '' : 's'}`
+}
+
 /** `now` is a parameter, not `new Date()`, so this is a pure function a test
  * can pin by value rather than by shape. */
 export function formatRelative(iso: string, now: Date): string {
