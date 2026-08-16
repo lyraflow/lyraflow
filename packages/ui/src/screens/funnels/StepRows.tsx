@@ -23,6 +23,13 @@ export const MIN_STEPS = 2
  * written against. It can still be removed entirely (which removes the
  * predicate along with it, not a lossy edit of it) so long as the two-step
  * floor allows it.
+ *
+ * The predicate itself is listed under the locked step, never hidden --
+ * an operator staring at a bare, disabled "page_view" field has no way to
+ * tell it means "page_view where path = /pricing" rather than every
+ * page_view there is. `FunnelBuilder` is the one that turns `locked`
+ * anywhere in this list into a save-wide block; this component's job ends
+ * at showing the truth of what each step does.
  */
 export function StepRows(props: {
   client: ApiClient
@@ -60,50 +67,68 @@ export function StepRows(props: {
           <div
             // biome-ignore lint/suspicious/noArrayIndexKey: steps have no stable id of their own and this list is reordered/removed by index, matching that index is exactly the identity `moveStep`/`removeStep` need.
             key={i}
-            className="flex items-end gap-2"
+            className="flex flex-col gap-1"
           >
-            <div className="flex-1">
-              <EventCombobox
-                client={client}
-                projectId={projectId}
-                value={step.event}
-                onChange={(event) => updateEvent(i, event)}
-                label={`Step ${i + 1}`}
-                disabled={locked}
-              />
+            <div className="flex items-end gap-2">
+              <div className="flex-1">
+                <EventCombobox
+                  client={client}
+                  projectId={projectId}
+                  value={step.event}
+                  onChange={(event) => updateEvent(i, event)}
+                  label={`Step ${i + 1}`}
+                  disabled={locked}
+                />
+              </div>
+              <div className="flex gap-1 pb-1">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon-sm"
+                  aria-label={`Move step ${i + 1} up`}
+                  disabled={i === 0}
+                  onClick={() => moveStep(i, -1)}
+                >
+                  <ArrowUp className="h-4 w-4" />
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon-sm"
+                  aria-label={`Move step ${i + 1} down`}
+                  disabled={i === steps.length - 1}
+                  onClick={() => moveStep(i, 1)}
+                >
+                  <ArrowDown className="h-4 w-4" />
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon-sm"
+                  aria-label={`Remove step ${i + 1}`}
+                  disabled={steps.length <= MIN_STEPS}
+                  onClick={() => removeStep(i)}
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              </div>
             </div>
-            <div className="flex gap-1 pb-1">
-              <Button
-                type="button"
-                variant="outline"
-                size="icon-sm"
-                aria-label={`Move step ${i + 1} up`}
-                disabled={i === 0}
-                onClick={() => moveStep(i, -1)}
-              >
-                <ArrowUp className="h-4 w-4" />
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="icon-sm"
-                aria-label={`Move step ${i + 1} down`}
-                disabled={i === steps.length - 1}
-                onClick={() => moveStep(i, 1)}
-              >
-                <ArrowDown className="h-4 w-4" />
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="icon-sm"
-                aria-label={`Remove step ${i + 1}`}
-                disabled={steps.length <= MIN_STEPS}
-                onClick={() => removeStep(i)}
-              >
-                <X className="h-4 w-4" />
-              </Button>
-            </div>
+            {/* Shown, never hidden -- see this component's own doc comment.
+             * Each predicate renders as its OWN element (`property`/`op` on
+             * one span, `value` on another) rather than one joined string,
+             * so a test -- or an operator scanning quickly -- can find the
+             * exact value a step filters on without parsing a sentence. */}
+            {locked && step.where != null && step.where.length > 0 && (
+              <ul className="flex flex-col gap-0.5 pl-1 text-xs text-muted-foreground">
+                {step.where.map((predicate, pi) => (
+                  // biome-ignore lint/suspicious/noArrayIndexKey: predicates have no stable id of their own; this list is only ever rendered read-only, never reordered or removed by index.
+                  <li key={pi}>
+                    where <span>{predicate.property}</span> {predicate.op}{' '}
+                    <span>{String(predicate.value)}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         )
       })}

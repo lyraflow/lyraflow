@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router'
+import { Link, useNavigate, useParams } from 'react-router'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import type { Funnel, FunnelRunResult } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
-import { funnelEditPath } from '../app/Router.js'
+import { ROUTES, funnelEditPath } from '../app/Router.js'
 import { Button } from '../components/ui/button.js'
 import type { RangeDays } from './funnels/RangePicker.js'
 import { DEFAULT_RANGE_DAYS, RangePicker, sinceIsoForDays } from './funnels/RangePicker.js'
@@ -42,6 +42,7 @@ function segmentFilterBroken(result: FunnelRunResult | null): boolean {
 export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => void }) {
   const { client, onUnauthorized } = props
   const { activeId } = useProject()
+  const navigate = useNavigate()
   const params = useParams<{ id: string }>()
   const id = params.id == null ? null : Number(params.id)
   const validId = id != null && Number.isSafeInteger(id) ? id : null
@@ -52,6 +53,9 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
   const [running, setRunning] = useState(false)
   const [stale, setStale] = useState(false)
   const [days, setDays] = useState<RangeDays>(DEFAULT_RANGE_DAYS)
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
 
   // Not scoped to the mount effect's own `cancelled` flag: an explicit Run
   // click happens while the screen is already mounted (it is what the user
@@ -125,25 +129,93 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
     setStale(true)
   }
 
+  // Behind a confirmation, deliberately -- deletion is the one action on
+  // this screen with no undo. `deleteError` deliberately does NOT reuse
+  // `error` (the run/fetch banner): a failed delete leaves everything else
+  // on the page still true, so it gets its own line rather than replacing
+  // whatever the run banner was already saying.
+  function handleDelete() {
+    if (activeId == null || validId == null) return
+    setDeleting(true)
+    setDeleteError(null)
+    client
+      .deleteFunnel(activeId, validId)
+      .then(() => navigate(ROUTES.funnels))
+      .catch((err: unknown) => {
+        if (err instanceof ApiError && err.status === 401) {
+          onUnauthorized?.()
+          return
+        }
+        setDeleteError(describeError(err))
+      })
+      .finally(() => setDeleting(false))
+  }
+
   const brokenSegment = segmentFilterBroken(result)
 
   return (
     <div className="flex min-w-0 flex-col gap-6">
       <div className="flex items-center justify-between gap-2">
         <h1 className="text-lg font-semibold">{funnel?.name ?? 'Funnel'}</h1>
-        {/* A funnel whose stored `steps` no longer parse cannot be opened in
-         * the builder -- `FunnelBuilder` (Task 6) has nothing to show it.
-         * Offering an Edit link the server cannot honour would be its own
-         * broken promise. */}
-        {funnel != null && !funnel.stale && (
-          <Link
-            to={funnelEditPath(funnel.id)}
-            className="text-sm font-medium text-primary hover:underline"
-          >
-            Edit
-          </Link>
-        )}
+        <div className="flex items-center gap-3">
+          {/* A funnel whose stored `steps` no longer parse cannot be opened in
+           * the builder -- `FunnelBuilder` (Task 6) has nothing to show it.
+           * Offering an Edit link the server cannot honour would be its own
+           * broken promise. */}
+          {funnel != null && !funnel.stale && (
+            <Link
+              to={funnelEditPath(funnel.id)}
+              className="text-sm font-medium text-primary hover:underline"
+            >
+              Edit
+            </Link>
+          )}
+          {funnel != null && !confirmingDelete && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setConfirmingDelete(true)}
+            >
+              Delete
+            </Button>
+          )}
+        </div>
       </div>
+
+      {/* A second, explicit click behind the first -- deletion has no undo,
+       * so this screen never treats one click on "Delete" as consent. */}
+      {confirmingDelete && (
+        <div className="flex flex-wrap items-center gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">
+          <p className="text-foreground">Delete this funnel? This cannot be undone.</p>
+          <div className="ml-auto flex gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setConfirmingDelete(false)}
+              disabled={deleting}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              size="sm"
+              onClick={handleDelete}
+              disabled={deleting}
+            >
+              Delete funnel
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {deleteError != null && (
+        <p role="alert" className="text-sm text-destructive">
+          {deleteError}
+        </p>
+      )}
 
       {error != null && (
         <p role="alert" className="text-sm text-destructive">

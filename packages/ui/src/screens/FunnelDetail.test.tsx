@@ -7,7 +7,7 @@ import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import type { Funnel, FunnelRunResult } from '../api/types.js'
 import { ProjectProvider } from '../app/ProjectContext.js'
-import { funnelPath } from '../app/Router.js'
+import { ROUTES, funnelPath } from '../app/Router.js'
 import { FunnelDetail } from './FunnelDetail.js'
 
 const PROJECTS = [
@@ -68,6 +68,11 @@ function renderDetail(client: ApiClient, onUnauthorized?: () => void) {
             path="/funnels/:id"
             element={<FunnelDetail client={client} onUnauthorized={onUnauthorized} />}
           />
+          {/* A successful delete navigates to the list route (Task 6) --
+           * this harness doesn't render the real `Funnels` screen, just a
+           * placeholder so React Router has somewhere to land instead of
+           * logging "no routes matched". */}
+          <Route path={ROUTES.funnels} element={<p>deleted</p>} />
         </Routes>
       </ProjectProvider>
     </MemoryRouter>,
@@ -203,6 +208,48 @@ describe('FunnelDetail', () => {
     const client = fakeClient()
     renderDetail(client)
     expect(await screen.findByRole('link', { name: /edit/i })).toBeInTheDocument()
+  })
+})
+
+describe('FunnelDetail — delete', () => {
+  it('deletes only after a confirmation, then leaves for the list', async () => {
+    const client = fakeClient()
+    renderDetail(client)
+    await screen.findByTestId('funnel-step-1')
+    await userEvent.click(screen.getByRole('button', { name: /delete/i }))
+    expect(client.deleteFunnel).not.toHaveBeenCalled()
+    await userEvent.click(screen.getByRole('button', { name: /^delete funnel$/i }))
+    await waitFor(() => expect(client.deleteFunnel).toHaveBeenCalledWith(1, 7))
+  })
+
+  // Invented mutation: clicking Delete without ever confirming must leave
+  // the confirmation dismissible and the funnel untouched -- otherwise the
+  // "behind a confirmation" guarantee above is only tested in the direction
+  // that proves the happy path, never the one that proves Cancel works.
+  it('cancelling the confirmation leaves the funnel in place', async () => {
+    const client = fakeClient()
+    renderDetail(client)
+    await screen.findByTestId('funnel-step-1')
+    await userEvent.click(screen.getByRole('button', { name: /delete/i }))
+    await userEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+    expect(screen.queryByRole('button', { name: /^delete funnel$/i })).toBeNull()
+    expect(screen.getByRole('button', { name: /^delete$/i })).toBeInTheDocument()
+    expect(client.deleteFunnel).not.toHaveBeenCalled()
+  })
+
+  it('routes a 401 on delete to onUnauthorized rather than an error banner', async () => {
+    const onUnauthorized = vi.fn()
+    const client = fakeClient({
+      deleteFunnel: vi.fn(async () => {
+        throw new ApiError(401, 'unauthorized')
+      }),
+    })
+    renderDetail(client, onUnauthorized)
+    await screen.findByTestId('funnel-step-1')
+    await userEvent.click(screen.getByRole('button', { name: /^delete$/i }))
+    await userEvent.click(screen.getByRole('button', { name: /^delete funnel$/i }))
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalled())
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 })
 

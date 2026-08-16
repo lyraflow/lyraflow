@@ -1,9 +1,11 @@
 import { render, screen, waitFor } from '@testing-library/react'
-import { MemoryRouter } from 'react-router'
+import userEvent from '@testing-library/user-event'
+import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import { ProjectProvider } from '../app/ProjectContext.js'
+import { FunnelBuilder } from './FunnelBuilder.js'
 import { Funnels } from './Funnels.js'
 
 const PROJECTS = [
@@ -232,5 +234,65 @@ describe('Funnels list — pin proof', () => {
     const row = await screen.findByRole('link', { name: /Signup flow/ })
     expect(row).not.toHaveTextContent('just now')
     expect(row).toHaveTextContent('2 minutes ago')
+  })
+})
+
+/** Step 1 = page_view, Step 2 = signup_completed -- same sequence
+ * `FunnelBuilder.test.tsx`'s own helper uses; duplicated locally rather than
+ * imported so this file's fixture doesn't reach across a test-only module
+ * boundary for one helper. */
+async function fillTwoSteps() {
+  await userEvent.type(screen.getByLabelText('Step 1'), 'page_view')
+  await userEvent.click(screen.getByRole('button', { name: /add step/i }))
+  await userEvent.type(screen.getByLabelText('Step 2'), 'signup_completed')
+}
+
+// On the previous plan the settings screen kept a private fetch while the
+// header switcher read context, so a newly created project was invisible in
+// the switcher until reload -- two sources of truth for one list, both
+// looking correct. This is the same shape of test for funnels: a create in
+// the builder must be visible in the list without a reload, which only
+// holds if `Funnels` re-fetches on mount rather than serving a copy held
+// above the route.
+describe('Funnels list — single source of truth with the builder', () => {
+  it('shows a funnel created elsewhere without requiring a reload', async () => {
+    const created = {
+      ...RUN_ONCE,
+      id: 11,
+      name: 'Brand new',
+      last_evaluated_at: null,
+      last_entered: null,
+      last_converted: null,
+    }
+    let listed: unknown[] = []
+    const client = {
+      funnels: vi.fn(async () => listed),
+      segments: vi.fn(async () => []),
+      schemaEvents: vi.fn(async () => []),
+      createFunnel: vi.fn(async () => {
+        listed = [created]
+        return created
+      }),
+    } as unknown as ApiClient
+
+    render(
+      <MemoryRouter initialEntries={['/funnels/new']}>
+        <ProjectProvider projects={PROJECTS} initialId={1}>
+          <Routes>
+            <Route path="/funnels" element={<Funnels client={client} />} />
+            <Route path="/funnels/new" element={<FunnelBuilder client={client} />} />
+          </Routes>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+
+    await fillTwoSteps()
+    await userEvent.type(screen.getByLabelText(/name/i), 'Brand new')
+    await userEvent.click(screen.getByRole('button', { name: /save/i }))
+
+    // Saving navigates to the list, which must fetch rather than serve a
+    // stale copy -- the mutation this pins is a private cached copy of the
+    // list held above the route instead of a re-fetch on mount.
+    expect(await screen.findByRole('link', { name: /Brand new/ })).toBeInTheDocument()
   })
 })

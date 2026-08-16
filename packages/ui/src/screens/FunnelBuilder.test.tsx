@@ -82,10 +82,11 @@ function renderBuilder(client: ApiClient = fakeBuilderClient(), editId?: number)
         <Routes>
           <Route path={ROUTES.funnelNew} element={<FunnelBuilder client={client} />} />
           <Route path="/funnels/:id/edit" element={<FunnelBuilder client={client} />} />
-          {/* A successful save navigates to the detail route -- this harness
-           * doesn't render `FunnelDetail`, just a placeholder so React Router
+          {/* A successful save navigates to the LIST route, not this
+           * funnel's own detail page (Task 6) -- this harness doesn't render
+           * the real `Funnels` screen, just a placeholder so React Router
            * has somewhere to land instead of logging "no routes matched". */}
-          <Route path="/funnels/:id" element={<p>saved</p>} />
+          <Route path={ROUTES.funnels} element={<p>saved</p>} />
         </Routes>
       </ProjectProvider>
     </MemoryRouter>,
@@ -264,5 +265,83 @@ describe('FunnelBuilder -- invented mutations', () => {
     await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
     await waitFor(() => expect(onUnauthorized).toHaveBeenCalled())
     expect(screen.queryByRole('alert')).toBeNull()
+  })
+})
+
+// Task 6: a controller ruling superseding Task 5's own choice. Task 5
+// disabled only the offending step's event field and left Save enabled --
+// that is wrong, because `PATCH /v1/funnels/:id` accepts a bare `steps`
+// array and the server will happily accept one with the `where` predicate
+// missing, answer 200, and now measure a different population than a
+// moment ago with nothing on screen saying so. The whole save control must
+// be disabled instead.
+describe('FunnelBuilder — predicate-carrying funnels cannot be saved here', () => {
+  it('refuses to save a funnel whose steps carry where predicates, and would not drop them', async () => {
+    const funnel = {
+      ...FUNNEL,
+      steps: [
+        { event: 'page_view', where: [{ property: 'path', op: 'eq', value: '/pricing' }] },
+        { event: 'signup_completed' },
+      ],
+    }
+    const client = fakeBuilderClient({ funnel: vi.fn(async () => funnel) })
+    renderBuilder(client, FUNNEL.id)
+
+    await screen.findByDisplayValue('page_view')
+    const save = screen.getByRole('button', { name: /save/i })
+    expect(save).toBeDisabled()
+    expect(screen.getByText(/authored with the CLI/i)).toBeInTheDocument()
+
+    // Click it anyway. A correctly disabled native button no-ops this --
+    // userEvent respects the `disabled` attribute and never fires the
+    // handler -- which is exactly what makes the assertion below a
+    // guarantee about the REQUEST rather than a check on the control's
+    // own state. A mutation that drops the `disabled` attribute (or the
+    // matching guard inside `handleSave`) and lets the click through would
+    // be invisible to `toBeDisabled()` alone if this click were omitted;
+    // with it, `patchFunnel` is the one thing standing between "the button
+    // looked right" and "the predicate actually survived".
+    await userEvent.click(save)
+
+    // The assertion that matters is not that a button is disabled -- it is
+    // that no PATCH could have been sent that loses the `where` array.
+    // Silently dropping a predicate changes what the funnel measures while
+    // returning 200.
+    expect(client.patchFunnel).not.toHaveBeenCalled()
+  })
+
+  it('shows the predicate rather than hiding the step', async () => {
+    const client = fakeBuilderClient({
+      funnel: vi.fn(async () => ({
+        ...FUNNEL,
+        steps: [
+          { event: 'page_view', where: [{ property: 'path', op: 'eq', value: '/pricing' }] },
+          { event: 'signup_completed' },
+        ],
+      })),
+    })
+    renderBuilder(client, FUNNEL.id)
+    expect(await screen.findByText(/path/)).toBeInTheDocument()
+    expect(screen.getByText('/pricing')).toBeInTheDocument()
+  })
+})
+
+describe('FunnelBuilder — edit round-trips every field it did not change', () => {
+  it('an edit of an ordinary funnel round-trips every field it did not change', async () => {
+    // Window and segment deliberately differ from both the fresh-builder
+    // defaults (604800s / null) AND from `FUNNEL`'s own defaults, so a bug
+    // that quietly falls back to either cannot pass by coincidence.
+    const client = fakeBuilderClient({
+      funnel: vi.fn(async () => ({ ...FUNNEL, segment_id: 4, window_seconds: 3600 })),
+    })
+    renderBuilder(client, FUNNEL.id)
+    await userEvent.clear(await screen.findByLabelText(/name/i))
+    await userEvent.type(screen.getByLabelText(/name/i), 'Renamed')
+    await userEvent.click(screen.getByRole('button', { name: /save/i }))
+    await waitFor(() => expect(client.patchFunnel).toHaveBeenCalled())
+    const call = client.patchFunnel.mock.calls[0]
+    if (!call) throw new Error('patchFunnel was not called')
+    const [, , patch] = call
+    expect(patch).toMatchObject({ name: 'Renamed', window_seconds: 3600, segment_id: 4 })
   })
 })
