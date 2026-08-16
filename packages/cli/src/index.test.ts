@@ -2,7 +2,14 @@ import { PassThrough } from 'node:stream'
 import { describe, expect, it } from 'vitest'
 import type { Client } from './api/client.js'
 import { CLI_VERSION, OUTPUT_SCHEMA_VERSION } from './api/output.js'
-import { type CommandContext, createPrompt, extractOverride, runVersion } from './index.js'
+import {
+  type CommandContext,
+  createPrompt,
+  extractOverride,
+  hostFromDomain,
+  resolveHost,
+  runVersion,
+} from './index.js'
 
 // `runVersion` itself only ever touches `write`/`isTty` — the rest of
 // `CommandContext` exists for Task 7's `events`/`stats`, but the interface
@@ -157,6 +164,111 @@ describe('extractOverride', () => {
   it('keeps the last occurrence of a repeated flag, the same convention parseCommandArgs uses', () => {
     expect(extractOverride(['--host', 'first', '--host', 'second'], 'host')).toBe('second')
   })
+})
+
+describe('hostFromDomain', () => {
+  it('prepends https:// to a bare domain', () => {
+    expect(hostFromDomain('analytics.example.com')).toBe('https://analytics.example.com')
+  })
+
+  it('preserves a trailing slash — downstream URL parsing normalises it the same way it would for an explicit --host', () => {
+    expect(hostFromDomain('analytics.example.com/')).toBe('https://analytics.example.com/')
+  })
+
+  it('trims surrounding whitespace before deciding anything else', () => {
+    expect(hostFromDomain('  analytics.example.com  ')).toBe('https://analytics.example.com')
+  })
+
+  it('returns a value that already carries a scheme AS IS, instead of double-prepending', () => {
+    // Naive `https://${domain}` concatenation here would silently build
+    // `https://https://analytics.example.com`, whose `.origin` resolves to
+    // the wrong-but-parseable `https://https` — a quiet bad default, the
+    // exact failure mode #61 was filed to close.
+    expect(hostFromDomain('https://analytics.example.com')).toBe('https://analytics.example.com')
+    expect(hostFromDomain('http://analytics.example.com')).toBe('http://analytics.example.com')
+  })
+
+  it('trims whitespace before the scheme check too', () => {
+    expect(hostFromDomain('  https://analytics.example.com  ')).toBe(
+      'https://analytics.example.com',
+    )
+  })
+})
+
+describe('resolveHost', () => {
+  it('an explicit --host wins over LYRAFLOW_HOST and LYRAFLOW_DOMAIN, for snippet', () => {
+    expect(
+      resolveHost('snippet', ['--host', 'https://flag.test'], {
+        LYRAFLOW_HOST: 'https://env-host.test',
+        LYRAFLOW_DOMAIN: 'env-domain.test',
+      }),
+    ).toBe('https://flag.test')
+  })
+
+  it('LYRAFLOW_HOST wins over LYRAFLOW_DOMAIN when --host is absent, and matches passing that same value via --host explicitly', () => {
+    const viaEnv = resolveHost('snippet', [], {
+      LYRAFLOW_HOST: 'https://env-host.test',
+      LYRAFLOW_DOMAIN: 'env-domain.test',
+    })
+    const viaFlag = resolveHost('snippet', ['--host', 'https://env-host.test'], {})
+    expect(viaEnv).toBe('https://env-host.test')
+    expect(viaEnv).toBe(viaFlag)
+  })
+
+  it('falls back to LYRAFLOW_DOMAIN, derived through hostFromDomain, when neither --host nor LYRAFLOW_HOST is set — snippet only', () => {
+    expect(resolveHost('snippet', [], { LYRAFLOW_DOMAIN: 'analytics.example.com' })).toBe(
+      'https://analytics.example.com',
+    )
+  })
+
+  it('never consults LYRAFLOW_DOMAIN for any command other than snippet', () => {
+    // The other seven commands sharing this dispatch branch only ever need a
+    // host that answers a request — #61 asked for this fallback on
+    // `snippet` alone, where a wrong scheme is the mixed-content failure the
+    // issue describes.
+    for (const command of [
+      'events',
+      'stats',
+      'persons',
+      'deletions',
+      'segments',
+      'funnels',
+      'schema',
+    ]) {
+      expect(resolveHost(command, [], { LYRAFLOW_DOMAIN: 'analytics.example.com' })).toBeUndefined()
+    }
+  })
+
+  it('returns undefined with none of the three set, for snippet — todays "must be set" usage error is unchanged', () => {
+    expect(resolveHost('snippet', [], {})).toBeUndefined()
+  })
+
+  it('an explicit but empty --host= falls through to LYRAFLOW_HOST, same as before this change', () => {
+    expect(resolveHost('snippet', ['--host='], { LYRAFLOW_HOST: 'https://env-host.test' })).toBe(
+      'https://env-host.test',
+    )
+  })
+
+  it('an empty LYRAFLOW_HOST falls through to LYRAFLOW_DOMAIN, for snippet', () => {
+    expect(
+      resolveHost('snippet', [], { LYRAFLOW_HOST: '', LYRAFLOW_DOMAIN: 'analytics.example.com' }),
+    ).toBe('https://analytics.example.com')
+  })
+
+  it.each([
+    ['a trailing slash', 'analytics.example.com/'],
+    ['a scheme already present', 'https://analytics.example.com'],
+    ['surrounding whitespace', '  analytics.example.com  '],
+  ])(
+    'LYRAFLOW_DOMAIN set to an odd value (%s) behaves the same as passing the derived value to --host directly',
+    (_label, domain) => {
+      const derived = hostFromDomain(domain)
+      const viaDomain = resolveHost('snippet', [], { LYRAFLOW_DOMAIN: domain })
+      const viaFlag = resolveHost('snippet', ['--host', derived], {})
+      expect(viaDomain).toBe(derived)
+      expect(viaDomain).toBe(viaFlag)
+    },
+  )
 })
 
 describe('createPrompt', () => {

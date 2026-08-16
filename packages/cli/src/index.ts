@@ -678,11 +678,13 @@ async function main(): Promise<void> {
         process.stderr.write(s)
       }
 
-      // `||`, not `??`: an explicit but empty `--host=`/`--server-key=`
-      // must fall back to the env var too, not silently win as `''` — a
-      // Client built with an empty host fails later with a confusing URL
-      // error instead of this branch's clear "must be set" message.
-      const host = extractOverride(args, 'host') || process.env.LYRAFLOW_HOST
+      // `||`, not `??`, throughout: an explicit but empty `--host=`/
+      // `--server-key=` must fall back to the next tier too, not silently
+      // win as `''` — a Client built with an empty host fails later with a
+      // confusing URL error instead of this branch's clear "must be set"
+      // message. `resolveHost` adds one more tier behind LYRAFLOW_HOST, for
+      // `snippet` only — see its own docstring (issue #61).
+      const host = resolveHost(command, args, process.env)
       const serverKey = extractOverride(args, 'server-key') || process.env.LYRAFLOW_SERVER_KEY
       if (!host || !serverKey) {
         // process.exitCode, not process.exit(2): see the create-project
@@ -694,9 +696,21 @@ async function main(): Promise<void> {
         // must still be honoured here too — the exact gap events.ts's and
         // stats.ts's own parse-failure paths were fixed for earlier, just
         // one dispatch layer up.
+        //
+        // `snippet` alone names LYRAFLOW_DOMAIN too: it is the one command
+        // `resolveHost` gives a third source for (see its own docstring,
+        // issue #61), so the message that told every other command's
+        // operator exactly what to set would otherwise go quiet about the
+        // one variable that could fix THIS command without touching either
+        // of the other two. The other six commands genuinely have no such
+        // fallback — naming it there would be a lie, worse than the
+        // narrower message they already have, so this stays a one-command
+        // exception rather than a change to the shared string.
         emitError(
           new UsageError(
-            'LYRAFLOW_HOST and LYRAFLOW_SERVER_KEY must be set (or pass --host/--server-key)',
+            command === 'snippet'
+              ? 'LYRAFLOW_HOST (or LYRAFLOW_DOMAIN) and LYRAFLOW_SERVER_KEY must be set (or pass --host/--server-key)'
+              : 'LYRAFLOW_HOST and LYRAFLOW_SERVER_KEY must be set (or pass --host/--server-key)',
           ),
           resolveMode({ json: hasRawFlag(args, 'json'), human: hasRawFlag(args, 'human') }, isTty),
           writeErr,
@@ -799,6 +813,79 @@ export function extractOverride(args: string[], flag: string): string | undefine
     }
   }
   return value
+}
+
+/**
+ * Derives a default `--host`/`LYRAFLOW_HOST` value from `LYRAFLOW_DOMAIN` —
+ * `resolveHost`'s third tier, `snippet` only (see that function's own
+ * docstring for why only that one command gets it). An install that was
+ * given a domain already knows its own public host: `LYRAFLOW_DOMAIN` is
+ * exactly that value — install.sh writes it, docker-compose.yml passes it to
+ * the proxy and, since #61, to the app container too — so requiring
+ * `--host`/`LYRAFLOW_HOST` again just to print a snippet asks a question the
+ * environment has already answered.
+ *
+ * Trims surrounding whitespace first. A bare host string passed directly as
+ * `--host` has it stripped automatically — the WHATWG URL parser both
+ * `Client` and `normalizeHost` (`packages/core/src/snippet/build.ts`) use
+ * removes leading/trailing space from the input before parsing — so
+ * trimming here keeps this derivation agreeing with that, rather than
+ * embedding a space at the join between `https://` and a domain that has
+ * leading whitespace and producing a string neither of them can parse.
+ *
+ * If the trimmed value already contains a scheme (`://`) — an operator's
+ * `LYRAFLOW_DOMAIN` accidentally holding a full URL rather than a bare
+ * domain — it is returned AS IS rather than having `https://` prepended a
+ * second time. Blindly prepending would silently build
+ * `https://https://example.com`, which a URL's `.origin` resolves to the
+ * wrong-but-parseable `https://https` — a QUIET bad default, exactly the
+ * failure mode #61 was filed to close, not a loud one. This also keeps this
+ * default agreeing with typing the identical `LYRAFLOW_DOMAIN` value into
+ * `--host` directly, whichever shape it is in — the two must never diverge.
+ *
+ * Otherwise prepends `https://` — never `http://`. This fallback only ever
+ * fires for an install with a real public domain (`LYRAFLOW_DOMAIN` is set
+ * only by the domain/TLS install path — see "Serving over HTTPS" in the main
+ * README), so defaulting to `http://` here would reintroduce, as the
+ * default, the exact mixed-content failure #61 describes.
+ */
+export function hostFromDomain(domain: string): string {
+  const trimmed = domain.trim()
+  return trimmed.includes('://') ? trimmed : `https://${trimmed}`
+}
+
+/**
+ * Resolves the host value this dispatch branch builds `Client`/`ctx.host`
+ * from — the one place `--host`, `LYRAFLOW_HOST` and (for `snippet` alone)
+ * `LYRAFLOW_DOMAIN` are ever read together. Each tier falls through to the
+ * next only when ABSENT or an EMPTY STRING (`||`, not `??` — the same rule
+ * the original `host || LYRAFLOW_HOST` used, so an explicit but empty
+ * `--host=` still falls through instead of silently winning as `''`):
+ *
+ *   1. `--host` (argv, via `extractOverride`)
+ *   2. `LYRAFLOW_HOST`
+ *   3. `LYRAFLOW_DOMAIN`, `snippet` only, via `hostFromDomain`
+ *
+ * `LYRAFLOW_DOMAIN` is consulted for `snippet` alone, not the other seven
+ * commands sharing this dispatch branch — this is what issue #61 asked for,
+ * and the two are not equivalent risk. `snippet` prints a URL into markup a
+ * browser parses, where a wrong scheme is the quiet mixed-content failure
+ * the issue describes; the other six commands only need a host that
+ * answers a request, a narrower default this issue was never filed to add.
+ *
+ * With none of the three set, returns `undefined` — every command,
+ * `snippet` included, keeps today's behaviour and reaches this branch's
+ * existing "LYRAFLOW_HOST and LYRAFLOW_SERVER_KEY must be set" usage error,
+ * unchanged.
+ */
+export function resolveHost(
+  command: string | undefined,
+  args: string[],
+  env: { LYRAFLOW_HOST?: string; LYRAFLOW_DOMAIN?: string },
+): string | undefined {
+  const fromDomain =
+    command === 'snippet' && env.LYRAFLOW_DOMAIN ? hostFromDomain(env.LYRAFLOW_DOMAIN) : undefined
+  return extractOverride(args, 'host') || env.LYRAFLOW_HOST || fromDomain
 }
 
 /**
