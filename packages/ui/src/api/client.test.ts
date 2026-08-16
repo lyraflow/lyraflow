@@ -505,6 +505,47 @@ describe('createClient', () => {
       expect(new Headers(init.headers).get('x-lyraflow-project')).toBe('3')
     })
 
+    // Fix round 1: previewSavedSegment had zero coverage -- a reviewer
+    // stubbed all nine segment methods in turn and this was the only one
+    // where the whole suite (40/40) stayed green against a no-op stub.
+    // Pins verb, path, project header, and that a call with no options
+    // sends `{}` rather than `undefined` -- the route does
+    // `PreviewOptions.safeParse(req.body ?? {})`, and `JSON.stringify(undefined)`
+    // is the string `"undefined"`, not valid JSON, which is a different
+    // failure than an empty-but-valid body.
+    it('previewSavedSegment POSTs to the saved segment path and sends {} with no options', async () => {
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response(JSON.stringify({ person_count: 3, warnings: [], as_of: 'x' }), {
+            status: 200,
+          }),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      await client.previewSavedSegment(3, 7)
+
+      const [path, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+      expect(path).toBe('/v1/segments/7/preview')
+      expect(init.method).toBe('POST')
+      expect(new Headers(init.headers).get('x-lyraflow-project')).toBe('3')
+      expect(JSON.parse(init.body as string)).toEqual({})
+    })
+
+    it('previewSavedSegment sends the given options in the body', async () => {
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response(JSON.stringify({ person_count: 3, warnings: [], as_of: 'x' }), {
+            status: 200,
+          }),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      await client.previewSavedSegment(3, 7, { include: ['members'], cursor: 'abc' })
+
+      const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+      expect(JSON.parse(init.body as string)).toEqual({ include: ['members'], cursor: 'abc' })
+    })
+
     it('renames without sending a tree', async () => {
       const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ id: 1 }), { status: 200 }))
       const client = createClient(fetchImpl as unknown as typeof fetch)
