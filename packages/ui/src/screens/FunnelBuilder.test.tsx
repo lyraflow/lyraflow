@@ -170,6 +170,31 @@ describe('FunnelBuilder', () => {
     expect(screen.getByText('beta reason')).toBeInTheDocument()
   })
 
+  // I2 (whole-branch review): spec decision 2 -- "changing the range, OR
+  // EDITING THE DEFINITION, does not re-run: the chart dims and a Run
+  // control appears" -- applies to this screen too, and had no staleness
+  // concept at all. Preview 40.8%, retype a step, and the old numbers
+  // rendered undimmed as if they still answered what was on screen.
+  it('dims the preview once the definition on screen no longer matches what was previewed', async () => {
+    const client = fakeBuilderClient()
+    renderBuilder(client)
+    await fillTwoSteps()
+    await userEvent.click(screen.getByRole('button', { name: /preview/i }))
+    const box = await screen.findByTestId('builder-preview-result')
+    expect(box).toHaveAttribute('data-stale', 'false')
+
+    // Editing the definition -- retyping step 2 -- must dim it, without a
+    // second preview call.
+    await userEvent.type(screen.getByLabelText('Step 2'), '_v2')
+    expect(screen.getByTestId('builder-preview-result')).toHaveAttribute('data-stale', 'true')
+    expect(client.previewFunnel).toHaveBeenCalledTimes(1)
+
+    // Re-previewing the NEW definition clears it again.
+    await userEvent.click(screen.getByRole('button', { name: /preview/i }))
+    await waitFor(() => expect(client.previewFunnel).toHaveBeenCalledTimes(2))
+    expect(screen.getByTestId('builder-preview-result')).toHaveAttribute('data-stale', 'false')
+  })
+
   it('surfaces a 409 on the name field rather than as a page error', async () => {
     const client = fakeBuilderClient({
       createFunnel: vi.fn(async () => {

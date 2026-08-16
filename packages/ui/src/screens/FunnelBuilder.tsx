@@ -81,6 +81,16 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
   const [saving, setSaving] = useState(false)
   const [previewing, setPreviewing] = useState(false)
   const [previewResult, setPreviewResult] = useState<FunnelRunResult | null>(null)
+  // I2 (whole-branch review): spec decision 2 says "changing the range, OR
+  // EDITING THE DEFINITION, does not re-run: the chart dims and a Run
+  // control appears" -- the detail screen implements the dimming half, but
+  // this screen, where a definition is actually being edited, had no
+  // staleness concept at all. Previewing 40.8%, then retyping a step, left
+  // the old numbers rendered exactly as if they still answered the
+  // definition on screen. The definition actually previewed, captured
+  // alongside its result, is the one honest reference point: it changes
+  // only when a NEW preview is accepted, never when a field is edited.
+  const [previewedDefinition, setPreviewedDefinition] = useState<FunnelDefinition | null>(null)
 
   // Fetch-and-seed for edit mode only. Deliberately NOT depending on
   // `steps`/`name`/etc: this must run exactly once per (project, id) pair,
@@ -155,9 +165,16 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
     if (!canSubmit || activeId == null) return
     setPreviewing(true)
     setSaveError(null)
+    const definition = buildDefinition()
     client
-      .previewFunnel(activeId, buildDefinition(), {})
-      .then(setPreviewResult)
+      .previewFunnel(activeId, definition, {})
+      .then((r) => {
+        setPreviewResult(r)
+        // Captured alongside the result it answers, not before the call --
+        // a response that arrives after the definition has already moved on
+        // again must not mark THIS newer definition as previewed.
+        setPreviewedDefinition(definition)
+      })
       .catch((err: unknown) => {
         if (err instanceof ApiError && err.status === 401) {
           onUnauthorized?.()
@@ -167,6 +184,19 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
       })
       .finally(() => setPreviewing(false))
   }
+
+  // I2: stale the instant the definition on screen no longer matches the one
+  // the current `previewResult` actually answers -- retyping a step,
+  // reordering, changing the window or the segment filter all count, exactly
+  // "editing the definition" from decision 2. Deliberately a comparison, not
+  // a dirty flag flipped by every onChange: a flag would have to be reset by
+  // hand everywhere the definition can change and reintroduce a new copy of
+  // the very "which fields did I remember to touch" bug the FunnelDetail
+  // fix (C1) exists to avoid on the range side.
+  const previewStale =
+    previewResult != null &&
+    previewedDefinition != null &&
+    JSON.stringify(buildDefinition()) !== JSON.stringify(previewedDefinition)
 
   function handleSave() {
     // Repeats the `hasPredicates` guard (and now the name guard, via
@@ -278,7 +308,11 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
       </div>
 
       {previewResult != null && (
-        <div className="flex min-w-0 flex-col gap-3">
+        <div
+          data-testid="builder-preview-result"
+          data-stale={String(previewStale)}
+          className={`flex min-w-0 flex-col gap-3 ${previewStale ? 'opacity-50' : ''}`}
+        >
           <WarningPanel warnings={previewResult.warnings} />
           <StepBars result={previewResult} />
         </div>
