@@ -9,6 +9,7 @@ import {
   personEventSummary,
   resolvePersonScope,
 } from '../identity/scope.js'
+import { parseNumericId } from '../numeric-id.js'
 import type { SegmentCache } from '../segments/cache.js'
 import type { DeletionStore } from './deletion-store.js'
 import type { SuppressionStore } from './suppression-store.js'
@@ -45,22 +46,14 @@ interface DeletionParams {
 
 /**
  * Parses the `:id` path param for the status route. A non-numeric or
- * non-positive id is a deterministic client error, not a lookup miss —
- * mirrors segments/routes.ts's `parseSegmentId` (kept as a private copy
- * rather than imported/exported, the same way that route file keeps its
- * own). Without this, `Number('not-a-number')` is `NaN`, which reaches
- * Postgres as a query parameter and trips app.ts's generic error handler
- * into a `503` for what is a deterministic client error.
+ * non-positive id is a deterministic client error, not a lookup miss. See
+ * `numeric-id.ts`'s `parseNumericId` for the shape this enforces and why —
+ * without it, `DeletionStore#get` receives a query parameter Postgres
+ * itself rejects, and app.ts's catch-all turns that into a `503` for what
+ * is a deterministic client error.
  */
 function parseDeletionId(raw: string): number | null {
-  const id = Number(raw)
-  // Bounded above by MAX_SAFE_INTEGER, not just "is an integer": a value
-  // like 1e20 passes Number.isInteger (it is exactly representable as a
-  // float) but is far outside Postgres's bigint range, and reaches
-  // DeletionStore#get as a query parameter that Postgres itself rejects —
-  // the exact "deterministic client error surfaces as a 503" outcome this
-  // function exists to prevent for every other malformed shape.
-  return Number.isInteger(id) && id > 0 && id <= Number.MAX_SAFE_INTEGER ? id : null
+  return parseNumericId(raw)
 }
 
 /**

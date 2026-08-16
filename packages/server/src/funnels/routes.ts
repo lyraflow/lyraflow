@@ -17,6 +17,7 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { Authenticate } from '../auth/bridge.js'
 import type { Project } from '../auth/project-cache.js'
+import { parseNumericId } from '../numeric-id.js'
 import { type WalkCursor, makeWalkCursorCodec } from '../query/walk-cursor.js'
 import { SegmentTimeoutError } from '../segments/execute.js'
 import { SegmentStore, StoredTreeError } from '../segments/store.js'
@@ -97,10 +98,9 @@ const DropoffBody = z.object({
   until: z.string().datetime().optional(),
 })
 
+/** See `numeric-id.ts`'s `parseNumericId` for the shape this enforces and why. */
 function parseId(raw: string): number | null {
-  if (!/^\d+$/.test(raw)) return null
-  const n = Number(raw)
-  return Number.isSafeInteger(n) && n > 0 ? n : null
+  return parseNumericId(raw)
 }
 
 export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): void {
