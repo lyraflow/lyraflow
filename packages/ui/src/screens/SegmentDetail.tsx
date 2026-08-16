@@ -9,14 +9,14 @@ import type { Segment, SegmentPreview } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
 import { Button } from '../components/ui/button.js'
 import { WarningPanel } from './funnels/WarningPanel.js'
+import { MemberList } from './segments/MemberList.js'
 import { summarise } from './segments/summarise.js'
 
 /**
- * Views a saved segment: its filter and its live count.
+ * Views a saved segment: its filter, its live count, and (Task 8) the
+ * people it matches.
  *
- * Task 7 only. Rename/delete are Task 9's; members ("Show people") are
- * Task 8's -- neither is wired here, so this is deliberately narrower than
- * the screen's own final shape.
+ * Rename/delete are Task 9's -- still not wired here.
  *
  * The count follows `SegmentBuilder`'s own cheap/costly split (that
  * component's own doc comment has the full reasoning): a cheap tree
@@ -185,6 +185,43 @@ export function SegmentDetail(props: { client: ApiClient; onUnauthorized?: () =>
             >
               {preview.person_count.toLocaleString('en-US')}
             </p>
+          )}
+
+          {/* `key={validId}` remounts `MemberList` -- discarding whatever
+           * page it had loaded, including anything in flight -- the instant
+           * the segment on screen changes, the same reset `Settings.tsx`
+           * uses for `LimitsSection`. `MemberList`'s own doc comment has the
+           * full reasoning for why that (rather than a second answer-id ref
+           * threaded down into a child) is enough: a response for the
+           * segment navigated away from lands against an unmounted
+           * component and simply has nowhere to apply itself. Gated on
+           * `preview != null` -- there is nothing useful to page through
+           * before a count has ever been run once, and on `activeId`/
+           * `validId` being non-null so the callback below never has to
+           * guess at a project or segment id. */}
+          {preview != null && activeId != null && validId != null && (
+            <MemberList
+              key={validId}
+              fetchPage={(cursor) =>
+                client
+                  .previewSavedSegment(activeId, validId, { include: ['members'], cursor })
+                  .then((r) => ({
+                    members: r.members ?? [],
+                    next_cursor: r.next_cursor ?? null,
+                    window_exhausted: r.window_exhausted ?? false,
+                  }))
+                  .catch((err: unknown) => {
+                    // Same 401 routing every other call on this screen does
+                    // -- MemberList still sees a rejection (and shows its
+                    // own generic error/Retry) since it has no reason to
+                    // know about `ApiError` or `onUnauthorized`, but a
+                    // session that actually expired navigates away instead
+                    // of reading as "could not load these people".
+                    if (err instanceof ApiError && err.status === 401) onUnauthorized?.()
+                    throw err
+                  })
+              }
+            />
           )}
         </>
       )}
