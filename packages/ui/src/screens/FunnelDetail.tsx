@@ -179,6 +179,27 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
 
   const brokenSegment = segmentFilterBroken(result)
 
+  // MINOR (whole-branch review): `/funnels/abc` used to null out `validId`
+  // and stop there -- every hook above already guards on it, so nothing
+  // fetched, no alert rendered, and the heading fell back to the literal
+  // string "Funnel". Decision 8 calls `invalid_funnel_id` "not reachable
+  // from the UI; treated as a 404" -- this is that 404, raised client-side
+  // for the one way an operator reaches it anyway: a stale bookmark or a
+  // hand-edited URL, never a request the server had a chance to answer.
+  if (validId == null) {
+    return (
+      <div className="flex flex-col gap-4">
+        <h1 className="text-lg font-semibold">Funnel</h1>
+        <p role="alert" className="text-sm text-destructive">
+          This funnel no longer exists.
+        </p>
+        <Link to={ROUTES.funnels} className="text-sm font-medium text-primary hover:underline">
+          Back to funnels
+        </Link>
+      </div>
+    )
+  }
+
   return (
     <div className="flex min-w-0 flex-col gap-6">
       <div className="flex items-center justify-between gap-2">

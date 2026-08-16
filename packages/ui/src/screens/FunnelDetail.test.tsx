@@ -290,6 +290,30 @@ describe('FunnelDetail', () => {
   })
 })
 
+// MINOR (whole-branch review): `/funnels/abc` used to be a dead screen --
+// `validId` nulled out, nothing fetched, no alert, heading read "Funnel".
+// Decision 8 treats an unreachable-from-the-UI `invalid_funnel_id` as a 404.
+describe('FunnelDetail — invalid id in the URL', () => {
+  it('treats an invalid id as a 404, with a link back to the list, not a dead screen', async () => {
+    const client = fakeClient()
+    render(
+      <MemoryRouter initialEntries={['/funnels/abc']}>
+        <ProjectProvider projects={PROJECTS} initialId={1}>
+          <Routes>
+            <Route path="/funnels/:id" element={<FunnelDetail client={client} />} />
+            <Route path={ROUTES.funnels} element={<p>funnels list</p>} />
+          </Routes>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    expect(await screen.findByRole('alert')).toHaveTextContent(/no longer exists/i)
+    expect(screen.getByRole('link', { name: /back to funnels/i })).toBeInTheDocument()
+    // Nothing was ever fetched: an invalid id is caught before any request,
+    // never a 404 the server had a chance to answer.
+    expect(client.funnel).not.toHaveBeenCalled()
+  })
+})
+
 describe('FunnelDetail — delete', () => {
   it('deletes only after a confirmation, then leaves for the list', async () => {
     const client = fakeClient()
