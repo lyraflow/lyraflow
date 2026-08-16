@@ -47,20 +47,88 @@ describe('MemberList', () => {
     expect(fetchPage).toHaveBeenCalledWith(undefined)
   })
 
-  // Step 1's two failing tests, verbatim from the brief.
-
   it('says the population is exhausted when the walk ends naturally', async () => {
     renderMembers({ members: page(3), next_cursor: null, window_exhausted: false })
     await userEvent.click(screen.getByRole('button', { name: /show people/i }))
-    expect(await screen.findByText(/that is everyone/i)).toBeInTheDocument()
+    const end = await screen.findByTestId('member-list-end')
+    expect(end).toHaveAttribute('data-end', 'exhausted')
+    expect(end).toHaveTextContent(/that is everyone/i)
     expect(screen.queryByRole('button', { name: /load more/i })).toBeNull()
   })
 
-  it('says there are more it cannot reach when the walk budget is spent', async () => {
-    renderMembers({ members: page(100), next_cursor: null, window_exhausted: true })
+  // --- the three endings ------------------------------------------------
+  //
+  // `window_exhausted: true` used to be rendered as "More people match than
+  // this preview can show", full stop. The server raises that flag once the
+  // walk has spent its page budget, INDEPENDENTLY of whether the last page
+  // it served was full -- so every population that ended on a short final
+  // page (a segment of 937, whose tenth page carries 37 rows) was told it
+  // had been truncated when it had been shown in full. That is the same
+  // conflation as reporting a truncated preview as "everyone", pointing the
+  // other way. The three tests below are the three endings; the middle one
+  // is the defect.
+  //
+  // The fixtures walk two pages rather than answering in one, because the
+  // component learns the server's page size from the walk (see `endingFor`)
+  // and a one-page walk has nothing to measure a short page against.
+
+  it('says everyone was shown when the budget is spent on a SHORT final page', async () => {
+    const fetchPage: Mock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        members: page(100),
+        next_cursor: 'cursor-1',
+        window_exhausted: false,
+      })
+      .mockResolvedValueOnce({ members: page(37, 100), next_cursor: null, window_exhausted: true })
+    render(<MemberList fetchPage={fetchPage} />)
+
+    await userEvent.click(screen.getByRole('button', { name: /show people/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /load more/i }))
+
+    const end = await screen.findByTestId('member-list-end')
+    expect(end).toHaveAttribute('data-end', 'window-short')
+    expect(end).toHaveTextContent(/that is everyone/i)
+    // The claim that was false: this population was shown in full.
+    expect(end).not.toHaveTextContent(/more people match/i)
+    expect(screen.queryByRole('button', { name: /load more/i })).toBeNull()
+  })
+
+  it('claims neither everyone nor more when the budget is spent on a FULL final page, and says how many were shown', async () => {
+    const fetchPage: Mock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        members: page(100),
+        next_cursor: 'cursor-1',
+        window_exhausted: false,
+      })
+      .mockResolvedValueOnce({ members: page(100, 100), next_cursor: null, window_exhausted: true })
+    render(<MemberList fetchPage={fetchPage} />)
+
+    await userEvent.click(screen.getByRole('button', { name: /show people/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /load more/i }))
+
+    const end = await screen.findByTestId('member-list-end')
+    expect(end).toHaveAttribute('data-end', 'window-full')
+    // Genuinely ambiguous: the population may be exactly 200 or far larger.
+    // So the copy states the 200 it showed and asserts neither.
+    expect(end).toHaveTextContent('200')
+    expect(end).not.toHaveTextContent(/that is everyone/i)
+    expect(screen.queryByRole('button', { name: /load more/i })).toBeNull()
+  })
+
+  it('a walk whose only page is short and flagged says what it showed, rather than guessing', async () => {
+    // The shape the real server cannot produce -- the flag needs the whole
+    // page budget spent, which takes ten pages -- and therefore the one
+    // where nothing in the response reveals the page size. Pinned so the
+    // choice is explicit: with no wider page to measure against, this falls
+    // to the ambiguous ending, which claims nothing, rather than to
+    // "everyone", which would be a guess.
+    renderMembers({ members: page(37), next_cursor: null, window_exhausted: true })
     await userEvent.click(screen.getByRole('button', { name: /show people/i }))
     const end = await screen.findByTestId('member-list-end')
-    expect(end).toHaveTextContent(/more people match/i)
+    expect(end).toHaveAttribute('data-end', 'window-full')
+    expect(end).toHaveTextContent('37')
     expect(end).not.toHaveTextContent(/that is everyone/i)
   })
 
