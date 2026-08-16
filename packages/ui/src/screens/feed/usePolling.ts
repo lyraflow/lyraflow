@@ -4,6 +4,16 @@ export interface PollingState<T> {
   data: T | null
   error: unknown
   loading: boolean
+  /**
+   * `Date.now()` at the moment `data` was last set by a successful poll --
+   * `null` until the first one lands, and left untouched by a failing poll
+   * (see below), so it always names *when* whatever is in `data` actually
+   * arrived rather than when the last attempt was made. Callers that need
+   * to tell an operator "showing data from N minutes ago" during an error
+   * read this rather than the wall clock, which would silently advance
+   * every failed retry and understate how stale the screen really is.
+   */
+  updatedAt: number | null
 }
 
 /**
@@ -37,7 +47,12 @@ export interface PollingState<T> {
  * not the whole dependency array.
  */
 export function usePolling<T>(fn: () => Promise<T>, intervalMs: number): PollingState<T> {
-  const [state, setState] = useState<PollingState<T>>({ data: null, error: null, loading: true })
+  const [state, setState] = useState<PollingState<T>>({
+    data: null,
+    error: null,
+    loading: true,
+    updatedAt: null,
+  })
   const fnRef = useRef(fn)
 
   useEffect(() => {
@@ -46,19 +61,20 @@ export function usePolling<T>(fn: () => Promise<T>, intervalMs: number): Polling
 
     if (fnRef.current !== fn) {
       fnRef.current = fn
-      setState({ data: null, error: null, loading: true })
+      setState({ data: null, error: null, loading: true, updatedAt: null })
     }
 
     async function tick() {
       try {
         const data = await fn()
         if (cancelled) return
-        setState({ data, error: null, loading: false })
+        setState({ data, error: null, loading: false, updatedAt: Date.now() })
       } catch (error) {
         if (cancelled) return
         // Keep whatever data is already on screen -- only `error` and
-        // `loading` change.
-        setState((prev) => ({ data: prev.data, error, loading: false }))
+        // `loading` change. `updatedAt` stays put too: this poll did NOT
+        // refresh `data`, so the moment it was last true does not move.
+        setState((prev) => ({ data: prev.data, error, loading: false, updatedAt: prev.updatedAt }))
       } finally {
         if (!cancelled) timer = setTimeout(tick, intervalMs)
       }

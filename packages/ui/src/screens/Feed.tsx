@@ -7,6 +7,7 @@ import { AcceptedTable } from './feed/AcceptedTable.js'
 import { RejectionsTable } from './feed/RejectionsTable.js'
 import { Sparkline } from './feed/Sparkline.js'
 import { usePolling } from './feed/usePolling.js'
+import { formatRelative } from './funnels/format.js'
 
 /**
  * How often the feed re-polls, in production. Three polled endpoints at
@@ -49,6 +50,24 @@ const STATS_WINDOW_MINUTES = 60
  */
 function formatCount(n: number, limit: number): string {
   return n >= limit ? `${limit}+` : n.toLocaleString()
+}
+
+/**
+ * Fix round 1 on #82: the tab badge is the same bug relocated, not a
+ * different one. `events.length === 0` cannot distinguish "confirmed zero"
+ * from "this poll has never once succeeded" -- the table body already
+ * stopped claiming "No events yet" in that state, but the badge kept
+ * rendering "Accepted 0" the whole time an events poll was failing, right
+ * next to a banner that (once some OTHER poll has data) reads "showing the
+ * last data received". An operator has no way to tell 0 was never
+ * confirmed. An em dash says "unknown" rather than asserting a count the
+ * poll never established; the alternative (freezing the last known number)
+ * was rejected because a frozen "3" reads as current, which is the exact
+ * false confidence #82 was filed over.
+ */
+function formatBadgeCount(n: number, limit: number, loadFailed: boolean): string {
+  if (loadFailed) return '—'
+  return formatCount(n, limit)
 }
 
 export function Feed(props: {
@@ -113,6 +132,40 @@ export function Feed(props: {
   // failed poll -- so this is additive, never a replacement for the table.
   const error = eventsState.error ?? rejectionsState.error ?? statsState.error
 
+  // Whether ANYTHING has been confirmed for the currently selected project
+  // yet -- across all three polls, not just events. `usePolling` resets
+  // `data` to `null` the moment `activeId` changes (see its own "Important
+  // 9" comment), so right after a project switch this is false until the
+  // first poll of *any* kind lands. Used to decide, below, whether an error
+  // means "could not load" (nothing to show yet) or "could not refresh"
+  // (something is already on screen, just possibly stale).
+  const hasData =
+    eventsState.data != null || rejectionsState.data != null || statsState.data != null
+
+  // The most recent moment any of the three polls actually succeeded --
+  // used to say WHEN the data currently on screen is from, not merely that
+  // it might be stale. `Math.max` over an empty/all-null set would be
+  // `-Infinity`; that only happens when `hasData` is false, and the banner
+  // below never reads this value in that case.
+  const lastUpdatedAt = [
+    eventsState.updatedAt,
+    rejectionsState.updatedAt,
+    statsState.updatedAt,
+  ].reduce<number | null>(
+    (latest, t) => (t != null && (latest == null || t > latest) ? t : latest),
+    null,
+  )
+
+  // Per-table, not the merged `hasData`/`error` above: whether THIS
+  // resource specifically has never been confirmed while erroring. Using
+  // the merged flags here would let one poll's success (rejections, say)
+  // paper over another's total failure (events) -- e.g. "No events yet"
+  // would still render as long as *some* poll succeeded, even though the
+  // events poll itself never has. Each table's empty-state claim is only
+  // ever honest about its own resource.
+  const eventsLoadFailed = eventsState.error != null && eventsState.data == null
+  const rejectionsLoadFailed = rejectionsState.error != null && rejectionsState.data == null
+
   // Critical 2: a 401 from ANY of the three polls means the session is
   // gone, not that the server is having a bad moment -- the generic banner
   // above would otherwise read as a transient hiccup forever, at roughly
@@ -129,9 +182,24 @@ export function Feed(props: {
     <div className="flex min-w-0 flex-col gap-4">
       <Sparkline buckets={buckets} since={statsState.data?.since} until={statsState.data?.until} />
 
-      {error != null && (
+      {/*
+       * Issue #82: this used to be one message regardless of whether there
+       * was anything on screen to be "showing" -- claiming to show data
+       * that a project switch had just cleared. `hasData` (merged across
+       * all three polls; see above) decides which of two true things to
+       * say instead. Never both, and never the table's own empty-state
+       * copy alongside the "could not load" branch -- see `eventsLoadFailed`
+       * / `rejectionsLoadFailed` passed to the tables below.
+       */}
+      {error != null && !hasData && (
         <p role="alert" className="text-sm text-destructive">
-          Could not refresh the feed. Showing the last data received.
+          Could not load the feed. It will keep retrying on its own.
+        </p>
+      )}
+      {error != null && hasData && lastUpdatedAt != null && (
+        <p role="alert" className="text-sm text-destructive">
+          Could not refresh the feed. Showing the last data received, as of{' '}
+          {formatRelative(new Date(lastUpdatedAt).toISOString(), new Date())}.
         </p>
       )}
 
@@ -147,7 +215,7 @@ export function Feed(props: {
          */}
         <TabsList className="max-w-full overflow-x-auto">
           <TabsTrigger value="accepted">
-            Accepted {formatCount(events.length, DEFAULT_LIMIT)}
+            Accepted {formatBadgeCount(events.length, DEFAULT_LIMIT, eventsLoadFailed)}
           </TabsTrigger>
           {/* The rejected count lives on this trigger even while "accepted"
            * is the active tab -- Radix renders every TabsTrigger regardless
@@ -155,14 +223,14 @@ export function Feed(props: {
            * screen: an operator on Accepted must see something is being
            * refused without going looking for it. */}
           <TabsTrigger value="rejected">
-            Rejected {formatCount(rejections.length, DEFAULT_LIMIT)}
+            Rejected {formatBadgeCount(rejections.length, DEFAULT_LIMIT, rejectionsLoadFailed)}
           </TabsTrigger>
         </TabsList>
         <TabsContent value="accepted" className="min-w-0">
-          <AcceptedTable events={events} />
+          <AcceptedTable events={events} loadFailed={eventsLoadFailed} />
         </TabsContent>
         <TabsContent value="rejected" className="min-w-0">
-          <RejectionsTable rejections={rejections} />
+          <RejectionsTable rejections={rejections} loadFailed={rejectionsLoadFailed} />
         </TabsContent>
       </Tabs>
     </div>

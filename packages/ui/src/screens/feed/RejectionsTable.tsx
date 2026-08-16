@@ -9,10 +9,22 @@ import {
 } from '../../components/ui/table.js'
 import { formatEventTime } from './format.js'
 
-export function RejectionsTable(props: { rejections: Rejection[] }) {
-  const { rejections } = props
+export function RejectionsTable(props: {
+  rejections: Rejection[]
+  /**
+   * Same reasoning as `AcceptedTable`'s prop of the same name (issue #82):
+   * an empty `rejections` here while the rejections poll has errored and
+   * never once succeeded for this project means "unknown", not "confirmed
+   * none accepted". `Feed` derives this from the poll's own null-ness.
+   */
+  loadFailed?: boolean
+}) {
+  const { rejections, loadFailed = false } = props
 
   if (rejections.length === 0) {
+    // See `AcceptedTable`: the "could not load" message lives in `Feed`'s
+    // banner, once, rather than repeated (and risking drifting) here.
+    if (loadFailed) return null
     return (
       <p className="px-2 py-10 text-center text-sm text-muted-foreground">
         No rejections. Everything received has been accepted.
