@@ -126,6 +126,122 @@ describe('FunnelStore', () => {
     expect(after?.lastEvaluatedAt).not.toBeNull()
   })
 
+  // The web UI sends the whole definition on every save (issue #92): a
+  // rename PATCH still carries `steps`/`window_seconds`, and they must not
+  // be mistaken for a change just because they were present in the request.
+  describe('keeps the snapshot when the definition is unchanged, even if the patch carries it', () => {
+    it('rename plus the current steps and window echoed back verbatim', async () => {
+      const f = await store.create(projectId, 'signup', signup)
+      await store.recordRun(projectId, f.id, { entered: 100, converted: 10, at: new Date() })
+      await store.update(projectId, f.id, {
+        name: 'signup-v2',
+        steps: signup.steps,
+        windowSeconds: signup.window_seconds,
+      })
+      const after = await store.get(projectId, f.id)
+      expect(after?.name).toBe('signup-v2')
+      expect(after?.lastEntered).toBe(100)
+      expect(after?.lastConverted).toBe(10)
+      expect(after?.lastEvaluatedAt).not.toBeNull()
+    })
+
+    it('window_seconds re-sent at its current value', async () => {
+      const f = await store.create(projectId, 'signup', signup)
+      await store.recordRun(projectId, f.id, { entered: 100, converted: 10, at: new Date() })
+      await store.update(projectId, f.id, { windowSeconds: signup.window_seconds })
+      expect((await store.get(projectId, f.id))?.lastEntered).toBe(100)
+    })
+
+    it('segment_id re-sent at its current value', async () => {
+      const f = await store.create(projectId, 'signup', { ...signup, segment_id: 42 })
+      await store.recordRun(projectId, f.id, { entered: 100, converted: 10, at: new Date() })
+      await store.update(projectId, f.id, { segmentId: 42 })
+      const after = await store.get(projectId, f.id)
+      expect(after?.segmentId).toBe(42)
+      expect(after?.lastEntered).toBe(100)
+    })
+
+    it('segment_id explicitly re-cleared to null when it was already null', async () => {
+      const f = await store.create(projectId, 'signup', signup) // segment_id absent → null
+      await store.recordRun(projectId, f.id, { entered: 100, converted: 10, at: new Date() })
+      await store.update(projectId, f.id, { segmentId: null })
+      const after = await store.get(projectId, f.id)
+      expect(after?.segmentId).toBeNull()
+      expect(after?.lastEntered).toBe(100)
+    })
+  })
+
+  describe('still clears the snapshot for a genuine definition change, echoed-back fields notwithstanding', () => {
+    it('a changed event name within a step', async () => {
+      const f = await store.create(projectId, 'signup', signup)
+      await store.recordRun(projectId, f.id, { entered: 100, converted: 10, at: new Date() })
+      const changed = structuredClone(signup.steps)
+      const secondStep = changed[1]
+      if (!secondStep) throw new Error('fixture must have a second step')
+      secondStep.event = 'signed_up_v2'
+      await store.update(projectId, f.id, { steps: changed })
+      expect((await store.get(projectId, f.id))?.lastEntered).toBeNull()
+    })
+
+    it('the same steps in a different order', async () => {
+      const f = await store.create(projectId, 'signup', signup)
+      await store.recordRun(projectId, f.id, { entered: 100, converted: 10, at: new Date() })
+      const reordered = [...signup.steps].reverse()
+      await store.update(projectId, f.id, { steps: reordered })
+      expect((await store.get(projectId, f.id))?.lastEntered).toBeNull()
+    })
+
+    it('an added where predicate', async () => {
+      const f = await store.create(projectId, 'signup', signup)
+      await store.recordRun(projectId, f.id, { entered: 100, converted: 10, at: new Date() })
+      const withExtraPredicate = structuredClone(signup.steps)
+      const firstStep = withExtraPredicate[0]
+      if (!firstStep) throw new Error('fixture must have a first step')
+      firstStep.where = [
+        ...(firstStep.where ?? []),
+        { property: 'referrer', operator: '=', value: 'x' },
+      ]
+      await store.update(projectId, f.id, { steps: withExtraPredicate })
+      expect((await store.get(projectId, f.id))?.lastEntered).toBeNull()
+    })
+
+    it('a removed where predicate', async () => {
+      const f = await store.create(projectId, 'signup', signup)
+      await store.recordRun(projectId, f.id, { entered: 100, converted: 10, at: new Date() })
+      const withoutPredicate = structuredClone(signup.steps)
+      const firstStep = withoutPredicate[0]
+      if (!firstStep) throw new Error('fixture must have a first step')
+      firstStep.where = []
+      await store.update(projectId, f.id, { steps: withoutPredicate })
+      expect((await store.get(projectId, f.id))?.lastEntered).toBeNull()
+    })
+
+    it('a genuinely changed window_seconds', async () => {
+      const f = await store.create(projectId, 'signup', signup)
+      await store.recordRun(projectId, f.id, { entered: 100, converted: 10, at: new Date() })
+      await store.update(projectId, f.id, { windowSeconds: signup.window_seconds + 1 })
+      expect((await store.get(projectId, f.id))?.lastEntered).toBeNull()
+    })
+
+    it('segment_id set for the first time', async () => {
+      const f = await store.create(projectId, 'signup', signup)
+      await store.recordRun(projectId, f.id, { entered: 100, converted: 10, at: new Date() })
+      await store.update(projectId, f.id, { segmentId: 99 })
+      const after = await store.get(projectId, f.id)
+      expect(after?.segmentId).toBe(99)
+      expect(after?.lastEntered).toBeNull()
+    })
+
+    it('segment_id cleared to null having previously been set', async () => {
+      const f = await store.create(projectId, 'signup', { ...signup, segment_id: 7 })
+      await store.recordRun(projectId, f.id, { entered: 100, converted: 10, at: new Date() })
+      await store.update(projectId, f.id, { segmentId: null })
+      const after = await store.get(projectId, f.id)
+      expect(after?.segmentId).toBeNull()
+      expect(after?.lastEntered).toBeNull()
+    })
+  })
+
   it('tells a null segment_id apart from an absent one', async () => {
     // undefined leaves the restriction alone; null removes it. Collapsing the
     // two would make "remove the segment" unexpressible through PATCH.

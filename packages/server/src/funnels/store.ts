@@ -1,4 +1,9 @@
-import { FUNNEL_DEFINITION_VERSION, type FunnelDefinition, FunnelStep } from '@lyraflow/core'
+import {
+  FUNNEL_DEFINITION_VERSION,
+  type FunnelDefinition,
+  FunnelStep,
+  type WherePredicate,
+} from '@lyraflow/core'
 import type { Pool } from '@lyraflow/db'
 import { z } from 'zod'
 
@@ -62,6 +67,76 @@ export class DuplicateFunnelNameError extends Error {
 const UNIQUE_VIOLATION = '23505'
 
 const StoredSteps = z.array(FunnelStep).min(2)
+
+/**
+ * Structural equality for two `where` predicate values. A predicate's `value`
+ * is either a scalar or a two-element tuple (`between`); comparing by field
+ * rather than by JSON string keeps this independent of how each value was
+ * constructed.
+ */
+function valueEqual(a: WherePredicate['value'], b: WherePredicate['value']): boolean {
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return (
+      Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => v === b[i])
+    )
+  }
+  return a === b
+}
+
+/**
+ * Field-by-field, not `JSON.stringify` equality: a value parsed from the
+ * incoming request and a value round-tripped through Postgres jsonb are not
+ * guaranteed to serialise their object keys in the same order even when
+ * every field agrees, and a key-order-sensitive comparison would silently
+ * keep today's bug while looking fixed. `where` order IS significant here —
+ * it is compared positionally, same as `steps` order — because this compares
+ * two definitions for exact equality, not for equivalence.
+ */
+function stepsEqual(a: FunnelStep[], b: FunnelStep[]): boolean {
+  if (a.length !== b.length) return false
+  return a.every((stepA, i) => {
+    const stepB = b[i]
+    if (!stepB || stepA.event !== stepB.event) return false
+    const whereA = stepA.where ?? []
+    const whereB = stepB.where ?? []
+    if (whereA.length !== whereB.length) return false
+    return whereA.every((p, j) => {
+      const q = whereB[j]
+      return (
+        !!q &&
+        p.property === q.property &&
+        p.operator === q.operator &&
+        valueEqual(p.value, q.value)
+      )
+    })
+  })
+}
+
+/**
+ * Whether `patch` actually changes the stored definition — as opposed to
+ * merely CARRYING the fields that make up the definition, which is what the
+ * PATCH body always does because the UI sends the whole definition on every
+ * save. A field patch.foo === undefined means "leave it alone" and is never
+ * a change; a field present with exactly its current value is present but
+ * not a change either. `segmentId` additionally distinguishes an explicit
+ * `null` (clear the filter) from omission (leave it) — both handled by the
+ * `!== undefined` checks below, since `null !== undefined`.
+ */
+function definitionChanged(
+  patch: { steps?: FunnelStep[]; windowSeconds?: number; segmentId?: number | null },
+  current: { steps: FunnelStep[] | null; windowSeconds: number; segmentId: number | null },
+): boolean {
+  if (patch.steps !== undefined) {
+    // `current.steps` is null only when the stored row failed to parse
+    // (StoredDefinitionError territory) — there is nothing to compare
+    // against, so err toward the old, safe behaviour and treat it as changed.
+    if (current.steps === null || !stepsEqual(patch.steps, current.steps)) return true
+  }
+  if (patch.windowSeconds !== undefined && patch.windowSeconds !== current.windowSeconds)
+    return true
+  if (patch.segmentId !== undefined && patch.segmentId !== current.segmentId) return true
+  return false
+}
 
 interface Row {
   id: string
@@ -205,10 +280,18 @@ export class FunnelStore {
   }
 
   /**
-   * Changing any part of the DEFINITION clears the snapshot in the same
-   * statement; renaming does not. A stored count describes the definition it
-   * was computed from, so leaving it after an edit makes a list display a
-   * confident number for a funnel that no longer exists.
+   * Changing what the definition actually MEASURES clears the snapshot in
+   * the same transaction; renaming does not — and, critically, neither does
+   * re-sending fields that merely carry the same value they already had.
+   * The web UI always sends the whole definition on every save, so "did the
+   * patch mention `steps`" is not the same question as "did `steps` change",
+   * and only the second one should ever discard a summary that is still
+   * accurate. See `definitionChanged` for the comparison itself.
+   *
+   * That comparison needs the row as it stands right now, so this reads it
+   * with `FOR UPDATE` inside the same transaction as the write — otherwise a
+   * concurrent PATCH could be diffed against a definition that is no longer
+   * current by the time this one writes.
    *
    * `segmentId` is `number | null | undefined` and the three mean different
    * things: a number sets it, `null` clears the restriction, and `undefined`
@@ -225,12 +308,30 @@ export class FunnelStore {
       segmentId?: number | null
     },
   ): Promise<StoredFunnel | null> {
-    const touchesDefinition =
-      patch.steps !== undefined ||
-      patch.windowSeconds !== undefined ||
-      patch.segmentId !== undefined
+    const client = await this.pool.connect()
     try {
-      const r = await this.pool.query<Row>(
+      await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+
+      const existing = await client.query<Row>(
+        `SELECT id, name, definition_version, steps, window_seconds, segment_id,
+                last_entered, last_converted, last_evaluated_at, created_at, updated_at
+           FROM funnels WHERE project_id = $1 AND id = $2 FOR UPDATE`,
+        [projectId, id],
+      )
+      const existingRow = existing.rows[0]
+      if (!existingRow) {
+        await client.query('ROLLBACK')
+        return null
+      }
+
+      const parsedCurrentSteps = StoredSteps.safeParse(existingRow.steps)
+      const resetsSummary = definitionChanged(patch, {
+        steps: parsedCurrentSteps.success ? parsedCurrentSteps.data : null,
+        windowSeconds: existingRow.window_seconds,
+        segmentId: existingRow.segment_id === null ? null : Number(existingRow.segment_id),
+      })
+
+      const r = await client.query<Row>(
         `UPDATE funnels SET
            name              = COALESCE($3, name),
            steps             = COALESCE($4::jsonb, steps),
@@ -251,16 +352,24 @@ export class FunnelStore {
           patch.windowSeconds ?? null,
           patch.segmentId !== undefined,
           patch.segmentId ?? null,
-          touchesDefinition,
+          resetsSummary,
         ],
       )
+      await client.query('COMMIT')
       const row = r.rows[0]
       return row ? this.#hydrate(row) : null
     } catch (err) {
+      try {
+        await client.query('ROLLBACK')
+      } catch {
+        /* connection is already gone */
+      }
       if ((err as { code?: string } | null)?.code === UNIQUE_VIOLATION) {
         throw new DuplicateFunnelNameError()
       }
       throw err
+    } finally {
+      client.release()
     }
   }
 
