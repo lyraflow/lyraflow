@@ -270,7 +270,7 @@ describe('SegmentBuilder -- edit', () => {
 // enabled/disabled state -- a screen that disables the wrong button but
 // still fires the wrong call would pass a control-only test.
 
-describe('SegmentBuilder -- Task 9: the rename rule', () => {
+describe('SegmentBuilder -- the rename rule', () => {
   /** A single click on condition-0's own Negate button -- a real,
    * content-changing edit (wraps the leaf in a `not`, `ConditionRow`'s own
    * doc comment), unlike the cap fixtures' negate-TWICE helper, which
@@ -601,7 +601,7 @@ describe('SegmentBuilder -- the three server-side tree caps', () => {
 // here) keeps `userEvent`'s own internal delays working while this file's
 // own `vi.advanceTimersByTimeAsync` calls stay exact.
 
-describe('SegmentBuilder -- Task 7: live counts', () => {
+describe('SegmentBuilder -- live counts', () => {
   async function withFakeTimers(run: () => Promise<void>): Promise<void> {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {

@@ -438,7 +438,7 @@ describe('SegmentDetail', () => {
 // linking to the edit route, and never calling `deleteSegment` before an
 // explicit second click confirms it.
 
-describe('SegmentDetail -- Task 9: edit link and delete', () => {
+describe('SegmentDetail -- edit link and delete', () => {
   it('links Edit to the segment edit route', async () => {
     renderDetail()
     const edit = await screen.findByRole('link', { name: /^edit$/i })
