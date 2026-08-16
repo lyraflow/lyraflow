@@ -436,6 +436,50 @@ describe('createClient', () => {
   })
 
   describe('segments', () => {
+    // Invented: `segment` (singular) had zero coverage the way `funnel`
+    // (singular) once did (see fix round 1 above) -- mutating it to send
+    // PUT to the wrong path left the whole suite green. Pins verb, path and
+    // project header the same way the funnel equivalent already does.
+    it('segment GETs a single segment by id under the project header', async () => {
+      const fetchImpl = vi.fn(
+        async () => new Response(JSON.stringify({ id: 7, name: 'Power users' }), { status: 200 }),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      const out = await client.segment(3, 7)
+
+      expect(out).toEqual({ id: 7, name: 'Power users' })
+      const [path, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+      expect(path).toBe('/v1/segments/7')
+      expect(init?.method ?? 'GET').toBe('GET')
+      expect(new Headers(init?.headers).get('x-lyraflow-project')).toBe('3')
+    })
+
+    // Invented: same body-shape family as createFunnel/previewSegment --
+    // `/v1/segments` also parses one flat object, so a caller that nests
+    // `{ name, definition: {...} }` gets a 400 this suite would not have
+    // caught. Mutating the spread to a nested body left the whole suite
+    // green, the same as createSegment having zero coverage at all.
+    it('createSegment sends name and the query flattened into ONE object, not nested', async () => {
+      const fetchImpl = vi.fn(
+        async () => new Response(JSON.stringify({ id: 9, name: 'Power users' }), { status: 201 }),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+      const filter = { kind: 'trait', key: 'plan', operator: '=', value: 'pro' }
+
+      await client.createSegment(3, 'Power users', { ast_version: 1, filter })
+
+      const [path, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+      expect(path).toBe('/v1/segments')
+      expect(init.method).toBe('POST')
+      expect(new Headers(init.headers).get('x-lyraflow-project')).toBe('3')
+      expect(JSON.parse(init.body as string)).toEqual({
+        name: 'Power users',
+        ast_version: 1,
+        filter,
+      })
+    })
+
     it('previews an ad-hoc tree with the tree and the options in one flat body', async () => {
       const fetchImpl = vi.fn(
         async () =>
@@ -493,6 +537,17 @@ describe('createClient', () => {
       const fetchImpl = vi.fn(async () => new Response(null, { status: 204 }))
       const client = createClient(fetchImpl as unknown as typeof fetch)
       await expect(client.deleteSegment(3, 7)).resolves.toBeUndefined()
+
+      // Invented: `resolves.toBeUndefined()` alone is also true of a stub
+      // that never calls fetch at all -- confirmed by mutating deleteSegment
+      // to `async () => undefined` and watching the suite stay green. Pin
+      // the verb, path and project header the same way deleteFunnel's test
+      // already does, so a no-op stub fails here too.
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+      const [path, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+      expect(path).toBe('/v1/segments/7')
+      expect(init.method).toBe('DELETE')
+      expect(new Headers(init.headers).get('x-lyraflow-project')).toBe('3')
     })
 
     it('schemaProperties sends event and q in the query string and maps to property_key', async () => {
