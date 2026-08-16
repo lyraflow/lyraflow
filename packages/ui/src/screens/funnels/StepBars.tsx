@@ -21,6 +21,18 @@ import { formatCount, formatPercent } from './format.js'
  * layout. It is also rounded to two decimal places: the width is purely
  * presentational, and asserting an unrounded float through style
  * serialisation is brittle.
+ *
+ * Drop rows are suppressed entirely when `entered === 0`, not rendered as
+ * "100% dropped". `formatPercent(1 - step.from_previous)` is technically
+ * correct there -- `from_previous` really is 0 -- but "100% dropped" reads
+ * as a catastrophic funnel failure when the true fact is "no one has
+ * entered yet" (a brand-new project's first-run state). This project
+ * already draws that line elsewhere (the funnels list says "not run yet",
+ * never "0%", for the same reason): a real zero and an absence of data are
+ * different facts, and conflating them makes an empty state look broken.
+ * The guard keys on `result.entered`, the funnel-wide entrant count, NOT on
+ * any individual step's `people` -- a legitimate funnel whose last step
+ * happens to convert zero people must still show the drop into that step.
  */
 export function StepBars(props: { result: FunnelRunResult }) {
   const { result } = props
@@ -32,7 +44,7 @@ export function StepBars(props: { result: FunnelRunResult }) {
           result.entered === 0 ? 0 : Math.round((step.people / result.entered) * 10000) / 100
         return (
           <div key={step.index} className="flex min-w-0 flex-col gap-1">
-            {previous && (
+            {previous && result.entered !== 0 && (
               <div
                 data-testid={`funnel-drop-${step.index}`}
                 className="pl-4 text-xs text-muted-foreground"

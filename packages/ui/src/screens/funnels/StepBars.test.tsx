@@ -62,6 +62,38 @@ describe('StepBars', () => {
     expect(screen.getByTestId('funnel-step-2')).toHaveTextContent('0%')
   })
 
+  it('renders no drop row at all for an empty funnel -- "100% dropped" would be its own lie when nothing has happened yet', () => {
+    const empty = {
+      ...RESULT,
+      entered: 0,
+      converted: 0,
+      conversion_rate: 0,
+      partial_window_entrants: 0,
+      steps: [
+        { index: 1, event: 'a', people: 0, from_previous: 0, from_start: 0 },
+        { index: 2, event: 'b', people: 0, from_previous: 0, from_start: 0 },
+        { index: 3, event: 'c', people: 0, from_previous: 0, from_start: 0 },
+      ],
+    }
+    const { container } = render(<StepBars result={empty} />)
+    expect(container.textContent).not.toMatch(/NaN/)
+    expect(container.querySelectorAll('[data-testid^="funnel-drop-"]')).toHaveLength(0)
+  })
+
+  it("still shows the drop row into a step that itself reaches zero people, as long as the funnel had entrants -- the empty-funnel guard must key on entered, not on a step's own people count", () => {
+    const lastStepZero = {
+      ...RESULT,
+      steps: [
+        { index: 1, event: 'a', people: 1204, from_previous: 1, from_start: 1 },
+        { index: 2, event: 'b', people: 0, from_previous: 0, from_start: 0 },
+      ],
+    }
+    render(<StepBars result={lastStepZero} />)
+    const drop = screen.getByTestId('funnel-drop-2')
+    expect(drop).toHaveTextContent('1,204') // 1204 - 0 dropped
+    expect(drop).toHaveTextContent('100%') // 1 - 0 from_previous
+  })
+
   it('states the drop between consecutive steps as a count and a percentage', () => {
     render(<StepBars result={RESULT} />)
     const drop = screen.getByTestId('funnel-drop-2')
