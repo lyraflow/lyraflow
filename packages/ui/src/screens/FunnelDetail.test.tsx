@@ -851,14 +851,31 @@ describe('FunnelDetail — segment name resolution (issue #94)', () => {
   // State 2: the filter resolves. The mutation this pins: render only the
   // bare id (the pre-fix behaviour) -- this fails unless the name itself is
   // on screen.
+  //
+  // Flake fix (issue #109): `findByTestId` alone only waits for the NODE to
+  // exist, not for its content -- and this node exists a render earlier than
+  // the resolved name does. It mounts as soon as `funnel` and `result` are
+  // both set (the fallback bare-id text, since `segments` hasn't loaded
+  // yet), and only gets the resolved name on a LATER commit once the
+  // `segments` effect -- which only fires after the `funnel` commit, so it
+  // is strictly behind the other two fetches -- settles. Under load,
+  // `findByTestId` could resolve on that first, bare-id commit, and the
+  // assertion right after it ran against stale text (confirmed live: a
+  // failure read "Received: Segment: #4" against the intended
+  // "Paying customers (#4)"). `waitFor` here re-runs the assertion itself
+  // until the FINAL text lands, rather than trusting that the node's first
+  // appearance already carries it -- still proving both the name and the id
+  // render, nothing weaker.
   it('renders the segment name, with the id alongside it, once resolved', async () => {
     const client = fakeClient({
       funnel: vi.fn(async () => ({ ...FUNNEL, segment_id: 4 })),
       segments: vi.fn(async () => [{ id: 4, name: 'Paying customers', stale: false }]),
     })
     renderDetail(client)
-    expect(await screen.findByTestId('funnel-segment-filter')).toHaveTextContent(
-      'Paying customers (#4)',
+    await waitFor(() =>
+      expect(screen.getByTestId('funnel-segment-filter')).toHaveTextContent(
+        'Paying customers (#4)',
+      ),
     )
     expect(client.segments).toHaveBeenCalledWith(1)
   })
@@ -869,16 +886,26 @@ describe('FunnelDetail — segment name resolution (issue #94)', () => {
   // unresolved id exactly the way a failed lookup does -- this fails unless
   // the "cannot be resolved" wording is on screen, distinct from both the
   // resolved-name text and a bare id.
+  // Flake fix (issue #109): the same shape as the test above -- the "cannot
+  // be resolved" wording only appears once `segments` resolves, but the node
+  // exists a render earlier showing the bare-id fallback, which also
+  // contains "#4" and does not yet contain "cannot be resolved". A
+  // `findByTestId` that stops at the node's first appearance could catch
+  // that earlier commit under load and fail the `/cannot be resolved/i`
+  // assertion against text that just hadn't arrived yet. `waitFor` re-runs
+  // both assertions together until they hold.
   it('renders an honest "cannot be resolved" state when the id is not in the list', async () => {
     const client = fakeClient({
       funnel: vi.fn(async () => ({ ...FUNNEL, segment_id: 4 })),
       segments: vi.fn(async () => [{ id: 9, name: 'Trial users', stale: false }]),
     })
     renderDetail(client)
-    const el = await screen.findByTestId('funnel-segment-filter')
-    expect(el).toHaveTextContent('#4')
-    expect(el).toHaveTextContent(/cannot be resolved/i)
-    expect(el).not.toHaveTextContent('Trial users')
+    await waitFor(() => {
+      const el = screen.getByTestId('funnel-segment-filter')
+      expect(el).toHaveTextContent('#4')
+      expect(el).toHaveTextContent(/cannot be resolved/i)
+    })
+    expect(screen.getByTestId('funnel-segment-filter')).not.toHaveTextContent('Trial users')
   })
 
   // The segments fetch failing outright (not a 401): must not blank the
