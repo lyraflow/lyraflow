@@ -31,6 +31,7 @@ function renderAt(path: string) {
       monthly_event_quota: null,
     })),
     projects: vi.fn(async () => PROJECTS),
+    funnels: vi.fn(async () => []),
   } as never
   return render(
     <ProjectProvider projects={PROJECTS} initialId={1}>
@@ -87,6 +88,27 @@ describe('AppRouter', () => {
   it('renders the feed for an unknown path rather than nothing', async () => {
     renderAt('/nope')
     expect(await screen.findByRole('tab', { name: /accepted/i })).toBeInTheDocument()
+  })
+
+  // Route RESOLUTION, not ordering -- `<Routes>` ranks candidates by path
+  // specificity (via `matchRoutes()`), independently of the order `<Route>`s
+  // are declared in `Router.tsx`; verified directly by moving the funnel
+  // routes after the "*" catch-all and confirming this still passes. What
+  // this pins instead: a typo'd `ROUTES.funnels`, a missing `<Route>`, or a
+  // `path`/`element` mismatch would all make `/funnels` fall through to the
+  // catch-all -- checked as a negative (no Feed tab reachable) alongside the
+  // positive (Funnels' own heading), so a component that renders *something*
+  // at both destinations can't pass this by accident.
+  it('resolves /funnels to Funnels, not the feed catch-all', async () => {
+    renderAt('/funnels')
+    expect(await screen.findByRole('heading', { name: /^funnels$/i })).toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: /accepted/i })).not.toBeInTheDocument()
+  })
+
+  it('marks Funnels as current at /funnels', async () => {
+    renderAt('/funnels')
+    const link = await screen.findByRole('link', { name: /funnels/i })
+    expect(link).toHaveAttribute('aria-current', 'page')
   })
 
   // IMPORTANT 3 from the whole-branch review: `onUnauthorized` used to be

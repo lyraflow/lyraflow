@@ -1,12 +1,15 @@
 import { BrowserRouter, Route, Routes } from 'react-router'
 import type { ApiClient } from '../api/client.js'
 import { Feed } from '../screens/Feed.js'
+import { FunnelBuilder } from '../screens/FunnelBuilder.js'
+import { FunnelDetail } from '../screens/FunnelDetail.js'
+import { Funnels } from '../screens/Funnels.js'
 import { Settings } from '../screens/Settings.js'
 import { Shell } from './Shell.js'
 
 /**
  * The app's client-side paths, named once so `Shell`'s nav links and this
- * file's own `<Route>`s can never drift apart. Both entries are deliberately
+ * file's own `<Route>`s can never drift apart. Every entry is deliberately
  * dot-free in their final segment: `packages/server/src/static.ts` only
  * hands a non-API GET to the SPA when the request's last path segment has
  * no dot in it (`looksLikeFile`) -- a route that violates that 404s on a
@@ -16,7 +19,14 @@ import { Shell } from './Shell.js'
 export const ROUTES = {
   feed: '/feed',
   settings: '/settings',
+  funnels: '/funnels',
+  funnelNew: '/funnels/new',
 } as const
+
+/** Path builders for the parameterised routes. Numeric ids only, so no final
+ * segment can ever acquire a dot. */
+export const funnelPath = (id: number) => `/funnels/${id}`
+export const funnelEditPath = (id: number) => `/funnels/${id}/edit`
 
 /**
  * Wraps `Shell` in a `BrowserRouter` so the nav's links are real
@@ -42,6 +52,10 @@ export function AppRouter(props: {
   // same way, and it is the only screen with no unauthorized detector of
   // its own now that both destinations get one.
   const settings = <Settings client={props.client} onUnauthorized={props.onUnauthorized} />
+  const funnels = <Funnels client={props.client} onUnauthorized={props.onUnauthorized} />
+  const funnelNew = <FunnelBuilder client={props.client} onUnauthorized={props.onUnauthorized} />
+  const funnelDetail = <FunnelDetail client={props.client} onUnauthorized={props.onUnauthorized} />
+  const funnelEdit = <FunnelBuilder client={props.client} onUnauthorized={props.onUnauthorized} />
   return (
     <BrowserRouter>
       <Shell email={props.email} onLogout={props.onLogout}>
@@ -49,6 +63,20 @@ export function AppRouter(props: {
           <Route path="/" element={feed} />
           <Route path={ROUTES.feed} element={feed} />
           <Route path={ROUTES.settings} element={settings} />
+          {/*
+           * `<Routes>` ranks candidates by path specificity (via
+           * `matchRoutes()`), not by declaration order -- verified directly:
+           * moving these four funnel routes after the "*" catch-all below
+           * still resolves `/funnels` to `funnels`, not `feed`. So JSX order
+           * here is for a human reading top to bottom, not for the router.
+           * "*" is the fallback for a path nothing else below matches --
+           * it deliberately renders `Feed` rather than a blank shell for an
+           * unrecognised client-side path (typo'd or stale).
+           */}
+          <Route path={ROUTES.funnels} element={funnels} />
+          <Route path={ROUTES.funnelNew} element={funnelNew} />
+          <Route path="/funnels/:id" element={funnelDetail} />
+          <Route path="/funnels/:id/edit" element={funnelEdit} />
           <Route path="*" element={feed} />
         </Routes>
       </Shell>

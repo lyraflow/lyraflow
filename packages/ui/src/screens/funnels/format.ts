@@ -1,0 +1,73 @@
+/**
+ * Formatting only. Nothing here computes a rate: `from_previous` and
+ * `from_start` arrive from the server, which returns both deliberately
+ * because deriving one from the other is a multiplication callers get
+ * subtly wrong. See packages/core/src/funnels/levels.ts.
+ */
+import { secondsToWindowInput } from './WindowField.js'
+
+/** A server-supplied 0..1 rate as a percentage. Exact 0 and 1 render without
+ * a decimal, because "0.0%" reads as a rounded small number rather than none. */
+export function formatPercent(rate: number): string {
+  if (!Number.isFinite(rate)) return '0%'
+  if (rate === 0) return '0%'
+  if (rate === 1) return '100%'
+  return `${(rate * 100).toFixed(1)}%`
+}
+
+export function formatCount(n: number): string {
+  return n.toLocaleString('en-US')
+}
+
+/**
+ * `Funnel.window_seconds` in human units, e.g. "7-day window" -- never the
+ * raw seconds count the wire carries. Reuses `secondsToWindowInput`'s own
+ * "pick the largest unit that divides evenly" (`WindowField`'s seeding
+ * logic) rather than a second, hand-rolled copy, so a list row always
+ * agrees with what the builder itself would show if this same window were
+ * opened for editing. The unit is singularised by hand (`PER_UNIT`'s keys
+ * are the plural `minutes`/`hours`/`days` an operator picks from a
+ * `<select>`) because "7-days window" reads as a typo, not two windows.
+ */
+export function formatWindow(seconds: number): string {
+  const { value, unit } = secondsToWindowInput(seconds)
+  const singular = unit.slice(0, -1)
+  return `${value}-${singular} window`
+}
+
+const MINUTE = 60_000
+const HOUR = 60 * MINUTE
+const DAY = 24 * HOUR
+
+function plural(n: number, unit: string): string {
+  return `${n} ${unit}${n === 1 ? '' : 's'} ago`
+}
+
+/**
+ * The subtitle's range label, derived from the RESOLVED `range` a run or
+ * preview actually answered -- never from picker state. `FunnelRunResult`
+ * carries `range: { since, until }` precisely so the client never has to
+ * guess what it ran over; deriving this from a `days` selector instead (the
+ * whole-branch review's I1) can show "Last 90 days" beside numbers that were
+ * actually computed for 30, because the picker can move after the request
+ * that produced the numbers on screen was already in flight.
+ */
+export function formatRangeDays(range: { since: string; until: string }): string {
+  const since = new Date(range.since).getTime()
+  const until = new Date(range.until).getTime()
+  if (Number.isNaN(since) || Number.isNaN(until)) return 'unknown range'
+  const days = Math.round((until - since) / DAY)
+  return `Last ${days} day${days === 1 ? '' : 's'}`
+}
+
+/** `now` is a parameter, not `new Date()`, so this is a pure function a test
+ * can pin by value rather than by shape. */
+export function formatRelative(iso: string, now: Date): string {
+  const then = new Date(iso).getTime()
+  if (Number.isNaN(then)) return 'unknown'
+  const delta = now.getTime() - then
+  if (delta < MINUTE) return 'just now'
+  if (delta < HOUR) return plural(Math.floor(delta / MINUTE), 'minute')
+  if (delta < DAY) return plural(Math.floor(delta / HOUR), 'hour')
+  return plural(Math.floor(delta / DAY), 'day')
+}

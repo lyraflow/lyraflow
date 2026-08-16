@@ -80,6 +80,30 @@ describe('createClient', () => {
     })
   })
 
+  // MINOR (whole-branch review): a validation 400's `detail[]` -- the
+  // per-path `{ path, message }` array the funnel routes already compute --
+  // used to be discarded at the one call site that parses the response
+  // body, leaving `describeError` nothing to build a field-specific message
+  // from. This is the one place that response is ever read.
+  it('carries a 400 response body detail[] onto the thrown ApiError', async () => {
+    const f = fakeFetch(400, {
+      error: 'invalid funnel',
+      detail: [{ path: 'window_seconds', message: 'Expected positive integer' }],
+    })
+    const client = createClient(f as unknown as typeof fetch)
+    await expect(client.projects()).rejects.toMatchObject({
+      status: 400,
+      code: 'invalid funnel',
+      detail: [{ path: 'window_seconds', message: 'Expected positive integer' }],
+    })
+  })
+
+  it('leaves detail undefined when the response body carries none', async () => {
+    const f = fakeFetch(403, { error: 'missing_ui_header' })
+    const client = createClient(f as unknown as typeof fetch)
+    await expect(client.projects()).rejects.toMatchObject({ detail: undefined })
+  })
+
   // A 401 must be distinguishable so the shell can route to login rather
   // than showing an error banner over an empty screen.
   it('raises ApiError with status 401 when the session is gone', async () => {
@@ -202,6 +226,212 @@ describe('createClient', () => {
       await createClient(f as unknown as typeof fetch).rejections(1, { reason: 'bad_schema' })
       const url = String(f.mock.calls[0]?.[0])
       expect(url).toMatch(/[?&]reason=bad_schema(&|$)/)
+    })
+  })
+
+  describe('funnels', () => {
+    it('lists funnels for the active project and unwraps the envelope', async () => {
+      const fetchImpl = vi.fn(
+        async (_input: RequestInfo | URL, _init?: RequestInit) =>
+          new Response(JSON.stringify({ funnels: [{ id: 7, name: 'Signup' }] }), { status: 200 }),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      const out = await client.funnels(3)
+
+      expect(out).toEqual([{ id: 7, name: 'Signup' }])
+      const [path, init] = fetchImpl.mock.calls[0] ?? []
+      expect(path).toBe('/v1/funnels')
+      expect(init?.method ?? 'GET').toBe('GET')
+      expect(new Headers(init?.headers).get('x-lyraflow-project')).toBe('3')
+      expect(new Headers(init?.headers).get('x-lyraflow-ui')).toBe('1')
+    })
+
+    // Fix round 1: a singular GET had zero coverage. Pinned the same way as
+    // the list -- verb, path, project header -- plus that the id lands in
+    // the path, not the query string.
+    it('funnel GETs a single funnel by id under the project header', async () => {
+      const fetchImpl = vi.fn(
+        async (_input: RequestInfo | URL, _init?: RequestInit) =>
+          new Response(JSON.stringify({ id: 7, name: 'Signup' }), { status: 200 }),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      const out = await client.funnel(3, 7)
+
+      expect(out).toEqual({ id: 7, name: 'Signup' })
+      const [path, init] = fetchImpl.mock.calls[0] ?? []
+      expect(path).toBe('/v1/funnels/7')
+      expect(init?.method ?? 'GET').toBe('GET')
+      expect(new Headers(init?.headers).get('x-lyraflow-project')).toBe('3')
+    })
+
+    it('runs a funnel with POST and sends the range in the body, not the query', async () => {
+      const fetchImpl = vi.fn(
+        async (_input: RequestInfo | URL, _init?: RequestInit) =>
+          new Response(JSON.stringify({ entered: 0, converted: 0, steps: [] }), { status: 200 }),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      await client.runFunnel(3, 7, { since: '2026-08-01T00:00:00.000Z' })
+
+      const [path, init] = fetchImpl.mock.calls[0] ?? []
+      // POST, not GET: run carries a range body. A `?since=` here would be
+      // silently ignored by the server and the range would default to 7 days.
+      expect(path).toBe('/v1/funnels/7/run')
+      expect(init?.method).toBe('POST')
+      expect(new Headers(init?.headers).get('x-lyraflow-project')).toBe('3')
+      expect(JSON.parse(init?.body as string)).toEqual({ since: '2026-08-01T00:00:00.000Z' })
+    })
+
+    // Fix round 1: the original test only asserted `resolves.toBeUndefined()`
+    // and never inspected `fetchImpl.mock.calls` -- a stub `deleteFunnel`
+    // that never calls fetch at all still resolved undefined and passed.
+    // Pinned the verb, the path and the project header the same way every
+    // other method in this describe block now is.
+    it('deleteFunnel sends DELETE to the funnel path under the project header', async () => {
+      const fetchImpl = vi.fn(
+        async (_input: RequestInfo | URL, _init?: RequestInit) =>
+          new Response(null, { status: 204 }),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      await expect(client.deleteFunnel(3, 7)).resolves.toBeUndefined()
+
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+      const [path, init] = fetchImpl.mock.calls[0] ?? []
+      expect(path).toBe('/v1/funnels/7')
+      expect(init?.method).toBe('DELETE')
+      expect(new Headers(init?.headers).get('x-lyraflow-project')).toBe('3')
+    })
+
+    // Invented: the three prescribed tests above each pin transport mechanics
+    // (path, method, headers) but none of them pin the actual JSON shape of a
+    // create/patch/preview body. `createFunnel` is exactly the case the brief
+    // calls out as consequential: the server parses one flat object twice --
+    // once as `{ name }`, once as `FunnelDefinition` -- so a caller that nests
+    // `{ name, definition: {...} }` gets a 400 that this suite would not have
+    // caught. Mutating the spread to a nested body left all prior tests green.
+    it('createFunnel sends name and the definition flattened into ONE object, not nested', async () => {
+      const fetchImpl = vi.fn(
+        async (_input: RequestInfo | URL, _init?: RequestInit) =>
+          new Response(JSON.stringify({ id: 9, name: 'Signup' }), { status: 201 }),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      await client.createFunnel(3, 'Signup', {
+        steps: [{ event: 'signed_up' }],
+        window_seconds: 604800,
+        segment_id: null,
+      })
+
+      const [path, init] = fetchImpl.mock.calls[0] ?? []
+      expect(path).toBe('/v1/funnels')
+      expect(init?.method).toBe('POST')
+      expect(new Headers(init?.headers).get('x-lyraflow-project')).toBe('3')
+      expect(JSON.parse(init?.body as string)).toEqual({
+        name: 'Signup',
+        steps: [{ event: 'signed_up' }],
+        window_seconds: 604800,
+        segment_id: null,
+      })
+    })
+
+    // Fix round 1: patchFunnel had zero coverage -- the reviewer mutated it to
+    // send PUT with an unrelated body and the full suite stayed green. Pins
+    // verb, path, project header, and that the patch object is sent verbatim
+    // (a field ABSENT from the call must stay absent on the wire, the same
+    // "omit means unchanged" contract `ProjectPatch` documents elsewhere).
+    it('patchFunnel sends PATCH to the funnel path with exactly the given patch', async () => {
+      const fetchImpl = vi.fn(
+        async (_input: RequestInfo | URL, _init?: RequestInit) =>
+          new Response(JSON.stringify({ id: 7, name: 'Renamed' }), { status: 200 }),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      await client.patchFunnel(3, 7, { name: 'Renamed' })
+
+      const [path, init] = fetchImpl.mock.calls[0] ?? []
+      expect(path).toBe('/v1/funnels/7')
+      expect(init?.method).toBe('PATCH')
+      expect(new Headers(init?.headers).get('x-lyraflow-project')).toBe('3')
+      expect(JSON.parse(init?.body as string)).toEqual({ name: 'Renamed' })
+    })
+
+    // Same body-shape family as createFunnel: `/v1/funnels/preview` also
+    // parses one flat object, so the definition and the range must both be
+    // flattened into it rather than nested under separate keys.
+    it('previewFunnel flattens the definition and the range into ONE body', async () => {
+      const fetchImpl = vi.fn(
+        async (_input: RequestInfo | URL, _init?: RequestInit) =>
+          new Response(JSON.stringify({ entered: 0, converted: 0, steps: [] }), { status: 200 }),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      await client.previewFunnel(
+        3,
+        { steps: [{ event: 'signed_up' }], window_seconds: 604800 },
+        { since: '2026-08-01T00:00:00.000Z' },
+      )
+
+      const [path, init] = fetchImpl.mock.calls[0] ?? []
+      expect(path).toBe('/v1/funnels/preview')
+      expect(init?.method).toBe('POST')
+      expect(new Headers(init?.headers).get('x-lyraflow-project')).toBe('3')
+      expect(JSON.parse(init?.body as string)).toEqual({
+        steps: [{ event: 'signed_up' }],
+        window_seconds: 604800,
+        since: '2026-08-01T00:00:00.000Z',
+      })
+    })
+
+    // Fix round 1: segments had zero coverage. Pins the verb, path, project
+    // header AND the envelope-unwrapping -- the route answers
+    // `{ segments: [...] }`, and a client that forgot to unwrap it, or
+    // unwrapped the wrong key, would still typecheck.
+    it('segments lists segments for the active project and unwraps the envelope', async () => {
+      const fetchImpl = vi.fn(
+        async (_input: RequestInfo | URL, _init?: RequestInit) =>
+          new Response(
+            JSON.stringify({ segments: [{ id: 1, name: 'Power users', stale: false }] }),
+            { status: 200 },
+          ),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      const out = await client.segments(3)
+
+      expect(out).toEqual([{ id: 1, name: 'Power users', stale: false }])
+      const [path, init] = fetchImpl.mock.calls[0] ?? []
+      expect(path).toBe('/v1/segments')
+      expect(init?.method ?? 'GET').toBe('GET')
+      expect(new Headers(init?.headers).get('x-lyraflow-project')).toBe('3')
+    })
+
+    // Fix round 1: schemaEvents had zero coverage. Pins the verb, path,
+    // project header, that `q` reaches the query string, and the
+    // `{ events: [{ event_name }] }` -> `string[]` unwrapping/mapping --
+    // a client that returned the objects unmapped, or read the wrong key,
+    // would still typecheck against a loosely-shaped stub.
+    it('schemaEvents sends q in the query string and maps events to their names', async () => {
+      const fetchImpl = vi.fn(
+        async (_input: RequestInfo | URL, _init?: RequestInit) =>
+          new Response(
+            JSON.stringify({ events: [{ event_name: 'signed_up' }, { event_name: 'page_view' }] }),
+            { status: 200 },
+          ),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      const out = await client.schemaEvents(3, 'sig')
+
+      expect(out).toEqual(['signed_up', 'page_view'])
+      const [path, init] = fetchImpl.mock.calls[0] ?? []
+      const url = String(path)
+      expect(url).toMatch(/^\/v1\/schema\/events\?/)
+      expect(url).toMatch(/[?&]q=sig(&|$)/)
+      expect(init?.method ?? 'GET').toBe('GET')
+      expect(new Headers(init?.headers).get('x-lyraflow-project')).toBe('3')
     })
   })
 })

@@ -1,4 +1,4 @@
-import { ChevronDown, LayoutList, LogOut, Settings as SettingsIcon } from 'lucide-react'
+import { ChevronDown, Filter, LayoutList, LogOut, Settings as SettingsIcon } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Link, NavLink, useLocation } from 'react-router'
 import {
@@ -143,9 +143,24 @@ export function Shell(props: { email: string | null; onLogout(): void; children:
     // multiple-match failure. One element that reflows has no such seam.
     <div className="flex h-dvh flex-col bg-background text-foreground sm:flex-row">
       <aside className="flex shrink-0 items-center gap-4 border-b border-border bg-card px-4 sm:w-56 sm:flex-col sm:items-stretch sm:gap-0 sm:border-b-0 sm:border-r sm:px-0">
-        <div className="flex h-14 items-center gap-2 font-semibold sm:border-b sm:border-border sm:px-4">
+        {/* The product is Lyraflow, not "Lyra" -- pre-existing on `main`,
+         * predating this branch, but this file is already touched here and
+         * the wordmark spec's hand-set kern pairs (e.g. `fl`) only exist in
+         * the full name. `role="group"` + `aria-label` gives this element a
+         * stable accessible name a test can pin without depending on the
+         * `Mark` SVG's own `aria-hidden` text content. */}
+        {/* biome-ignore lint/a11y/useSemanticElements: biome's suggested
+         * <fieldset> is for grouping form controls, which this isn't -- a
+         * mark plus a wordmark, not inputs. `role="group"` on a `div` is
+         * the correct ARIA choice for "a set of UI objects" that aren't
+         * form controls. */}
+        <div
+          role="group"
+          aria-label="Lyraflow"
+          className="flex h-14 items-center gap-2 font-semibold sm:border-b sm:border-border sm:px-4"
+        >
           <Mark />
-          Lyra
+          Lyraflow
         </div>
         <nav className="flex items-center gap-1 sm:flex-col sm:items-stretch sm:gap-0.5 sm:p-2">
           {/*
@@ -174,8 +189,30 @@ export function Shell(props: { email: string | null; onLogout(): void; children:
             }`}
           >
             <LayoutList className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
-            Feed
+            {/* Three destinations no longer fit as icon+label at 390px (see
+             * this task's own brief: the switcher truncated to "Ce" and a
+             * tab label to "ed 1"). The label stays in the DOM at every
+             * width -- only visually hidden below `sm` -- so the link's
+             * accessible name never depends on viewport size, and no
+             * `aria-label` duplicate is needed alongside it. */}
+            <span className="sr-only sm:not-sr-only">Feed</span>
           </Link>
+          {/* `NavLink`, exactly as Settings uses it below -- it supplies
+           * `aria-current="page"` itself, and unlike Feed there is no
+           * second path (`/`) that also has to count as "on this screen". */}
+          <NavLink
+            to={ROUTES.funnels}
+            className={({ isActive }) =>
+              `flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium ${
+                isActive
+                  ? 'text-foreground'
+                  : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+              }`
+            }
+          >
+            <Filter className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
+            <span className="sr-only sm:not-sr-only">Funnels</span>
+          </NavLink>
           <NavLink
             to={ROUTES.settings}
             className={({ isActive }) =>
@@ -187,7 +224,7 @@ export function Shell(props: { email: string | null; onLogout(): void; children:
             }
           >
             <SettingsIcon className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
-            Settings
+            <span className="sr-only sm:not-sr-only">Settings</span>
           </NavLink>
         </nav>
       </aside>

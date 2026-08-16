@@ -48,15 +48,28 @@ describe('Shell', () => {
     expect(screen.getByText('admin@localhost')).toBeInTheDocument()
   })
 
+  // Defect 3 from the Task 8 visual pass: the wordmark rendered "Lyra" on
+  // every screen this Shell wraps -- the product is Lyraflow, and the
+  // brand's wordmark spec hand-sets a kern pair (`fl`) that exists only in
+  // the full name. Pinned via accessible name, not `getByText`, so a
+  // regression (or a markup change that hides the string from assistive
+  // tech while still painting the old text) fails this the same way.
+  it('names the brand element "Lyraflow", not "Lyra"', () => {
+    renderShell()
+    expect(screen.getByRole('group', { name: 'Lyraflow' })).toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: 'Lyra' })).toBeNull()
+  })
+
   // `Router.tsx` (Task 2) is what gives this app somewhere to route to --
   // Feed and Settings are both real navigation links now, and the current
   // one is marked for assistive technology by `NavLink` itself rather than
   // by anything Shell does by hand. `Router.test.tsx` covers the
   // navigation and aria-current behaviour end-to-end; this only pins that
   // both destinations are advertised.
-  it('renders Feed and Settings as navigation links', () => {
+  it('renders Feed, Funnels and Settings as navigation links', () => {
     renderShell()
     expect(screen.getByRole('link', { name: /feed/i })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /funnels/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /settings/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /feed/i })).toHaveAttribute('aria-current', 'page')
   })
@@ -128,5 +141,55 @@ describe('Shell', () => {
     await userEvent.click(screen.getByRole('button', { name: /admin@localhost/i }))
     await userEvent.click(screen.getByRole('menuitem', { name: /sign out/i }))
     expect(onLogout).toHaveBeenCalled()
+  })
+
+  // Task 7 (#85): three destinations made the deferred narrow-width problem
+  // a defect -- at 390px the sidebar took 57% of the viewport, the switcher
+  // truncated to "Ce" and a tab label to "ed 1". jsdom has no Tailwind
+  // stylesheet loaded (see Shell.tsx's own comment on this), so `sr-only`
+  // never actually applies here -- this only pins that every destination
+  // keeps an accessible name and stays queryable regardless of width; the
+  // visual collapse itself was checked by rendering the page, not by this
+  // suite.
+  it('exposes every destination at a narrow width', () => {
+    renderShell()
+    for (const name of [/feed/i, /funnels/i, /settings/i]) {
+      expect(screen.getByRole('link', { name })).toBeVisible()
+    }
+  })
+
+  it('marks the active destination with aria-current', () => {
+    render(
+      <MemoryRouter initialEntries={['/funnels']}>
+        <ProjectProvider projects={PROJECTS} initialId={1}>
+          <Shell email="a@b.c" onLogout={vi.fn()}>
+            {null}
+          </Shell>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    expect(screen.getByRole('link', { name: /funnels/i })).toHaveAttribute('aria-current', 'page')
+  })
+
+  // `Shell.tsx`'s own comment explains why Feed is a plain `Link` with
+  // `aria-current` computed by hand: `Router.tsx` answers `/` with the same
+  // element as `/feed`, and `NavLink`'s own `isActive` match (computed from
+  // `to` against the current location) never fires for a `to="/feed"` link
+  // when the location is `/` -- the exact state every operator lands on
+  // right after login. This is the case a refactor of this file is most
+  // likely to break, and nothing above covered it.
+  it('marks Feed active at the bare root, not just /feed', () => {
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <ProjectProvider projects={PROJECTS} initialId={1}>
+          <Shell email="a@b.c" onLogout={vi.fn()}>
+            {null}
+          </Shell>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    expect(screen.getByRole('link', { name: /feed/i })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('link', { name: /funnels/i })).not.toHaveAttribute('aria-current')
+    expect(screen.getByRole('link', { name: /settings/i })).not.toHaveAttribute('aria-current')
   })
 })
