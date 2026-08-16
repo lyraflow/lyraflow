@@ -55,7 +55,12 @@ function fakeClient(): ApiClient {
  * rendered pixel-identical to a non-negated one.
  */
 const LEAF_KINDS = [
-  ['trait', traitNode, 'textbox', /key/i],
+  // Trait is a "combobox" for the same reason `behavior` is, below: its
+  // field is now an `<input list=...>` backed by the schema, not the bare
+  // text box it shipped as. That change is the point -- a free text box
+  // labelled "Key" asked the operator to guess both what the field meant
+  // and which names their project actually records.
+  ['trait', traitNode, 'combobox', /^trait$/i],
   ['context', contextNode, 'combobox', /field/i],
   ['lifecycle', lifecycleNode, 'combobox', /^field$/i],
   // `EventCombobox`'s own `<input list=...>` computes an ARIA role of
@@ -142,7 +147,7 @@ describe('ConditionRow', () => {
       />,
     )
     const row = screen.getByTestId('condition-0')
-    expect(within(row).getByRole('textbox', { name: /key/i })).toHaveValue('plan')
+    expect(within(row).getByRole('combobox', { name: /^trait$/i })).toHaveValue('plan')
     expect(within(row).getByRole('button', { name: /negate/i })).toHaveAttribute(
       'aria-pressed',
       'true',
@@ -209,7 +214,7 @@ describe('ConditionRow', () => {
     expect(badge.closest('button')).toBeNull()
     expect(within(row).getByRole('button', { name: /negate/i })).not.toBe(badge)
     // Additive, not a replacement: the trait's own fields still render.
-    expect(within(row).getByRole('textbox', { name: /key/i })).toHaveValue('status')
+    expect(within(row).getByRole('combobox', { name: /^trait$/i })).toHaveValue('status')
     expect(within(row).getByRole('textbox', { name: /^value$/i })).toHaveValue('churned')
   })
 
@@ -227,7 +232,7 @@ describe('ConditionRow', () => {
     )
     const row = screen.getByTestId('condition-1-2')
     expect(within(row).queryByText('Not', { selector: ':not(button)' })).toBeNull()
-    expect(within(row).getByRole('textbox', { name: /key/i })).toHaveValue('status')
+    expect(within(row).getByRole('combobox', { name: /^trait$/i })).toHaveValue('status')
   })
 
   // The two tests above use the same `trait` fixture for both the presence
@@ -348,7 +353,7 @@ describe('ConditionRow', () => {
     // state: if the wrap were dropped, this would flip to "false" the
     // instant a character is typed.
     render(<Harness initial={{ kind: 'not', child: traitNode }} />)
-    const key = screen.getByRole('textbox', { name: /key/i })
+    const key = screen.getByRole('combobox', { name: /^trait$/i })
     await userEvent.clear(key)
     await userEvent.type(key, 'plan_id')
     expect(key).toHaveValue('plan_id')
@@ -361,7 +366,7 @@ describe('ConditionRow', () => {
 
   it('does not re-wrap an edit to a non-negated leaf', async () => {
     render(<Harness initial={traitNode} />)
-    const key = screen.getByRole('textbox', { name: /key/i })
+    const key = screen.getByRole('combobox', { name: /^trait$/i })
     await userEvent.clear(key)
     await userEvent.type(key, 'plan_id')
     expect(key).toHaveValue('plan_id')

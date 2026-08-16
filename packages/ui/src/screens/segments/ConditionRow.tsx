@@ -95,7 +95,16 @@ export function ConditionRow(props: {
   function body() {
     switch (inner.kind) {
       case 'trait':
-        return <TraitForm id={testId} node={inner as Trait} onChange={handleChange} />
+        return (
+          <TraitForm
+            id={testId}
+            node={inner as Trait}
+            onChange={handleChange}
+            client={client}
+            projectId={projectId}
+            onUnauthorized={onUnauthorized}
+          />
+        )
       case 'context':
         return <ContextForm id={testId} node={inner as Context} onChange={handleChange} />
       case 'lifecycle':

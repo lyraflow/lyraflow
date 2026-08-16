@@ -185,7 +185,7 @@ describe('SegmentBuilder -- edit', () => {
     // real `TraitForm` -- an `<input>`'s `value` is never DOM text content,
     // so the fetched trait's data is pinned through its own fields instead.
     const condition = within(screen.getByTestId('condition-0'))
-    expect(condition.getByRole('textbox', { name: /key/i })).toHaveValue('plan')
+    expect(condition.getByRole('combobox', { name: /^trait$/i })).toHaveValue('plan')
     expect(condition.getByRole('combobox', { name: /operator/i })).toHaveValue('=')
     expect(condition.getByRole('textbox', { name: /^value$/i })).toHaveValue('pro')
   })
@@ -629,7 +629,7 @@ describe('SegmentBuilder -- live counts', () => {
   async function typeATrait() {
     await userEvent.click(screen.getByRole('button', { name: /add condition/i }))
     await userEvent.type(
-      within(screen.getByTestId('condition-0')).getByRole('textbox', { name: /key/i }),
+      within(screen.getByTestId('condition-0')).getByRole('combobox', { name: /^trait$/i }),
       'plan',
     )
   }
@@ -785,7 +785,7 @@ describe('SegmentBuilder -- live counts', () => {
       // "tree has changed again" the invariant names. `answerIdRef` moves
       // right here, before request 2 is even issued.
       await userEvent.type(
-        within(screen.getByTestId('condition-0')).getByRole('textbox', { name: /key/i }),
+        within(screen.getByTestId('condition-0')).getByRole('combobox', { name: /^trait$/i }),
         'X',
       )
       await act(async () => {
@@ -840,7 +840,7 @@ describe('SegmentBuilder -- live counts', () => {
       expect(screen.getByRole('button', { name: /run/i })).toBeDisabled()
 
       await userEvent.type(
-        within(screen.getByTestId('condition-0')).getByRole('textbox', { name: /key/i }),
+        within(screen.getByTestId('condition-0')).getByRole('combobox', { name: /^trait$/i }),
         'X',
       )
       await act(async () => {

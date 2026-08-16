@@ -185,7 +185,7 @@ describe('TreeEditor', () => {
       // fact this test always meant to pin: a bare-trait root normalises
       // and reaches the leaf with its data intact.
       const condition = within(screen.getByTestId('condition-0'))
-      expect(condition.getByRole('textbox', { name: /key/i })).toHaveValue('z')
+      expect(condition.getByRole('combobox', { name: /^trait$/i })).toHaveValue('z')
       expect(condition.getByRole('combobox', { name: /operator/i })).toHaveValue('=')
       expect(condition.getByRole('textbox', { name: /^value$/i })).toHaveValue('x')
     })
