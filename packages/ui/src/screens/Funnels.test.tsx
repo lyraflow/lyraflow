@@ -1,6 +1,7 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import { ProjectProvider } from '../app/ProjectContext.js'
 import { Funnels } from './Funnels.js'
@@ -111,6 +112,111 @@ describe('Funnels list', () => {
   it('offers the builder when there are no funnels', async () => {
     renderList([])
     expect(await screen.findByRole('link', { name: /create.*funnel/i })).toBeInTheDocument()
+  })
+})
+
+// Invented beyond the brief, from the stub check: replacing the screen's
+// body with a hardcoded success state that never touches `client` at all
+// left FIVE of the brief's five given tests green, plus the pin-proof test
+// below -- every one of them only inspects rendered text, and none ever
+// asserts `client.funnels` was called. Only the unauthorized tests below
+// caught the stub, because they're the only ones that make the fetch
+// itself reject. This is the single assertion that collapses that gap: a
+// component that never calls the client at all now fails immediately,
+// exactly `Settings.test.tsx`'s own "requests the active project" /
+// "re-requests for the newly active project" pair.
+describe('Funnels list — invented mutations', () => {
+  it('requests funnels for the active project', async () => {
+    const client = { funnels: vi.fn(async () => [RUN_ONCE]) } as unknown as ApiClient
+    render(
+      <MemoryRouter>
+        <ProjectProvider projects={PROJECTS} initialId={1}>
+          <Funnels client={client} />
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    await screen.findByRole('link', { name: /Signup flow/ })
+    expect(client.funnels).toHaveBeenCalledWith(1)
+  })
+
+  // A hardcoded `client.funnels(1)` satisfies the test above too -- this is
+  // the one that actually distinguishes a genuine `activeId` read from a
+  // hardcoded literal, by switching the active project to an id the
+  // hardcoded call cannot produce.
+  it('re-requests for the newly active project, not a fixed id', async () => {
+    const client = { funnels: vi.fn(async () => [RUN_ONCE]) } as unknown as ApiClient
+    const projects = [
+      ...PROJECTS,
+      {
+        id: 2,
+        name: 'Beta',
+        slug: 'beta',
+        created_at: '',
+        retention_months: 24,
+        monthly_event_quota: null,
+      },
+    ]
+    const view = render(
+      <MemoryRouter>
+        <ProjectProvider projects={projects} initialId={1}>
+          <Funnels client={client} />
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(client.funnels).toHaveBeenCalledWith(1))
+
+    view.rerender(
+      <MemoryRouter>
+        <ProjectProvider projects={projects} initialId={2}>
+          <Funnels client={client} />
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(client.funnels).toHaveBeenCalledWith(2))
+  })
+})
+
+// Invented beyond the brief. The given suite never exercises `onUnauthorized`
+// at all -- confirmed directly: routing a 401 to `setError(true)` instead of
+// `onUnauthorized?.()` left the whole given suite green, since none of its
+// fixtures ever reject. This mirrors `Settings.test.tsx`'s own "calls
+// onUnauthorized on a 401" pin -- Funnels has exactly the same shape of
+// fetch-once effect and deserves the same guard against an admin sitting on
+// `/funnels` with an expired session falling into the generic error banner
+// forever instead of being routed back to login.
+describe('Funnels list — unauthorized', () => {
+  it('calls onUnauthorized on a 401 from the funnels fetch, not the generic error banner', async () => {
+    const onUnauthorized = vi.fn()
+    const client = {
+      funnels: vi.fn(async () => {
+        throw new ApiError(401, 'invalid_session')
+      }),
+    } as unknown as ApiClient
+    render(
+      <MemoryRouter>
+        <ProjectProvider projects={PROJECTS} initialId={1}>
+          <Funnels client={client} onUnauthorized={onUnauthorized} />
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalled())
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('shows an error instead of hanging forever when the funnels fetch fails for any other reason', async () => {
+    const client = {
+      funnels: vi.fn(async () => {
+        throw new Error('boom')
+      }),
+    } as unknown as ApiClient
+    render(
+      <MemoryRouter>
+        <ProjectProvider projects={PROJECTS} initialId={1}>
+          <Funnels client={client} />
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
   })
 })
 
