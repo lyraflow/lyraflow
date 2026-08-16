@@ -696,9 +696,21 @@ async function main(): Promise<void> {
         // must still be honoured here too — the exact gap events.ts's and
         // stats.ts's own parse-failure paths were fixed for earlier, just
         // one dispatch layer up.
+        //
+        // `snippet` alone names LYRAFLOW_DOMAIN too: it is the one command
+        // `resolveHost` gives a third source for (see its own docstring,
+        // issue #61), so the message that told every other command's
+        // operator exactly what to set would otherwise go quiet about the
+        // one variable that could fix THIS command without touching either
+        // of the other two. The other six commands genuinely have no such
+        // fallback — naming it there would be a lie, worse than the
+        // narrower message they already have, so this stays a one-command
+        // exception rather than a change to the shared string.
         emitError(
           new UsageError(
-            'LYRAFLOW_HOST and LYRAFLOW_SERVER_KEY must be set (or pass --host/--server-key)',
+            command === 'snippet'
+              ? 'LYRAFLOW_HOST (or LYRAFLOW_DOMAIN) and LYRAFLOW_SERVER_KEY must be set (or pass --host/--server-key)'
+              : 'LYRAFLOW_HOST and LYRAFLOW_SERVER_KEY must be set (or pass --host/--server-key)',
           ),
           resolveMode({ json: hasRawFlag(args, 'json'), human: hasRawFlag(args, 'human') }, isTty),
           writeErr,

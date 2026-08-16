@@ -107,13 +107,43 @@ afterEach(() => {
 })
 
 describe('snippet host resolution against a real subprocess (issue #61)', () => {
-  it('with none of --host, LYRAFLOW_HOST or LYRAFLOW_DOMAIN set, keeps todays exact usage error', async () => {
+  it('with none of --host, LYRAFLOW_HOST or LYRAFLOW_DOMAIN set, names all three sources snippet actually has', async () => {
+    // `snippet` is the one command `resolveHost` gives a third source
+    // (LYRAFLOW_DOMAIN) — its usage error names it alongside the other two,
+    // unlike every other command's (pinned separately below), so an
+    // operator with LYRAFLOW_DOMAIN in their compose file but not exported
+    // where the CLI runs is told the variable that would actually fix it.
     const env = { ...process.env }
     env.LYRAFLOW_HOST = undefined
     env.LYRAFLOW_DOMAIN = undefined
     env.LYRAFLOW_SERVER_KEY = undefined
 
     const child = spawn(process.execPath, [CLI_ENTRY, 'snippet', '--json'], {
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    openChild = child
+    const stderr = collect(child.stderr)
+    const exitCode = await waitForExit(child)
+
+    expect(exitCode).toBe(2)
+    expect(JSON.parse(stderr.text().trim())).toEqual({
+      error:
+        'LYRAFLOW_HOST (or LYRAFLOW_DOMAIN) and LYRAFLOW_SERVER_KEY must be set (or pass --host/--server-key)',
+      code: 'usage_error',
+    })
+  }, 15000)
+
+  it('leaves another commands usage error exactly as it was — it genuinely has no LYRAFLOW_DOMAIN fallback', async () => {
+    // Pinned separately from the `snippet` case above so a future refactor
+    // that widens the new message to every command (instead of keeping it a
+    // one-command exception) fails here, not silently.
+    const env = { ...process.env }
+    env.LYRAFLOW_HOST = undefined
+    env.LYRAFLOW_DOMAIN = undefined
+    env.LYRAFLOW_SERVER_KEY = undefined
+
+    const child = spawn(process.execPath, [CLI_ENTRY, 'events', '--json'], {
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
