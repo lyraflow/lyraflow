@@ -43,6 +43,36 @@ describe('usePolling', () => {
     await waitFor(() => expect(fn).toHaveBeenCalledTimes(2))
   })
 
+  // Feed's "showing data from N minutes ago" (issue #82) reads this value,
+  // so it has to name when `data` actually arrived, not merely "recently".
+  it('sets updatedAt when a poll succeeds', async () => {
+    const fn = vi.fn(async () => 'ok')
+    const before = Date.now()
+    const { result } = renderHook(() => usePolling(fn, 1000))
+    await waitFor(() => expect(result.current.data).toBe('ok'))
+    expect(result.current.updatedAt).not.toBeNull()
+    expect(result.current.updatedAt as number).toBeGreaterThanOrEqual(before)
+  })
+
+  // The other half: a failing poll must NOT advance `updatedAt`, or the
+  // "showing data from N minutes ago" label would silently understate how
+  // stale the screen really is on every failed retry.
+  it('does not advance updatedAt when a later poll fails', async () => {
+    let succeed = true
+    const fn = vi.fn(async () => {
+      if (succeed) return 'ok'
+      throw new Error('boom')
+    })
+    const { result } = renderHook(() => usePolling(fn, 1000))
+    await waitFor(() => expect(result.current.data).toBe('ok'))
+    const firstUpdatedAt = result.current.updatedAt
+
+    succeed = false
+    await vi.advanceTimersByTimeAsync(1000)
+    await waitFor(() => expect(result.current.error).not.toBeNull())
+    expect(result.current.updatedAt).toBe(firstUpdatedAt)
+  })
+
   it('stops on unmount', async () => {
     const fn = vi.fn(async () => 1)
     const { unmount } = renderHook(() => usePolling(fn, 1000))
@@ -83,6 +113,7 @@ describe('usePolling', () => {
     // new poll to complete.
     expect(result.current.data).toBeNull()
     expect(result.current.error).toBeNull()
+    expect(result.current.updatedAt).toBeNull()
 
     releaseBeta('beta-data')
     await waitFor(() => expect(result.current.data).toBe('beta-data'))

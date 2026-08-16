@@ -89,6 +89,52 @@ function failingAfterFirstCall() {
   return c
 }
 
+/** Every poll fails on every call, from the very first one -- no resource
+ * ever has anything to show. This is the fixture for the matrix's "no data,
+ * error" row: unlike `failingAfterFirstCall`, there is no prior success on
+ * any of the three endpoints for something-was-cleared confusion to hide
+ * behind. */
+function allFailingFromStart() {
+  const c = fakeClient()
+  c.events = vi.fn(async () => {
+    throw new ApiError(503, 'unavailable')
+  }) as unknown as typeof c.events
+  c.rejections = vi.fn(async () => {
+    throw new ApiError(503, 'unavailable')
+  }) as unknown as typeof c.rejections
+  c.stats = vi.fn(async () => {
+    throw new ApiError(503, 'unavailable')
+  }) as unknown as typeof c.stats
+  return c
+}
+
+/** All three succeed once, then all fail on every later call. Used to prove
+ * the "as of" text names a REAL elapsed time rather than always reading
+ * "just now" -- every other fixture in this file that mixes success and
+ * failure keeps at least one poll succeeding on every tick, which would let
+ * a version of `Feed` that hardcodes `new Date()` as the "last updated"
+ * moment (instead of reading `updatedAt` off the failed poll's own state)
+ * pass unnoticed. */
+function allSucceedThenAllFail() {
+  let eventsN = 0
+  let rejectionsN = 0
+  let statsN = 0
+  const c = fakeClient()
+  c.events = vi.fn(async () => {
+    if (eventsN++ > 0) throw new ApiError(503, 'unavailable')
+    return { events: EVENTS, next_cursor: null }
+  }) as unknown as typeof c.events
+  c.rejections = vi.fn(async () => {
+    if (rejectionsN++ > 0) throw new ApiError(503, 'unavailable')
+    return { rejections: REJECTIONS, has_more: false, next_offset: REJECTIONS.length }
+  }) as unknown as typeof c.rejections
+  c.stats = vi.fn(async () => {
+    if (statsN++ > 0) throw new ApiError(503, 'unavailable')
+    return { buckets: BUCKETS }
+  }) as unknown as typeof c.stats
+  return c
+}
+
 // Invented: every existing "shows an error" fixture fails the *events*
 // poll specifically. Nothing in the given suite would notice a mutation
 // that wired the alert to `eventsState.error` alone and dropped the other
@@ -174,9 +220,13 @@ async function withFakeTimers(run: () => Promise<void>): Promise<void> {
 }
 
 describe('Feed', () => {
+  // Matrix row 4 (data, no error): the plain case. Asserting the alert's
+  // absence here, not just the rows' presence, is what would catch a stub
+  // that always renders SOME banner regardless of state.
   it('renders accepted events', async () => {
     renderFeed()
     expect(await screen.findByText('page_view')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
   // The reason the screen exists: an operator on the Accepted tab must be
@@ -226,12 +276,33 @@ describe('Feed', () => {
     expect(client.events.mock.calls[0]?.[1]).toHaveProperty('limit')
   })
 
+  // Matrix row 1 (no data, no error): the only case where "No events yet"
+  // is an honest thing to say.
   it('shows an empty state rather than a blank table', async () => {
     const client = fakeClient({ events: [] })
     renderFeed({ client })
     expect(await screen.findByText(/no events yet/i)).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
+  // Matrix row 2 (no data, error) -- issue #82's own bug. Nothing has ever
+  // been received for this project on ANY of the three polls, so "No
+  // events yet" would assert something the poll never established. The
+  // banner must say the load failed, and must NEVER appear next to the
+  // empty-state copy -- a stub that renders both would satisfy a weaker
+  // test that only checked one or the other.
+  it('shows a load-failed message, never the empty state, when there is no data at all and a poll errors', async () => {
+    const client = allFailingFromStart()
+    renderFeed({ client })
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toMatch(/could not load the feed/i)
+    expect(screen.queryByText(/no events yet/i)).not.toBeInTheDocument()
+    expect(screen.queryByText('page_view')).not.toBeInTheDocument()
+  })
+
+  // Matrix row 3 (data, error): the only row where "showing the last data
+  // received" is true, and the row that must also name WHEN that data is
+  // from -- not just that it's stale.
   it('shows an error without clearing the rows it already has', async () => {
     await withFakeTimers(async () => {
       const client = failingAfterFirstCall()
@@ -240,6 +311,40 @@ describe('Feed', () => {
       await vi.advanceTimersByTimeAsync(DEFAULT_POLL_INTERVAL_MS)
       await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
       expect(screen.getByText('page_view')).toBeInTheDocument()
+      const alert = screen.getByRole('alert')
+      expect(alert.textContent).toMatch(/could not refresh the feed/i)
+      expect(alert.textContent).toMatch(/showing the last data received, as of/i)
+      // Within the same test's fake-timer tick, the last successful poll is
+      // effectively simultaneous with the check -- pinning "just now" (vs.
+      // some other relative phrase) proves this reads a real `updatedAt`
+      // rather than a hardcoded string.
+      expect(alert.textContent).toMatch(/just now/i)
+    })
+  })
+
+  // Every other fixture in this file that pairs data with an error keeps at
+  // least one of the three polls succeeding on every tick, so its
+  // `updatedAt` is always effectively "now" -- a version of `Feed` that
+  // read the wall clock instead of the poll's own `updatedAt` would pass
+  // every test above this one. Here ALL THREE polls stop succeeding after
+  // their first call, so real time can elapse between "last success" and
+  // "now" -- and the banner has to say so.
+  it('names how long ago the shown data is from, once real time has actually elapsed', async () => {
+    await withFakeTimers(async () => {
+      const client = allSucceedThenAllFail()
+      renderFeed({ client })
+      expect(await screen.findByText('page_view')).toBeInTheDocument()
+      // Past `format.ts`'s own MINUTE boundary for "just now" -- every poll
+      // after the first fails, so none of this advance can push
+      // `updatedAt` forward with it.
+      await vi.advanceTimersByTimeAsync(65_000)
+      await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
+      // Not pinned to an exact minute count -- `shouldAdvanceTime` also
+      // advances by whatever real wall-clock time the surrounding `await`s
+      // take, so a tight bound is flaky by construction (the same reason
+      // `Feed.test.tsx`'s poll-interval test uses asymmetric margins).
+      // "just now" is impossible past the 60s mark either way.
+      expect(screen.getByRole('alert').textContent).toMatch(/\d+ minutes? ago/i)
     })
   })
 
@@ -316,6 +421,23 @@ describe('Feed', () => {
     expect(await screen.findByText(/no rejections/i)).toBeInTheDocument()
   })
 
+  // The Rejected tab's own version of issue #82: "No rejections. Everything
+  // received has been accepted." is a stronger claim than "zero rows" --
+  // it says nothing was refused, which is exactly what a poll that has
+  // never once succeeded cannot establish. Symmetric fixture to the events
+  // one above: rejections fails from the very first call for this project,
+  // while events/stats keep succeeding.
+  it('does not show "No rejections" when the rejections poll has never succeeded and is failing', async () => {
+    const client = fakeClient()
+    client.rejections = vi.fn(async () => {
+      throw new ApiError(503, 'unavailable')
+    }) as unknown as typeof client.rejections
+    renderFeed({ client })
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
+    await userEvent.click(await screen.findByRole('tab', { name: /rejected/i }))
+    expect(screen.queryByText(/no rejections/i)).not.toBeInTheDocument()
+  })
+
   // Important 5 from the whole-branch review. GET /v1/events deliberately
   // returns its page OLDEST-first (so it reads like a log and --follow can
   // continue from the last row shown -- see that route's own docstring).
@@ -367,6 +489,16 @@ describe('Feed', () => {
   // at the rows: switching to a project whose poll then fails must show NO
   // rows, not the previous project's, even though usePolling never clears
   // `data` on an error by itself.
+  //
+  // Issue #82: this is also the exact reproduction from the bug report --
+  // switching projects into a poll that fails, here on the events endpoint
+  // specifically while rejections/stats keep succeeding. Before the fix,
+  // this rendered "No events yet" (asserting something the poll never
+  // established for project 2) directly beside "Could not refresh the
+  // feed. Showing the last data received." (claiming to show rows that had
+  // just been cleared). The events poll for project 2 has never once
+  // succeeded, so the Accepted tab must never claim "No events yet" -- that
+  // claim is only ever honest about a poll that actually ran.
   it('shows no rows, not the previous project rows, when switching to a project whose poll fails', async () => {
     const client = fakeClient()
     client.events = vi.fn(async (projectId: number) => {
@@ -379,7 +511,11 @@ describe('Feed', () => {
     rerenderWithProject(2)
     await waitFor(() => expect(client.events).toHaveBeenCalledWith(2, expect.anything()))
     await waitFor(() => expect(screen.queryByText('page_view')).not.toBeInTheDocument())
-    expect(await screen.findByText(/no events yet/i)).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
+    // The absence check is the one that matters -- a screen that rendered
+    // both the alert AND the empty-state copy would still pass every
+    // assertion above this one.
+    expect(screen.queryByText(/no events yet/i)).not.toBeInTheDocument()
   })
 
   // Critical 2 from the whole-branch review. A 401 from ANY polled endpoint
