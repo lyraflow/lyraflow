@@ -4,7 +4,7 @@ import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import type { FunnelDefinition, FunnelRunResult, FunnelStep } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
-import { ROUTES } from '../app/Router.js'
+import { ROUTES, funnelPath } from '../app/Router.js'
 import { Button } from '../components/ui/button.js'
 import { Input } from '../components/ui/input.js'
 import { Label } from '../components/ui/label.js'
@@ -44,11 +44,17 @@ const DEFAULT_WINDOW_UNIT: WindowUnit = 'days'
  * screen's job is only to call it with three separate arguments, never to
  * nest `definition` under a `definition` key of its own.
  *
- * A successful save -- create or edit -- lands on the funnels LIST, not
- * this funnel's own detail page. That is what lets `Funnels` (which fetches
- * fresh on every mount, no cache above it) be the one place a just-saved
- * funnel is confirmed visible, closing the single-source-of-truth gap the
- * previous plan left in the project switcher.
+ * A successful CREATE lands on the funnels LIST -- there is no result yet
+ * to look at, and `Funnels` (which fetches fresh on every mount, no cache
+ * above it) is the one place a just-created funnel is confirmed visible,
+ * closing the single-source-of-truth gap the previous plan left in the
+ * project switcher. A successful EDIT lands on that funnel's own DETAIL
+ * page instead (controller ruling, Task 6 fix round 1): the operator just
+ * changed steps, window or segment, and the only question they have is
+ * what it says now. `FunnelDetail` auto-runs on open, so arriving there
+ * answers it immediately -- landing on the list instead would hide the
+ * effect of the edit behind another click, on a row showing the OLD
+ * cached rate from before the edit, which reads as current when it isn't.
  */
 export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () => void }) {
   const { client, onUnauthorized } = props
@@ -161,11 +167,13 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
         ? client.patchFunnel(activeId, editId, { name, ...definition })
         : client.createFunnel(activeId, name, definition)
     request
-      // Saving lands on the list, not the just-saved funnel's own detail
-      // page -- `Funnels` fetches fresh on every mount (no cache held above
-      // it), so this is also what makes a funnel created or edited here
-      // show up there without a reload.
-      .then(() => navigate(ROUTES.funnels))
+      // CREATE -> the list (Funnels fetches fresh on every mount, no cache
+      // held above it, which is what makes a newly created funnel show up
+      // there without a reload). EDIT -> that funnel's own detail page,
+      // which auto-runs on open and so is the one place the operator can
+      // see the edit actually took, rather than a stale cached rate on a
+      // list row.
+      .then((funnel) => navigate(isEditing ? funnelPath(funnel.id) : ROUTES.funnels))
       .catch((err: unknown) => {
         if (err instanceof ApiError && err.status === 401) {
           onUnauthorized?.()

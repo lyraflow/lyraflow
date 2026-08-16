@@ -9,6 +9,7 @@ import type { Funnel, FunnelRunResult } from '../api/types.js'
 import { ProjectProvider } from '../app/ProjectContext.js'
 import { ROUTES, funnelEditPath } from '../app/Router.js'
 import { FunnelBuilder } from './FunnelBuilder.js'
+import { FunnelDetail } from './FunnelDetail.js'
 
 const PROJECTS = [
   {
@@ -82,11 +83,15 @@ function renderBuilder(client: ApiClient = fakeBuilderClient(), editId?: number)
         <Routes>
           <Route path={ROUTES.funnelNew} element={<FunnelBuilder client={client} />} />
           <Route path="/funnels/:id/edit" element={<FunnelBuilder client={client} />} />
-          {/* A successful save navigates to the LIST route, not this
-           * funnel's own detail page (Task 6) -- this harness doesn't render
-           * the real `Funnels` screen, just a placeholder so React Router
-           * has somewhere to land instead of logging "no routes matched". */}
-          <Route path={ROUTES.funnels} element={<p>saved</p>} />
+          {/* A successful CREATE navigates to the list route; a successful
+           * EDIT navigates to this funnel's own detail route instead
+           * (Task 6 fix round 1). This harness doesn't render the real
+           * `Funnels`/`FunnelDetail` screens, just placeholders so React
+           * Router has somewhere to land instead of logging "no routes
+           * matched" -- the dedicated test below renders the real
+           * `FunnelDetail` to check what an edit actually lands on. */}
+          <Route path={ROUTES.funnels} element={<p>saved to list</p>} />
+          <Route path="/funnels/:id" element={<p>saved to detail</p>} />
         </Routes>
       </ProjectProvider>
     </MemoryRouter>,
@@ -343,5 +348,61 @@ describe('FunnelBuilder — edit round-trips every field it did not change', () 
     if (!call) throw new Error('patchFunnel was not called')
     const [, , patch] = call
     expect(patch).toMatchObject({ name: 'Renamed', window_seconds: 3600, segment_id: 4 })
+  })
+})
+
+// Controller ruling, Task 6 fix round 1: CREATE lands on the list (proven by
+// the single-source-of-truth test in `Funnels.test.tsx`, not touched here);
+// EDIT lands on that funnel's own detail page instead, because the operator
+// just changed something and the only question they have is what it says
+// now -- the detail screen answers that by auto-running, where the list
+// would only show a stale cached rate from before the edit.
+describe('FunnelBuilder — a successful edit lands on the detail page, not the list', () => {
+  it('lands on the detail route, which then runs the EDITED funnel exactly once', async () => {
+    // A stand-in server: GET reflects whatever the last PATCH wrote, so this
+    // test can tell "shows the edit" apart from "shows a stale copy fetched
+    // before it". `currentFunnel` is intentionally mutated by `patchFunnel`
+    // rather than the test asserting on the outgoing patch alone.
+    let currentFunnel: Funnel = FUNNEL
+    const client = {
+      schemaEvents: vi.fn(async () => []),
+      segments: vi.fn(async () => []),
+      previewFunnel: vi.fn(async () => RUN),
+      createFunnel: vi.fn(async () => ({ ...FUNNEL, id: 42 })),
+      patchFunnel: vi.fn(async (_projectId: number, _id: number, patch: Partial<Funnel>) => {
+        currentFunnel = { ...currentFunnel, ...patch }
+        return currentFunnel
+      }),
+      funnel: vi.fn(async () => currentFunnel),
+      runFunnel: vi.fn(async () => RUN),
+    } as unknown as ApiClient & {
+      patchFunnel: Mock
+      funnel: Mock
+      runFunnel: Mock
+    }
+
+    render(
+      <MemoryRouter initialEntries={[funnelEditPath(FUNNEL.id)]}>
+        <ProjectProvider projects={PROJECTS} initialId={1}>
+          <Routes>
+            <Route path="/funnels/:id/edit" element={<FunnelBuilder client={client} />} />
+            <Route path="/funnels/:id" element={<FunnelDetail client={client} />} />
+          </Routes>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+
+    await userEvent.clear(await screen.findByLabelText(/name/i))
+    await userEvent.type(screen.getByLabelText(/name/i), 'Renamed')
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+
+    // The detail screen's own heading is the funnel's name -- finding
+    // "Renamed" here (not "Signup flow") proves this is the EDITED
+    // definition, not a copy cached from before the PATCH.
+    expect(await screen.findByRole('heading', { name: 'Renamed' })).toBeInTheDocument()
+    // Exactly once: not run while still on the builder (which never calls
+    // `runFunnel` at all), and not run twice by arriving at the detail
+    // page -- a single fresh mount runs it a single time.
+    await waitFor(() => expect(client.runFunnel).toHaveBeenCalledTimes(1))
   })
 })
