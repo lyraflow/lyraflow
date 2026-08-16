@@ -1,0 +1,231 @@
+import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { MemoryRouter, Route, Routes } from 'react-router'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { Mock } from 'vitest'
+import { ApiError } from '../api/client.js'
+import type { ApiClient } from '../api/client.js'
+import type { Funnel, FunnelRunResult } from '../api/types.js'
+import { ProjectProvider } from '../app/ProjectContext.js'
+import { funnelPath } from '../app/Router.js'
+import { FunnelDetail } from './FunnelDetail.js'
+
+const PROJECTS = [
+  {
+    id: 1,
+    name: 'Alpha',
+    slug: 'alpha',
+    created_at: '',
+    retention_months: 24,
+    monthly_event_quota: null,
+  },
+]
+
+const FUNNEL: Funnel = {
+  id: 7,
+  name: 'Signup flow',
+  definition_version: 1,
+  steps: [{ event: 'page_view' }, { event: 'signup_completed' }],
+  window_seconds: 604800,
+  segment_id: null,
+  stale: false,
+  last_entered: 1204,
+  last_converted: 491,
+  last_evaluated_at: '2026-08-15T11:58:00.000Z',
+  created_at: '2026-08-01T00:00:00.000Z',
+  updated_at: '2026-08-01T00:00:00.000Z',
+}
+
+const RUN: FunnelRunResult = {
+  entered: 1204,
+  converted: 491,
+  conversion_rate: 0.4078,
+  partial_window_entrants: 312,
+  range: { since: '2026-08-08T00:00:00.000Z', until: '2026-08-15T00:00:00.000Z' },
+  as_of: '2026-08-15T11:58:00.000Z',
+  warnings: [],
+  steps: [
+    { index: 1, event: 'page_view', people: 1204, from_previous: 1, from_start: 1 },
+    { index: 2, event: 'signup_completed', people: 491, from_previous: 0.4078, from_start: 0.4078 },
+  ],
+}
+
+function fakeClient(over: Record<string, unknown> = {}) {
+  return {
+    funnel: vi.fn(async () => FUNNEL),
+    runFunnel: vi.fn(async () => RUN),
+    deleteFunnel: vi.fn(async () => undefined),
+    ...over,
+  } as unknown as ApiClient & { funnel: Mock; runFunnel: Mock; deleteFunnel: Mock }
+}
+
+function renderDetail(client: ApiClient, onUnauthorized?: () => void) {
+  render(
+    <MemoryRouter initialEntries={[funnelPath(FUNNEL.id)]}>
+      <ProjectProvider projects={PROJECTS} initialId={1}>
+        <Routes>
+          <Route
+            path="/funnels/:id"
+            element={<FunnelDetail client={client} onUnauthorized={onUnauthorized} />}
+          />
+        </Routes>
+      </ProjectProvider>
+    </MemoryRouter>,
+  )
+}
+
+// Controller correction (binding, from Funnels.test.tsx/Task 2): `vi.setSystemTime()`
+// alone is a no-op -- it must follow `vi.useFakeTimers()`, or a pinned-time
+// assertion depends on real wall-clock time and passes or fails by accident.
+beforeEach(() => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+})
+afterEach(() => {
+  vi.useRealTimers()
+})
+
+describe('FunnelDetail', () => {
+  it('runs the funnel once on open', async () => {
+    const client = fakeClient()
+    renderDetail(client)
+    await screen.findByTestId('funnel-step-1')
+    expect(client.runFunnel).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not re-run when the range changes -- it dims and offers Run', async () => {
+    const client = fakeClient()
+    renderDetail(client)
+    await screen.findByTestId('funnel-step-1')
+
+    await userEvent.selectOptions(screen.getByLabelText(/range/i), '30')
+
+    expect(client.runFunnel).toHaveBeenCalledTimes(1)
+    expect(screen.getByTestId('funnel-result')).toHaveAttribute('data-stale', 'true')
+    expect(screen.getByRole('button', { name: /^run$/i })).toBeEnabled()
+  })
+
+  it('marks the result stale so old numbers are never presented as current', async () => {
+    // The mutation this pins: remove data-stale and this test alone fails.
+    const client = fakeClient()
+    renderDetail(client)
+    await screen.findByTestId('funnel-step-1')
+    expect(screen.getByTestId('funnel-result')).toHaveAttribute('data-stale', 'false')
+    await userEvent.selectOptions(screen.getByLabelText(/range/i), '30')
+    expect(screen.getByTestId('funnel-result')).toHaveAttribute('data-stale', 'true')
+  })
+
+  it('clears the stale mark after an explicit Run', async () => {
+    const client = fakeClient()
+    renderDetail(client)
+    await screen.findByTestId('funnel-step-1')
+    await userEvent.selectOptions(screen.getByLabelText(/range/i), '30')
+    await userEvent.click(screen.getByRole('button', { name: /^run$/i }))
+    await waitFor(() =>
+      expect(screen.getByTestId('funnel-result')).toHaveAttribute('data-stale', 'false'),
+    )
+    expect(client.runFunnel).toHaveBeenCalledTimes(2)
+    expect(client.runFunnel.mock.calls[1]?.[2]).toMatchObject({ since: expect.any(String) })
+  })
+
+  it('renders every warning the run returned', async () => {
+    const client = fakeClient({
+      runFunnel: vi.fn(async () => ({
+        ...RUN,
+        warnings: [
+          { path: 'range', reason: 'alpha reason' },
+          { path: 'segment', reason: 'beta reason' },
+        ],
+      })),
+    })
+    renderDetail(client)
+    expect(await screen.findByText('alpha reason')).toBeInTheDocument()
+    expect(screen.getByText('beta reason')).toBeInTheDocument()
+  })
+
+  it('shows as_of by value so a cached result cannot read as live', async () => {
+    vi.setSystemTime(new Date('2026-08-15T12:00:00.000Z'))
+    renderDetail(fakeClient())
+    expect(await screen.findByTestId('funnel-as-of')).toHaveTextContent('2 minutes ago')
+  })
+
+  it('maps a 422 to an actionable message, not the outage banner', async () => {
+    const client = fakeClient({
+      runFunnel: vi.fn(async () => {
+        throw new ApiError(422, 'segment query timed out')
+      }),
+    })
+    renderDetail(client)
+    expect(await screen.findByRole('alert')).toHaveTextContent(/narrow the range/i)
+  })
+
+  it('routes a 401 to onUnauthorized rather than an error banner', async () => {
+    const onUnauthorized = vi.fn()
+    const client = fakeClient({
+      runFunnel: vi.fn(async () => {
+        throw new ApiError(401, 'unauthorized')
+      }),
+    })
+    renderDetail(client, onUnauthorized)
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalled())
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('does not offer to edit a funnel the server cannot read', async () => {
+    const client = fakeClient({ funnel: vi.fn(async () => ({ ...FUNNEL, stale: true })) })
+    renderDetail(client)
+    await waitFor(() => expect(screen.queryByRole('link', { name: /edit/i })).toBeNull())
+  })
+})
+
+// Controller correction 2 (binding): a funnel referencing a stale/deleted
+// segment still answers 200 with real, plausible numbers computed over the
+// WHOLE population -- the ONLY signal is a `segment_id` warning. Two
+// requirements follow, each with its own test below.
+describe('FunnelDetail — broken segment filter', () => {
+  it('renders a segment_id warning above the numbers, not as a footnote beneath them', async () => {
+    const client = fakeClient({
+      funnel: vi.fn(async () => ({ ...FUNNEL, segment_id: 4 })),
+      runFunnel: vi.fn(async () => ({
+        ...RUN,
+        warnings: [
+          {
+            path: 'segment_id',
+            reason:
+              'segment 4 no longer exists or cannot be read, so this funnel ran over everyone rather than the population it names',
+          },
+        ],
+      })),
+    })
+    renderDetail(client)
+    const warning = await screen.findByText(/ran over everyone/i)
+    const numbers = await screen.findByText(/Entered/)
+    // DOCUMENT_POSITION_FOLLOWING (4) means `numbers` comes AFTER `warning`
+    // in the DOM -- i.e. the warning is above the numbers it qualifies.
+    expect(warning.compareDocumentPosition(numbers) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+  })
+
+  it('does not present the funnel segment filter as applied when the run warns it could not be', async () => {
+    const client = fakeClient({
+      funnel: vi.fn(async () => ({ ...FUNNEL, segment_id: 4 })),
+      runFunnel: vi.fn(async () => ({
+        ...RUN,
+        warnings: [{ path: 'segment_id', reason: 'segment 4 no longer exists or cannot be read' }],
+      })),
+    })
+    renderDetail(client)
+    await screen.findByTestId('funnel-step-1')
+    expect(screen.queryByTestId('funnel-segment-filter')).toBeNull()
+    expect(screen.queryByText(/Segment: #4/)).toBeNull()
+  })
+
+  it('does present the segment filter as applied when the run has no such warning', async () => {
+    const client = fakeClient({
+      funnel: vi.fn(async () => ({ ...FUNNEL, segment_id: 4 })),
+    })
+    renderDetail(client)
+    await screen.findByTestId('funnel-step-1')
+    expect(screen.getByTestId('funnel-segment-filter')).toHaveTextContent('#4')
+  })
+})
