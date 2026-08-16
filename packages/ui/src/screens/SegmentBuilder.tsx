@@ -71,11 +71,11 @@ export const DEBOUNCE_MS = 600
  * so "Add condition"/"Add group" disable before a save could ever reach the
  * server's own `validateTree` rejection.
  *
- * Task 7 -- live counts, the reason this editor justifies a frontend
- * framework at all (ADR 009). `costWarnings` is a PURE function of `root`,
- * no round trip -- computed fresh on every render and never fetched. A
- * cheap tree (no warnings) previews itself automatically, `debounceMs`
- * after the operator stops editing; a tree carrying a warning never does,
+ * Task 7 -- live counts, the interaction that justifies this screen being a
+ * stateful client rather than a form post. `costWarnings` is a PURE
+ * function of `root`, no round trip -- computed fresh on every render and
+ * never fetched. A cheap tree (no warnings) previews itself automatically,
+ * `debounceMs` after the operator stops editing; a tree carrying a warning never does,
  * and waits for an explicit click on "Run" instead, which works
  * regardless of warnings. Two things keep this from doing the wrong thing:
  *
