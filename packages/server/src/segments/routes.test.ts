@@ -724,6 +724,72 @@ describe('/v1/segments CRUD and run', () => {
     expect(after.json().last_evaluated_at).not.toBeNull()
   })
 
+  /**
+   * #21: the saved-segment run used to omit the cost warnings the ad-hoc
+   * preview returns for the identical tree. Enumerates every warning kind
+   * `costWarnings` can produce (see core/segments/validate.ts) rather than
+   * just one, plus a tree that produces both at once — and for each,
+   * compares the saved run's warnings against a preview of the SAME
+   * definition, so a future divergence between the two entry points fails
+   * here rather than passing quietly.
+   */
+  it('returns the same cost warnings a preview would, for every warning kind', async () => {
+    const cases: { name: string; filter: unknown }[] = [
+      {
+        name: 'Ever window only',
+        filter: {
+          kind: 'behavior',
+          event: 'signed_up',
+          aggregate: 'count',
+          operator: '>=',
+          value: 1,
+          window: { kind: 'ever' },
+        },
+      },
+      {
+        name: 'Wildcard event only',
+        filter: {
+          kind: 'behavior',
+          event: '*',
+          aggregate: 'count',
+          operator: '>=',
+          value: 1,
+          window: { kind: 'last', n: 7, unit: 'days' },
+        },
+      },
+      {
+        name: 'Both ever window and wildcard event',
+        filter: {
+          kind: 'behavior',
+          event: '*',
+          aggregate: 'count',
+          operator: '>=',
+          value: 1,
+          window: { kind: 'ever' },
+        },
+      },
+    ]
+
+    for (const { name, filter } of cases) {
+      const created = await create({ name, ast_version: 1, filter })
+      expect(created.statusCode).toBe(201)
+      const id = created.json().id
+
+      const savedRun = await runSaved(id)
+      expect(savedRun.statusCode).toBe(200)
+
+      const adHoc = await preview({ ast_version: 1, filter })
+      expect(adHoc.statusCode).toBe(200)
+
+      // Response shape is otherwise unchanged: person_count/as_of on the
+      // saved run, warnings now present on both.
+      expect(typeof savedRun.json().person_count).toBe('number')
+      expect(Array.isArray(savedRun.json().warnings)).toBe(true)
+      expect(savedRun.json().warnings.length).toBeGreaterThan(0)
+      expect(savedRun.json().warnings).toEqual(adHoc.json().warnings)
+    }
+  })
+
   it('updates the snapshot when members are requested too', async () => {
     const created = await create({ name: 'Runnable with members', ast_version: 1, filter: trait })
     const id = created.json().id
