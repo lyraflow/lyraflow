@@ -806,7 +806,9 @@ describe('/v1/segments CRUD and run', () => {
   // notation all coerce to a normal-looking finite integer. Each must be
   // rejected the same way `'not-a-number'` is above, matching the
   // `/^\d+$/`-first convention every `:id` route now shares via
-  // `numeric-id.ts`'s `parseNumericId`.
+  // `numeric-id.ts`'s `parseNumericId`. Zero passes that shape check —
+  // it is `id > 0` that rejects it — and is pinned here so a local
+  // parser reintroduced without that boundary would be caught.
   it.each([
     ['0x10', 'hex notation'],
     ['+5', 'a leading plus sign'],
@@ -814,6 +816,7 @@ describe('/v1/segments CRUD and run', () => {
     ['1e3', 'exponent notation'],
     ['', 'an empty string'],
     ['-1', 'a negative number'],
+    ['0', 'zero'],
     ['1.0', 'a decimal point'],
     ['99999999999999999999', 'a value beyond MAX_SAFE_INTEGER'],
   ])('rejects a segment id with %s (%s)', async (raw) => {
