@@ -330,9 +330,7 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
            * fields I1 fixed the detail screen's subtitle to read from, for
            * the same reason: never derived from form state. */}
           <p className="text-sm text-muted-foreground">
-            <span data-testid="builder-preview-range">
-              {formatRangeDays(previewResult.range)}
-            </span>{' '}
+            <span data-testid="builder-preview-range">{formatRangeDays(previewResult.range)}</span>{' '}
             · as of{' '}
             <span data-testid="builder-preview-as-of">
               {formatRelative(previewResult.as_of, new Date())}

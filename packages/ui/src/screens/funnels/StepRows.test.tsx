@@ -118,7 +118,7 @@ describe('StepRows -- invented mutations', () => {
   // `onUnauthorized` at all, so a 401 from an event step's own combobox had
   // no way out of this component even once EventCombobox itself learned to
   // report one.
-  it('threads onUnauthorized down to each step\'s EventCombobox', async () => {
+  it("threads onUnauthorized down to each step's EventCombobox", async () => {
     const onUnauthorized = vi.fn()
     const schemaEvents = vi.fn(async () => {
       throw new ApiError(401, 'unauthorized')
