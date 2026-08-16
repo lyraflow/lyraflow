@@ -373,6 +373,30 @@ describe('SegmentBuilder -- Task 7: live counts', () => {
     ],
   }
 
+  // Task 7, fix round 1 (Important 1): `EVER_BEHAVIOUR` above has exactly
+  // ONE condition -- "the warning appears inside condition-0" was true
+  // whether path association worked or not, and a mutation rendering EVERY
+  // warning on EVERY row (`const ownWarnings = warnings`, dropping
+  // `warningsAt`'s own path filter) passed every test built on it. This
+  // fixture has TWO conditions, only one costly, specifically to make that
+  // mutation observable: a warning showing up on the WRONG row is now a
+  // distinct, assertable failure, not merely absent evidence.
+  const MIXED_TREE: FilterNode = {
+    kind: 'group',
+    op: 'and',
+    children: [
+      { kind: 'trait', key: 'plan', operator: '=', value: 'pro' },
+      {
+        kind: 'behavior',
+        event: 'import_started',
+        aggregate: 'count',
+        window: { kind: 'ever' },
+        operator: '>=',
+        value: 1,
+      },
+    ],
+  }
+
   /** Renders in EDIT mode against a segment already carrying a `behavior`
    * leaf with an `ever` window -- there is no kind-switcher anywhere in
    * this plan (`GroupCard`'s own doc comment: `newCondition()` always
@@ -420,19 +444,22 @@ describe('SegmentBuilder -- Task 7: live counts', () => {
     })
   })
 
-  it('renders each warning against the condition it names, via its path', async () => {
+  it('renders each warning against the condition it names, via its path -- and not against the one it does not', async () => {
     // costWarnings returns { path, reason }. A warning rendered only as
     // prose in a page-level panel makes the operator hunt for which of 40
     // conditions is meant -- this pins that it renders INSIDE the
-    // offending condition's own testid instead.
+    // offending condition's own testid instead, using a tree with a CHEAP
+    // trait beside the costly behaviour so a warning leaking onto the wrong
+    // row is a distinct, catchable failure (see MIXED_TREE's own comment).
     const client = fakeClient({
-      segment: vi.fn(async () => ({ ...SEGMENT, filter: EVER_BEHAVIOUR })),
+      segment: vi.fn(async () => ({ ...SEGMENT, filter: MIXED_TREE })),
     })
     renderBuilder(client, SEGMENT.id)
-    await screen.findByTestId('condition-0')
+    await screen.findByTestId('condition-1')
     expect(
-      within(screen.getByTestId('condition-0')).getByText(/scans all history/i),
+      within(screen.getByTestId('condition-1')).getByText(/scans all history/i),
     ).toBeInTheDocument()
+    expect(within(screen.getByTestId('condition-0')).queryByText(/scans all history/i)).toBeNull()
   })
 
   // The `dirty` gate, pinned directly: every cap fixture above already
@@ -563,6 +590,83 @@ describe('SegmentBuilder -- Task 7: live counts', () => {
       })
       expect(screen.getByRole('button', { name: /run/i })).toBeEnabled()
       expect(screen.getByTestId('segment-preview-count')).toHaveTextContent('999')
+    })
+  })
+
+  const BEHAVIOUR_LAST: FilterNode = {
+    kind: 'group',
+    op: 'and',
+    children: [
+      {
+        kind: 'behavior',
+        event: 'import_started',
+        aggregate: 'count',
+        window: { kind: 'last', n: 7, unit: 'days' },
+        operator: '>=',
+        value: 1,
+      },
+    ],
+  }
+
+  // Important 2 (fix round 1): every stale-response test above issues a
+  // REPLACEMENT request for the newer state (a second edit, or navigating
+  // to a segment that itself auto-previews) -- collapsing `answerIdRef` and
+  // `requestIdRef` into a single shared ref still passed every one of them.
+  // The case that actually distinguishes two counters from one is a
+  // request ABANDONED by an edit that issues NO replacement at all: a
+  // cheap tree's debounced preview is still in flight when the operator
+  // flips a behaviour's window to `ever`, making the tree costly -- the
+  // debounce effect's own early return (`hasCostWarning`) means no second
+  // request is ever issued. Under a single shared ref, that edit would
+  // invalidate the FIRST request's own identity too, so its `.finally`
+  // never fires and Run is stuck disabled forever, with no later call ever
+  // coming along to clear it -- the exact funnels defect this design
+  // exists to prevent (this component's own doc comment).
+  it('re-enables Run when an abandoned request lands late, even though no replacement request was ever issued', async () => {
+    await withFakeTimers(async () => {
+      const p1 = deferred<SegmentPreview>()
+      const previewSegment = vi.fn().mockReturnValueOnce(p1.promise)
+      const client = fakeClient({
+        segment: vi.fn(async () => ({ ...SEGMENT, filter: BEHAVIOUR_LAST })),
+        previewSegment,
+      })
+      renderBuilder(client, SEGMENT.id)
+      await screen.findByTestId('condition-0')
+
+      // One real edit to a still-cheap tree -- dirties it and starts the
+      // debounce without changing what makes it cheap.
+      const negate = within(screen.getByTestId('condition-0')).getByRole('button', {
+        name: /negate/i,
+      })
+      await userEvent.click(negate)
+      await userEvent.click(negate)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(DEBOUNCE_MS)
+      })
+      await waitFor(() => expect(previewSegment).toHaveBeenCalledTimes(1))
+      expect(screen.getByRole('button', { name: /run/i })).toBeDisabled()
+
+      // The tree becomes COSTLY before the first request lands -- a real
+      // edit that issues no replacement request of its own.
+      const windowSelect = within(screen.getByTestId('condition-0')).getByRole('combobox', {
+        name: /^window$/i,
+      })
+      await userEvent.selectOptions(windowSelect, 'ever')
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(DEBOUNCE_MS * 4)
+      })
+      expect(previewSegment).toHaveBeenCalledTimes(1)
+      expect(screen.getByText(/scans all history/i)).toBeInTheDocument()
+
+      // The abandoned request lands late -- discarded (it answers a tree
+      // that no longer exists), but Run must re-enable.
+      await act(async () => {
+        p1.resolve({ ...PREVIEW, person_count: 111 })
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      expect(screen.getByRole('button', { name: /run/i })).toBeEnabled()
+      expect(screen.queryByTestId('segment-preview-count')).toBeNull()
     })
   })
 

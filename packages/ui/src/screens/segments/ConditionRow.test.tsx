@@ -256,4 +256,66 @@ describe('ConditionRow', () => {
     await waitFor(() => expect(schemaEvents).toHaveBeenCalled())
     expect(schemaEvents.mock.calls[0]?.[0]).toBe(42)
   })
+
+  // Task 7, fix round 1 (Important 1): every SegmentBuilder/SegmentDetail
+  // fixture carrying a cost warning had exactly ONE condition in the whole
+  // tree, so "the warning appears inside condition-0" was true whether path
+  // association worked or not -- `const ownWarnings = warnings` (render
+  // every warning on every row, unfiltered) passed all 31 tests that
+  // existed at the time. Pinned directly here, at the unit level, with two
+  // DIFFERENT paths so a warning for one can be told apart from a warning
+  // for the other.
+  it('renders only the warning addressed to its own path, not a warning for a different path', () => {
+    const warnings = [{ path: 'filter.children[1]', reason: 'scans all history' }]
+    const { rerender } = render(
+      <ConditionRow
+        node={traitNode}
+        path={[0]}
+        onChange={vi.fn()}
+        onRemove={vi.fn()}
+        onNegate={vi.fn()}
+        client={fakeClient()}
+        projectId={1}
+        warnings={warnings}
+      />,
+    )
+    expect(within(screen.getByTestId('condition-0')).queryByText(/scans all history/i)).toBeNull()
+
+    rerender(
+      <ConditionRow
+        node={traitNode}
+        path={[1]}
+        onChange={vi.fn()}
+        onRemove={vi.fn()}
+        onNegate={vi.fn()}
+        client={fakeClient()}
+        projectId={1}
+        warnings={warnings}
+      />,
+    )
+    expect(
+      within(screen.getByTestId('condition-1')).getByText(/scans all history/i),
+    ).toBeInTheDocument()
+  })
+
+  it('a `warnings` prop for a DIFFERENT path renders nothing at all -- not merely "not this text"', () => {
+    // The inverse of the test above: a mutation that renders SOME warning
+    // list unconditionally (rather than the empty filtered result) could
+    // still pass an assertion that only checks a specific string is absent.
+    render(
+      <ConditionRow
+        node={traitNode}
+        path={[0]}
+        onChange={vi.fn()}
+        onRemove={vi.fn()}
+        onNegate={vi.fn()}
+        client={fakeClient()}
+        projectId={1}
+        warnings={[{ path: 'filter.children[9]', reason: 'scans all history' }]}
+      />,
+    )
+    // `AlertTriangle` (lucide) renders no visible text of its own -- if a
+    // warning list rendered at all, it would carry at least the reason text.
+    expect(screen.queryByText(/scans all history/i)).toBeNull()
+  })
 })

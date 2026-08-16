@@ -228,4 +228,72 @@ describe('SegmentDetail', () => {
     expect(screen.queryByText('111')).toBeNull()
     expect(screen.getByRole('button', { name: /run/i })).toBeEnabled()
   })
+
+  // Important 2 (fix round 1): the test above navigates to a segment that
+  // ITSELF issues a replacement request (its own auto-preview) -- collapsing
+  // `answerIdRef` and `requestIdRef` into one shared ref still passes it,
+  // since the newer call's own `.finally` clears `previewing` regardless.
+  // The case that distinguishes two counters from one is navigating to a
+  // COSTLY segment: the fetch effect's `answerIdRef` bump still invalidates
+  // the abandoned request's answer, but the auto-preview effect's own
+  // `warnings.length > 0` guard means NO replacement request is ever
+  // issued. Under a single shared ref, that abandoned request's `.finally`
+  // would never fire (its captured id no longer matches), leaving Run
+  // stuck disabled forever with nothing left in flight to clear it.
+  it('re-enables Run when an abandoned request lands late after navigating to a costly segment that never auto-previews', async () => {
+    const p7 = deferred<SegmentPreview>()
+    const previewSavedSegment = vi.fn(() => p7.promise)
+    const client = fakeClient({
+      segment: vi.fn(async (_projectId: number, id: number) =>
+        id === 7 ? { ...SEGMENT, id: 7 } : { ...SEGMENT, id: 9, filter: EVER_BEHAVIOUR },
+      ),
+      previewSavedSegment,
+    })
+
+    function Nav(props: { to: string }) {
+      const navigate = useNavigate()
+      return (
+        <button type="button" onClick={() => navigate(props.to)}>
+          go
+        </button>
+      )
+    }
+
+    render(
+      <MemoryRouter initialEntries={[segmentPath(7)]}>
+        <ProjectProvider projects={PROJECTS} initialId={1}>
+          <Routes>
+            <Route
+              path="/segments/:id"
+              element={
+                <>
+                  <SegmentDetail client={client} />
+                  <Nav to="/segments/9" />
+                </>
+              }
+            />
+          </Routes>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(previewSavedSegment).toHaveBeenCalledTimes(1))
+    expect(screen.getByRole('button', { name: /run/i })).toBeDisabled()
+
+    // Navigate to a COSTLY segment -- its own fetch resolves and its
+    // warnings block the auto-preview effect, so no second request is ever
+    // issued.
+    await userEvent.click(screen.getByText('go'))
+    await screen.findByText(/scans all history/i)
+    expect(previewSavedSegment).toHaveBeenCalledTimes(1)
+
+    // The abandoned request for segment 7 lands late -- discarded (it
+    // answers a segment no longer on screen), but Run must re-enable.
+    await act(async () => {
+      p7.resolve({ ...PREVIEW, person_count: 111 })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(screen.getByRole('button', { name: /run/i })).toBeEnabled()
+    expect(screen.queryByTestId('segment-detail-count')).toBeNull()
+  })
 })
