@@ -33,16 +33,32 @@ export const DEBOUNCE_MS = 600
  * Creates a new segment or edits an existing one -- `useParams().id`
  * decides which, the same split `FunnelBuilder` uses.
  *
- * Task 4 wires this to `TreeEditor` and to create/tree-update. What it
- * deliberately does NOT do yet: send a name change on save in edit mode.
- * `updateSegmentTree` is "tree update ONLY. deliberately cannot carry a
- * name" (its own doc comment in `api/client.ts`) -- Task 9 adds the split
- * save a rename requires (`renameSegment` alone vs `updateSegmentTree`
- * alone vs both, asserted on the REQUEST, not the control). Until then,
- * retyping the name in edit mode and saving updates the tree only; the
- * name reverts to the server's copy on next load. Saving still does not
- * reach the server merely from opening a segment -- only from an explicit
- * Save.
+ * Task 4 wired this to `TreeEditor` and to create/tree-update. Task 9 adds
+ * the split save a rename requires. `PATCH /v1/segments/:id` decides
+ * whether to touch the filter tree by whether the request body carries one
+ * AT ALL, not by comparing old against new -- so a rename that ships the
+ * whole definition resets the segment's cached count snapshot, silently,
+ * with a `200` back. `renameSegment` (name only, cannot carry a tree) and
+ * `updateSegmentTree` (tree only, cannot carry a name) exist as two
+ * separate `ApiClient` methods for exactly this reason (their own doc
+ * comments in `api/client.ts`) -- one method with an optional tree would
+ * let a caller send it by accident.
+ *
+ * `originalName`/`originalRoot` below are the fetched segment's own name
+ * and tree, captured once by the load effect and never touched again by
+ * anything else -- the one fixed point `handleSave` compares the CURRENT
+ * `name`/`root` against to decide what actually changed. Content equality
+ * (`JSON.stringify`), not the `dirty` flag Task 7 already tracks: `dirty`
+ * answers "has TreeEditor's onChange ever fired", which a negate-twice
+ * round trip (back to the original shape) still leaves true, and sending a
+ * tree that already matches the server's own copy would trip the exact
+ * snapshot-reset this split exists to avoid. Only the fields that changed
+ * are ever sent -- a save with neither changed issues no request at all
+ * and simply navigates, which is the only way "click Save having changed
+ * nothing" can be trusted not to cost the segment its count.
+ *
+ * Saving still does not reach the server merely from opening a segment --
+ * only from an explicit Save.
  *
  * Task 6 threads `client`/`projectId`/`onUnauthorized` down into
  * `TreeEditor` -- unused directly by this component, needed only so a
@@ -102,6 +118,15 @@ export function SegmentBuilder(props: {
 
   const [name, setName] = useState('')
   const [root, setRoot] = useState<FilterNode>(EMPTY_ROOT)
+  // Task 9: the fetched segment's own name/tree, fixed once by the load
+  // effect below and never written to again -- see this component's own
+  // doc comment for why `handleSave` compares against THESE rather than
+  // the `dirty` flag. `originalRoot` stays `null` in create mode (there is
+  // no prior tree to compare against; a create always sends the whole
+  // thing) and while a fetched segment is stale (editing is disabled
+  // entirely, so nothing ever reads it).
+  const [originalName, setOriginalName] = useState('')
+  const [originalRoot, setOriginalRoot] = useState<FilterNode | null>(null)
   // A stale segment's stored tree no longer parses (`Segment`'s own doc
   // comment in `api/types.ts`) -- handing it to TreeEditor as though it
   // were a legal FilterNode risks a crash on data that isn't one. Mirrors
@@ -141,8 +166,12 @@ export function SegmentBuilder(props: {
       .then((s) => {
         if (cancelled) return
         setName(s.name)
+        setOriginalName(s.name)
         setStale(s.stale)
-        if (!s.stale) setRoot(s.filter as FilterNode)
+        if (!s.stale) {
+          setRoot(s.filter as FilterNode)
+          setOriginalRoot(s.filter as FilterNode)
+        }
       })
       .catch((err: unknown) => {
         if (cancelled) return
@@ -251,13 +280,40 @@ export function SegmentBuilder(props: {
     if (!canSave || activeId == null) return
     setSaving(true)
     setSaveError(null)
-    const query = { ast_version: AST_VERSION, filter: root }
-    const request =
-      isEditing && editId != null
-        ? client.updateSegmentTree(activeId, editId, query)
-        : client.createSegment(activeId, trimmedName, query)
-    request
-      .then((segment) => navigate(isEditing ? segmentPath(segment.id) : ROUTES.segments))
+
+    if (!isEditing || editId == null) {
+      // Create has no "what changed" to compute -- the whole definition is
+      // new, and lands on the LIST (controller correction; see Task 4).
+      client
+        .createSegment(activeId, trimmedName, { ast_version: AST_VERSION, filter: root })
+        .then(() => navigate(ROUTES.segments))
+        .catch((err: unknown) => {
+          if (err instanceof ApiError && err.status === 401) {
+            onUnauthorized?.()
+            return
+          }
+          setSaveError('Could not save this segment. Nothing was changed on the server.')
+        })
+        .finally(() => setSaving(false))
+      return
+    }
+
+    // Edit: send only what actually changed, through the method that can
+    // ONLY carry that field -- see this component's own doc comment for why
+    // sending a tree the server already has resets the count snapshot.
+    const nameChanged = trimmedName !== originalName
+    const treeChanged =
+      originalRoot == null || JSON.stringify(root) !== JSON.stringify(originalRoot)
+    const requests: Promise<unknown>[] = []
+    if (nameChanged) requests.push(client.renameSegment(activeId, editId, trimmedName))
+    if (treeChanged) {
+      requests.push(
+        client.updateSegmentTree(activeId, editId, { ast_version: AST_VERSION, filter: root }),
+      )
+    }
+
+    Promise.all(requests)
+      .then(() => navigate(segmentPath(editId)))
       .catch((err: unknown) => {
         if (err instanceof ApiError && err.status === 401) {
           onUnauthorized?.()

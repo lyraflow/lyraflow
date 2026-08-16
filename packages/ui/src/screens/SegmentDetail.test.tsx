@@ -8,7 +8,7 @@ import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import type { MemberRow, Segment, SegmentPreview } from '../api/types.js'
 import { ProjectProvider } from '../app/ProjectContext.js'
-import { ROUTES, segmentPath } from '../app/Router.js'
+import { ROUTES, segmentEditPath, segmentPath } from '../app/Router.js'
 import { SegmentDetail } from './SegmentDetail.js'
 
 const PROJECTS = [
@@ -77,8 +77,9 @@ function fakeClient(over: Record<string, unknown> = {}) {
   return {
     segment: vi.fn(async () => SEGMENT),
     previewSavedSegment: vi.fn(async () => PREVIEW),
+    deleteSegment: vi.fn(async () => undefined),
     ...over,
-  } as unknown as ApiClient & { segment: Mock; previewSavedSegment: Mock }
+  } as unknown as ApiClient & { segment: Mock; previewSavedSegment: Mock; deleteSegment: Mock }
 }
 
 function renderDetail(client: ApiClient = fakeClient(), id: number = SEGMENT.id) {
@@ -87,6 +88,11 @@ function renderDetail(client: ApiClient = fakeClient(), id: number = SEGMENT.id)
       <ProjectProvider projects={PROJECTS} initialId={1}>
         <Routes>
           <Route path="/segments/:id" element={<SegmentDetail client={client} />} />
+          {/* Placeholders so a successful edit-link click or delete's own
+           * navigation has somewhere to land, matching FunnelDetail.test.tsx's
+           * own harness. */}
+          <Route path="/segments/:id/edit" element={<p>segment edit</p>} />
+          <Route path={ROUTES.segments} element={<p>segments list</p>} />
         </Routes>
       </ProjectProvider>
     </MemoryRouter>,
@@ -411,5 +417,102 @@ describe('SegmentDetail', () => {
 
     await userEvent.click(screen.getByRole('button', { name: /show people/i }))
     await waitFor(() => expect(onUnauthorized).toHaveBeenCalledTimes(1))
+  })
+})
+
+// --- Task 9: Edit link and delete-behind-confirmation. Rename/tree-update
+// themselves live on `SegmentBuilder` (its own "Task 9" describe block in
+// `SegmentBuilder.test.tsx`) -- this file only covers what THIS screen owns:
+// linking to the edit route, and never calling `deleteSegment` before an
+// explicit second click confirms it.
+
+describe('SegmentDetail -- Task 9: edit link and delete', () => {
+  it('links Edit to the segment edit route', async () => {
+    renderDetail()
+    const edit = await screen.findByRole('link', { name: /^edit$/i })
+    expect(edit).toHaveAttribute('href', segmentEditPath(SEGMENT.id))
+  })
+
+  it('a stale segment gets no Edit link, but is still deletable', async () => {
+    const client = fakeClient({ segment: vi.fn(async () => ({ ...SEGMENT, stale: true })) })
+    renderDetail(client)
+    await screen.findByText(/cannot be read/i)
+    expect(screen.queryByRole('link', { name: /^edit$/i })).toBeNull()
+    expect(screen.getByRole('button', { name: /^delete$/i })).toBeInTheDocument()
+  })
+
+  it('clicking Delete asks for confirmation first -- deleteSegment is not called before it', async () => {
+    const client = fakeClient()
+    renderDetail(client)
+    await screen.findByText('Paying customers')
+    await userEvent.click(screen.getByRole('button', { name: /^delete$/i }))
+    expect(screen.getByText(/delete this segment/i)).toBeInTheDocument()
+    // The assertion that matters is on the REQUEST -- a screen that shows
+    // the confirmation panel but fires the delete anyway must still fail
+    // this.
+    expect(client.deleteSegment).not.toHaveBeenCalled()
+  })
+
+  it('Cancel dismisses the confirmation without ever calling deleteSegment', async () => {
+    const client = fakeClient()
+    renderDetail(client)
+    await screen.findByText('Paying customers')
+    await userEvent.click(screen.getByRole('button', { name: /^delete$/i }))
+    await userEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+    expect(screen.queryByText(/delete this segment/i)).toBeNull()
+    expect(client.deleteSegment).not.toHaveBeenCalled()
+    // The original Delete button is back, not stuck hidden behind a
+    // confirmation state that never resets.
+    expect(screen.getByRole('button', { name: /^delete$/i })).toBeInTheDocument()
+  })
+
+  it('confirming calls deleteSegment with the project/segment ids and navigates to the list', async () => {
+    const client = fakeClient()
+    renderDetail(client)
+    await screen.findByText('Paying customers')
+    await userEvent.click(screen.getByRole('button', { name: /^delete$/i }))
+    await userEvent.click(screen.getByRole('button', { name: /^delete segment$/i }))
+    await waitFor(() => expect(client.deleteSegment).toHaveBeenCalledWith(1, SEGMENT.id))
+    expect(await screen.findByText('segments list')).toBeInTheDocument()
+  })
+
+  it('a failed delete shows its own error, distinct from the count/warning banner, and does not navigate', async () => {
+    const client = fakeClient({
+      deleteSegment: vi.fn(async () => {
+        throw new ApiError(500, 'server_error')
+      }),
+    })
+    renderDetail(client)
+    await screen.findByText('Paying customers')
+    await userEvent.click(screen.getByRole('button', { name: /^delete$/i }))
+    await userEvent.click(screen.getByRole('button', { name: /^delete segment$/i }))
+    expect(await screen.findByText(/could not delete this segment/i)).toBeInTheDocument()
+    expect(screen.queryByText('segments list')).toBeNull()
+  })
+
+  it('routes a 401 on delete to onUnauthorized rather than an error banner', async () => {
+    const onUnauthorized = vi.fn()
+    const client = fakeClient({
+      deleteSegment: vi.fn(async () => {
+        throw new ApiError(401, 'unauthorized')
+      }),
+    })
+    render(
+      <MemoryRouter initialEntries={[segmentPath(SEGMENT.id)]}>
+        <ProjectProvider projects={PROJECTS} initialId={1}>
+          <Routes>
+            <Route
+              path="/segments/:id"
+              element={<SegmentDetail client={client} onUnauthorized={onUnauthorized} />}
+            />
+          </Routes>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    await screen.findByText('Paying customers')
+    await userEvent.click(screen.getByRole('button', { name: /^delete$/i }))
+    await userEvent.click(screen.getByRole('button', { name: /^delete segment$/i }))
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalledTimes(1))
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 })

@@ -2,11 +2,12 @@ import type { FilterNode } from '@lyraflow/core/segments/ast.js'
 import { AST_VERSION } from '@lyraflow/core/segments/ast.js'
 import { costWarnings } from '@lyraflow/core/segments/validate.js'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useParams } from 'react-router'
+import { Link, useNavigate, useParams } from 'react-router'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import type { Segment, SegmentPreview } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
+import { ROUTES, segmentEditPath } from '../app/Router.js'
 import { Button } from '../components/ui/button.js'
 import { WarningPanel } from './funnels/WarningPanel.js'
 import { MemberList } from './segments/MemberList.js'
@@ -16,7 +17,17 @@ import { summarise } from './segments/summarise.js'
  * Views a saved segment: its filter, its live count, and (Task 8) the
  * people it matches.
  *
- * Rename/delete are Task 9's -- still not wired here.
+ * Task 9 wires Edit (a plain link to `SegmentBuilder`'s edit route -- the
+ * rename/tree-update split lives there, not here) and Delete, behind a
+ * confirmation, same two-step shape and same reasoning as `FunnelDetail`'s
+ * own `handleDelete`: deletion is the one action on this screen with no
+ * undo, so a single click on "Delete" is never treated as consent, and a
+ * failed delete gets its own `deleteError` line rather than replacing
+ * whatever the count/warning banner above was already saying. A stale
+ * segment gets no Edit link -- `SegmentBuilder` has nothing to show it,
+ * same reasoning `FunnelDetail` uses for a stale funnel's steps -- but IS
+ * still deletable, since removing a segment that cannot be read is exactly
+ * the recovery path a stale segment leaves.
  *
  * The count follows `SegmentBuilder`'s own cheap/costly split (that
  * component's own doc comment has the full reasoning): a cheap tree
@@ -42,6 +53,7 @@ import { summarise } from './segments/summarise.js'
 export function SegmentDetail(props: { client: ApiClient; onUnauthorized?: () => void }) {
   const { client, onUnauthorized } = props
   const { activeId } = useProject()
+  const navigate = useNavigate()
   const params = useParams<{ id: string }>()
   const id = params.id == null ? null : Number(params.id)
   const validId = id != null && Number.isSafeInteger(id) ? id : null
@@ -51,6 +63,9 @@ export function SegmentDetail(props: { client: ApiClient; onUnauthorized?: () =>
   const [preview, setPreview] = useState<SegmentPreview | null>(null)
   const [previewing, setPreviewing] = useState(false)
   const [previewError, setPreviewError] = useState<string | null>(null)
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
 
   const requestIdRef = useRef(0)
   const answerIdRef = useRef(0)
@@ -134,6 +149,28 @@ export function SegmentDetail(props: { client: ApiClient; onUnauthorized?: () =>
     runPreview()
   }, [segment, warnings])
 
+  // Behind a confirmation, deliberately -- see this component's own doc
+  // comment. `deleteError` is its own line rather than reusing
+  // `segmentError`/`previewError`, same reasoning `FunnelDetail`'s own
+  // `handleDelete` gives: a failed delete leaves everything else on the
+  // page still true.
+  function handleDelete() {
+    if (activeId == null || validId == null) return
+    setDeleting(true)
+    setDeleteError(null)
+    client
+      .deleteSegment(activeId, validId)
+      .then(() => navigate(ROUTES.segments))
+      .catch((err: unknown) => {
+        if (err instanceof ApiError && err.status === 401) {
+          onUnauthorized?.()
+          return
+        }
+        setDeleteError('Could not delete this segment. Try again.')
+      })
+      .finally(() => setDeleting(false))
+  }
+
   if (validId == null) {
     return (
       <div className="flex flex-col gap-4">
@@ -147,7 +184,66 @@ export function SegmentDetail(props: { client: ApiClient; onUnauthorized?: () =>
 
   return (
     <div className="flex min-w-0 flex-col gap-6">
-      <h1 className="text-lg font-semibold">{segment?.name ?? 'Segment'}</h1>
+      <div className="flex items-center justify-between gap-2">
+        <h1 className="text-lg font-semibold">{segment?.name ?? 'Segment'}</h1>
+        <div className="flex items-center gap-3">
+          {/* A stale segment's stored filter cannot be read -- SegmentBuilder
+           * has nothing to show it, same reasoning FunnelDetail withholds
+           * Edit for a stale funnel's steps. */}
+          {segment != null && !segment.stale && (
+            <Link
+              to={segmentEditPath(segment.id)}
+              className="text-sm font-medium text-primary hover:underline"
+            >
+              Edit
+            </Link>
+          )}
+          {segment != null && !confirmingDelete && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setConfirmingDelete(true)}
+            >
+              Delete
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {/* A second, explicit click behind the first -- deletion has no undo,
+       * so this screen never treats one click on "Delete" as consent. */}
+      {confirmingDelete && (
+        <div className="flex flex-wrap items-center gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">
+          <p className="text-foreground">Delete this segment? This cannot be undone.</p>
+          <div className="ml-auto flex gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setConfirmingDelete(false)}
+              disabled={deleting}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              size="sm"
+              onClick={handleDelete}
+              disabled={deleting}
+            >
+              Delete segment
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {deleteError != null && (
+        <p role="alert" className="text-sm text-destructive">
+          {deleteError}
+        </p>
+      )}
 
       {segmentError != null && (
         <p role="alert" className="text-sm text-destructive">

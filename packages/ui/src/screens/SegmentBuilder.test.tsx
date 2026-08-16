@@ -55,6 +55,11 @@ function fakeClient(over: Record<string, unknown> = {}) {
   return {
     segment: vi.fn(async () => SEGMENT),
     createSegment: vi.fn(async () => ({ ...SEGMENT, id: 42 })),
+    // Task 9: rename ONLY (never carries a tree) vs tree update ONLY
+    // (never carries a name) -- two methods, deliberately, so a caller
+    // cannot send the wrong one by accident (this file's own "the sharpest
+    // rule in this plan" tests, below).
+    renameSegment: vi.fn(async () => SEGMENT),
     updateSegmentTree: vi.fn(async () => SEGMENT),
     // Task 6's cap fixtures render REAL `behavior` leaves -- each one
     // mounts a `BehaviourForm` -> `EventCombobox`, whose debounced effect
@@ -77,6 +82,7 @@ function fakeClient(over: Record<string, unknown> = {}) {
   } as unknown as ApiClient & {
     segment: Mock
     createSegment: Mock
+    renameSegment: Mock
     updateSegmentTree: Mock
   }
 }
@@ -96,6 +102,19 @@ function renderBuilder(client: ApiClient = fakeClient(), editId?: number) {
       </ProjectProvider>
     </MemoryRouter>,
   )
+}
+
+/** Task 9: renders in EDIT mode against a segment shaped by `overrides`
+ * (`{ ...SEGMENT, ...overrides }`) -- mutates the given `fakeClient`'s own
+ * `segment` mock in place rather than building a fresh client, so a test
+ * can still assert on the SAME client object's `renameSegment`/
+ * `updateSegmentTree` mocks it already holds a reference to. */
+function renderEdit(
+  client: ApiClient & { segment: Mock },
+  overrides: Partial<Segment> & { id: number },
+) {
+  client.segment.mockResolvedValue({ ...SEGMENT, ...overrides })
+  renderBuilder(client, overrides.id)
 }
 
 describe('SegmentBuilder -- create', () => {
@@ -171,19 +190,53 @@ describe('SegmentBuilder -- edit', () => {
     expect(condition.getByRole('textbox', { name: /^value$/i })).toHaveValue('pro')
   })
 
+  // Task 9 changed what an UNCHANGED save does (nothing reaches the server
+  // at all -- see SegmentBuilder's own doc comment), so this fixture now
+  // makes a real tree edit (appending to the existing trait's value) before
+  // saving, to keep pinning "edit mode goes through updateSegmentTree, not
+  // createSegment" as a distinct fact from Task 9's own three tests below.
   it('save sends the current tree through updateSegmentTree, never createSegment', async () => {
     const client = fakeClient()
     renderBuilder(client, SEGMENT.id)
     await screen.findByLabelText(/name/i)
+    await userEvent.type(
+      within(screen.getByTestId('condition-0')).getByRole('textbox', { name: /^value$/i }),
+      'X',
+    )
     await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
     await waitFor(() => expect(client.updateSegmentTree).toHaveBeenCalledTimes(1))
     expect(client.createSegment).not.toHaveBeenCalled()
+    expect(client.renameSegment).not.toHaveBeenCalled()
     const call = client.updateSegmentTree.mock.calls[0]
     if (!call) throw new Error('updateSegmentTree was not called')
     expect(call[0]).toBe(1)
     expect(call[1]).toBe(SEGMENT.id)
-    expect(call[2]).toEqual({ ast_version: 1, filter: TREE })
+    expect(call[2]).toEqual({
+      ast_version: 1,
+      filter: {
+        kind: 'group',
+        op: 'and',
+        children: [{ kind: 'trait', key: 'plan', operator: '=', value: 'proX' }],
+      },
+    })
     expect(await screen.findByText('segment detail')).toBeInTheDocument()
+  })
+
+  it('a save with no name or tree change reaches neither renameSegment nor updateSegmentTree, and still navigates to detail', async () => {
+    // The other half of the coincidence this task's brief warns about: a
+    // fixture where NOTHING changed must not be indistinguishable from one
+    // where the tree happens to round-trip back to its original shape --
+    // this pins that clicking Save on an untouched segment issues no
+    // request at all, matching "never send the tree along a rename" taken
+    // to its limit.
+    const client = fakeClient()
+    renderBuilder(client, SEGMENT.id)
+    await screen.findByLabelText(/name/i)
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    expect(await screen.findByText('segment detail')).toBeInTheDocument()
+    expect(client.renameSegment).not.toHaveBeenCalled()
+    expect(client.updateSegmentTree).not.toHaveBeenCalled()
+    expect(client.createSegment).not.toHaveBeenCalled()
   })
 
   it('removing the only condition disables save and shows the empty state again', async () => {
@@ -204,6 +257,108 @@ describe('SegmentBuilder -- edit', () => {
     expect(await screen.findByText(/cannot be read/i)).toBeInTheDocument()
     expect(screen.queryByTestId('group-')).toBeNull()
     expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+  })
+})
+
+// --- Task 9: the sharpest rule in this plan. `PATCH /v1/segments/:id`
+// decides whether to touch the filter tree by whether the body carries one
+// AT ALL, not by comparing old against new -- so a rename that ships the
+// whole definition resets the segment's cached count snapshot and returns
+// `200`, silently. `renameSegment` (name only) and `updateSegmentTree`
+// (tree only) are separate `ApiClient` methods for exactly this reason.
+// Every assertion below is on the REQUEST, never merely on a control's
+// enabled/disabled state -- a screen that disables the wrong button but
+// still fires the wrong call would pass a control-only test.
+
+describe('SegmentBuilder -- Task 9: the rename rule', () => {
+  /** A single click on condition-0's own Negate button -- a real,
+   * content-changing edit (wraps the leaf in a `not`, `ConditionRow`'s own
+   * doc comment), unlike the cap fixtures' negate-TWICE helper, which
+   * dirties the tree without changing its final shape. One click is what
+   * this file needs: a tree edit that `originalRoot` comparison actually
+   * sees as changed. */
+  async function negateTheFirstCondition() {
+    await userEvent.click(
+      within(screen.getByTestId('condition-0')).getByRole('button', { name: /negate/i }),
+    )
+  }
+
+  it('a rename sends the name alone, never the tree', async () => {
+    const client = fakeClient()
+    renderEdit(client, { id: 7, name: 'Old', filter: TREE })
+    await screen.findByTestId('condition-0')
+    await userEvent.clear(screen.getByLabelText(/name/i))
+    await userEvent.type(screen.getByLabelText(/name/i), 'New')
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+
+    // The assertion that matters is about the REQUEST, not the control.
+    await waitFor(() => expect(client.renameSegment).toHaveBeenCalledWith(1, 7, 'New'))
+    expect(client.updateSegmentTree).not.toHaveBeenCalled()
+  })
+
+  it('a tree edit sends the tree', async () => {
+    // So the guard above cannot be satisfied by never sending one.
+    const client = fakeClient()
+    renderEdit(client, { id: 7, name: 'Old', filter: TREE })
+    await screen.findByTestId('condition-0')
+    await negateTheFirstCondition()
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    await waitFor(() => expect(client.updateSegmentTree).toHaveBeenCalled())
+  })
+
+  it('a name and tree change together sends both, and neither call is malformed', async () => {
+    // Two PATCHes is fine; one carrying both is not, because the rename
+    // path is the only one that preserves the snapshot and it must stay
+    // tree-free.
+    const client = fakeClient()
+    renderEdit(client, { id: 7, name: 'Old', filter: TREE })
+    await screen.findByTestId('condition-0')
+    await userEvent.clear(screen.getByLabelText(/name/i))
+    await userEvent.type(screen.getByLabelText(/name/i), 'New')
+    await negateTheFirstCondition()
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+
+    await waitFor(() => expect(client.updateSegmentTree).toHaveBeenCalled())
+    expect(client.renameSegment).toHaveBeenCalledWith(1, 7, 'New')
+    // The tree call carries no name, and the rename carries no tree.
+    const treeCall = client.updateSegmentTree.mock.calls[0]
+    const renameCall = client.renameSegment.mock.calls[0]
+    if (!treeCall || !renameCall) throw new Error('both calls were expected')
+    expect(treeCall[2]).not.toHaveProperty('name')
+    expect(renameCall[2]).toBe('New')
+  })
+
+  // Beyond the brief, mutation 1: a save with ONLY a name change must not
+  // merely skip `updateSegmentTree` -- it must not navigate before the
+  // rename's own promise settles, and it must navigate to DETAIL (edit's
+  // own destination, controller correction), never the list (create's).
+  it('a rename-only save navigates to the segment detail route, not the list', async () => {
+    const client = fakeClient()
+    renderEdit(client, { id: 7, name: 'Old', filter: TREE })
+    await screen.findByTestId('condition-0')
+    await userEvent.clear(screen.getByLabelText(/name/i))
+    await userEvent.type(screen.getByLabelText(/name/i), 'New')
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    expect(await screen.findByText('segment detail')).toBeInTheDocument()
+    expect(screen.queryByText('segments list')).toBeNull()
+  })
+
+  // Beyond the brief, mutation 2: a tree that is edited and then edited BACK
+  // to its exact original shape (negate, negate again) must read as
+  // UNCHANGED -- content equality against `originalRoot`, not the `dirty`
+  // flag Task 7 already sets and never clears. A rename alongside a
+  // round-tripped tree edit must still take the rename-only path.
+  it('a tree edited back to its original shape is not treated as a tree change, even alongside a rename', async () => {
+    const client = fakeClient()
+    renderEdit(client, { id: 7, name: 'Old', filter: TREE })
+    await screen.findByTestId('condition-0')
+    await negateTheFirstCondition()
+    await negateTheFirstCondition() // back to the original shape
+    await userEvent.clear(screen.getByLabelText(/name/i))
+    await userEvent.type(screen.getByLabelText(/name/i), 'New')
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    await waitFor(() => expect(client.renameSegment).toHaveBeenCalledWith(1, 7, 'New'))
+    expect(client.updateSegmentTree).not.toHaveBeenCalled()
   })
 })
 
