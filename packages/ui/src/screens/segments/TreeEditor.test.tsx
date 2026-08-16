@@ -204,13 +204,37 @@ describe('TreeEditor', () => {
     expect(next.children[1]?.kind).toBe('trait')
   })
 
-  it('Add group appends a new empty nested group, at the end', async () => {
+  it('Add group appends a new nested group seeded with one condition, never empty', async () => {
+    // Controller ruling (fix round 1): a group with zero children is not a
+    // state this editor should be able to produce -- it violates the AST's
+    // `children.min(1)` the instant it exists, before the operator has done
+    // anything wrong. Seeded with the SAME default condition "Add
+    // condition" itself inserts, so the two controls agree.
     const onChange = vi.fn()
     render(<TreeEditor value={group(trait('a'))} onChange={onChange} />)
     await userEvent.click(screen.getByRole('button', { name: /add group/i }))
     const next = lastRoot(onChange)
     expect(next.children).toHaveLength(2)
-    expect(next.children[1]).toEqual({ kind: 'group', op: 'and', children: [] })
+    expect(next.children[1]).toEqual({
+      kind: 'group',
+      op: 'and',
+      children: [{ kind: 'trait', key: '', operator: '=', value: '' }],
+    })
+  })
+
+  it('the group Add group inserts never has an empty children array, matching the AST', async () => {
+    // A second, independent pin on the same rule -- phrased as a direct
+    // shape check rather than an exact-equality snapshot, so it still
+    // catches a future change to the default condition's own shape that
+    // `toEqual` above would otherwise also flag as a failure for the wrong
+    // reason.
+    const onChange = vi.fn()
+    render(<TreeEditor value={group(trait('a'))} onChange={onChange} />)
+    await userEvent.click(screen.getByRole('button', { name: /add group/i }))
+    const next = lastRoot(onChange)
+    const nested = next.children[1] as Group
+    expect(nested.kind).toBe('group')
+    expect(nested.children.length).toBeGreaterThan(0)
   })
 
   it('changing the Match operator replaces op without touching children', async () => {

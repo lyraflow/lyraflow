@@ -11,17 +11,28 @@ function newCondition(): FilterNode {
   return { kind: 'trait', key: '', operator: '=', value: '' }
 }
 
-/** A new, empty nested group inserted by "Add group". Legal to exist
- * transiently: an operator fills it with its own "Add condition" next, the
- * same way a brand-new segment starts at an empty root (see
- * `SegmentBuilder`'s `EMPTY_ROOT`) rather than refusing to render one.
- * `tree.ts` has no collapsing rule for THIS case (only `removeAt` collapses
- * an emptied group, on removal) so an empty non-root group left unfilled at
- * save time is the server's own `children.min(1)` to reject with a field
- * error -- this screen does not pre-empt every way a tree can be
- * incomplete, only the one correction 2 names: an empty ROOT. */
+/**
+ * A new nested group inserted by "Add group" -- seeded with ONE default
+ * condition (the same one `newCondition` inserts), never empty.
+ *
+ * Controller ruling (Task 4 fix round 1): a group with zero children is not
+ * a state this editor should be able to produce. `removeAt` collapses a
+ * group emptied BY REMOVAL, but nothing stopped one being BORN empty --
+ * "Add group" used to insert `{ children: [] }`, which is invalid the
+ * instant it exists (the AST's `children.min(1)`), before the operator has
+ * done anything. The server's own rejection at save time was not an
+ * adequate backstop for that: it is a guard that fires after the fact, not
+ * a rule that keeps the state unreachable. Seeding with `newCondition()`
+ * makes it unreachable instead, and keeps "Add condition" and "Add group"
+ * agreeing on what a freshly-added condition looks like.
+ *
+ * `SegmentBuilder`'s empty-root save-disable (controller correction 2)
+ * remains the backstop for the one empty-group state that IS still
+ * reachable: removing the root's last remaining condition, which
+ * `removeAt` deliberately leaves as an empty root rather than collapsing.
+ */
 function newGroup(): FilterNode {
-  return { kind: 'group', op: 'and', children: [] }
+  return { kind: 'group', op: 'and', children: [newCondition()] }
 }
 
 /**
