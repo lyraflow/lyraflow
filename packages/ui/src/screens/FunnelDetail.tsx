@@ -73,19 +73,44 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
 
-  // C1 (whole-branch review): nothing tied a landing response to the range
-  // it was actually computed for, so a slow run for one range could resolve
-  // AFTER the picker moved on to another and still clear staleness -- the
-  // screen would then show the new range in its subtitle (I1) over the old
-  // range's numbers, undimmed, with no warning anything was wrong. A ref,
-  // not `days` captured in the closure: `days` inside `.then` would still be
-  // whatever it was when THIS run started, which is exactly the stale value
-  // that can't tell "still selected" from "moved on" -- the ref is mutated
-  // by every render, including ones after this promise was created.
-  const daysRef = useRef(days)
-  useEffect(() => {
-    daysRef.current = days
-  }, [days])
+  // C1 fix round 2 (targeted re-review): the original guard compared the
+  // RANGE a response was issued for against the range now selected -- but
+  // range equality is not identity. Two in-flight runs sharing the same
+  // range (a project switch that lands back on the default 7-day range,
+  // most concretely) were indistinguishable to it, so the older one's
+  // numbers could still land and un-dim the screen under the NEW project's
+  // heading.
+  //
+  // Two separate counters, deliberately not one -- they answer two
+  // different questions and conflating them either lets a stale response
+  // apply, or leaves Run stuck disabled:
+  //
+  // `requestIdRef` identifies NETWORK CALLS. It is bumped only by `runNow`
+  // actually issuing a fetch, and gates `running`: Run may re-enable only
+  // when the MOST RECENTLY ISSUED call settles, so two overlapping runs
+  // (project switch, `:id` change, or the mount effect racing an explicit
+  // Run) can't have the older one's `.finally` re-enable Run while the
+  // newer one is still open.
+  //
+  // `answerIdRef` identifies "the question currently on screen". It is
+  // bumped by everything that changes what would count as a valid answer to
+  // it -- every `runNow` call AND a bare range selection that issues no
+  // request at all (`handleRangeChange`, below) -- and gates whether a
+  // settling promise may write `result`/`stale`/`runError`. This is the
+  // one that must NOT be `requestIdRef`: if range changes bumped the same
+  // counter `running` keys off, an in-flight run abandoned by a range
+  // change (a real, spec'd case -- the picker is never disabled mid-run)
+  // would leave Run stuck disabled forever, since no later request would
+  // ever come along whose `.finally` matches a counter that already moved
+  // past it for a reason that issued no request.
+  //
+  // A response is applied only when its own `answerId`, captured at issue
+  // time, still equals `answerIdRef.current` -- i.e. nothing has changed
+  // what's being asked since. This is strictly more than the range guard it
+  // replaces: it also catches a same-range request from a different call
+  // site (project switch), which range equality alone could not.
+  const requestIdRef = useRef(0)
+  const answerIdRef = useRef(0)
 
   // Not scoped to the mount effect's own `cancelled` flag: an explicit Run
   // click happens while the screen is already mounted (it is what the user
@@ -94,23 +119,21 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
   const runNow = useCallback(
     (runDays: RangeDays) => {
       if (activeId == null || validId == null) return
+      const requestId = ++requestIdRef.current
+      const answerId = ++answerIdRef.current
       setRunning(true)
       setRunError(null)
       const since = sinceIsoForDays(runDays, new Date())
       client
         .runFunnel(activeId, validId, { since })
         .then((r) => {
-          // The range picker is deliberately never disabled while a run is
-          // in flight (disabling it only hides this race, and would lock
-          // the whole screen behind a slow scan) -- so `runDays` and the
-          // range selected NOW can genuinely differ by the time this
-          // resolves. A response that no longer answers the range currently
-          // selected is discarded outright, not merely left dimmed: it is
-          // not an answer to anything on screen, and applying it under a
-          // stale flag would still let its numbers render as this range's
-          // result the instant a later click cleared staleness for an
-          // unrelated reason.
-          if (runDays !== daysRef.current) return
+          // Discarded outright, not merely left dimmed, for any response
+          // that no longer answers the question on screen: it is not an
+          // answer to anything currently shown, and applying it under a
+          // stale flag would still let its numbers render as the CURRENT
+          // question's result the instant something else cleared staleness
+          // for an unrelated reason.
+          if (answerId !== answerIdRef.current) return
           setResult(r)
           setStale(false)
         })
@@ -119,10 +142,32 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
             onUnauthorized?.()
             return
           }
-          if (runDays !== daysRef.current) return
+          // Same identity check as the success branch above -- an older
+          // request's failure must not set an error for a screen that has
+          // already moved on to a different question (a new run, or a bare
+          // range change).
+          if (answerId !== answerIdRef.current) return
           setRunError(describeError(err))
+          // Ruling (targeted re-review): a failed Run does not erase a
+          // previously good result -- those numbers are still a true answer
+          // to the PREVIOUS question, and the operator needs them on screen,
+          // dimmed, to decide how to narrow the range. Reusing `stale`
+          // (rather than a second flag) is deliberate: it is already the
+          // "these numbers are not a fresh, confirmed answer" signal the
+          // dimming and `data-stale` attribute key off.
+          setStale(true)
         })
-        .finally(() => setRunning(false))
+        .finally(() => {
+          // An older CALL finishing after a newer one is still open must
+          // not re-enable Run: only the call that is ACTUALLY the most
+          // recently issued may flip `running` back to false. Deliberately
+          // `requestIdRef`, not `answerIdRef` -- a range change alone must
+          // not block this: the one outstanding call it abandoned still
+          // needs to re-enable Run when it settles, even though its result
+          // gets discarded above.
+          if (requestId !== requestIdRef.current) return
+          setRunning(false)
+        })
     },
     [client, activeId, validId, onUnauthorized],
   )
@@ -170,6 +215,11 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
   }, [client, activeId, validId, onUnauthorized])
 
   const handleRangeChange = (newDays: RangeDays) => {
+    // Bumps `answerIdRef` even though it issues no request of its own: a
+    // range change changes what would count as a valid answer, so any
+    // response still in flight for the OLD range must be discarded when it
+    // lands, exactly like a response for an abandoned project or funnel id.
+    answerIdRef.current += 1
     setDays(newDays)
     setStale(true)
   }
@@ -317,7 +367,17 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
         </Button>
       </div>
 
-      {funnelError == null && runError == null && result != null && (
+      {/* Ruling (targeted re-review): gating this on `runError == null` too
+       * went wider than the finding it was meant to fix -- that finding was
+       * about the FUNNEL fetch (no funnel means nothing to show numbers
+       * for), not a Run that fails after a good result is already on
+       * screen. A failed Run keeps the last good result rendered here,
+       * dimmed via `stale` (set in `runNow`'s catch above), beside the
+       * error banner -- those numbers are still a true answer to the
+       * previous question. Only `funnelError` suppresses the block
+       * entirely: without the funnel itself nothing else on the page can be
+       * trusted either. */}
+      {funnelError == null && result != null && (
         <div
           data-testid="funnel-result"
           data-stale={String(stale)}

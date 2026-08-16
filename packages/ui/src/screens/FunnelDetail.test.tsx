@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter, Route, Routes } from 'react-router'
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import { ApiError } from '../api/client.js'
@@ -10,16 +10,38 @@ import { ProjectProvider } from '../app/ProjectContext.js'
 import { ROUTES, funnelPath } from '../app/Router.js'
 import { FunnelDetail } from './FunnelDetail.js'
 
-const PROJECTS = [
-  {
-    id: 1,
-    name: 'Alpha',
-    slug: 'alpha',
-    created_at: '',
-    retention_months: 24,
-    monthly_event_quota: null,
-  },
-]
+const PROJECT_1 = {
+  id: 1,
+  name: 'Alpha',
+  slug: 'alpha',
+  created_at: '',
+  retention_months: 24,
+  monthly_event_quota: null,
+}
+
+const PROJECTS = [PROJECT_1]
+
+const PROJECT_2 = {
+  id: 2,
+  name: 'Beta',
+  slug: 'beta',
+  created_at: '',
+  retention_months: 24,
+  monthly_event_quota: null,
+}
+
+// A same-route navigation trigger for the race tests below -- clicking it
+// changes the `:id` param WITHOUT unmounting `FunnelDetail` (same position
+// in the same `<Route>`), which is what lets a request issued for the OLD
+// id still be in flight when the mount effect for the NEW id fires.
+function Nav(props: { to: string }) {
+  const navigate = useNavigate()
+  return (
+    <button type="button" onClick={() => navigate(props.to)}>
+      go
+    </button>
+  )
+}
 
 const FUNNEL: Funnel = {
   id: 7,
@@ -185,9 +207,9 @@ describe('FunnelDetail', () => {
   // picking "Last 30 days", clicking Run, then picking "Last 90 days" WHILE
   // that run was still in flight -- the 30-day response then landed and
   // un-dimmed the screen under a "Last 90 days" subtitle showing 30-day
-  // numbers. The mutation this pins: drop the `runDays !== daysRef.current`
-  // guard in `runNow`'s `.then`, and this test alone fails (data-stale flips
-  // to "false" for a response that does not answer the selected range).
+  // numbers. The mutation this pins: drop the identity guard in `runNow`'s
+  // `.then`, and this test alone fails (data-stale flips to "false" for a
+  // response that does not answer the selected range).
   it('discards a response whose range no longer matches the one now selected', async () => {
     const inFlight = deferred<FunnelRunResult>()
     const runFunnel = vi
@@ -206,13 +228,18 @@ describe('FunnelDetail', () => {
     await userEvent.selectOptions(screen.getByLabelText(/range/i), '90')
     expect(screen.getByTestId('funnel-result')).toHaveAttribute('data-stale', 'true')
 
-    // The 30-day response lands now, after the selection moved to 90. Wrapped
-    // in act() and given a real turn of the microtask queue so the state
-    // update the fix DOESN'T make (and the bug WOULD make) has every chance
-    // to land before the assertion below runs.
+    // The 30-day response lands now, after the selection moved to 90, and
+    // carries a DIFFERENT `entered` count from the mount's 7-day result --
+    // if it were applied at all, the rendered number would change even if
+    // some other code path kept `data-stale` "true". Wrapped in act() and
+    // given a real turn of the microtask queue so the state update the fix
+    // DOESN'T make (and the bug WOULD make) has every chance to land before
+    // the assertions below run.
     await act(async () => {
       inFlight.resolve({
         ...RUN,
+        entered: 777,
+        converted: 111,
         range: { since: '2026-07-16T00:00:00.000Z', until: '2026-08-15T00:00:00.000Z' },
       })
       await Promise.resolve()
@@ -222,6 +249,30 @@ describe('FunnelDetail', () => {
     // Must still read stale: the 30-day answer is not an answer to the
     // 90-day range currently selected.
     expect(screen.getByTestId('funnel-result')).toHaveAttribute('data-stale', 'true')
+    // I2 (targeted re-review): discarded OUTRIGHT, not merely left dimmed --
+    // the mutation `if (stale) { setResult(r); return }` passes the
+    // assertion above unchanged (dimming is a red herring) but applies the
+    // discarded response's numbers underneath it. The mount's original
+    // 1,204 must still be on screen; the discarded response's 777 must not.
+    expect(screen.getByText(/Entered 1,204/)).toBeInTheDocument()
+    expect(screen.queryByText(/Entered 777/)).toBeNull()
+  })
+
+  // Stub-check gap (targeted re-review): every OTHER fixture in this file
+  // resolves a 7-day range, which is also `formatRangeDays`' hardcoded
+  // fallback would print if it ignored its argument entirely and just
+  // returned the constant string "Last 7 days" -- format.test.ts is the
+  // only place that would have caught it. This is the one assertion in
+  // THIS file a constant-returning stub cannot satisfy.
+  it('labels a range other than the mount default correctly (stub-check gap)', async () => {
+    const client = fakeClient({
+      runFunnel: vi.fn(async () => ({
+        ...RUN,
+        range: { since: '2026-07-16T00:00:00.000Z', until: '2026-08-15T00:00:00.000Z' },
+      })),
+    })
+    renderDetail(client)
+    expect(await screen.findByTestId('funnel-range-label')).toHaveTextContent('Last 30 days')
   })
 
   it('renders every warning the run returned', async () => {
@@ -287,6 +338,302 @@ describe('FunnelDetail', () => {
     const client = fakeClient()
     renderDetail(client)
     expect(await screen.findByRole('link', { name: /edit/i })).toBeInTheDocument()
+  })
+})
+
+// C1 fix round 2 (targeted re-review): the original guard compared the
+// RANGE a response was issued for -- a same-range double-run (a project
+// switch that lands back on the default 7-day range being the concrete
+// case) was indistinguishable to it. These pin the invariant by IDENTITY
+// for every way a second request can be issued: project switch, `:id`
+// change, and the mount effect racing a still-open manual Run.
+describe('FunnelDetail — response identity survives every way a second request can be issued', () => {
+  function renderWithProjects(client: ApiClient, initialId: number) {
+    return render(
+      <MemoryRouter initialEntries={[funnelPath(FUNNEL.id)]}>
+        <ProjectProvider projects={[PROJECT_1, PROJECT_2]} initialId={initialId}>
+          <Routes>
+            <Route path="/funnels/:id" element={<FunnelDetail client={client} />} />
+            <Route path={ROUTES.funnels} element={<p>deleted</p>} />
+          </Routes>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+  }
+
+  // The mutation this pins: compare `runDays` (or any range value) instead
+  // of request identity -- both requests below share the SAME default
+  // range, which a range-equality guard cannot tell apart, so this test
+  // alone fails against it (the older project's numbers overwrite the
+  // newer project's, undimmed, under the newer project's heading).
+  it('discards an older response when the active project changes mid-flight, even though the range never changed', async () => {
+    const p1 = deferred<FunnelRunResult>()
+    const p2 = deferred<FunnelRunResult>()
+    const runFunnel = vi.fn((projectId: number) => (projectId === 1 ? p1.promise : p2.promise))
+    const client = fakeClient({ runFunnel })
+    const { rerender } = renderWithProjects(client, 1)
+    await waitFor(() => expect(runFunnel).toHaveBeenCalledTimes(1))
+
+    rerender(
+      <MemoryRouter initialEntries={[funnelPath(FUNNEL.id)]}>
+        <ProjectProvider projects={[PROJECT_1, PROJECT_2]} initialId={2}>
+          <Routes>
+            <Route path="/funnels/:id" element={<FunnelDetail client={client} />} />
+            <Route path={ROUTES.funnels} element={<p>deleted</p>} />
+          </Routes>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(runFunnel).toHaveBeenCalledTimes(2))
+
+    // Landing order does not track issue order -- resolve the NEWER request
+    // (project 2) first, then the OLDER one (project 1) afterwards.
+    await act(async () => {
+      p2.resolve({ ...RUN, entered: 2222, converted: 900 })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(await screen.findByText(/Entered 2,222/)).toBeInTheDocument()
+
+    await act(async () => {
+      p1.resolve({ ...RUN, entered: 1111, converted: 400 })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    // The older, project-1 response must never have applied -- undimmed or
+    // otherwise.
+    expect(screen.getByText(/Entered 2,222/)).toBeInTheDocument()
+    expect(screen.queryByText(/Entered 1,111/)).toBeNull()
+  })
+
+  // The other half of the same invariant: a manual Run for one funnel is
+  // still open when navigation (the `:id` param) moves to a different
+  // funnel entirely, which fires the mount effect's OWN `runNow` call for
+  // the new funnel -- the exact "mount effect races a manual Run" shape.
+  it('discards a manual run in flight for one funnel once navigating supersedes it with the mount effect for another', async () => {
+    const manualRun = deferred<FunnelRunResult>()
+    const newerMountRun = deferred<FunnelRunResult>()
+    const runFunnel = vi
+      .fn()
+      .mockResolvedValueOnce(RUN) // mount auto-run for funnel 7
+      .mockReturnValueOnce(manualRun.promise) // manual Run click for funnel 7, held open
+      .mockReturnValueOnce(newerMountRun.promise) // mount auto-run for funnel 9, held open
+    const client = fakeClient({
+      funnel: vi.fn(async (_projectId: number, id: number) => ({ ...FUNNEL, id })),
+      runFunnel,
+    })
+    render(
+      <MemoryRouter initialEntries={[funnelPath(7)]}>
+        <ProjectProvider projects={PROJECTS} initialId={1}>
+          <Routes>
+            <Route
+              path="/funnels/:id"
+              element={
+                <>
+                  <FunnelDetail client={client} />
+                  <Nav to="/funnels/9" />
+                </>
+              }
+            />
+            <Route path={ROUTES.funnels} element={<p>deleted</p>} />
+          </Routes>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    await screen.findByTestId('funnel-step-1')
+    expect(runFunnel).toHaveBeenCalledTimes(1)
+
+    await userEvent.click(screen.getByRole('button', { name: /^run$/i }))
+    expect(runFunnel).toHaveBeenCalledTimes(2)
+
+    await userEvent.click(screen.getByText('go'))
+    await waitFor(() => expect(runFunnel).toHaveBeenCalledTimes(3))
+
+    // The new funnel's own mount run (the latest request) lands -- it must apply.
+    await act(async () => {
+      newerMountRun.resolve({ ...RUN, entered: 3333, converted: 1200 })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(await screen.findByText(/Entered 3,333/)).toBeInTheDocument()
+
+    // The stale manual run for the funnel navigated away from lands late --
+    // discarded outright: no result change, and Run stays usable.
+    await act(async () => {
+      manualRun.resolve({ ...RUN, entered: 9999, converted: 1 })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(screen.getByText(/Entered 3,333/)).toBeInTheDocument()
+    expect(screen.queryByText(/Entered 9,999/)).toBeNull()
+    expect(screen.getByRole('button', { name: /^run$/i })).toBeEnabled()
+  })
+
+  // I2 (targeted re-review): pins the CATCH branch's own identity guard
+  // (FunnelDetail.tsx's error-branch staleness guard) in isolation from the
+  // success-branch test above -- nothing in the suite exercised an OLDER
+  // request failing after a NEWER one had already landed. The mutation this
+  // pins: drop the identity check in `runNow`'s `.catch`, and this test
+  // alone fails (an error banner appears, and the current good result is
+  // marked stale, for a funnel the operator already navigated away from).
+  it('discards an older run error after a newer request has already landed', async () => {
+    const manualRun = deferred<FunnelRunResult>()
+    const newerMountRun = deferred<FunnelRunResult>()
+    const runFunnel = vi
+      .fn()
+      .mockResolvedValueOnce(RUN) // mount auto-run for funnel 7
+      .mockReturnValueOnce(manualRun.promise) // manual Run for funnel 7, held open, will FAIL late
+      .mockReturnValueOnce(newerMountRun.promise) // mount auto-run for funnel 9, held open
+    const client = fakeClient({
+      funnel: vi.fn(async (_projectId: number, id: number) => ({ ...FUNNEL, id })),
+      runFunnel,
+    })
+    render(
+      <MemoryRouter initialEntries={[funnelPath(7)]}>
+        <ProjectProvider projects={PROJECTS} initialId={1}>
+          <Routes>
+            <Route
+              path="/funnels/:id"
+              element={
+                <>
+                  <FunnelDetail client={client} />
+                  <Nav to="/funnels/9" />
+                </>
+              }
+            />
+            <Route path={ROUTES.funnels} element={<p>deleted</p>} />
+          </Routes>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    await screen.findByTestId('funnel-step-1')
+    await userEvent.click(screen.getByRole('button', { name: /^run$/i }))
+    await userEvent.click(screen.getByText('go'))
+    await waitFor(() => expect(runFunnel).toHaveBeenCalledTimes(3))
+
+    await act(async () => {
+      newerMountRun.resolve({ ...RUN, entered: 3333, converted: 1200 })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(await screen.findByText(/Entered 3,333/)).toBeInTheDocument()
+
+    await act(async () => {
+      manualRun.reject(new ApiError(422, 'segment query timed out'))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.getByTestId('funnel-result')).toHaveAttribute('data-stale', 'false')
+    expect(screen.getByText(/Entered 3,333/)).toBeInTheDocument()
+  })
+
+  // Pins `runNow`'s `.finally` guard in isolation: the two tests above
+  // always resolve the NEWER call first, so `running` would already read
+  // false by the time the older call's own `.finally` runs even WITHOUT
+  // this guard. Here the OLDER call settles FIRST, while the newer one the
+  // operator is actually waiting on is still open. The mutation this pins:
+  // drop the `requestId !== requestIdRef.current` check in `.finally`, and
+  // this test alone fails -- Run re-enables early, while a request is still
+  // outstanding.
+  it('does not re-enable Run when an older call settles before a still-open newer call', async () => {
+    const manualRun = deferred<FunnelRunResult>()
+    const newerMountRun = deferred<FunnelRunResult>()
+    const runFunnel = vi
+      .fn()
+      .mockResolvedValueOnce(RUN) // mount auto-run for funnel 7
+      .mockReturnValueOnce(manualRun.promise) // manual Run for funnel 7, held open
+      .mockReturnValueOnce(newerMountRun.promise) // mount auto-run for funnel 9, held open
+    const client = fakeClient({
+      funnel: vi.fn(async (_projectId: number, id: number) => ({ ...FUNNEL, id })),
+      runFunnel,
+    })
+    render(
+      <MemoryRouter initialEntries={[funnelPath(7)]}>
+        <ProjectProvider projects={PROJECTS} initialId={1}>
+          <Routes>
+            <Route
+              path="/funnels/:id"
+              element={
+                <>
+                  <FunnelDetail client={client} />
+                  <Nav to="/funnels/9" />
+                </>
+              }
+            />
+            <Route path={ROUTES.funnels} element={<p>deleted</p>} />
+          </Routes>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    await screen.findByTestId('funnel-step-1')
+    await userEvent.click(screen.getByRole('button', { name: /^run$/i }))
+    expect(screen.getByRole('button', { name: /^run$/i })).toBeDisabled()
+
+    await userEvent.click(screen.getByText('go'))
+    await waitFor(() => expect(runFunnel).toHaveBeenCalledTimes(3))
+    expect(screen.getByRole('button', { name: /^run$/i })).toBeDisabled()
+
+    // The OLDER call (the manual run for the funnel navigated away from)
+    // settles first.
+    await act(async () => {
+      manualRun.resolve({ ...RUN, entered: 9999 })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(screen.getByRole('button', { name: /^run$/i })).toBeDisabled()
+
+    // Only now, once the newer call ALSO settles, may Run re-enable.
+    await act(async () => {
+      newerMountRun.resolve({ ...RUN, entered: 3333 })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(screen.getByRole('button', { name: /^run$/i })).toBeEnabled()
+  })
+})
+
+// Ruling (targeted re-review): the previous wave gated the result block on
+// `runError == null` too, which went wider than the finding it was meant to
+// fix -- a transient failed Run (e.g. a 422 "narrow the range") wiped
+// previously-good numbers off the screen entirely. A failed Run keeps the
+// last good result on screen, dimmed, beside the error banner; a failed
+// FUNNEL fetch (the actual finding) still suppresses the result, since
+// there is no funnel to show numbers for.
+describe('FunnelDetail — a failed Run keeps the previous good result on screen', () => {
+  it('dims the last good result beside the error banner rather than wiping it', async () => {
+    const runFunnel = vi
+      .fn()
+      .mockResolvedValueOnce(RUN) // mount auto-run succeeds
+      .mockRejectedValueOnce(new ApiError(422, 'segment query timed out')) // manual Run fails
+    const client = fakeClient({ runFunnel })
+    renderDetail(client)
+    await screen.findByTestId('funnel-step-1')
+    expect(screen.getByTestId('funnel-result')).toHaveAttribute('data-stale', 'false')
+
+    await userEvent.click(screen.getByRole('button', { name: /^run$/i }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(/narrow the range/i)
+
+    // The mutation this pins: gating the result block on `runError == null`
+    // again -- exactly these assertions fail, because the last-good numbers
+    // would disappear the moment the failed Run set `runError`.
+    const box = screen.getByTestId('funnel-result')
+    expect(box).toBeInTheDocument()
+    expect(box).toHaveAttribute('data-stale', 'true')
+    expect(screen.getByText(/Entered 1,204/)).toBeInTheDocument()
+  })
+
+  it('still suppresses the result when the funnel itself cannot be read (the actual finding)', async () => {
+    // Unlike a run error, a funnel-fetch failure means there is no funnel to
+    // show numbers for at all -- this must still suppress the result block.
+    const client = fakeClient({
+      funnel: vi.fn(async () => {
+        throw new ApiError(404, 'funnel_not_found')
+      }),
+    })
+    renderDetail(client)
+    expect(await screen.findByRole('alert')).toHaveTextContent(/no longer exists/i)
+    expect(screen.queryByTestId('funnel-result')).toBeNull()
   })
 })
 
