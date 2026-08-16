@@ -241,6 +241,14 @@ export function buildApp(input: {
     // call `segmentCache.clearProject(projectId)` here too. See
     // segments/cache.ts's own docstring on `clearProject` for the race this
     // closes.
+    //
+    // `clearProject` is not a per-project O(1) delete: it copies and scans
+    // every entry currently in the cache (bounded by CACHE_MAX_ENTRIES,
+    // across all projects) to find the ones matching this project's key
+    // prefix. `onDrop` also is not deduplicated per project per run — it
+    // fires once per partition actually dropped, so a sweep touching
+    // several projects with several stale months each runs that whole-cache
+    // scan that many times.
     onDrop: (result) => {
       logDroppedPartition(app.log, result)
       segmentCache.clearProject(result.projectId)
