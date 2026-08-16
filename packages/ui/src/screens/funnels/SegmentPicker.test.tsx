@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '../../api/client.js'
@@ -71,6 +71,59 @@ describe('SegmentPicker -- invented mutations', () => {
     await screen.findByRole('option', { name: /Paying/ })
     await userEvent.selectOptions(screen.getByLabelText('Segment'), '42')
     expect(onChange).toHaveBeenLastCalledWith(42)
+  })
+
+  it('renders an explicit unresolvable option, SELECTED, when the value has no matching segment', async () => {
+    // I5: segment_id has no foreign key, deliberately -- a segment_id
+    // absent from the list is a designed state (deleted elsewhere), not an
+    // edge case. The mutation this pins: fall back to the native <select>'s
+    // default behaviour for an unmatched value (silently reads as
+    // "Everyone") -- exactly this test fails, because the select's own
+    // value would then be "" instead of "missing".
+    const segments = vi.fn(async () => [{ id: 1, name: 'Paying', stale: false }])
+    render(
+      <SegmentPicker
+        client={{ segments } as unknown as ApiClient}
+        projectId={1}
+        value={4}
+        onChange={() => {}}
+      />,
+    )
+    const select = (await screen.findByLabelText('Segment')) as HTMLSelectElement
+    await waitFor(() => expect(select).toHaveValue('missing'))
+    expect(screen.getByText(/cannot be resolved/i)).toBeInTheDocument()
+    expect(screen.getByText(/#4/)).toBeInTheDocument()
+  })
+
+  it('lets the operator deliberately clear an unresolvable segment by picking Everyone', async () => {
+    const onChange = vi.fn()
+    const segments = vi.fn(async () => [{ id: 1, name: 'Paying', stale: false }])
+    render(
+      <SegmentPicker
+        client={{ segments } as unknown as ApiClient}
+        projectId={1}
+        value={4}
+        onChange={onChange}
+      />,
+    )
+    const select = (await screen.findByLabelText('Segment')) as HTMLSelectElement
+    await waitFor(() => expect(select).toHaveValue('missing'))
+    await userEvent.selectOptions(select, 'Everyone')
+    expect(onChange).toHaveBeenCalledWith(null)
+  })
+
+  it('does not show the unresolvable option once the segment list actually contains the value', async () => {
+    const segments = vi.fn(async () => [{ id: 4, name: 'Paying', stale: false }])
+    render(
+      <SegmentPicker
+        client={{ segments } as unknown as ApiClient}
+        projectId={1}
+        value={4}
+        onChange={() => {}}
+      />,
+    )
+    await screen.findByRole('option', { name: /Paying/ })
+    expect(screen.queryByText(/cannot be resolved/i)).toBeNull()
   })
 
   it('a stale segment cannot be selected via selectOptions -- disabled is real, not cosmetic', async () => {
