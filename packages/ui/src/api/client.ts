@@ -22,10 +22,24 @@ import type {
 /** The feed's default page size. Explicit on every request -- see #32. */
 export const DEFAULT_LIMIT = 100
 
+/** One entry of a validation 400's `detail[]` -- `{ path, message }` against
+ * the offending field, e.g. `{ path: "window_seconds", message: "Expected
+ * positive integer" }`. */
+export interface ApiErrorDetail {
+  path: string
+  message: string
+}
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
+    // MINOR (whole-branch review): a validation 400 carries a per-path
+    // `detail[]` the server already computed -- this is the one place that
+    // ever reaches the wire, so a caller that wants to say WHICH field was
+    // wrong (rather than a code an operator cannot act on) needs it kept,
+    // not discarded at the one call site that parses the response body.
+    readonly detail?: ApiErrorDetail[],
   ) {
     super(`${status} ${code}`)
     this.name = 'ApiError'
@@ -120,13 +134,24 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
       // A 5xx from a proxy is frequently HTML. Parsing must not throw a
       // SyntaxError that replaces the real status with a parse failure.
       let code = 'unknown'
+      let detail: ApiErrorDetail[] | undefined
       try {
-        const body = (await res.json()) as { error?: string }
+        const body = (await res.json()) as { error?: string; detail?: unknown }
         if (typeof body.error === 'string') code = body.error
+        if (Array.isArray(body.detail)) {
+          const parsed = body.detail.filter(
+            (d): d is ApiErrorDetail =>
+              typeof d === 'object' &&
+              d !== null &&
+              typeof (d as Record<string, unknown>).path === 'string' &&
+              typeof (d as Record<string, unknown>).message === 'string',
+          )
+          if (parsed.length > 0) detail = parsed
+        }
       } catch {
-        /* keep 'unknown' */
+        /* keep 'unknown', detail stays absent */
       }
-      throw new ApiError(res.status, code)
+      throw new ApiError(res.status, code, detail)
     }
 
     if (res.status === 204) return undefined as T

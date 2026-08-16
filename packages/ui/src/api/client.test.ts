@@ -80,6 +80,30 @@ describe('createClient', () => {
     })
   })
 
+  // MINOR (whole-branch review): a validation 400's `detail[]` -- the
+  // per-path `{ path, message }` array the funnel routes already compute --
+  // used to be discarded at the one call site that parses the response
+  // body, leaving `describeError` nothing to build a field-specific message
+  // from. This is the one place that response is ever read.
+  it('carries a 400 response body detail[] onto the thrown ApiError', async () => {
+    const f = fakeFetch(400, {
+      error: 'invalid funnel',
+      detail: [{ path: 'window_seconds', message: 'Expected positive integer' }],
+    })
+    const client = createClient(f as unknown as typeof fetch)
+    await expect(client.projects()).rejects.toMatchObject({
+      status: 400,
+      code: 'invalid funnel',
+      detail: [{ path: 'window_seconds', message: 'Expected positive integer' }],
+    })
+  })
+
+  it('leaves detail undefined when the response body carries none', async () => {
+    const f = fakeFetch(403, { error: 'missing_ui_header' })
+    const client = createClient(f as unknown as typeof fetch)
+    await expect(client.projects()).rejects.toMatchObject({ detail: undefined })
+  })
+
   // A 401 must be distinguishable so the shell can route to login rather
   // than showing an error banner over an empty screen.
   it('raises ApiError with status 401 when the session is gone', async () => {

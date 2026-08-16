@@ -9,6 +9,39 @@ describe('describeError', () => {
     )
   })
 
+  // MINOR (whole-branch review): a validation 400 carries a per-path
+  // `detail[]` naming exactly which field was wrong -- discarding it left an
+  // operator reading "This funnel could not be read: invalid funnel" with no
+  // way to tell which of the fields they just submitted was the problem.
+  it('maps 400 with a detail[] to the per-path message, against the offending field', () => {
+    expect(
+      describeError(
+        new ApiError(400, 'invalid funnel', [
+          { path: 'window_seconds', message: 'Expected positive integer' },
+        ]),
+      ),
+    ).toBe('This funnel could not be read: window_seconds -- Expected positive integer')
+  })
+
+  it('joins multiple detail[] entries rather than showing only the first', () => {
+    expect(
+      describeError(
+        new ApiError(400, 'invalid funnel', [
+          { path: 'steps', message: 'Required' },
+          { path: 'window_seconds', message: 'Expected positive integer' },
+        ]),
+      ),
+    ).toBe(
+      'This funnel could not be read: steps -- Required; window_seconds -- Expected positive integer',
+    )
+  })
+
+  it('falls back to the code when a 400 carries no detail[]', () => {
+    expect(describeError(new ApiError(400, 'bad_definition', []))).toBe(
+      'This funnel could not be read: bad_definition',
+    )
+  })
+
   it('maps 404 to "no longer exists"', () => {
     expect(describeError(new ApiError(404, 'not_found'))).toBe('This funnel no longer exists.')
   })
