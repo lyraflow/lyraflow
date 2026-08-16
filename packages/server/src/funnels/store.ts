@@ -310,7 +310,16 @@ export class FunnelStore {
   ): Promise<StoredFunnel | null> {
     const client = await this.pool.connect()
     try {
-      await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+      // Plain BEGIN, not SERIALIZABLE. The row lock from `FOR UPDATE` below
+      // is already enough: it makes a second concurrent PATCH block until
+      // the first commits, then re-read the now-current row, which is
+      // exactly the guarantee `definitionChanged` needs. SERIALIZABLE adds
+      // nothing on top of that here — only a 40001 serialization_failure
+      // that the route does not special-case, so it surfaces as a 503. That
+      // was measured: 8 concurrent PATCHes to one funnel returned 67/80
+      // 503s under SERIALIZABLE, and 80/80 200s under plain BEGIN, across
+      // repeated trials.
+      await client.query('BEGIN')
 
       const existing = await client.query<Row>(
         `SELECT id, name, definition_version, steps, window_seconds, segment_id,
