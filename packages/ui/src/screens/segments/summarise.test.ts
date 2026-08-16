@@ -110,4 +110,9 @@ describe('summarise', () => {
     const root = { kind: 'not', child: group(trait('a'), trait('b')) }
     expect(summarise(root as never)).toBe('not (a = x and b = x)')
   })
+
+  it('renders a "between" operator\'s two-value tuple as "X and Y", pinning the phrasing', () => {
+    const t = { kind: 'trait', key: 'age', operator: 'between', value: [18, 65] }
+    expect(summarise(t as never)).toBe('age between 18 and 65')
+  })
 })

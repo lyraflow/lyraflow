@@ -108,24 +108,64 @@ export function replaceAt(root: FilterNode, path: number[], node: FilterNode): F
 }
 
 /**
- * Removes the child addressed by `path` from its containing group. Unlike
- * the other edits, `path` here addresses the child to remove, not a group
- * to operate on, so removal happens one level below the terminal step of
- * ordinary descent: the last path segment is resolved against whichever
- * group owns it -- which may be reached by first passing transparently
- * through a `not`, per the module's path semantics -- and that segment is
- * then used to filter, not to descend further. Removing the root itself
- * (`path === []`) has no parent to remove it from and is rejected.
+ * Sentinel meaning "this whole subtree is gone" -- returned internally by
+ * `removeFrom` when removing a child would leave a `group` with zero
+ * children. A `group` requires at least one child
+ * (packages/core/src/segments/ast.ts's `children: z.array(FilterNode).min(1)`);
+ * an empty one is not a legal tree, so it collapses out of its OWN parent
+ * too, recursively -- removing the last trait from a group two levels deep
+ * can empty the group above it as well, and that keeps propagating upward
+ * until a level is left with a sibling, or the root is reached. A `not` can
+ * never be left with zero children at all (it wraps exactly one `child`
+ * field, not an array), so if the node it wraps collapses, the `not`
+ * collapses too, unconditionally -- there is no "empty not" to fall back
+ * to the way there is an "empty group".
+ */
+const REMOVE = Symbol('tree.ts: subtree removed')
+
+/**
+ * Removes the child addressed by `path` from its containing group, and
+ * collapses any group left with zero children out of its own parent in
+ * turn -- see `REMOVE` above. The root is the one exception: it has no
+ * parent to collapse into, so removing the last child of the root group
+ * returns that group with an empty `children` array -- a legal-shaped but
+ * meaningless segment -- rather than collapsing or throwing. This module
+ * does not invent an empty-tree representation beyond that; the caller
+ * (the builder) must treat an empty root as its own save-disabled state.
+ *
+ * Unlike the other edits, `path` here addresses the child to remove, not a
+ * group to operate on, so removal happens one level below the terminal
+ * step of ordinary descent: the last path segment is resolved against
+ * whichever group owns it -- which may be reached by first passing
+ * transparently through a `not`, per the module's path semantics -- and
+ * that segment is then used to filter, not to descend further. Removing
+ * the root itself (`path === []`) has no parent to remove it from and is
+ * rejected.
  */
 export function removeAt(root: FilterNode, path: number[]): FilterNode {
   if (path.length === 0) {
     throw new Error('removeAt: cannot remove the root')
   }
-  return removeFrom(root, path, 0)
+  const result = removeFrom(root, path, 0, true)
+  if (result === REMOVE) {
+    // Only reachable if `root` itself is a bare `not` whose single child
+    // collapsed -- there is no legal empty-`not` fallback the way there is
+    // for an empty root group.
+    throw new Error('removeAt: removing this node would leave the root with nothing to wrap')
+  }
+  return result
 }
 
-function removeFrom(node: FilterNode, path: number[], i: number): FilterNode {
-  if (node.kind === 'not') return { kind: 'not', child: removeFrom(node.child, path, i) }
+function removeFrom(
+  node: FilterNode,
+  path: number[],
+  i: number,
+  isRoot: boolean,
+): FilterNode | typeof REMOVE {
+  if (node.kind === 'not') {
+    const child = removeFrom(node.child, path, i, false)
+    return child === REMOVE ? REMOVE : { kind: 'not', child }
+  }
   if (node.kind !== 'group') {
     throw new Error('removeAt: path continues past a leaf node')
   }
@@ -133,13 +173,16 @@ function removeFrom(node: FilterNode, path: number[], i: number): FilterNode {
   if (idx === undefined || !isPathIndex(idx) || idx >= node.children.length) {
     throw new Error(`removeAt: path index ${String(idx)} is out of range`)
   }
-  if (i === path.length - 1) {
-    return { ...node, children: node.children.filter((_, ci) => ci !== idx) }
-  }
-  const children = node.children.map((child, ci) =>
-    ci === idx ? removeFrom(child, path, i + 1) : child,
-  )
-  return { ...node, children }
+  const newChildren: FilterNode[] =
+    i === path.length - 1
+      ? node.children.filter((_, ci) => ci !== idx)
+      : node.children.flatMap((child, ci) => {
+          if (ci !== idx) return [child]
+          const result = removeFrom(child, path, i + 1, false)
+          return result === REMOVE ? [] : [result]
+        })
+  if (newChildren.length === 0 && !isRoot) return REMOVE
+  return { ...node, children: newChildren }
 }
 
 /** Toggles negation of the node addressed by `path`: wraps an unwrapped

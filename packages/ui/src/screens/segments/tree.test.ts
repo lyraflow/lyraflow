@@ -133,4 +133,39 @@ describe('tree edits are pure', () => {
     const root = group(trait('a'))
     expect(nodeAt(root as never, [])).toBe(root)
   })
+
+  // --- Collapsing an emptied group (fix round 1) --------------------------
+  //
+  // A `group` requires at least one child; removing the last child of a
+  // non-root group would otherwise produce an illegal, server-rejecting
+  // tree. removeAt collapses that group out of its own parent instead,
+  // recursively -- except at the root, which has no parent to collapse
+  // into and is kept as a legal-shaped, empty group.
+
+  it('removes a nested group entirely when removing its last child empties it', () => {
+    const root = group(trait('a'), group(trait('b')))
+    const next = removeAt(root as never, [1, 0]) as never as typeof root
+    expect((next.children as { key: string }[]).map((c) => c.key)).toEqual(['a'])
+  })
+
+  it('collapses two levels when emptying a nested group also empties its parent', () => {
+    const root = group(trait('z'), group(group(trait('a'))))
+    const next = removeAt(root as never, [1, 0, 0]) as never as typeof root
+    expect((next.children as { key: string }[]).map((c) => c.key)).toEqual(['z'])
+  })
+
+  it('does not collapse a group that still has a sibling left after removal', () => {
+    const root = group(trait('a'), group(trait('b'), trait('c')))
+    const next = removeAt(root as never, [1, 0]) as never as typeof root
+    expect(next.children).toHaveLength(2)
+    const inner = next.children[1] as typeof root
+    expect((inner.children as { key: string }[]).map((c) => c.key)).toEqual(['c'])
+  })
+
+  it('removing the last child of the root itself returns an empty root group, not null or a throw', () => {
+    const root = group(trait('a'))
+    const next = removeAt(root as never, [0]) as never as typeof root
+    expect(next.kind).toBe('group')
+    expect(next.children).toEqual([])
+  })
 })
