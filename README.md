@@ -216,7 +216,7 @@ it flips the last step into a success state and waits for you to click
 done with it. There is also a "Skip to dashboard" for the case where you
 cannot instrument the target site right now.
 
-Past the wizard (or immediately, if a project already exists), there are two
+Past the wizard (or immediately, if a project already exists), there are three
 screens, reachable from the sidebar:
 
 - **Feed** — a live event feed, split into an **Accepted** tab and a
@@ -236,9 +236,34 @@ screens, reachable from the sidebar:
   full project list with a create-project flow of its own, whose server key
   is likewise shown exactly once and never again.
 
-**Volunteering the limit:** that is the whole UI. Segments, people, person
-profiles and funnels have **no** screens at all yet; reach them the way the
-rest of this document shows, over the HTTP API or the CLI.
+- **Funnels** — create a funnel from an ordered list of events, run it over a
+  range you choose, and read the result as one row per step: how many people
+  reached it, what share of the entrants that is, and how many dropped between
+  it and the step before. Opening a saved funnel runs it once; changing the
+  range does **not** re-run it — the chart dims and waits for you, because a
+  funnel is a real scan and because numbers from the old range sitting under a
+  new one would be a wrong answer stated confidently.
+
+  Two honesty details worth knowing, both of which the screen states without
+  being asked. If some of the people who entered did so too recently to have
+  had the funnel's full window, it says so and tells you how many — otherwise
+  every run over a range shorter than the window quietly under-reports
+  conversion. And if a funnel's segment filter has been deleted, the run
+  succeeds over **everyone** rather than failing; the screen reports that and
+  stops showing the filter as though it applied, because the numbers alone
+  look entirely normal.
+
+**Volunteering the limit:** that is the whole UI. Segments, people and person
+profiles have **no** screens at all yet; reach them the way the rest of this
+document shows, over the HTTP API or the CLI.
+
+The CLI is still strictly more capable for funnels than the UI is. A funnel
+step can carry conditions on that event's own properties — `page_view` where
+`path` is `/pricing` — and the builder here does not author those; a funnel
+that has them opens read-only rather than silently dropping them on save, and
+`lyraflow funnels` remains the way to write one. The per-step list of *which*
+people dropped is likewise API- and CLI-only for now, since there is no person
+profile screen to open one from.
 
 ## Tracking more than one site
 
