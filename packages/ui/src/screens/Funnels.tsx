@@ -5,8 +5,9 @@ import { ApiError } from '../api/client.js'
 import type { Funnel } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
 import { ROUTES, funnelPath } from '../app/Router.js'
+import { Badge } from '../components/ui/badge.js'
 import { Button } from '../components/ui/button.js'
-import { formatPercent, formatRelative } from './funnels/format.js'
+import { formatPercent, formatRelative, formatWindow } from './funnels/format.js'
 
 /**
  * `last_entered`/`last_converted`/`last_evaluated_at` are a CACHE the
@@ -37,6 +38,18 @@ function stepSummary(f: Funnel): string {
   return f.steps.map((s) => s.event).join(' → ')
 }
 
+/**
+ * Defect 2 from the Task 8 visual pass: the binding spec (decision 1) says
+ * every row carries name, the step chain, the window, whether a segment
+ * filter applies, and the cached rate with its timestamp -- the window and
+ * segment indicator were missing entirely. Both matter for the same reason:
+ * two funnels over identical steps read as different questions once their
+ * windows differ (1 hour vs. 30 days), and a segment-filtered funnel is not
+ * measuring the same population as one that isn't -- without both, rows
+ * are not comparable to each other. `segment_id` alone is resolved, not the
+ * segment's name: `Funnel` carries only the id on the wire, and resolving
+ * names to display here is deliberately deferred (see the defect report).
+ */
 function FunnelRow(props: { funnel: Funnel }) {
   const { funnel } = props
   return (
@@ -47,6 +60,10 @@ function FunnelRow(props: { funnel: Funnel }) {
       >
         <span className="font-medium text-foreground">{funnel.name}</span>
         <span className="text-sm text-muted-foreground">{stepSummary(funnel)}</span>
+        <span className="flex items-center gap-2 text-sm text-muted-foreground">
+          <span>{formatWindow(funnel.window_seconds)}</span>
+          {funnel.segment_id != null && <Badge variant="secondary">Segment filter</Badge>}
+        </span>
         <span className="text-sm text-muted-foreground">{funnelRateLabel(funnel, new Date())}</span>
       </Link>
     </li>

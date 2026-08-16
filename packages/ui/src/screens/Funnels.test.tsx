@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -114,6 +114,35 @@ describe('Funnels list', () => {
   it('offers the builder when there are no funnels', async () => {
     renderList([])
     expect(await screen.findByRole('link', { name: /create.*funnel/i })).toBeInTheDocument()
+  })
+})
+
+// Defect 2 from the Task 8 visual pass: the binding spec requires every row
+// to carry the window and whether a segment filter applies, alongside the
+// name/chain/rate the given suite already covered -- neither was rendered.
+// `RUN_ONCE`'s own window (604800s = 7 days) is deliberately NOT reused
+// here: a fixture using the 7-day default could pass against a component
+// that hardcodes "7-day window" regardless of the funnel's actual value, so
+// both tests below pick a window that is NOT 7 days.
+describe('Funnels list — window and segment filter', () => {
+  it("shows the funnel's window in human units, not the raw seconds", async () => {
+    renderList([{ ...RUN_ONCE, window_seconds: 3600 }])
+    const row = await screen.findByRole('link', { name: /Signup flow/ })
+    expect(row).toHaveTextContent('1-hour window')
+    expect(row).not.toHaveTextContent('3600')
+  })
+
+  it('shows no segment indicator when segment_id is null', async () => {
+    renderList([{ ...RUN_ONCE, window_seconds: 2_592_000, segment_id: null }])
+    const row = await screen.findByRole('link', { name: /Signup flow/ })
+    expect(row).toHaveTextContent('30-day window')
+    expect(within(row).queryByText(/segment/i)).toBeNull()
+  })
+
+  it('shows a segment indicator when segment_id is non-null', async () => {
+    renderList([{ ...RUN_ONCE, window_seconds: 2_592_000, segment_id: 4 }])
+    const row = await screen.findByRole('link', { name: /Signup flow/ })
+    expect(within(row).getByText(/segment/i)).toBeInTheDocument()
   })
 })
 

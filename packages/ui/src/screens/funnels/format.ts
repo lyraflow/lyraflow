@@ -4,6 +4,7 @@
  * because deriving one from the other is a multiplication callers get
  * subtly wrong. See packages/core/src/funnels/levels.ts.
  */
+import { secondsToWindowInput } from './WindowField.js'
 
 /** A server-supplied 0..1 rate as a percentage. Exact 0 and 1 render without
  * a decimal, because "0.0%" reads as a rounded small number rather than none. */
@@ -16,6 +17,22 @@ export function formatPercent(rate: number): string {
 
 export function formatCount(n: number): string {
   return n.toLocaleString('en-US')
+}
+
+/**
+ * `Funnel.window_seconds` in human units, e.g. "7-day window" -- never the
+ * raw seconds count the wire carries. Reuses `secondsToWindowInput`'s own
+ * "pick the largest unit that divides evenly" (`WindowField`'s seeding
+ * logic) rather than a second, hand-rolled copy, so a list row always
+ * agrees with what the builder itself would show if this same window were
+ * opened for editing. The unit is singularised by hand (`PER_UNIT`'s keys
+ * are the plural `minutes`/`hours`/`days` an operator picks from a
+ * `<select>`) because "7-days window" reads as a typo, not two windows.
+ */
+export function formatWindow(seconds: number): string {
+  const { value, unit } = secondsToWindowInput(seconds)
+  const singular = unit.slice(0, -1)
+  return `${value}-${singular} window`
 }
 
 const MINUTE = 60_000
