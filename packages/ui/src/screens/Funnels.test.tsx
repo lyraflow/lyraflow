@@ -254,6 +254,16 @@ async function fillTwoSteps() {
 // the builder must be visible in the list without a reload, which only
 // holds if `Funnels` re-fetches on mount rather than serving a copy held
 // above the route.
+//
+// Deliberately mounts `Funnels` TWICE -- once before navigating away to
+// create, once after returning -- rather than only once after the create.
+// A guarantee about "re-fetch on mount, no cache above the route" can only
+// be pinned by a scenario with a SECOND mount for a cache to have been
+// populated before: the real-world shape this protects is "open the list,
+// navigate away to create a funnel, save, come back," and a single-mount
+// test cannot tell a genuine re-fetch apart from a cache that merely
+// happens to be empty the one time it's ever consulted (see the fix-round
+// report for the lazy-cache mutation this restructure was needed for).
 describe('Funnels list — single source of truth with the builder', () => {
   it('shows a funnel created elsewhere without requiring a reload', async () => {
     const created = {
@@ -264,19 +274,19 @@ describe('Funnels list — single source of truth with the builder', () => {
       last_entered: null,
       last_converted: null,
     }
-    let listed: unknown[] = []
+    let listed: unknown[] = [RUN_ONCE]
     const client = {
       funnels: vi.fn(async () => listed),
       segments: vi.fn(async () => []),
       schemaEvents: vi.fn(async () => []),
       createFunnel: vi.fn(async () => {
-        listed = [created]
+        listed = [RUN_ONCE, created]
         return created
       }),
     } as unknown as ApiClient
 
     render(
-      <MemoryRouter initialEntries={['/funnels/new']}>
+      <MemoryRouter initialEntries={['/funnels']}>
         <ProjectProvider projects={PROJECTS} initialId={1}>
           <Routes>
             <Route path="/funnels" element={<Funnels client={client} />} />
@@ -286,13 +296,26 @@ describe('Funnels list — single source of truth with the builder', () => {
       </MemoryRouter>,
     )
 
+    // Mount 1: the list starts here and fetches what already exists.
+    // Asserted explicitly (not just implied by what comes later) so this
+    // test proves the first mount really happened, rather than assuming it.
+    expect(await screen.findByRole('link', { name: /Signup flow/ })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /Brand new/ })).toBeNull()
+
+    // Navigate away and create -- exercises the SAME create -> list
+    // navigation ruled on in fix round 1 (create still goes to the list;
+    // only edit goes to the funnel's own detail page). This assertion is
+    // deliberately kept: weakening it back to a single mount would also
+    // silently un-pin that ruling.
+    await userEvent.click(screen.getByRole('link', { name: /create funnel/i }))
     await fillTwoSteps()
     await userEvent.type(screen.getByLabelText(/name/i), 'Brand new')
     await userEvent.click(screen.getByRole('button', { name: /save/i }))
 
-    // Saving navigates to the list, which must fetch rather than serve a
-    // stale copy -- the mutation this pins is a private cached copy of the
-    // list held above the route instead of a re-fetch on mount.
+    // Mount 2: back on the list. This is the mount a cache populated on
+    // mount 1 -- eager OR lazy -- would serve stale data from; the new
+    // funnel appearing here is what proves there is no such cache.
     expect(await screen.findByRole('link', { name: /Brand new/ })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /Signup flow/ })).toBeInTheDocument()
   })
 })
