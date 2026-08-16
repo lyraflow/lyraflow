@@ -90,14 +90,16 @@ describe('AppRouter', () => {
     expect(await screen.findByRole('tab', { name: /accepted/i })).toBeInTheDocument()
   })
 
-  // Task 2's trap: the "*" catch-all renders Feed, and it has to stay the
-  // LAST <Route> in the list. A funnel route accidentally registered after
-  // it would silently render Feed's tabs instead -- this pins the negative
-  // (no Feed tab reachable at /funnels) alongside the positive (Funnels'
-  // own heading), so reordering the routes in `Router.tsx` fails this test
-  // rather than passing by accident because both screens happen to render
-  // *something*.
-  it('renders Funnels at /funnels, not the feed catch-all', async () => {
+  // Route RESOLUTION, not ordering -- `<Routes>` ranks candidates by path
+  // specificity (via `matchRoutes()`), independently of the order `<Route>`s
+  // are declared in `Router.tsx`; verified directly by moving the funnel
+  // routes after the "*" catch-all and confirming this still passes. What
+  // this pins instead: a typo'd `ROUTES.funnels`, a missing `<Route>`, or a
+  // `path`/`element` mismatch would all make `/funnels` fall through to the
+  // catch-all -- checked as a negative (no Feed tab reachable) alongside the
+  // positive (Funnels' own heading), so a component that renders *something*
+  // at both destinations can't pass this by accident.
+  it('resolves /funnels to Funnels, not the feed catch-all', async () => {
     renderAt('/funnels')
     expect(await screen.findByRole('heading', { name: /^funnels$/i })).toBeInTheDocument()
     expect(screen.queryByRole('tab', { name: /accepted/i })).not.toBeInTheDocument()

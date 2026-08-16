@@ -64,10 +64,14 @@ export function AppRouter(props: {
           <Route path={ROUTES.feed} element={feed} />
           <Route path={ROUTES.settings} element={settings} />
           {/*
-           * Registered above the "*" catch-all below on purpose: the
-           * catch-all renders `Feed`, so any funnel route registered after
-           * it would silently render the feed instead of ever reaching
-           * these elements. See `Router.test.tsx`'s ordering pin.
+           * `<Routes>` ranks candidates by path specificity (via
+           * `matchRoutes()`), not by declaration order -- verified directly:
+           * moving these four funnel routes after the "*" catch-all below
+           * still resolves `/funnels` to `funnels`, not `feed`. So JSX order
+           * here is for a human reading top to bottom, not for the router.
+           * "*" is the fallback for a path nothing else below matches --
+           * it deliberately renders `Feed` rather than a blank shell for an
+           * unrecognised client-side path (typo'd or stale).
            */}
           <Route path={ROUTES.funnels} element={funnels} />
           <Route path={ROUTES.funnelNew} element={funnelNew} />
