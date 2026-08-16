@@ -271,14 +271,14 @@ describe('App', () => {
       .fn()
       // App's initial session load: no project yet.
       .mockResolvedValueOnce([])
-      // The wizard's own lookup of the id behind the project it just
-      // created.
-      .mockResolvedValueOnce([PLACEHOLDER_PROJECT])
-      // App's re-fetch after `onReady`, and anything after.
+      // App's own re-fetch after `onReady`, and anything after. Fix round 1
+      // on #89: `createProject`'s response now carries the id directly
+      // (`CreatedProject` extends `Project`), so the wizard itself no
+      // longer calls `projects()` at all -- this is the only other queued
+      // response, not a third one for a lookup that no longer happens.
       .mockResolvedValue([PLACEHOLDER_PROJECT])
     const createProject = vi.fn(async () => ({
-      name: 'Cem Demo',
-      slug: 'cem-demo',
+      ...PLACEHOLDER_PROJECT,
       write_key: 'wk_new',
       server_key: 'sk_new',
     }))
@@ -289,6 +289,9 @@ describe('App', () => {
     await userEvent.click(await screen.findByRole('button', { name: /skip|later|dashboard/i }))
     expect(await screen.findByText('Feed')).toBeInTheDocument()
     expect(screen.queryByLabelText(/project name/i)).not.toBeInTheDocument()
+    // Exactly two: App's initial load and its post-`onReady` re-fetch --
+    // pins against the wizard reintroducing its own `projects()` call.
+    expect(projects).toHaveBeenCalledTimes(2)
   })
 
   // MINOR from the whole-branch review: ThemeToggle only ever mounted

@@ -21,28 +21,6 @@ import { SnippetSection } from './settings/SnippetSection.js'
 export const DEFAULT_WIZARD_POLL_INTERVAL_MS = 3000
 
 /**
- * A placeholder used only when `onReady` must fire without ever having
- * resolved the freshly-created project's id (the list refetch below
- * failed). Every field the caller could plausibly read is present, but the
- * id (`-1`) can never collide with a real project, since real ids start at
- * 1. `App`'s `onReady` handler re-fetches the project list itself and does
- * not trust this value's fields -- it exists only so the callback's type
- * signature stays a `Project`, never `Project | null`, which would push a
- * null check onto every future caller for a path only the skip button
- * (and only a projects()-refetch failure within it) ever takes.
- */
-function unresolvedProjectStub(name: string): Project {
-  return {
-    id: -1,
-    name,
-    slug: '',
-    created_at: '',
-    retention_months: 24,
-    monthly_event_quota: null,
-  }
-}
-
-/**
  * The first-run wizard: name a project, get the install snippet and the
  * project's one-time server key, then wait for a real event to arrive
  * before ever calling `onReady`. `App` renders this INSTEAD OF the normal
@@ -81,17 +59,11 @@ export function Wizard(props: {
   const [name, setName] = useState('')
   const [creating, setCreating] = useState(false)
   const [nameError, setNameError] = useState<string | null>(null)
+  // `CreatedProject` extends `Project` (#89) -- the numeric id `events()`
+  // needs to poll, and everything `onReady`'s caller needs, are already in
+  // this one response. No second call to resolve them: `created` alone
+  // drives the snippet/server-key panel, polling, and both exit buttons.
   const [created, setCreated] = useState<CreatedProject | null>(null)
-  // Separate from `created`: `createProject`'s response (`CreatedProject`,
-  // `api/types.ts`) carries no `id` -- only `name`/`slug`/the two one-time
-  // keys -- so the numeric id `events()` needs to poll has to come from a
-  // second call, `projects()`, matched back by slug. `created` (the
-  // snippet/server-key panel) and `resolvedProject` (what polling and
-  // `onReady` use) are set together, from the same successful path, so a
-  // render with one set and not the other only happens if that lookup
-  // itself failed -- handled below by falling back to a stub rather than
-  // ever blocking on it.
-  const [resolvedProject, setResolvedProject] = useState<Project | null>(null)
 
   // Guards `onReady` firing more than once. Both paths that can call it --
   // an arriving event and the skip button -- can in principle both become
@@ -115,20 +87,7 @@ export function Wizard(props: {
     setCreating(true)
     try {
       const createdProject = await client.createProject(trimmed)
-      let match: Project | null = null
-      try {
-        const list = await client.projects()
-        match = list.find((p) => p.slug === createdProject.slug) ?? null
-      } catch {
-        // The create itself already succeeded -- a failed refetch here
-        // must not throw away the one-time keys. `resolvedProject` staying
-        // null just means polling can't start until it's known; the skip
-        // button (via `unresolvedProjectStub`) still gets the operator
-        // through.
-        match = null
-      }
       setCreated(createdProject)
-      setResolvedProject(match)
     } catch (err) {
       // The API slugifies the name, so "My App" and "my app" collide even
       // though neither is literally the other -- the ordinary outcome of
@@ -145,14 +104,14 @@ export function Wizard(props: {
     }
   }
 
-  // Before a project exists (or its id is still unresolved) this returns
-  // without ever calling the API -- `usePolling` still runs its interval,
-  // harmlessly, rather than this being wired up conditionally, so there is
-  // one polling discipline instead of a second start/stop mechanism.
+  // Before a project exists this returns without ever calling the API --
+  // `usePolling` still runs its interval, harmlessly, rather than this
+  // being wired up conditionally, so there is one polling discipline
+  // instead of a second start/stop mechanism.
   const pollEvents = useCallback(async () => {
-    if (resolvedProject == null) return { events: [], next_cursor: null }
-    return client.events(resolvedProject.id, { limit: 1 })
-  }, [client, resolvedProject])
+    if (created == null) return { events: [], next_cursor: null }
+    return client.events(created.id, { limit: 1 })
+  }, [client, created])
 
   const pollState = usePolling(pollEvents, pollIntervalMs)
   // `pollState.error` is deliberately NOT consulted here -- a poll that
@@ -171,17 +130,18 @@ export function Wizard(props: {
   // one arrives) ever calls `fireReady`.
   const arrived = (pollState.data?.events.length ?? 0) > 0
 
+  // Both buttons below are only rendered inside the `created != null`
+  // branch, so `created` is never null at the moment either handler fires.
+  // The guard exists only because that fact isn't visible to the type
+  // checker from here -- `CreatedProject` satisfies `Project` directly, so
+  // there is no separate fallback value to construct once `created` is
+  // confirmed non-null.
   function handleSkip() {
-    fireReady(resolvedProject ?? unresolvedProjectStub(created?.name ?? name.trim()))
+    if (created != null) fireReady(created)
   }
 
   function handleContinue() {
-    // Only reachable once `arrived` is true, which (see `pollEvents` above)
-    // only happens once `resolvedProject` is non-null -- the poll itself
-    // returns an empty page otherwise and `arrived` stays false. The
-    // fallback stub exists only so this stays typed as `Project`, matching
-    // `handleSkip`'s own fallback; it is not expected to ever be reached.
-    fireReady(resolvedProject ?? unresolvedProjectStub(created?.name ?? name.trim()))
+    if (created != null) fireReady(created)
   }
 
   return (

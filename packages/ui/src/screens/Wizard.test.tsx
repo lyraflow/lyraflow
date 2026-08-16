@@ -4,7 +4,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/client.js'
 import { DEFAULT_WIZARD_POLL_INTERVAL_MS, Wizard } from './Wizard.js'
 
-const CREATED = { name: 'My App', slug: 'my-app', write_key: 'wk_new', server_key: 'sk_new' }
+// The full `CreatedProject` shape (#89): `createProject`'s response alone
+// now carries the numeric id polling needs, so this fixture must too, or a
+// regression back to resolving it via a second `projects()` call would go
+// uncaught.
+const CREATED = {
+  id: 7,
+  name: 'My App',
+  slug: 'my-app',
+  created_at: '',
+  retention_months: 24,
+  monthly_event_quota: null,
+  write_key: 'wk_new',
+  server_key: 'sk_new',
+}
 
 beforeEach(() => vi.useFakeTimers({ shouldAdvanceTime: true }))
 afterEach(() => vi.useRealTimers())
@@ -12,9 +25,14 @@ afterEach(() => vi.useRealTimers())
 function fakeClient(over: Record<string, unknown> = {}) {
   return {
     createProject: vi.fn(async () => CREATED),
+    // A stand-in for a stale/failing refetch: if the wizard ever calls this
+    // again, it answers with a DIFFERENT id (99) than the one `createProject`
+    // already returned, so a regression back to resolving polling from here
+    // is caught by "polls events for the newly created project" below
+    // rather than passing by coincidence.
     projects: vi.fn(async () => [
       {
-        id: 7,
+        id: 99,
         name: 'My App',
         slug: 'my-app',
         created_at: '',
@@ -174,5 +192,25 @@ describe('Wizard', () => {
         limit: 1,
       }),
     )
+  })
+
+  // Fix round 1 on #89: `createProject`'s response now carries the id
+  // directly (`CreatedProject` extends `Project`), so the wizard no longer
+  // needs a second `GET /v1/projects` to resolve it. `fakeClient`'s
+  // `projects` fixture answers with a DIFFERENT id (99) specifically so a
+  // regression back to that refetch is caught two ways: this assertion
+  // that the call never happens, and the previous test's id-7 pin, which
+  // would instead see 99.
+  it('never calls GET /v1/projects to resolve the created project', async () => {
+    const client = fakeClient()
+    render(<Wizard client={client} onReady={vi.fn()} pollIntervalMs={10} />)
+    await userEvent.type(screen.getByLabelText(/name/i), 'My App')
+    await userEvent.click(screen.getByRole('button', { name: /create/i }))
+    await screen.findByTestId('install-snippet')
+    await vi.advanceTimersByTimeAsync(10)
+    await waitFor(() =>
+      expect((client as { events: ReturnType<typeof vi.fn> }).events).toHaveBeenCalled(),
+    )
+    expect((client as { projects: ReturnType<typeof vi.fn> }).projects).not.toHaveBeenCalled()
   })
 })
