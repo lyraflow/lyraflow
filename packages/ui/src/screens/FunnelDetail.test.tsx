@@ -92,6 +92,19 @@ describe('FunnelDetail', () => {
     expect(client.runFunnel).toHaveBeenCalledTimes(1)
   })
 
+  // Invented mutation: swapping the (projectId, id) argument order into
+  // `client.funnel(validId, activeId)` left every OTHER test in this file
+  // green, since `fakeClient`'s default `funnel` mock ignores its arguments
+  // entirely and always resolves to the same `FUNNEL`. This is the one
+  // assertion that distinguishes a genuine `(activeId, id)` call from a
+  // swapped or hardcoded one.
+  it('fetches the funnel for the active project and the id in the URL', async () => {
+    const client = fakeClient()
+    renderDetail(client)
+    await screen.findByTestId('funnel-step-1')
+    expect(client.funnel).toHaveBeenCalledWith(1, FUNNEL.id)
+  })
+
   it('does not re-run when the range changes -- it dims and offers Run', async () => {
     const client = fakeClient()
     renderDetail(client)
@@ -144,8 +157,14 @@ describe('FunnelDetail', () => {
 
   it('shows as_of by value so a cached result cannot read as live', async () => {
     vi.setSystemTime(new Date('2026-08-15T12:00:00.000Z'))
-    renderDetail(fakeClient())
+    const client = fakeClient()
+    renderDetail(client)
     expect(await screen.findByTestId('funnel-as-of')).toHaveTextContent('2 minutes ago')
+    // Invented beyond the brief, from the stub check: a component that never
+    // calls the client at all and just renders a hardcoded "2 minutes ago"
+    // satisfies the assertion above unchanged. This is the one line that
+    // distinguishes a genuine fetched `as_of` from a hardcoded string.
+    expect(client.runFunnel).toHaveBeenCalledWith(1, FUNNEL.id, { since: expect.any(String) })
   })
 
   it('maps a 422 to an actionable message, not the outage banner', async () => {
@@ -174,6 +193,16 @@ describe('FunnelDetail', () => {
     const client = fakeClient({ funnel: vi.fn(async () => ({ ...FUNNEL, stale: true })) })
     renderDetail(client)
     await waitFor(() => expect(screen.queryByRole('link', { name: /edit/i })).toBeNull())
+  })
+
+  // Invented mutation, from probing the pair above: inverting the `!funnel.stale`
+  // guard (offer Edit ONLY for a stale/unreadable funnel, never for a normal
+  // one) left every OTHER test in this file green -- nothing asserted the
+  // positive case. This is the test that closes that gap.
+  it('offers to edit a funnel the server can read', async () => {
+    const client = fakeClient()
+    renderDetail(client)
+    expect(await screen.findByRole('link', { name: /edit/i })).toBeInTheDocument()
   })
 })
 
