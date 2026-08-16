@@ -17,8 +17,18 @@ export interface ProjectStore {
 }
 
 export interface CreatedProject {
+  // Every field GET /v1/projects lists for a project, so a caller can add
+  // this row to an in-memory list without a second round trip -- plus the
+  // two one-time keys, which appear here and nowhere else. `id` and
+  // `monthlyEventQuota` come back from Postgres as strings (bigint/bigserial
+  // are returned as strings by node-pg to avoid precision loss); the caller
+  // converts, exactly as GET /v1/projects's own row mapping already does.
+  id: string
   name: string
   slug: string
+  createdAt: Date
+  retentionMonths: number
+  monthlyEventQuota: string | null
   writeKey: string
   serverKey: string
 }
@@ -57,9 +67,18 @@ export async function createProject(pg: ProjectStore, name: string): Promise<Cre
   const writeKey = `wk_${randomBytes(16).toString('hex')}`
   const serverKey = `sk_${randomBytes(24).toString('hex')}`
 
+  // RETURNING rather than a hardcoded copy of the columns' defaults: `id` is
+  // only known once the row exists, and `retention_months` /
+  // `monthly_event_quota` already drifted from their originally-shipped
+  // defaults once (010_retention_default.sql, 011_quota.sql) -- reading them
+  // back is what keeps this correct across the next such migration too,
+  // instead of silently reporting a value the row was never given.
+  let result: unknown
   try {
-    await pg.query(
-      'INSERT INTO projects (name, slug, write_key, server_key_hash) VALUES ($1, $2, $3, $4)',
+    result = await pg.query(
+      `INSERT INTO projects (name, slug, write_key, server_key_hash)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, created_at, retention_months, monthly_event_quota`,
       [name, slug, writeKey, createHash('sha256').update(serverKey).digest('hex')],
     )
   } catch (err) {
@@ -67,5 +86,26 @@ export async function createProject(pg: ProjectStore, name: string): Promise<Cre
     throw err
   }
 
-  return { name, slug, writeKey, serverKey }
+  const row = (
+    result as {
+      rows: Array<{
+        id: string
+        created_at: Date
+        retention_months: number
+        monthly_event_quota: string | null
+      }>
+    }
+  ).rows[0]
+  if (!row) throw new Error('createProject: INSERT ... RETURNING produced no row')
+
+  return {
+    name,
+    slug,
+    writeKey,
+    serverKey,
+    id: row.id,
+    createdAt: row.created_at,
+    retentionMonths: row.retention_months,
+    monthlyEventQuota: row.monthly_event_quota,
+  }
 }

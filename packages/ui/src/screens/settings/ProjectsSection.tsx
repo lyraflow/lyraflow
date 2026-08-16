@@ -21,12 +21,20 @@ type Mode = 'idle' | 'form' | 'created'
  * header naming one project while the data underneath answers to another,
  * with neither looking wrong on its own. A successful create can't just
  * merge into context via `updateProject` (that only patches an existing
- * row by id), so it re-fetches the authoritative list and hands the whole
- * thing to `setProjects` instead -- one source of truth, one write path.
+ * row by id), so it hands the create response straight to `addProject`
+ * instead -- one source of truth, one write path.
+ *
+ * Deliberately NOT a re-fetch-and-replace (#89): `POST /v1/projects` now
+ * returns every field a `Project` needs (`CreatedProject`, `api/types.ts`),
+ * so there is nothing left to fetch. A `GET /v1/projects` issued here could
+ * still be in flight when a concurrent `PATCH /v1/project` (this same
+ * screen's own limits form) commits, and its stale response -- fetched
+ * before that PATCH landed -- would win a whole-list replace even though
+ * `updateProject`'s merge already applied the newer value.
  */
 export function ProjectsSection(props: { client: ApiClient }) {
   const { client } = props
-  const { projects, setProjects } = useProject()
+  const { projects, addProject } = useProject()
 
   const [mode, setMode] = useState<Mode>('idle')
   const [name, setName] = useState('')
@@ -58,19 +66,12 @@ export function ProjectsSection(props: { client: ApiClient }) {
       const created = await client.createProject(trimmed)
       setCreatedProject(created)
       setMode('created')
-      // The create response carries only name/slug/write_key/server_key --
-      // no `id`, so it can't be merged in locally. Re-fetching and handing
-      // the result to context's `setProjects` is what makes the header
-      // switcher (and this list) see the new project without a reload.
-      // Best effort -- the create itself already succeeded, and a failed
-      // refresh here must not hide the one-time keys panel above. The
-      // person can always reload to see the list catch up.
-      try {
-        const fresh = await client.projects()
-        setProjects(fresh)
-      } catch {
-        /* the list will be stale until the next successful fetch */
-      }
+      // Additive, straight from the create response -- no re-fetch. It
+      // already carries every field a `Project` needs, so this is what
+      // makes the header switcher (and this list) see the new project
+      // without a reload, and without a `GET /v1/projects` that could race
+      // a concurrent limits save (#89).
+      addProject(created)
     } catch (err) {
       // The API slugifies the name, so "My App" and "my app" collide even
       // though neither is literally the other. This is the ordinary

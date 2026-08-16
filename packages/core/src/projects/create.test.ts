@@ -32,6 +32,25 @@ describe('createProject', () => {
     expect(project.serverKey).toMatch(/^sk_[0-9a-f]{48}$/)
   })
 
+  // The whole point of this shape existing: a caller building an in-memory
+  // row (the UI's project switcher) needs every field GET /v1/projects
+  // would hand it, not just the two one-time keys. `id` in particular is
+  // what #89's fix needed and CreatedProject didn't carry before.
+  it('returns id, created_at, retention_months and monthly_event_quota alongside the keys', async () => {
+    const project = await createProject(pg, `${NAME} 2`)
+    try {
+      expect(project.id).toMatch(/^\d+$/)
+      expect(project.createdAt).toBeInstanceOf(Date)
+      expect(project.retentionMonths).toBeGreaterThan(0)
+      // NULL means unlimited and is the shipped default for new projects
+      // (011_quota.sql) -- asserting it here pins that default rather than
+      // letting a future migration change it unnoticed.
+      expect(project.monthlyEventQuota).toBeNull()
+    } finally {
+      await pg.query('DELETE FROM projects WHERE slug = $1', [slugify(`${NAME} 2`)])
+    }
+  })
+
   it('reports a clear message instead of a raw Postgres unique-violation when run twice', async () => {
     // `create-project` is the first command the README gives a new self-hoster,
     // so running it twice is an ordinary mistake. Before the fix this rejected

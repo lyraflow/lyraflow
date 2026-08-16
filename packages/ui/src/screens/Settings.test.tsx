@@ -5,9 +5,32 @@ import { describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
-import { ProjectProvider } from '../app/ProjectContext.js'
+import { ProjectProvider, useProject } from '../app/ProjectContext.js'
 import { Shell } from '../app/Shell.js'
 import { Settings } from './Settings.js'
+
+// Same idiom as SegmentPicker.test.tsx's own `deferred`: a promise the test
+// controls, so an ordering that would otherwise depend on real timing (the
+// race in #89) can be driven deterministically instead.
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
+}
+
+// Reads project context directly rather than through any one screen's own
+// rendering of a field -- `LimitsSection`'s retention input only reflects
+// what was TYPED, not what context ends up holding after `updateProject`'s
+// merge, so it can't be used to prove a race outcome on its own. This is
+// the one place the race test below can observe whether a whole-list
+// replace clobbered `updateProject`'s already-applied edit.
+function RetentionProbe(props: { id: number }) {
+  const { projects } = useProject()
+  const value = projects.find((p) => p.id === props.id)?.retention_months
+  return <div data-testid="retention-probe">{value ?? 'missing'}</div>
+}
 
 const PROJECTS = [
   {
@@ -19,6 +42,25 @@ const PROJECTS = [
     monthly_event_quota: null,
   },
 ]
+
+// The full `CreatedProject` shape (#89): every `Project` field plus the two
+// one-time keys. Tests below use this instead of the pre-fix
+// name/slug/write_key/server_key-only shape so a fixture that omits a field
+// `addProject` needs (id in particular) doesn't silently push an incomplete
+// row into context.
+function createdProject(over: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: 2,
+    name: 'Beta',
+    slug: 'beta',
+    created_at: '2026-08-14T00:00:00.000Z',
+    retention_months: 13,
+    monthly_event_quota: null,
+    write_key: 'wk_new',
+    server_key: 'sk_new',
+    ...over,
+  }
+}
 
 function fakeClient(over: Record<string, unknown> = {}) {
   return {
@@ -428,12 +470,7 @@ describe('Settings — projects', () => {
   })
 
   it('creates a project and shows both keys', async () => {
-    const createProject = vi.fn(async () => ({
-      name: 'Beta',
-      slug: 'beta',
-      write_key: 'wk_new',
-      server_key: 'sk_new',
-    }))
+    const createProject = vi.fn(async () => createdProject())
     renderSettings(fakeClient({ createProject }))
     await userEvent.click(await screen.findByRole('button', { name: /new project/i }))
     await userEvent.type(screen.getByLabelText(/name/i), 'Beta')
@@ -454,12 +491,7 @@ describe('Settings — projects', () => {
   // anything. Scoping it to the panel is what makes "drop the
   // not-shown-again warning" actually fail this test.
   it('warns that the server key will not be shown again', async () => {
-    const createProject = vi.fn(async () => ({
-      name: 'Beta',
-      slug: 'beta',
-      write_key: 'wk_new',
-      server_key: 'sk_new',
-    }))
+    const createProject = vi.fn(async () => createdProject())
     renderSettings(fakeClient({ createProject }))
     await userEvent.click(await screen.findByRole('button', { name: /new project/i }))
     await userEvent.type(screen.getByLabelText(/name/i), 'Beta')
@@ -490,30 +522,17 @@ describe('Settings — projects', () => {
   // one thing while the data underneath says another, both looking
   // correct -- is the worst available failure on this screen, so this
   // asserts the new project is actually selectable in the switcher.
+  //
+  // #89: this now proves the switcher updates WITHOUT any `GET /v1/projects`
+  // at all -- `projects` below is a fake that would hand back the stale
+  // pre-create list forever, and the test still has to pass. Before the fix
+  // this test relied on a mocked refetch actually returning Beta; that
+  // refetch (and the race it enabled against a concurrent limits save) is
+  // gone, and `createProject`'s own response is now the only source for the
+  // new row.
   it('adds the new project to the switcher without a reload', async () => {
-    const createProject = vi.fn(async () => ({
-      name: 'Beta',
-      slug: 'beta',
-      write_key: 'wk_new',
-      server_key: 'sk_new',
-    }))
-    // The refresh this flow triggers is a genuine re-fetch, not a locally
-    // synthesized entry -- `CreatedProject` has no `id`. This mock has to
-    // answer the POST-create `GET /v1/projects` with Beta actually in it,
-    // the same way a real server would, or this test would pass by
-    // accident: the default `projects` mock below would hand context back
-    // exactly the list it started with.
-    const projects = vi.fn(async () => [
-      ...PROJECTS,
-      {
-        id: 2,
-        name: 'Beta',
-        slug: 'beta',
-        created_at: '',
-        retention_months: 24,
-        monthly_event_quota: null,
-      },
-    ])
+    const createProject = vi.fn(async () => createdProject())
+    const projects = vi.fn(async () => PROJECTS)
     const client = fakeClient({ createProject, projects })
     render(
       <MemoryRouter initialEntries={['/settings']}>
@@ -531,6 +550,78 @@ describe('Settings — projects', () => {
 
     await userEvent.click(screen.getByRole('button', { name: /^alpha$/i }))
     expect(await screen.findByRole('option', { name: /beta/i })).toBeInTheDocument()
+    // The stale-refetch path this test used to exercise is gone entirely --
+    // creating a project must never issue a `GET /v1/projects` at all.
+    expect(projects).not.toHaveBeenCalled()
+  })
+
+  // The race #89 describes: a limits save (PATCH, merged in via
+  // `updateProject`) commits WHILE a project creation is in flight, and the
+  // creation's response resolves after. Driven with deferred promises so the
+  // ordering is exact rather than timing-dependent: the PATCH's `updateProject`
+  // merge happens first, then the create resolves and is added -- and the
+  // saved retention value must survive the add.
+  //
+  // Mutation-tested: reverting `ProjectsSection`'s additive `addProject` call
+  // back to a `client.projects()` refetch + whole-list replace makes this
+  // fail, because the refetch mock below deliberately answers with the
+  // PRE-save retention value (12), representing a `GET` issued before the
+  // `PATCH` committed. The fix removed that refetch entirely, so this
+  // fake's `projects` is never even consulted.
+  it('a concurrent limits save survives a project creation whose list fetch was issued first', async () => {
+    const patch = deferred<{ retention_months: number; monthly_event_quota: number | null }>()
+    const patchProject = vi.fn(() => patch.promise)
+    const create = deferred<ReturnType<typeof createdProject>>()
+    const createProject = vi.fn(() => create.promise)
+    // Stands in for "the GET issued before the PATCH committed": if
+    // anything in the create flow still calls this, it answers with the
+    // OLD retention value (12), never the saved one (7).
+    const projects = vi.fn(async () => [{ ...PROJECTS[0], retention_months: 12 }])
+    const client = fakeClient({ createProject, patchProject, projects })
+    render(
+      <MemoryRouter initialEntries={['/settings']}>
+        <ProjectProvider projects={PROJECTS} initialId={1}>
+          <Shell email="admin@localhost" onLogout={vi.fn()}>
+            <RetentionProbe id={1} />
+            <Settings client={client} />
+          </Shell>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    expect(screen.getByTestId('retention-probe')).toHaveTextContent('24')
+
+    // Start the creation first (its "list fetch", if the buggy path issued
+    // one, would be dispatched at this point -- before the save below ever
+    // commits).
+    await userEvent.click(await screen.findByRole('button', { name: /new project/i }))
+    await userEvent.type(screen.getByLabelText(/name/i), 'Beta')
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }))
+    expect(createProject).toHaveBeenCalledTimes(1)
+
+    // Now the concurrent limits save: change retention and save it while
+    // the creation above is still unresolved.
+    const retentionInput = await screen.findByLabelText(/retention/i)
+    await userEvent.clear(retentionInput)
+    await userEvent.type(retentionInput, '7')
+    await userEvent.click(screen.getByRole('button', { name: /save retention/i }))
+    expect(patchProject).toHaveBeenCalledTimes(1)
+
+    // The PATCH commits first, applying `updateProject`'s merge...
+    patch.resolve({ retention_months: 7, monthly_event_quota: null })
+    await waitFor(() => expect(screen.getByTestId('retention-probe')).toHaveTextContent('7'))
+
+    // ...then the creation resolves and is added afterward.
+    create.resolve(createdProject())
+    await screen.findByTestId('created-project-keys')
+    await userEvent.click(screen.getByRole('button', { name: /^alpha$/i }))
+    expect(await screen.findByRole('option', { name: /beta/i })).toBeInTheDocument()
+
+    // The saved value must have survived the creation settling afterward --
+    // the whole point of this test. A whole-list-replace fed by a `GET`
+    // issued before the PATCH committed would show '12' (the stale fixture
+    // above) here instead.
+    expect(screen.getByTestId('retention-probe')).toHaveTextContent('7')
+    expect(projects).not.toHaveBeenCalled()
   })
 })
 
@@ -579,12 +670,7 @@ describe('Settings — projects invented mutations', () => {
   // truly gone rather than merely covered, and that dismissing it does not
   // also wipe the (already-refreshed) project list underneath it.
   it('dismisses the keys panel only on the explicit button, and the list survives it', async () => {
-    const createProject = vi.fn(async () => ({
-      name: 'Beta',
-      slug: 'beta',
-      write_key: 'wk_new',
-      server_key: 'sk_new',
-    }))
+    const createProject = vi.fn(async () => createdProject())
     renderSettings(fakeClient({ createProject }))
     await userEvent.click(await screen.findByRole('button', { name: /new project/i }))
     await userEvent.type(screen.getByLabelText(/name/i), 'Beta')
@@ -607,12 +693,15 @@ describe('Settings — projects invented mutations', () => {
     const createProject = vi
       .fn()
       .mockRejectedValueOnce(new ApiError(409, 'project_exists'))
-      .mockResolvedValueOnce({
-        name: 'Gamma',
-        slug: 'gamma',
-        write_key: 'wk_g',
-        server_key: 'sk_g',
-      })
+      .mockResolvedValueOnce(
+        createdProject({
+          id: 3,
+          name: 'Gamma',
+          slug: 'gamma',
+          write_key: 'wk_g',
+          server_key: 'sk_g',
+        }),
+      )
     renderSettings(fakeClient({ createProject }))
     await userEvent.click(await screen.findByRole('button', { name: /new project/i }))
     await userEvent.type(screen.getByLabelText(/name/i), 'Alpha')
