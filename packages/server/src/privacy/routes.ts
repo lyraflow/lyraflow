@@ -46,21 +46,27 @@ interface DeletionParams {
 /**
  * Parses the `:id` path param for the status route. A non-numeric or
  * non-positive id is a deterministic client error, not a lookup miss —
- * mirrors segments/routes.ts's `parseSegmentId` (kept as a private copy
- * rather than imported/exported, the same way that route file keeps its
- * own). Without this, `Number('not-a-number')` is `NaN`, which reaches
- * Postgres as a query parameter and trips app.ts's generic error handler
- * into a `503` for what is a deterministic client error.
+ * mirrors funnels/routes.ts's `parseId` and auth/bridge.ts's
+ * `parseProjectId` (kept as a private copy rather than imported/exported,
+ * the same way those files keep their own).
+ *
+ * `/^\d+$/` first, so `Number()` never sees anything it could coerce —
+ * `'0x10'`, `' 1 '`, `'+5'` and `'1e3'` all parse to a normal-looking
+ * finite number under a bare `Number()` call. Without the shape check,
+ * `Number('not-a-number')` is `NaN`, which reaches Postgres as a query
+ * parameter and trips app.ts's generic error handler into a `503` for what
+ * is a deterministic client error.
  */
 function parseDeletionId(raw: string): number | null {
+  if (!/^\d+$/.test(raw)) return null
   const id = Number(raw)
   // Bounded above by MAX_SAFE_INTEGER, not just "is an integer": a value
-  // like 1e20 passes Number.isInteger (it is exactly representable as a
-  // float) but is far outside Postgres's bigint range, and reaches
-  // DeletionStore#get as a query parameter that Postgres itself rejects —
-  // the exact "deterministic client error surfaces as a 503" outcome this
-  // function exists to prevent for every other malformed shape.
-  return Number.isInteger(id) && id > 0 && id <= Number.MAX_SAFE_INTEGER ? id : null
+  // like 99999999999999999999 is all digits but outside Postgres's bigint
+  // range, and reaches DeletionStore#get as a query parameter that
+  // Postgres itself rejects — the exact "deterministic client error
+  // surfaces as a 503" outcome this function exists to prevent for every
+  // other malformed shape.
+  return Number.isSafeInteger(id) && id > 0 ? id : null
 }
 
 /**

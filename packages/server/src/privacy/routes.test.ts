@@ -577,6 +577,27 @@ describe('GET /v1/deletions/:id', () => {
     expect(res.json().error).toBe('invalid_deletion_id')
   })
 
+  // A bare `Number()` + `Number.isInteger()` check accepts all of these —
+  // hex (`0x10`), a leading `+`, surrounding whitespace, and exponent
+  // notation all coerce to a normal-looking finite integer. Each must be
+  // rejected the same way `'not-a-number'` is above, matching the
+  // `/^\d+$/`-first convention `parseId` (funnels/routes.ts) and
+  // `parseProjectId` (auth/bridge.ts) already use.
+  it.each([
+    ['0x10', 'hex notation'],
+    ['+5', 'a leading plus sign'],
+    [' 1 ', 'surrounding whitespace'],
+    ['1e3', 'exponent notation'],
+    ['', 'an empty string'],
+    ['-1', 'a negative number'],
+    ['1.0', 'a decimal point'],
+    ['99999999999999999999', 'a value beyond MAX_SAFE_INTEGER'],
+  ])('rejects a deletion id with %s (%s)', async (raw) => {
+    const res = await status(encodeURIComponent(raw), SERVER_KEY_A)
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toBe('invalid_deletion_id')
+  })
+
   it('404s an id nothing in this project has ever recorded', async () => {
     const res = await status(999_999_999, SERVER_KEY_A)
     expect(res.statusCode).toBe(404)
