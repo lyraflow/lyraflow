@@ -314,6 +314,45 @@ describe('FunnelDetail — invalid id in the URL', () => {
   })
 })
 
+// MINOR (whole-branch review): the funnel fetch and the mount auto-run fire
+// concurrently, so a fetch failure alongside a successful run could render
+// an error banner and a full, confident result together. Two consequences,
+// two tests: the result must not render alongside an error, and a Run click
+// must not silently clear a funnel-fetch banner that has nothing to do with
+// the run it just kicked off.
+describe('FunnelDetail — error banner and result never coexist', () => {
+  it('does not render a full result alongside an error banner', async () => {
+    // The mutation this pins: gate the result block on `result != null`
+    // alone again (drop the `funnelError == null && runError == null`
+    // clauses) -- exactly this test fails, because runFunnel still
+    // succeeds even though funnel() rejected.
+    const client = fakeClient({
+      funnel: vi.fn(async () => {
+        throw new ApiError(503, 'unavailable')
+      }),
+    })
+    renderDetail(client)
+    expect(await screen.findByRole('alert')).toHaveTextContent(/temporarily unavailable/i)
+    expect(screen.queryByTestId('funnel-result')).toBeNull()
+  })
+
+  it('a Run click does not clear an unrelated funnel-fetch banner', async () => {
+    // The mutation this pins: `runNow` clearing the SAME error state the
+    // fetch effect writes to (the pre-fix shape) -- exactly this test fails,
+    // because a successful Run would then silently erase the fetch banner.
+    const client = fakeClient({
+      funnel: vi.fn(async () => {
+        throw new ApiError(503, 'unavailable')
+      }),
+    })
+    renderDetail(client)
+    expect(await screen.findByRole('alert')).toHaveTextContent(/temporarily unavailable/i)
+    await userEvent.click(screen.getByRole('button', { name: /^run$/i }))
+    await waitFor(() => expect(client.runFunnel).toHaveBeenCalledTimes(2))
+    expect(screen.getByRole('alert')).toHaveTextContent(/temporarily unavailable/i)
+  })
+})
+
 describe('FunnelDetail — delete', () => {
   it('deletes only after a confirmation, then leaves for the list', async () => {
     const client = fakeClient()

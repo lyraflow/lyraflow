@@ -49,7 +49,17 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
 
   const [funnel, setFunnel] = useState<Funnel | null>(null)
   const [result, setResult] = useState<FunnelRunResult | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  // MINOR (whole-branch review): these were one `error` state shared by the
+  // funnel fetch AND every run -- two consequences, both defects. First,
+  // `runNow` calling `setError(null)` on every click silently wiped out a
+  // funnel-fetch banner that had nothing to do with the run just requested.
+  // Second, the two fire concurrently on mount (see the effect below), so a
+  // fetch failure alongside a successful run could leave an error banner and
+  // a full, confident result rendered together -- the fetch and the run are
+  // independent requests and must not share one flag that only the more
+  // recent caller gets to clear.
+  const [funnelError, setFunnelError] = useState<string | null>(null)
+  const [runError, setRunError] = useState<string | null>(null)
   const [running, setRunning] = useState(false)
   const [stale, setStale] = useState(false)
   const [days, setDays] = useState<RangeDays>(DEFAULT_RANGE_DAYS)
@@ -79,7 +89,7 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
     (runDays: RangeDays) => {
       if (activeId == null || validId == null) return
       setRunning(true)
-      setError(null)
+      setRunError(null)
       const since = sinceIsoForDays(runDays, new Date())
       client
         .runFunnel(activeId, validId, { since })
@@ -104,7 +114,7 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
             return
           }
           if (runDays !== daysRef.current) return
-          setError(describeError(err))
+          setRunError(describeError(err))
         })
         .finally(() => setRunning(false))
     },
@@ -125,7 +135,8 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
     let cancelled = false
     setFunnel(null)
     setResult(null)
-    setError(null)
+    setFunnelError(null)
+    setRunError(null)
     setStale(false)
     setDays(DEFAULT_RANGE_DAYS)
 
@@ -140,7 +151,7 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
           onUnauthorized?.()
           return
         }
-        setError(describeError(err))
+        setFunnelError(describeError(err))
       })
 
     runNow(DEFAULT_RANGE_DAYS)
@@ -264,10 +275,24 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
         </p>
       )}
 
-      {error != null && (
+      {/* MINOR (whole-branch review): an error banner and a full result used
+       * to render together -- the funnel fetch and a run fire concurrently
+       * on mount, so a fetch failure alongside a successful run could show
+       * "this funnel could not be read" right next to a complete, confident
+       * numbers panel. `funnelError` takes priority (without the funnel
+       * itself, nothing else on the page -- Edit, Delete, the segment
+       * subtitle -- can be trusted either); either error suppresses the
+       * result entirely rather than rendering beside it. */}
+      {funnelError != null ? (
         <p role="alert" className="text-sm text-destructive">
-          {error}
+          {funnelError}
         </p>
+      ) : (
+        runError != null && (
+          <p role="alert" className="text-sm text-destructive">
+            {runError}
+          </p>
+        )
       )}
 
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -277,7 +302,7 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
         </Button>
       </div>
 
-      {result != null && (
+      {funnelError == null && runError == null && result != null && (
         <div
           data-testid="funnel-result"
           data-stale={String(stale)}
