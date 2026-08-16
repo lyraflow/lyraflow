@@ -3,7 +3,19 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../../api/client.js'
 import type { ApiClient } from '../../api/client.js'
+import type { Segment } from '../../api/types.js'
 import { SegmentPicker } from './SegmentPicker.js'
+
+// A promise the test controls, so a guard gated on the fetch NOT having
+// resolved yet (the `loaded` gate below) can actually be provoked instead
+// of merely asserted against.
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
+}
 
 describe('SegmentPicker', () => {
   it('disables a stale segment and says why', async () => {
@@ -125,6 +137,53 @@ describe('SegmentPicker -- invented mutations', () => {
     )
     await screen.findByRole('option', { name: /Paying/ })
     expect(screen.queryByText(/cannot be resolved/i)).toBeNull()
+  })
+
+  // I5 (targeted re-review): `selectedMissing` is gated on `loaded` so a
+  // value isn't read as unresolvable for the render(s) before the real list
+  // arrives. The mutation this pins: drop `loaded &&` from the guard, and
+  // this test alone fails -- the select would read "missing" (and render
+  // the "cannot be resolved" text) BEFORE the fetch has had any chance to
+  // say whether the segment is really absent.
+  it('does not call a value unresolvable before the segment list has loaded', async () => {
+    const pending = deferred<Segment[]>()
+    render(
+      <SegmentPicker
+        client={{ segments: vi.fn(() => pending.promise) } as unknown as ApiClient}
+        projectId={1}
+        value={4}
+        onChange={() => {}}
+      />,
+    )
+    const select = screen.getByLabelText('Segment') as HTMLSelectElement
+    expect(select).not.toHaveValue('missing')
+    expect(screen.queryByText(/cannot be resolved/i)).toBeNull()
+
+    // Resolving with a list that genuinely lacks id 4 -- NOW it may read
+    // unresolvable.
+    pending.resolve([{ id: 1, name: 'Paying', stale: false }])
+    await waitFor(() => expect(select).toHaveValue('missing'))
+  })
+
+  // I5 (targeted re-review): the "missing" option is a statement, not a
+  // real choice -- re-selecting it must be a no-op. The mutation this pins:
+  // drop the `if (next === 'missing') return` guard, and this test alone
+  // fails -- `onChange` would be called with `Number('missing')`, i.e. NaN.
+  it('reselecting the unresolvable option is a no-op, not a change to NaN', async () => {
+    const onChange = vi.fn()
+    const segments = vi.fn(async () => [{ id: 1, name: 'Paying', stale: false }])
+    render(
+      <SegmentPicker
+        client={{ segments } as unknown as ApiClient}
+        projectId={1}
+        value={4}
+        onChange={onChange}
+      />,
+    )
+    const select = (await screen.findByLabelText('Segment')) as HTMLSelectElement
+    await waitFor(() => expect(select).toHaveValue('missing'))
+    await userEvent.selectOptions(select, 'missing')
+    expect(onChange).not.toHaveBeenCalled()
   })
 
   it('a stale segment cannot be selected via selectOptions -- disabled is real, not cosmetic', async () => {
