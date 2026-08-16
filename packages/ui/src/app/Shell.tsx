@@ -174,7 +174,13 @@ export function Shell(props: { email: string | null; onLogout(): void; children:
             }`}
           >
             <LayoutList className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
-            Feed
+            {/* Three destinations no longer fit as icon+label at 390px (see
+             * this task's own brief: the switcher truncated to "Ce" and a
+             * tab label to "ed 1"). The label stays in the DOM at every
+             * width -- only visually hidden below `sm` -- so the link's
+             * accessible name never depends on viewport size, and no
+             * `aria-label` duplicate is needed alongside it. */}
+            <span className="sr-only sm:not-sr-only">Feed</span>
           </Link>
           {/* `NavLink`, exactly as Settings uses it below -- it supplies
            * `aria-current="page"` itself, and unlike Feed there is no
@@ -190,7 +196,7 @@ export function Shell(props: { email: string | null; onLogout(): void; children:
             }
           >
             <Filter className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
-            Funnels
+            <span className="sr-only sm:not-sr-only">Funnels</span>
           </NavLink>
           <NavLink
             to={ROUTES.settings}
@@ -203,7 +209,7 @@ export function Shell(props: { email: string | null; onLogout(): void; children:
             }
           >
             <SettingsIcon className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
-            Settings
+            <span className="sr-only sm:not-sr-only">Settings</span>
           </NavLink>
         </nav>
       </aside>
