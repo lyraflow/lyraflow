@@ -14,6 +14,83 @@ docker compose build`, so today every install builds from its own checkout. A
 release is therefore a git tag and the source at that tag — upgrading means
 pulling the tag and rebuilding, not pulling an image.
 
+**0.2.1 was never tagged either.** Its version bump and changelog entry shipped
+in the repository, but no `v0.2.1` tag was ever created — so the release below
+exists in the manifests and in this file and nowhere in `git tag`. It is recorded
+here as it happened rather than tagged retroactively, for the same reason 0.1.0
+is: a tag created after the fact names a moment nobody could have fetched. Its
+one fix is contained in 0.3.0.
+
+## 0.3.0 — 2026-08-16
+
+Lyraflow gets a web interface. Everything before this release was reachable only
+over HTTP or through the CLI.
+
+**Schema version 13** (`013_admin_sessions.sql`, additive). Upgrading runs one
+migration and needs no downtime.
+
+### Added
+
+**An admin interface at `/`, served by the same process on the same port.** One
+container, one port, one certificate; the installer is unchanged. Four screens:
+
+- **Login**, backed by a session cookie that is a second credential inside the
+  existing authenticator rather than a parallel auth system. Sessions are hashed
+  at rest, slide on use, and expire absolutely at 90 days.
+- **First-run wizard** — create a project, copy the snippet, watch the first
+  event arrive. It hands over the server key, which exists nowhere else: only its
+  SHA-256 is stored, so leaving that screen without copying it means creating
+  another project.
+- **Live feed** — accepted events and rejections in two tabs, with the reason
+  each rejection was dropped. That reason was previously visible only by reading
+  server logs.
+- **Settings** — the install snippet, this month's usage against quota, editable
+  retention and quota, and the project list. These were reachable only by raw SQL.
+- **Funnels** — create a funnel from an ordered list of events, run it over a
+  range, and read one row per step: how many reached it, what share of entrants
+  that is, and how many dropped since the step before.
+
+**Two honesty surfaces on the funnels screen**, because a funnel can return
+plausible numbers that answer a different question than the one asked:
+
+- A run over a range shorter than the funnel's own window under-reports
+  conversion, because people who entered near the end have not had their full
+  window to finish. The screen says so, and says how many.
+- If a funnel's segment filter has been deleted, the run succeeds over
+  **everyone** rather than failing. The screen reports that and stops presenting
+  the filter as applied.
+
+### Fixed
+
+- Renaming a funnel no longer discards its cached run summary. The stored
+  definition is compared against the incoming one, so only a real change resets
+  it (#92)
+- The funnel detail screen shows a segment filter by name rather than by id (#94)
+- The feed no longer claims "no events yet" and "showing the last data received"
+  at the same time — states that cleared the rows and then asserted things no
+  poll had established. Its tab badges now distinguish a confirmed zero from an
+  unconfirmed one (#82)
+- `parseSegmentId` accepted an unbounded id, so an oversized value reached
+  Postgres as a bigint bind and returned `503` — an input error wearing an
+  outage's clothes, on four segment routes. Every route id now shares one shape
+  check (#78)
+
+### Known limitations, stated rather than implied
+
+**Segments, people and person profiles have no screens.** Reach them over the
+HTTP API or the CLI, as before.
+
+**The CLI remains strictly more capable for funnels.** A funnel step can carry
+conditions on that event's own properties; the builder does not author those, and
+a funnel that has them opens read-only rather than silently dropping them on
+save. The per-step list of *which* people dropped is API- and CLI-only, since
+there is no person profile to open one from.
+
+**A pasted snippet still records nothing until the site calls `lyraflow.page()`**
+([#52](https://github.com/lyraflow/lyraflow/issues/52)). This is the next thing
+being fixed, and it undercuts the wizard: an install that is correct and one that
+is waiting for more code look identical.
+
 ## 0.2.1 — 2026-08-14
 
 ### Fixed
