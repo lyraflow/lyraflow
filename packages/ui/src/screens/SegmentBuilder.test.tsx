@@ -134,7 +134,13 @@ describe('SegmentBuilder -- edit', () => {
   it('seeds the name and tree from the fetched segment', async () => {
     renderBuilder(fakeClient(), SEGMENT.id)
     expect(await screen.findByLabelText(/name/i)).toHaveValue('Paying customers')
-    expect(screen.getByTestId('condition-0')).toHaveTextContent('plan = pro')
+    // Task 5 replaced the placeholder leaf (plain `summarise` text) with a
+    // real `TraitForm` -- an `<input>`'s `value` is never DOM text content,
+    // so the fetched trait's data is pinned through its own fields instead.
+    const condition = within(screen.getByTestId('condition-0'))
+    expect(condition.getByRole('textbox', { name: /key/i })).toHaveValue('plan')
+    expect(condition.getByRole('combobox', { name: /operator/i })).toHaveValue('=')
+    expect(condition.getByRole('textbox', { name: /^value$/i })).toHaveValue('pro')
   })
 
   it('save sends the current tree through updateSegmentTree, never createSegment', async () => {

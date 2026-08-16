@@ -82,7 +82,16 @@ describe('TreeEditor', () => {
       // stub that happens to hardcode 'a'/'b' as its own placeholder text.
       render(<TreeEditor value={trait('z')} onChange={vi.fn()} />)
       expect(screen.getByTestId('group-')).toBeInTheDocument()
-      expect(screen.getByTestId('condition-0')).toHaveTextContent('z = x')
+      // Task 5 replaced the placeholder leaf (a `summarise` text span) with
+      // a real `TraitForm`, whose fields don't concatenate into "z = x" as
+      // DOM text content -- an `<input>`'s `value` is never a text node.
+      // Reading each field back through its own control pins the same
+      // fact this test always meant to pin: a bare-trait root normalises
+      // and reaches the leaf with its data intact.
+      const condition = within(screen.getByTestId('condition-0'))
+      expect(condition.getByRole('textbox', { name: /key/i })).toHaveValue('z')
+      expect(condition.getByRole('combobox', { name: /operator/i })).toHaveValue('=')
+      expect(condition.getByRole('textbox', { name: /^value$/i })).toHaveValue('x')
     })
 
     it('edits inside a normalised root reach the server root wrapped, not bare', async () => {
