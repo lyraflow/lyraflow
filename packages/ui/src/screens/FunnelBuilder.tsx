@@ -266,7 +266,13 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
       </div>
 
       {activeId != null && (
-        <StepRows client={client} projectId={activeId} steps={steps} onChange={setSteps} />
+        <StepRows
+          client={client}
+          projectId={activeId}
+          steps={steps}
+          onChange={setSteps}
+          onUnauthorized={onUnauthorized}
+        />
       )}
 
       <WindowField
@@ -284,6 +290,7 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
           projectId={activeId}
           value={segmentId}
           onChange={setSegmentId}
+          onUnauthorized={onUnauthorized}
         />
       )}
 

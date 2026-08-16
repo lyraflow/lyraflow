@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
+import { ApiError } from '../../api/client.js'
 import type { ApiClient } from '../../api/client.js'
 import { SegmentPicker } from './SegmentPicker.js'
 
@@ -146,5 +147,46 @@ describe('SegmentPicker -- invented mutations', () => {
     await userEvent.selectOptions(select, '2')
     expect(select).toHaveValue('')
     expect(onChange).not.toHaveBeenCalled()
+  })
+})
+
+// I6 (whole-branch review): every segments() failure -- INCLUDING 401 --
+// used to be swallowed into an empty list, silently showing only
+// "Everyone" for an expired session, the exact failure spec decision 6
+// exists to prevent for the event autocomplete.
+describe('SegmentPicker -- errors are never silently swallowed', () => {
+  it('routes a 401 to onUnauthorized rather than rendering an empty list', async () => {
+    const onUnauthorized = vi.fn()
+    const segments = vi.fn(async () => {
+      throw new ApiError(401, 'unauthorized')
+    })
+    render(
+      <SegmentPicker
+        client={{ segments } as unknown as ApiClient}
+        projectId={1}
+        value={null}
+        onChange={() => {}}
+        onUnauthorized={onUnauthorized}
+      />,
+    )
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalled())
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('surfaces a non-401 failure instead of silently rendering only Everyone', async () => {
+    const segments = vi.fn(async () => {
+      throw new ApiError(503, 'unavailable')
+    })
+    render(
+      <SegmentPicker
+        client={{ segments } as unknown as ApiClient}
+        projectId={1}
+        value={null}
+        onChange={() => {}}
+      />,
+    )
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not load segments/i)
+    // Everyone must stay usable even though the fetch failed.
+    expect(screen.getByRole('option', { name: /everyone/i })).toBeInTheDocument()
   })
 })

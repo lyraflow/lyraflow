@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
+import { ApiError } from '../../api/client.js'
 import type { ApiClient } from '../../api/client.js'
 import { EventCombobox } from './EventCombobox.js'
 
@@ -122,5 +123,50 @@ describe('EventCombobox -- invented mutations', () => {
       />,
     )
     expect(screen.getByLabelText('Step 1')).toBeDisabled()
+  })
+})
+
+// I6 (whole-branch review): every schemaEvents() failure -- INCLUDING 401 --
+// used to be swallowed into an empty options list, which reads as "your
+// events do not exist" for an expired session -- the exact failure spec
+// decision 6 exists to prevent for this field's ordinary empty state.
+describe('EventCombobox -- errors are never silently swallowed', () => {
+  it('routes a 401 to onUnauthorized rather than a permanently empty list', async () => {
+    const onUnauthorized = vi.fn()
+    const schemaEvents = vi.fn(async () => {
+      throw new ApiError(401, 'unauthorized')
+    })
+    render(
+      <EventCombobox
+        client={{ schemaEvents } as unknown as ApiClient}
+        projectId={1}
+        value=""
+        onChange={() => {}}
+        label="Step 1"
+        onUnauthorized={onUnauthorized}
+      />,
+    )
+    await userEvent.type(screen.getByLabelText('Step 1'), 'signup')
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalled())
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('surfaces a non-401 failure instead of silently rendering no suggestions', async () => {
+    const schemaEvents = vi.fn(async () => {
+      throw new ApiError(503, 'unavailable')
+    })
+    render(
+      <EventCombobox
+        client={{ schemaEvents } as unknown as ApiClient}
+        projectId={1}
+        value=""
+        onChange={() => {}}
+        label="Step 1"
+      />,
+    )
+    await userEvent.type(screen.getByLabelText('Step 1'), 'signup')
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not load suggestions/i)
+    // Free-typing must still work -- this field always accepts an unlisted name.
+    expect(screen.getByLabelText('Step 1')).toBeEnabled()
   })
 })

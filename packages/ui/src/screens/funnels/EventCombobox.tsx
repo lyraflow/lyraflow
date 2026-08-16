@@ -1,4 +1,5 @@
 import { useEffect, useId, useState } from 'react'
+import { ApiError } from '../../api/client.js'
 import type { ApiClient } from '../../api/client.js'
 import { Input } from '../../components/ui/input.js'
 import { Label } from '../../components/ui/label.js'
@@ -37,10 +38,21 @@ export function EventCombobox(props: {
   onChange: (value: string) => void
   label: string
   disabled?: boolean
+  onUnauthorized?: () => void
 }) {
-  const { client, projectId, value, onChange, label, disabled } = props
+  const { client, projectId, value, onChange, label, disabled, onUnauthorized } = props
   const [text, setText] = useState(value)
   const [options, setOptions] = useState<string[]>([])
+  // I6 (whole-branch review): every schemaEvents failure -- INCLUDING 401 --
+  // used to be swallowed into an empty options list, which reads as "your
+  // events do not exist" (an expired session, not a real absence). Spec
+  // decision 6 exists to prevent exactly that misreading for the prefix
+  // filter's empty state; a permanently empty autocomplete for the WRONG
+  // reason is the same failure with a different cause. A 401 routes to
+  // `onUnauthorized`; any other failure still leaves free-typing usable
+  // (this field always accepts an unlisted name) but says the suggestions
+  // themselves failed, rather than silently implying there are none.
+  const [loadError, setLoadError] = useState(false)
   const id = useId()
   const listId = `${id}-events`
 
@@ -52,16 +64,27 @@ export function EventCombobox(props: {
     const q = text.trim()
     if (q === '') {
       setOptions([])
+      setLoadError(false)
       return
     }
     const timer = window.setTimeout(() => {
       client
         .schemaEvents(projectId, q)
-        .then(setOptions)
-        .catch(() => setOptions([]))
+        .then((list) => {
+          setOptions(list)
+          setLoadError(false)
+        })
+        .catch((err: unknown) => {
+          if (err instanceof ApiError && err.status === 401) {
+            onUnauthorized?.()
+            return
+          }
+          setOptions([])
+          setLoadError(true)
+        })
     }, DEBOUNCE_MS)
     return () => window.clearTimeout(timer)
-  }, [text, client, projectId])
+  }, [text, client, projectId, onUnauthorized])
 
   return (
     <div className="flex flex-col gap-1">
@@ -96,6 +119,11 @@ export function EventCombobox(props: {
           </option>
         ))}
       </datalist>
+      {loadError && (
+        <p role="alert" className="text-xs text-destructive">
+          Could not load suggestions. You can still type the event name.
+        </p>
+      )}
     </div>
   )
 }

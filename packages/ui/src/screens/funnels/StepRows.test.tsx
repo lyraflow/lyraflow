@@ -1,6 +1,7 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
+import { ApiError } from '../../api/client.js'
 import type { ApiClient } from '../../api/client.js'
 import { MIN_STEPS, StepRows } from './StepRows.js'
 
@@ -111,6 +112,28 @@ describe('StepRows -- invented mutations', () => {
     )
     expect(screen.getByRole('button', { name: /move step 1 up/i })).toBeDisabled()
     expect(screen.getByRole('button', { name: /move step 3 down/i })).toBeDisabled()
+  })
+
+  // I6 (whole-branch review): StepRows never took or forwarded
+  // `onUnauthorized` at all, so a 401 from an event step's own combobox had
+  // no way out of this component even once EventCombobox itself learned to
+  // report one.
+  it('threads onUnauthorized down to each step\'s EventCombobox', async () => {
+    const onUnauthorized = vi.fn()
+    const schemaEvents = vi.fn(async () => {
+      throw new ApiError(401, 'unauthorized')
+    })
+    render(
+      <StepRows
+        client={{ schemaEvents } as unknown as ApiClient}
+        projectId={1}
+        steps={[{ event: 'a' }, { event: 'b' }]}
+        onChange={() => {}}
+        onUnauthorized={onUnauthorized}
+      />,
+    )
+    await userEvent.type(screen.getByLabelText('Step 1'), 'x')
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalled())
   })
 
   it('remove becomes enabled again once above the floor', () => {

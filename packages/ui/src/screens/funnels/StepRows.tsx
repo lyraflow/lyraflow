@@ -36,8 +36,9 @@ export function StepRows(props: {
   projectId: number
   steps: FunnelStep[]
   onChange: (steps: FunnelStep[]) => void
+  onUnauthorized?: () => void
 }) {
-  const { client, projectId, steps, onChange } = props
+  const { client, projectId, steps, onChange, onUnauthorized } = props
 
   function updateEvent(i: number, event: string) {
     onChange(steps.map((s, idx) => (idx === i ? { ...s, event } : s)))
@@ -75,6 +76,7 @@ export function StepRows(props: {
                   client={client}
                   projectId={projectId}
                   value={step.event}
+                  onUnauthorized={onUnauthorized}
                   onChange={(event) => updateEvent(i, event)}
                   label={`Step ${i + 1}`}
                   disabled={locked}

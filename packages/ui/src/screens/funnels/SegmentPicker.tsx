@@ -1,4 +1,5 @@
 import { useEffect, useId, useState } from 'react'
+import { ApiError } from '../../api/client.js'
 import type { ApiClient } from '../../api/client.js'
 import type { Segment } from '../../api/types.js'
 import { Label } from '../../components/ui/label.js'
@@ -23,19 +24,28 @@ export function SegmentPicker(props: {
   projectId: number
   value: number | null
   onChange: (value: number | null) => void
+  onUnauthorized?: () => void
 }) {
-  const { client, projectId, value, onChange } = props
+  const { client, projectId, value, onChange, onUnauthorized } = props
   const [segments, setSegments] = useState<Segment[]>([])
   // I5 (whole-branch review): before the fetch resolves we don't yet know
   // whether `value` is genuinely missing from the list -- gates
   // `selectedMissing` below so a value isn't read as unresolvable for the
   // one render before the real list arrives.
   const [loaded, setLoaded] = useState(false)
+  // I6 (whole-branch review): every error used to be swallowed into an
+  // empty list, INCLUDING 401 -- an expired session showed "Everyone" and
+  // nothing else, teaching the operator their segments do not exist, the
+  // exact failure spec decision 6 exists to prevent for the event
+  // autocomplete. A 401 now routes to `onUnauthorized`; any other failure
+  // still resolves the picker (Everyone must stay usable) but says so.
+  const [loadError, setLoadError] = useState(false)
   const id = useId()
 
   useEffect(() => {
     let cancelled = false
     setLoaded(false)
+    setLoadError(false)
     client
       .segments(projectId)
       .then((list) => {
@@ -43,15 +53,20 @@ export function SegmentPicker(props: {
         setSegments(list)
         setLoaded(true)
       })
-      .catch(() => {
+      .catch((err: unknown) => {
         if (cancelled) return
+        if (err instanceof ApiError && err.status === 401) {
+          onUnauthorized?.()
+          return
+        }
         setSegments([])
         setLoaded(true)
+        setLoadError(true)
       })
     return () => {
       cancelled = true
     }
-  }, [client, projectId])
+  }, [client, projectId, onUnauthorized])
 
   // I5 (whole-branch review): `segment_id` has NO foreign key, deliberately
   // (`packages/db/migrations/postgres/012_funnels.sql`) -- a `segment_id`
@@ -98,6 +113,11 @@ export function SegmentPicker(props: {
           </option>
         ))}
       </select>
+      {loadError && (
+        <p role="alert" className="text-xs text-destructive">
+          Could not load segments. Everyone is available; reload to try again for the rest.
+        </p>
+      )}
     </div>
   )
 }

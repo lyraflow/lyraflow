@@ -369,6 +369,57 @@ describe('FunnelBuilder -- invented mutations', () => {
   })
 })
 
+// I6 (whole-branch review): SegmentPicker and EventCombobox learned to
+// route a 401 to onUnauthorized, but neither takes it any good if the
+// builder never passes it down -- these confirm the SCREEN actually threads
+// it to both, not just that the leaf components can accept it in isolation.
+describe('FunnelBuilder — threads onUnauthorized to the segment picker and event fields', () => {
+  it('routes a 401 from the segment picker to onUnauthorized', async () => {
+    const onUnauthorized = vi.fn()
+    const client = fakeBuilderClient({
+      segments: vi.fn(async () => {
+        throw new ApiError(401, 'unauthorized')
+      }),
+    })
+    render(
+      <MemoryRouter initialEntries={[ROUTES.funnelNew]}>
+        <ProjectProvider projects={PROJECTS} initialId={1}>
+          <Routes>
+            <Route
+              path={ROUTES.funnelNew}
+              element={<FunnelBuilder client={client} onUnauthorized={onUnauthorized} />}
+            />
+          </Routes>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalled())
+  })
+
+  it('routes a 401 from an event step field to onUnauthorized', async () => {
+    const onUnauthorized = vi.fn()
+    const client = fakeBuilderClient({
+      schemaEvents: vi.fn(async () => {
+        throw new ApiError(401, 'unauthorized')
+      }),
+    })
+    render(
+      <MemoryRouter initialEntries={[ROUTES.funnelNew]}>
+        <ProjectProvider projects={PROJECTS} initialId={1}>
+          <Routes>
+            <Route
+              path={ROUTES.funnelNew}
+              element={<FunnelBuilder client={client} onUnauthorized={onUnauthorized} />}
+            />
+          </Routes>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    await userEvent.type(screen.getByLabelText('Step 1'), 'signup')
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalled())
+  })
+})
+
 // Task 6: a controller ruling superseding Task 5's own choice. Task 5
 // disabled only the offending step's event field and left Save enabled --
 // that is wrong, because `PATCH /v1/funnels/:id` accepts a bare `steps`
