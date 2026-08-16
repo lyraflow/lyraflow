@@ -14,6 +14,7 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { Authenticate } from '../auth/bridge.js'
 import type { Project } from '../auth/project-cache.js'
+import { parseNumericId } from '../numeric-id.js'
 import { makeWalkCursorCodec } from '../query/walk-cursor.js'
 import type { MemberRow, SegmentCache } from './cache.js'
 import { SegmentTimeoutError, runSegment, runSegmentMembers } from './execute.js'
@@ -87,16 +88,11 @@ function bodyCarriesTreeFields(body: unknown): boolean {
  * Parses the `:id` path param. A non-numeric or non-positive id is a
  * malformed request, not a lookup miss — unlike the cross-project 404 case,
  * there is no existence to leak by rejecting it outright, so this returns
- * 400 rather than folding into the "not found" path. Without this guard,
- * `Number('not-a-number')` is `NaN`, which reaches Postgres as a query
- * parameter and trips the generic error handler into a 503 for what is a
- * deterministic client error — exactly what app.ts's own error handler
- * documents never doing, since it tells the client to retry something that
- * will fail identically forever.
+ * 400 rather than folding into the "not found" path. See `numeric-id.ts`'s
+ * `parseNumericId` for the shape this enforces and why.
  */
 function parseSegmentId(raw: string): number | null {
-  const id = Number(raw)
-  return Number.isInteger(id) && id > 0 ? id : null
+  return parseNumericId(raw)
 }
 
 /**

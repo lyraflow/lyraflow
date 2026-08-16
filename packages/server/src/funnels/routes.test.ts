@@ -218,6 +218,27 @@ describe('funnel routes', () => {
     expect((await call('GET', '/v1/funnels/not-a-number')).statusCode).toBe(400)
   })
 
+  // A bare `Number()` + `Number.isInteger()` check accepts all of these —
+  // hex (`0x10`), a leading `+`, surrounding whitespace, and exponent
+  // notation all coerce to a normal-looking finite integer. Each must be
+  // rejected the same way `'not-a-number'` is above, matching the
+  // `/^\d+$/`-first convention every `:id` route shares via
+  // `numeric-id.ts`'s `parseNumericId`.
+  it.each([
+    ['0x10', 'hex notation'],
+    ['+5', 'a leading plus sign'],
+    [' 1 ', 'surrounding whitespace'],
+    ['1e3', 'exponent notation'],
+    ['', 'an empty string'],
+    ['-1', 'a negative number'],
+    ['1.0', 'a decimal point'],
+    ['99999999999999999999', 'a value beyond MAX_SAFE_INTEGER'],
+  ])('rejects a funnel id with %s (%s)', async (raw) => {
+    const res = await call('GET', `/v1/funnels/${encodeURIComponent(raw)}`)
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toBe('invalid_funnel_id')
+  })
+
   it('records the run snapshot, and clears it when the definition changes', async () => {
     const created = await call('POST', '/v1/funnels', { name: 'signup', ...signup })
     const id = created.json().id

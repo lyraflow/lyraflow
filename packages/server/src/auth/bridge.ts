@@ -1,6 +1,7 @@
 import type { FastifyReply, FastifyRequest } from 'fastify'
 import { type Readiness, refuseIfDraining } from '../health.js'
 import { SERVER_KEY_HEADER, makeAuthenticator } from '../ingest/routes.js'
+import { parseNumericId } from '../numeric-id.js'
 import { PROJECT_HEADER, SESSION_COOKIE, UI_HEADER } from './cookie.js'
 import type { Project, ProjectCache } from './project-cache.js'
 import type { SessionStore } from './sessions.js'
@@ -22,28 +23,18 @@ export interface BridgeDeps {
 export type Authenticate = (req: FastifyRequest, reply: FastifyReply) => Promise<Project | null>
 
 /**
- * Parses the `x-lyraflow-project` header. Same shape as funnels/routes.ts's
- * `parseId` and privacy/routes.ts's `parseDeletionId` (kept as a private
- * copy here too, rather than imported, for the same reason those two stay
- * separate from each other) -- this is the one place a malformed id reaches
- * EVERY project-scoped route, so it needs the same two-part check they do:
+ * Parses the `x-lyraflow-project` header -- the one place a malformed id
+ * reaches EVERY project-scoped route. See `numeric-id.ts`'s `parseNumericId`
+ * for the shape this enforces and why.
  *
- * `/^\d+$/` first, so `Number()` never sees anything it could coerce --
- * `'1e21'`, `'0x10'`, `' 1 '`, and `'+5'` all parse to a normal-looking
- * finite number under a bare `Number()` call, and `Number.isInteger(1e21)`
- * is `true`. Then `Number.isSafeInteger`, so a value that IS all digits but
- * outside safe-integer range (`'99999999999999999999'`) is refused too.
- *
- * Without both checks, a value that passes lands as a `ProjectCache.byId`
- * bind parameter against `projects.id bigserial`, Postgres raises
+ * Without it, a value that passes lands as a `ProjectCache.byId` bind
+ * parameter against `projects.id bigserial`, Postgres raises
  * `22P02`/`22003`, and `#lookup` rethrows into app.ts's catch-all -- turning
  * a deterministic client error into a `503 {"error":"unavailable"}` with a
  * `retry-after` header and a level-50 log line, on every request.
  */
 function parseProjectId(raw: string): number | null {
-  if (!/^\d+$/.test(raw)) return null
-  const id = Number(raw)
-  return Number.isSafeInteger(id) && id > 0 ? id : null
+  return parseNumericId(raw)
 }
 
 /**
