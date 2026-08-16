@@ -31,6 +31,7 @@ function renderAt(path: string) {
       monthly_event_quota: null,
     })),
     projects: vi.fn(async () => PROJECTS),
+    funnels: vi.fn(async () => []),
   } as never
   return render(
     <ProjectProvider projects={PROJECTS} initialId={1}>
@@ -87,6 +88,25 @@ describe('AppRouter', () => {
   it('renders the feed for an unknown path rather than nothing', async () => {
     renderAt('/nope')
     expect(await screen.findByRole('tab', { name: /accepted/i })).toBeInTheDocument()
+  })
+
+  // Task 2's trap: the "*" catch-all renders Feed, and it has to stay the
+  // LAST <Route> in the list. A funnel route accidentally registered after
+  // it would silently render Feed's tabs instead -- this pins the negative
+  // (no Feed tab reachable at /funnels) alongside the positive (Funnels'
+  // own heading), so reordering the routes in `Router.tsx` fails this test
+  // rather than passing by accident because both screens happen to render
+  // *something*.
+  it('renders Funnels at /funnels, not the feed catch-all', async () => {
+    renderAt('/funnels')
+    expect(await screen.findByRole('heading', { name: /^funnels$/i })).toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: /accepted/i })).not.toBeInTheDocument()
+  })
+
+  it('marks Funnels as current at /funnels', async () => {
+    renderAt('/funnels')
+    const link = await screen.findByRole('link', { name: /funnels/i })
+    expect(link).toHaveAttribute('aria-current', 'page')
   })
 
   // IMPORTANT 3 from the whole-branch review: `onUnauthorized` used to be

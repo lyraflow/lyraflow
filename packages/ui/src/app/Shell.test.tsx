@@ -54,9 +54,10 @@ describe('Shell', () => {
   // by anything Shell does by hand. `Router.test.tsx` covers the
   // navigation and aria-current behaviour end-to-end; this only pins that
   // both destinations are advertised.
-  it('renders Feed and Settings as navigation links', () => {
+  it('renders Feed, Funnels and Settings as navigation links', () => {
     renderShell()
     expect(screen.getByRole('link', { name: /feed/i })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /funnels/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /settings/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /feed/i })).toHaveAttribute('aria-current', 'page')
   })

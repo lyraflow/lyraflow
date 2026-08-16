@@ -1,4 +1,4 @@
-import { ChevronDown, LayoutList, LogOut, Settings as SettingsIcon } from 'lucide-react'
+import { ChevronDown, Filter, LayoutList, LogOut, Settings as SettingsIcon } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Link, NavLink, useLocation } from 'react-router'
 import {
@@ -176,6 +176,22 @@ export function Shell(props: { email: string | null; onLogout(): void; children:
             <LayoutList className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
             Feed
           </Link>
+          {/* `NavLink`, exactly as Settings uses it below -- it supplies
+           * `aria-current="page"` itself, and unlike Feed there is no
+           * second path (`/`) that also has to count as "on this screen". */}
+          <NavLink
+            to={ROUTES.funnels}
+            className={({ isActive }) =>
+              `flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium ${
+                isActive
+                  ? 'text-foreground'
+                  : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+              }`
+            }
+          >
+            <Filter className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
+            Funnels
+          </NavLink>
           <NavLink
             to={ROUTES.settings}
             className={({ isActive }) =>
