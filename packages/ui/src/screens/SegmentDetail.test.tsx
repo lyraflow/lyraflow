@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
-import type { Segment, SegmentPreview } from '../api/types.js'
+import type { MemberRow, Segment, SegmentPreview } from '../api/types.js'
 import { ProjectProvider } from '../app/ProjectContext.js'
 import { ROUTES, segmentPath } from '../app/Router.js'
 import { SegmentDetail } from './SegmentDetail.js'
@@ -59,6 +59,18 @@ const PREVIEW: SegmentPreview = {
   person_count: 42,
   warnings: [],
   as_of: '2026-08-16T00:00:00.000Z',
+}
+
+const MEMBER: MemberRow = {
+  person_id: 'person-1',
+  first_seen: '2026-08-01T00:00:00.000Z',
+  last_seen: '2026-08-10T00:00:00.000Z',
+}
+
+const MEMBER_2: MemberRow = {
+  person_id: 'person-2',
+  first_seen: '2026-08-02T00:00:00.000Z',
+  last_seen: '2026-08-11T00:00:00.000Z',
 }
 
 function fakeClient(over: Record<string, unknown> = {}) {
@@ -295,5 +307,109 @@ describe('SegmentDetail', () => {
     })
     expect(screen.getByRole('button', { name: /run/i })).toBeEnabled()
     expect(screen.queryByTestId('segment-detail-count')).toBeNull()
+  })
+
+  // --- Task 8 fix round 1 (Important 1): the wiring between this screen and
+  // `MemberList` -- the real `fetchPage` closure that actually calls
+  // `previewSavedSegment` with `include`/`cursor`, defaults its optional
+  // response fields, and routes a 401 -- had NO coverage. `MemberList.test.tsx`
+  // only ever drives an injected fake `fetchPage`; nothing here ever clicked
+  // "Show people". These three exercise the real client fake through the real
+  // closure, which is the only thing that can catch a defect in the JOIN
+  // between the two components rather than in either one alone.
+
+  it('clicking "Show people" calls previewSavedSegment with the project/segment ids and include:[members]', async () => {
+    const previewSavedSegment = vi.fn(
+      async (
+        _projectId: number,
+        _id: number,
+        options?: { include?: string[]; cursor?: string },
+      ) => {
+        if (options?.include == null) return PREVIEW
+        return { ...PREVIEW, members: [MEMBER], next_cursor: null, window_exhausted: false }
+      },
+    )
+    const client = fakeClient({ previewSavedSegment })
+    renderDetail(client)
+    // Wait for the auto-preview (the count-only call) to land first, so the
+    // second call below is unambiguously the member fetch.
+    await screen.findByTestId('segment-detail-count')
+
+    await userEvent.click(screen.getByRole('button', { name: /show people/i }))
+    await waitFor(() => expect(previewSavedSegment).toHaveBeenCalledTimes(2))
+    expect(previewSavedSegment).toHaveBeenNthCalledWith(2, 1, SEGMENT.id, {
+      include: ['members'],
+      cursor: undefined,
+    })
+    expect(await screen.findByText(/that is everyone/i)).toBeInTheDocument()
+  })
+
+  it('clicking "Load more" sends the PREVIOUS page\'s cursor -- not undefined, and not the first page repeated', async () => {
+    const page1 = {
+      ...PREVIEW,
+      members: [MEMBER],
+      next_cursor: 'cursor-1',
+      window_exhausted: false,
+    }
+    const page2 = { ...PREVIEW, members: [MEMBER_2], next_cursor: null, window_exhausted: false }
+    const previewSavedSegment = vi.fn(
+      async (
+        _projectId: number,
+        _id: number,
+        options?: { include?: string[]; cursor?: string },
+      ) => {
+        if (options?.include == null) return PREVIEW
+        return options.cursor == null ? page1 : page2
+      },
+    )
+    const client = fakeClient({ previewSavedSegment })
+    renderDetail(client)
+    await screen.findByTestId('segment-detail-count')
+
+    await userEvent.click(screen.getByRole('button', { name: /show people/i }))
+    const loadMore = await screen.findByRole('button', { name: /load more/i })
+    await waitFor(() => expect(previewSavedSegment).toHaveBeenCalledTimes(2))
+
+    await userEvent.click(loadMore)
+    await waitFor(() => expect(previewSavedSegment).toHaveBeenCalledTimes(3))
+    expect(previewSavedSegment).toHaveBeenNthCalledWith(3, 1, SEGMENT.id, {
+      include: ['members'],
+      cursor: 'cursor-1',
+    })
+    // Both pages' rows are on screen -- the second call actually resumed the
+    // walk rather than re-fetching (or fetching nothing at) the first page.
+    expect(await screen.findByText('person-2')).toBeInTheDocument()
+    expect(screen.getByText('person-1')).toBeInTheDocument()
+  })
+
+  it("routes a 401 on a member page fetch to onUnauthorized, same as the screen's other fetches", async () => {
+    const onUnauthorized = vi.fn()
+    const previewSavedSegment = vi.fn(
+      async (
+        _projectId: number,
+        _id: number,
+        options?: { include?: string[]; cursor?: string },
+      ) => {
+        if (options?.include == null) return PREVIEW
+        throw new ApiError(401, 'unauthorized')
+      },
+    )
+    const client = fakeClient({ previewSavedSegment })
+    render(
+      <MemoryRouter initialEntries={[segmentPath(SEGMENT.id)]}>
+        <ProjectProvider projects={PROJECTS} initialId={1}>
+          <Routes>
+            <Route
+              path="/segments/:id"
+              element={<SegmentDetail client={client} onUnauthorized={onUnauthorized} />}
+            />
+          </Routes>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    await screen.findByTestId('segment-detail-count')
+
+    await userEvent.click(screen.getByRole('button', { name: /show people/i }))
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalledTimes(1))
   })
 })
