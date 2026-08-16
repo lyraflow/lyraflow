@@ -1,16 +1,193 @@
+import type { FilterNode } from '@lyraflow/core/segments/ast.js'
+import { AST_VERSION } from '@lyraflow/core/segments/ast.js'
+import { costWarnings } from '@lyraflow/core/segments/validate.js'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useParams } from 'react-router'
+import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
+import type { Segment, SegmentPreview } from '../api/types.js'
+import { useProject } from '../app/ProjectContext.js'
+import { Button } from '../components/ui/button.js'
+import { WarningPanel } from './funnels/WarningPanel.js'
+import { summarise } from './segments/summarise.js'
 
 /**
- * Stub, replaced in full by Task 7. Exists now only so `Router.tsx` has
- * somewhere for `/segments/:id` to go -- the props shape matches every
- * other detail-style screen (`client`, `onUnauthorized`) so Task 7 can fill
- * this in without touching the route registration again.
+ * Views a saved segment: its filter and its live count.
+ *
+ * Task 7 only. Rename/delete are Task 9's; members ("Show people") are
+ * Task 8's -- neither is wired here, so this is deliberately narrower than
+ * the screen's own final shape.
+ *
+ * The count follows `SegmentBuilder`'s own cheap/costly split (that
+ * component's own doc comment has the full reasoning): a cheap tree
+ * previews itself via `previewSavedSegment` the moment the segment is known
+ * to be cheap, and a tree carrying a `costWarnings` warning waits for an
+ * explicit Run instead. Unlike the builder there is no debounce and no
+ * `dirty` gate -- this screen never edits the tree, so "the moment it is
+ * known to be cheap" (right after the fetch lands) is the only point that
+ * could ever matter, matching `FunnelDetail`'s own auto-run-on-open.
+ * `WarningPanel` renders the reason here (rather than per-condition, as
+ * `SegmentBuilder` does) because this screen has no per-condition
+ * breakdown to point at -- only `summarise`'s one-line prose.
+ *
+ * Same two-ref request/answer split as `SegmentBuilder`'s `runPreview`,
+ * for the same reason (that component's own doc comment): `answerIdRef`
+ * also moves the instant the fetch effect starts a NEW segment/project
+ * (even before its own preview, if any, is issued), so an in-flight
+ * response for the segment/project just navigated away from can never
+ * land against this one -- and `requestIdRef` gates `previewing` so an
+ * older call settling late can't re-enable Run while a newer one (the new
+ * segment's own auto-preview) is still open.
  */
-export function SegmentDetail(_props: { client: ApiClient; onUnauthorized?: () => void }) {
+export function SegmentDetail(props: { client: ApiClient; onUnauthorized?: () => void }) {
+  const { client, onUnauthorized } = props
+  const { activeId } = useProject()
+  const params = useParams<{ id: string }>()
+  const id = params.id == null ? null : Number(params.id)
+  const validId = id != null && Number.isSafeInteger(id) ? id : null
+
+  const [segment, setSegment] = useState<Segment | null>(null)
+  const [segmentError, setSegmentError] = useState<string | null>(null)
+  const [preview, setPreview] = useState<SegmentPreview | null>(null)
+  const [previewing, setPreviewing] = useState(false)
+  const [previewError, setPreviewError] = useState<string | null>(null)
+
+  const requestIdRef = useRef(0)
+  const answerIdRef = useRef(0)
+
+  const runPreview = useCallback(() => {
+    if (activeId == null || validId == null) return
+    const requestId = ++requestIdRef.current
+    const answerId = ++answerIdRef.current
+    setPreviewing(true)
+    setPreviewError(null)
+    client
+      .previewSavedSegment(activeId, validId)
+      .then((r) => {
+        if (answerId !== answerIdRef.current) return
+        setPreview(r)
+      })
+      .catch((err: unknown) => {
+        if (err instanceof ApiError && err.status === 401) {
+          onUnauthorized?.()
+          return
+        }
+        if (answerId !== answerIdRef.current) return
+        setPreviewError('Could not run this segment. Try again.')
+      })
+      .finally(() => {
+        if (requestId !== requestIdRef.current) return
+        setPreviewing(false)
+      })
+  }, [client, activeId, validId, onUnauthorized])
+
+  // Fetch, on mount and whenever the active project or the id in the URL
+  // changes -- deliberately not depending on `segment` itself, which this
+  // effect alone ever sets.
+  useEffect(() => {
+    if (activeId == null || validId == null) return
+    let cancelled = false
+    setSegment(null)
+    setSegmentError(null)
+    setPreview(null)
+    setPreviewError(null)
+    // A response for the segment/project navigated away FROM must never
+    // land against this one -- bumped here, before this segment's own
+    // preview (if any) is even issued, exactly like `SegmentBuilder`'s own
+    // `handleRootChange` invalidating an in-flight answer before a new
+    // request is issued for what replaced it.
+    answerIdRef.current += 1
+    client
+      .segment(activeId, validId)
+      .then((s) => {
+        if (cancelled) return
+        setSegment(s)
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return
+        if (err instanceof ApiError && err.status === 401) {
+          onUnauthorized?.()
+          return
+        }
+        setSegmentError('Could not load this segment. Reload to try again.')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [client, activeId, validId, onUnauthorized])
+
+  const warnings = useMemo(() => {
+    if (segment == null || segment.stale) return []
+    return costWarnings({ ast_version: AST_VERSION, filter: segment.filter as FilterNode })
+  }, [segment])
+
+  // Auto-previews the instant a cheap segment is known -- never for a
+  // costly one, and never twice for the same segment (`segment` only
+  // changes identity when the fetch above actually lands a NEW one).
+  // `runPreview` is stable per (client, activeId, validId), already this
+  // effect's own inputs via the segment fetch it reacts to -- listing it
+  // would add nothing but a lint-satisfying no-op dependency, same
+  // reasoning as `FunnelDetail`'s own mount effect.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: see comment above
+  useEffect(() => {
+    if (segment == null || segment.stale || warnings.length > 0) return
+    runPreview()
+  }, [segment, warnings])
+
+  if (validId == null) {
+    return (
+      <div className="flex flex-col gap-4">
+        <h1 className="text-lg font-semibold">Segment</h1>
+        <p role="alert" className="text-sm text-destructive">
+          This segment no longer exists.
+        </p>
+      </div>
+    )
+  }
+
   return (
     <div className="flex min-w-0 flex-col gap-6">
-      <h1 className="text-lg font-semibold">Segment</h1>
-      <p className="text-sm text-muted-foreground">Coming soon.</p>
+      <h1 className="text-lg font-semibold">{segment?.name ?? 'Segment'}</h1>
+
+      {segmentError != null && (
+        <p role="alert" className="text-sm text-destructive">
+          {segmentError}
+        </p>
+      )}
+
+      {segment?.stale && (
+        <p role="alert" className="text-sm text-destructive">
+          This segment's stored filter cannot be read.
+        </p>
+      )}
+
+      {segment != null && !segment.stale && (
+        <>
+          <p className="text-sm text-muted-foreground">{summarise(segment.filter as FilterNode)}</p>
+
+          <WarningPanel warnings={warnings} />
+
+          <div className="flex items-center gap-3">
+            <Button size="sm" onClick={runPreview} disabled={previewing}>
+              Run
+            </Button>
+            {previewError != null && (
+              <p role="alert" className="text-sm text-destructive">
+                {previewError}
+              </p>
+            )}
+          </div>
+
+          {preview != null && (
+            <p
+              data-testid="segment-detail-count"
+              className="text-2xl font-semibold text-foreground"
+            >
+              {preview.person_count.toLocaleString('en-US')}
+            </p>
+          )}
+        </>
+      )}
     </div>
   )
 }

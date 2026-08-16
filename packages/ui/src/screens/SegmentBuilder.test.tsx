@@ -4,17 +4,17 @@ import {
   MAX_TREE_DEPTH,
   MAX_TREE_NODES,
 } from '@lyraflow/core/segments/validate.js'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
-import type { Segment } from '../api/types.js'
+import type { Segment, SegmentPreview } from '../api/types.js'
 import { ProjectProvider } from '../app/ProjectContext.js'
 import { ROUTES, segmentEditPath, segmentPath } from '../app/Router.js'
-import { SegmentBuilder } from './SegmentBuilder.js'
+import { DEBOUNCE_MS, SegmentBuilder } from './SegmentBuilder.js'
 
 const PROJECTS = [
   {
@@ -45,6 +45,12 @@ const SEGMENT: Segment = {
   updated_at: '2026-08-01T00:00:00.000Z',
 }
 
+const PREVIEW: SegmentPreview = {
+  person_count: 42,
+  warnings: [],
+  as_of: '2026-08-16T00:00:00.000Z',
+}
+
 function fakeClient(over: Record<string, unknown> = {}) {
   return {
     segment: vi.fn(async () => SEGMENT),
@@ -58,6 +64,15 @@ function fakeClient(over: Record<string, unknown> = {}) {
     // before Task 6 ever did.
     schemaEvents: vi.fn(async () => []),
     schemaProperties: vi.fn(async () => []),
+    // Task 7: EVERY dirtying edit in this file now starts a real
+    // `debounceMs` timer that, once it fires, calls this -- on real timers
+    // (every test above this point) that is a genuine 600ms wall-clock
+    // wait, not a no-op, so a fixture that dirties the tree but finishes
+    // its own assertions slower than that (this machine's own documented
+    // contention) would otherwise hit an unmocked `previewSegment` and
+    // throw inside a timer callback. Same defensive shape as
+    // `schemaEvents`/`schemaProperties` above, one task later.
+    previewSegment: vi.fn(async () => PREVIEW),
     ...over,
   } as unknown as ApiClient & {
     segment: Mock
@@ -301,4 +316,264 @@ describe('SegmentBuilder -- the three server-side tree caps', () => {
     const add = await screen.findByRole('button', { name: /^add condition$/i })
     expect(add).toBeEnabled()
   }, 15000)
+})
+
+// --- Task 7: live counts -- cheap automatically, costly on request. Fake
+// timers are scoped to `withFakeTimers`, per test, never file- or
+// describe-wide -- every test above this point relies on real timers, and
+// `shouldAdvanceTime: true` (Feed.test.tsx's own `withFakeTimers`, mirrored
+// here) keeps `userEvent`'s own internal delays working while this file's
+// own `vi.advanceTimersByTimeAsync` calls stay exact.
+
+describe('SegmentBuilder -- Task 7: live counts', () => {
+  async function withFakeTimers(run: () => Promise<void>): Promise<void> {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      await run()
+    } finally {
+      vi.useRealTimers()
+    }
+  }
+
+  /** A deferred promise a test can settle on its own schedule -- the only
+   * way to provoke "landing order does not track issue order" rather than
+   * merely assert it (mirrors `FunnelDetail.test.tsx`'s own `deferred`). */
+  function deferred<T>() {
+    let resolve!: (value: T) => void
+    const promise = new Promise<T>((res) => {
+      resolve = res
+    })
+    return { promise, resolve }
+  }
+
+  /** Adds one condition and types into its key field -- a real edit through
+   * `TreeEditor`'s own `onChange`, which is what marks the tree dirty
+   * (`SegmentBuilder`'s own doc comment on why merely opening a segment
+   * must not). */
+  async function typeATrait() {
+    await userEvent.click(screen.getByRole('button', { name: /add condition/i }))
+    await userEvent.type(
+      within(screen.getByTestId('condition-0')).getByRole('textbox', { name: /key/i }),
+      'plan',
+    )
+  }
+
+  const EVER_BEHAVIOUR: FilterNode = {
+    kind: 'group',
+    op: 'and',
+    children: [
+      {
+        kind: 'behavior',
+        event: 'import_started',
+        aggregate: 'count',
+        window: { kind: 'ever' },
+        operator: '>=',
+        value: 1,
+      },
+    ],
+  }
+
+  /** Renders in EDIT mode against a segment already carrying a `behavior`
+   * leaf with an `ever` window -- there is no kind-switcher anywhere in
+   * this plan (`GroupCard`'s own doc comment: `newCondition()` always
+   * inserts a `trait`), so a behaviour leaf can only ever be reached by
+   * fetching one already shaped that way, never by clicking through the
+   * create-mode UI. Also performs one real edit (Negate, twice, which
+   * restores the original tree) so `dirty` is true going in -- proving the
+   * COST WARNING itself blocks the preview, not merely the `dirty` gate
+   * never having fired at all. */
+  async function addBehaviourWithEverWindow(client: ApiClient) {
+    renderBuilder(client, SEGMENT.id)
+    await screen.findByTestId('condition-0')
+    const negate = within(screen.getByTestId('condition-0')).getByRole('button', {
+      name: /negate/i,
+    })
+    await userEvent.click(negate)
+    await userEvent.click(negate)
+  }
+
+  it('previews a cheap tree automatically after editing stops', async () => {
+    await withFakeTimers(async () => {
+      const client = fakeClient()
+      renderBuilder(client)
+      await typeATrait()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(DEBOUNCE_MS)
+      })
+      await waitFor(() => expect(client.previewSegment).toHaveBeenCalledTimes(1))
+      expect(await screen.findByTestId('segment-preview-count')).toHaveTextContent('42')
+    })
+  })
+
+  it('does not preview a tree carrying a cost warning, and says why', async () => {
+    await withFakeTimers(async () => {
+      const client = fakeClient({
+        segment: vi.fn(async () => ({ ...SEGMENT, filter: EVER_BEHAVIOUR })),
+      })
+      await addBehaviourWithEverWindow(client)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(DEBOUNCE_MS * 4)
+      })
+      expect(client.previewSegment).not.toHaveBeenCalled()
+      expect(screen.getByText(/scans all history/i)).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /run/i })).toBeEnabled()
+    })
+  })
+
+  it('renders each warning against the condition it names, via its path', async () => {
+    // costWarnings returns { path, reason }. A warning rendered only as
+    // prose in a page-level panel makes the operator hunt for which of 40
+    // conditions is meant -- this pins that it renders INSIDE the
+    // offending condition's own testid instead.
+    const client = fakeClient({
+      segment: vi.fn(async () => ({ ...SEGMENT, filter: EVER_BEHAVIOUR })),
+    })
+    renderBuilder(client, SEGMENT.id)
+    await screen.findByTestId('condition-0')
+    expect(
+      within(screen.getByTestId('condition-0')).getByText(/scans all history/i),
+    ).toBeInTheDocument()
+  })
+
+  // The `dirty` gate, pinned directly: every cap fixture above already
+  // shows a fetched, cheap, non-empty tree never calling `previewSegment`,
+  // but each of those ALSO happens to sit at a cap that blocks editing --
+  // this fixture sits one full trait below any cap, purely to isolate
+  // "opening a segment reaches no server preview" from "a capped tree
+  // cannot be edited into firing one" as two different reasons for the
+  // same assertion.
+  it('does not auto-preview merely from opening an existing (cheap) segment for editing', async () => {
+    await withFakeTimers(async () => {
+      const client = fakeClient()
+      renderBuilder(client, SEGMENT.id)
+      await screen.findByTestId('condition-0')
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(DEBOUNCE_MS * 4)
+      })
+      expect(client.previewSegment).not.toHaveBeenCalled()
+    })
+  })
+
+  // Step 5's invariant, both halves: a response may be applied only if it
+  // belongs to the MOST RECENT request this screen issued. Two counters,
+  // not one -- a single counter that only gated `previewing` would leave
+  // Run stuck disabled forever the moment an abandoned request's `.finally`
+  // fired after a newer one already cleared it; a single counter that only
+  // gated the result would apply a same-tree-shape coincidence. This test
+  // resolves the NEWER request first (pinning the apply-guard) and then the
+  // OLDER one late (pinning that a late, discarded landing changes nothing
+  // -- not the count, not the Run button).
+  it('discards a stale preview response that lands after the tree has changed again', async () => {
+    await withFakeTimers(async () => {
+      const p1 = deferred<SegmentPreview>()
+      const p2 = deferred<SegmentPreview>()
+      const previewSegment = vi.fn().mockReturnValueOnce(p1.promise).mockReturnValueOnce(p2.promise)
+      const client = fakeClient({ previewSegment })
+      renderBuilder(client)
+
+      await typeATrait()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(DEBOUNCE_MS)
+      })
+      await waitFor(() => expect(previewSegment).toHaveBeenCalledTimes(1))
+      expect(screen.getByRole('button', { name: /run/i })).toBeDisabled()
+
+      // A further edit before the first request has landed -- this is the
+      // "tree has changed again" the invariant names. `answerIdRef` moves
+      // right here, before request 2 is even issued.
+      await userEvent.type(
+        within(screen.getByTestId('condition-0')).getByRole('textbox', { name: /key/i }),
+        'X',
+      )
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(DEBOUNCE_MS)
+      })
+      await waitFor(() => expect(previewSegment).toHaveBeenCalledTimes(2))
+
+      // Landing order does not track issue order -- resolve the NEWER
+      // request first.
+      await act(async () => {
+        p2.resolve({ ...PREVIEW, person_count: 999 })
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      expect(await screen.findByTestId('segment-preview-count')).toHaveTextContent('999')
+      expect(screen.getByRole('button', { name: /run/i })).toBeEnabled()
+
+      // The OLDER response lands late -- discarded outright: no count
+      // change, and Run stays usable rather than getting stuck by a
+      // `.finally` that thinks IT was the most recent call.
+      await act(async () => {
+        p1.resolve({ ...PREVIEW, person_count: 111 })
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      expect(screen.getByTestId('segment-preview-count')).toHaveTextContent('999')
+      expect(screen.queryByText('111')).toBeNull()
+      expect(screen.getByRole('button', { name: /run/i })).toBeEnabled()
+    })
+  })
+
+  // Pins `runPreview`'s `.finally` guard in ISOLATION from the test above --
+  // that one always resolves the NEWER call first, so `previewing` would
+  // already read false by the time the older call's own `.finally` runs
+  // even WITHOUT this guard (verified: a mutation dropping the `.finally`
+  // guard alone passed the test above unnoticed). Here the OLDER call
+  // settles FIRST, while the newer one is still open, which is the only
+  // ordering that actually exercises it.
+  it('does not re-enable Run when an older call settles before a still-open newer call', async () => {
+    await withFakeTimers(async () => {
+      const p1 = deferred<SegmentPreview>()
+      const p2 = deferred<SegmentPreview>()
+      const previewSegment = vi.fn().mockReturnValueOnce(p1.promise).mockReturnValueOnce(p2.promise)
+      const client = fakeClient({ previewSegment })
+      renderBuilder(client)
+
+      await typeATrait()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(DEBOUNCE_MS)
+      })
+      await waitFor(() => expect(previewSegment).toHaveBeenCalledTimes(1))
+      expect(screen.getByRole('button', { name: /run/i })).toBeDisabled()
+
+      await userEvent.type(
+        within(screen.getByTestId('condition-0')).getByRole('textbox', { name: /key/i }),
+        'X',
+      )
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(DEBOUNCE_MS)
+      })
+      await waitFor(() => expect(previewSegment).toHaveBeenCalledTimes(2))
+      expect(screen.getByRole('button', { name: /run/i })).toBeDisabled()
+
+      // The OLDER call (request 1) settles first, while request 2 is still
+      // open.
+      await act(async () => {
+        p1.resolve({ ...PREVIEW, person_count: 111 })
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      expect(screen.getByRole('button', { name: /run/i })).toBeDisabled()
+
+      // Only now, with the truly most recent call settled, may Run re-enable.
+      await act(async () => {
+        p2.resolve({ ...PREVIEW, person_count: 999 })
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      expect(screen.getByRole('button', { name: /run/i })).toBeEnabled()
+      expect(screen.getByTestId('segment-preview-count')).toHaveTextContent('999')
+    })
+  })
+
+  it('an explicit Run previews a tree carrying a cost warning', async () => {
+    const client = fakeClient({
+      segment: vi.fn(async () => ({ ...SEGMENT, filter: EVER_BEHAVIOUR })),
+    })
+    renderBuilder(client, SEGMENT.id)
+    await screen.findByTestId('condition-0')
+    await userEvent.click(screen.getByRole('button', { name: /run/i }))
+    await waitFor(() => expect(client.previewSegment).toHaveBeenCalledTimes(1))
+    expect(await screen.findByTestId('segment-preview-count')).toHaveTextContent('42')
+  })
 })

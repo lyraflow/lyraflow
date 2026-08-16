@@ -1,4 +1,5 @@
 import type { FilterNode, Group } from '@lyraflow/core/segments/ast.js'
+import type { CostWarning } from '@lyraflow/core/segments/validate.js'
 import type { ApiClient } from '../../api/client.js'
 import { GroupCard } from './GroupCard.js'
 
@@ -46,6 +47,11 @@ function normalise(value: FilterNode): Group {
  * `GroupCard` -- this component owns no state and makes no requests of its
  * own; they exist only so a `behavior` leaf, at whatever depth, can reach
  * `BehaviourForm` (Task 6).
+ *
+ * `warnings` (Task 7) is likewise passed straight through, unfiltered --
+ * `SegmentBuilder` computes the whole tree's `costWarnings()` once and hands
+ * it down; only `ConditionRow`, at whatever depth, picks out the ones
+ * addressed to its own path. Defaults to `[]`.
  */
 export function TreeEditor(props: {
   value: FilterNode
@@ -53,8 +59,9 @@ export function TreeEditor(props: {
   client: ApiClient
   projectId: number
   onUnauthorized?: () => void
+  warnings?: CostWarning[]
 }) {
-  const { value, onChange, client, projectId, onUnauthorized } = props
+  const { value, onChange, client, projectId, onUnauthorized, warnings = [] } = props
   const root = normalise(value)
   return (
     <GroupCard
@@ -64,6 +71,7 @@ export function TreeEditor(props: {
       client={client}
       projectId={projectId}
       onUnauthorized={onUnauthorized}
+      warnings={warnings}
     />
   )
 }

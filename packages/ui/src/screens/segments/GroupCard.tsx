@@ -1,4 +1,5 @@
 import type { FilterNode, Group } from '@lyraflow/core/segments/ast.js'
+import type { CostWarning } from '@lyraflow/core/segments/validate.js'
 import {
   MAX_BEHAVIOR_NODES,
   MAX_TREE_DEPTH,
@@ -165,8 +166,14 @@ export function GroupCard(props: {
   client: ApiClient
   projectId: number
   onUnauthorized?: () => void
+  /** Task 7: the whole tree's `costWarnings()` list, passed through
+   * unfiltered at every level -- only `ConditionRow`, at the leaf a warning
+   * actually names, picks its own out via `warningsAt`. Defaults to `[]` so
+   * every caller from before this task (this file's own tests included)
+   * keeps working unchanged. */
+  warnings?: CostWarning[]
 }) {
-  const { root, path, onChange, client, projectId, onUnauthorized } = props
+  const { root, path, onChange, client, projectId, onUnauthorized, warnings = [] } = props
   const node = nodeAt(root, path)
   // Defensive only -- every caller of GroupCard (TreeEditor for the root,
   // this component for a nested group) resolves `path` from the tree it is
@@ -271,6 +278,7 @@ export function GroupCard(props: {
                 client={client}
                 projectId={projectId}
                 onUnauthorized={onUnauthorized}
+                warnings={warnings}
               />
             )
           }
@@ -285,6 +293,7 @@ export function GroupCard(props: {
               client={client}
               projectId={projectId}
               onUnauthorized={onUnauthorized}
+              warnings={warnings}
             />
           )
         })}
