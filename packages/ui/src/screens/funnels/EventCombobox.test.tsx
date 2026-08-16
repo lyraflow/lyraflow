@@ -18,7 +18,16 @@ describe('EventCombobox', () => {
     )
     await userEvent.type(screen.getByLabelText('Step 1'), 'signup')
     await waitFor(() => expect(schemaEvents).toHaveBeenCalledWith(1, 'signup'))
-    expect(await screen.findByRole('option', { name: 'signup_completed' })).toBeInTheDocument()
+    // `hidden: true` here is a query concession, not a product one: a
+    // native `<datalist>` is `display: none` in every browser (its options
+    // are read structurally, not painted), so `getByRole` -- which by
+    // default excludes hidden elements the same way a sighted user's
+    // browser does -- needs telling to look inside it. Production markup
+    // stays exactly what a real `<input list>` needs; only the query
+    // adapts to how the DOM actually presents this element.
+    expect(
+      await screen.findByRole('option', { name: 'signup_completed', hidden: true }),
+    ).toBeInTheDocument()
   })
 
   it('describes itself as a prefix filter, because the server matches with startsWith', async () => {

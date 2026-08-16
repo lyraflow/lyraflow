@@ -80,30 +80,16 @@ export function EventCombobox(props: {
         }}
       />
       {/*
-       * Every browser's UA stylesheet sets `datalist { display: none }` --
-       * a `<datalist>` is never laid out, so its `<option>` children have no
-       * box, and an element with no box is invisible to the accessibility
-       * tree regardless of what native-picker UI a browser draws for it.
-       * That is correct for a sighted user, but it means an unstyled
-       * `<datalist>` is invisible to `getByRole('option', ...)` too, not
-       * only to the eye (verified against this exact jsdom against
-       * `display: none` directly). The inline style below is the standard
-       * visually-hidden technique -- override `display` so the element has
-       * a box again, then clip that box to nothing -- so the accessible
-       * name of each option is queryable the same way a real screen reader
-       * would see it, without the list ever painting on screen.
+       * No style override here, deliberately. Every browser's UA stylesheet
+       * sets `datalist { display: none }` -- production markup does not
+       * bend to make a test selector tidier (see the fix-round note this
+       * reverted: an inline style here once existed only to satisfy
+       * `getByRole('option', ...)`, and shipped a nonstandard override of a
+       * native element's browser-default rendering to every self-hoster
+       * for that reason alone). The test queries this list with
+       * `{ hidden: true }` instead of asking the markup to change.
        */}
-      <datalist
-        id={listId}
-        style={{
-          display: 'block',
-          position: 'absolute',
-          width: 1,
-          height: 1,
-          overflow: 'hidden',
-          clip: 'rect(0,0,0,0)',
-        }}
-      >
+      <datalist id={listId}>
         {options.map((event) => (
           <option key={event} value={event}>
             {event}
