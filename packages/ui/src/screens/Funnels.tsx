@@ -25,13 +25,24 @@ import { formatPercent, formatRelative, formatWindow } from './funnels/format.js
  * this branch already fixed in `StepBars`, inverted. A funnel that ran and
  * found nobody must show that it ran, when, and that nobody entered; folding
  * it into "not run yet" loses the timestamp and reads as a funnel nobody has
- * touched, when the truth is it ran and answered "zero". Dividing by a
- * denominator that is genuinely 0 would produce `Infinity`, not `NaN` --
- * this guard exists so that division is never reached for either case.
+ * touched, when the truth is it ran and answered "zero".
+ *
+ * MINOR (whole-branch review): `last_entered` is typed `number | null` --
+ * the guard above only caught the LITERAL `0`, so a non-null
+ * `last_evaluated_at` paired with a `null` `last_entered` fell through to
+ * the division below. `Number(null)` is `0`, so that division is legitimate
+ * ONLY once `last_entered` is known to be a real, positive count; for `0` or
+ * `null` it is `x / 0`, which is `Infinity` (or `NaN` for `0 / 0`) --
+ * `formatPercent` happens to catch both and print "0%", which silently
+ * reads as a real, computed rate rather than "the wire carries no rate for
+ * this row". Both must short-circuit to the same "0 entered" text as the
+ * literal-zero case above, before the division is ever reached.
  */
 function funnelRateLabel(f: Funnel, now: Date): string {
   if (f.last_evaluated_at === null) return 'Not run yet'
-  if (f.last_entered === 0) return `0 entered · ${formatRelative(f.last_evaluated_at, now)}`
+  if (f.last_entered === 0 || f.last_entered === null) {
+    return `0 entered · ${formatRelative(f.last_evaluated_at, now)}`
+  }
   const rate = Number(f.last_converted) / Number(f.last_entered)
   return `${formatPercent(rate)} · ${formatRelative(f.last_evaluated_at, now)}`
 }

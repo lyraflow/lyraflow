@@ -102,6 +102,23 @@ describe('Funnels list', () => {
     expect(row).toHaveTextContent('2 minutes ago')
   })
 
+  // MINOR (whole-branch review): `last_entered` is typed `number | null` --
+  // a non-null `last_evaluated_at` paired with a NULL (not literal 0)
+  // `last_entered` used to fall through to `Number(last_converted) /
+  // Number(last_entered)`, which is `x / 0` (`Number(null) === 0`) and
+  // renders as a silent, misleading "0%" via formatPercent's NaN/Infinity
+  // guard -- reading as a real computed rate rather than "no rate on the
+  // wire for this row".
+  it('does not divide by a null last_entered -- same "0 entered" text, never "0%"', async () => {
+    vi.setSystemTime(new Date('2026-08-15T12:00:00.000Z'))
+    renderList([{ ...RUN_ONCE, last_entered: null, last_converted: null }])
+    const row = await screen.findByRole('link', { name: /Signup flow/ })
+    expect(row).not.toHaveTextContent(/not run yet/i)
+    expect(row).not.toHaveTextContent('0%')
+    expect(row).toHaveTextContent('0 entered')
+    expect(row).toHaveTextContent('2 minutes ago')
+  })
+
   it('never calls a run endpoint to freshen the list', async () => {
     const run = vi.fn()
     const client = {
