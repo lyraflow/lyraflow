@@ -109,6 +109,18 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
+/** Navigates to another segment while the detail screen stays mounted --
+ * the shape no fixture in this file had, since each renders one segment and
+ * never leaves it. */
+function GoToSegment(props: { id: number }) {
+  const navigate = useNavigate()
+  return (
+    <button type="button" onClick={() => navigate(segmentPath(props.id))}>
+      go to segment {props.id}
+    </button>
+  )
+}
+
 describe('SegmentDetail', () => {
   it('shows the segment name and filter summary', async () => {
     renderDetail()
@@ -583,5 +595,44 @@ describe('SegmentDetail -- what instant the number is from', () => {
 
     await userEvent.click(screen.getByRole('button', { name: /show people/i }))
     expect(await screen.findByText('person-from-run-2')).toBeInTheDocument()
+  })
+})
+
+describe('SegmentDetail -- the segment an action belongs to', () => {
+  it('a delete confirmation opened for one segment does not survive a navigation to another', async () => {
+    // Deletion is the one action on this screen with no undo, which is why
+    // it takes two clicks. Left standing across a navigation the panel
+    // stayed open and simply re-aimed: the second click, the one treated as
+    // the operator's explicit consent, deleted whichever segment was now in
+    // the URL. Asserted on the REQUEST as well as the panel, because a
+    // screen that hides the panel but keeps the state would pass a
+    // presence-only test.
+    const client = fakeClient({
+      segment: vi.fn(async (_projectId: number, id: number) => ({
+        ...SEGMENT,
+        id,
+        name: `Segment ${id}`,
+      })),
+    })
+    render(
+      <MemoryRouter initialEntries={[segmentPath(SEGMENT.id)]}>
+        <ProjectProvider projects={PROJECTS} initialId={1}>
+          <GoToSegment id={8} />
+          <Routes>
+            <Route path="/segments/:id" element={<SegmentDetail client={client} />} />
+            <Route path={ROUTES.segments} element={<p>segments list</p>} />
+          </Routes>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    await screen.findByText('Segment 7')
+    await userEvent.click(screen.getByRole('button', { name: /^delete$/i }))
+    expect(screen.getByText(/delete this segment\?/i)).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: /go to segment 8/i }))
+    await screen.findByText('Segment 8')
+    expect(screen.queryByText(/delete this segment\?/i)).toBeNull()
+    expect(screen.queryByRole('button', { name: /^delete segment$/i })).toBeNull()
+    expect(client.deleteSegment).not.toHaveBeenCalled()
   })
 })

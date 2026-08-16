@@ -115,6 +115,15 @@ export function SegmentDetail(props: { client: ApiClient; onUnauthorized?: () =>
     setSegmentError(null)
     setPreview(null)
     setPreviewError(null)
+    // The confirmation belongs to the segment it was opened for. Left
+    // standing across a navigation it stays open and simply re-aims: open
+    // Delete on one segment, follow a link to another, and the second click
+    // -- the one this screen treats as the operator's explicit consent --
+    // deletes the segment now in the URL, which they never asked to delete
+    // and cannot undo. `deleteError` goes with it; it describes a failure
+    // against a segment no longer on screen.
+    setConfirmingDelete(false)
+    setDeleteError(null)
     // A response for the segment/project navigated away FROM must never
     // land against this one -- bumped here, before this segment's own
     // preview (if any) is even issued, exactly like `SegmentBuilder`'s own
