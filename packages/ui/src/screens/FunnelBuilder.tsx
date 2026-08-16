@@ -30,14 +30,18 @@ const DEFAULT_WINDOW_UNIT: WindowUnit = 'days'
  * link at all (a stale funnel never gets one, so this screen never has to
  * cope with unparseable stored steps).
  *
- * Preview and Save share ONE readiness gate (`canSubmit`): at least two
- * steps, every step's event non-empty, and a window that
+ * Preview and Save share ONE base readiness gate (`canSubmit`): at least
+ * two steps, every step's event non-empty, and a window that
  * `toWindowSeconds` accepts. Preview is deliberately not ALSO gated on the
  * name field -- an operator previewing a funnel they haven't named yet is
  * a normal, common order of operations, and gating it on the name would
  * make Preview lie about being ready before the numbers ever mattered.
- * Save carries one MORE gate Preview does not: `hasPredicates` (see below),
- * because only Save can lose data -- Preview never writes anything back.
+ * Save carries two MORE gates Preview does not: `canSave` additionally
+ * requires a non-empty, trimmed name (the server's `CreateBody` is
+ * `z.string().min(1).max(200)`, so an unchecked empty or whitespace-only
+ * name is a guaranteed 400 for a field the form never marked required),
+ * and `hasPredicates` (see below) -- both because only Save can lose data
+ * or fail outright; Preview never writes anything back.
  *
  * `POST /v1/funnels` needs a FLAT body (`{ name, ...definition }`) --
  * `client.createFunnel` already does that spread internally, so this
@@ -117,6 +121,18 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
   const windowSeconds = toWindowSeconds(windowValue, windowUnit)
   const stepsValid = steps.length >= 2 && steps.every((s) => s.event.trim() !== '')
   const canSubmit = stepsValid && windowSeconds != null && activeId != null
+  // The server's `CreateBody` is `z.string().min(1).max(200)` -- a name of
+  // only spaces passes THAT check (`min(1)` counts the spaces) but is not a
+  // name, so this trims before comparing rather than only checking
+  // `name !== ''`. Deliberately its own gate, layered on top of
+  // `canSubmit` rather than folded into it: `canSubmit` is Preview's gate
+  // too (see this function's own doc comment above), and Preview is
+  // deliberately NOT gated on the name field -- a name-empty `canSubmit`
+  // would silently start requiring one there as well. Save alone needs
+  // `canSave`; `handleSave` repeats this same check below, same shape as
+  // the existing `hasPredicates` guard on the line after it.
+  const trimmedName = name.trim()
+  const canSave = canSubmit && trimmedName !== ''
   // A step carrying a `where` predicate was authored by the CLI -- this
   // screen can only ever represent a step's event name, so a save from
   // here would silently drop the predicate array and hand the server a
@@ -153,19 +169,26 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
   }
 
   function handleSave() {
-    // Repeats the `hasPredicates` guard already reflected in the button's
-    // `disabled` prop below -- deliberately, not redundantly. The button
-    // state is what an operator sees; this is what actually stops the
-    // request. A mutation that only removes the `disabled` attribute must
-    // still find no path to `patchFunnel` here.
-    if (!canSubmit || activeId == null || hasPredicates) return
+    // Repeats the `hasPredicates` guard (and now the name guard, via
+    // `canSave`) already reflected in the button's `disabled` prop below --
+    // deliberately, not redundantly. The button state is what an operator
+    // sees; this is what actually stops the request. A mutation that only
+    // removes the `disabled` attribute must still find no path to
+    // `patchFunnel`/`createFunnel` here.
+    if (!canSave || activeId == null || hasPredicates) return
     setSaving(true)
     setSaveError(null)
     const definition = buildDefinition()
+    // Sent trimmed, not the raw field value: the field can hold leading or
+    // trailing whitespace an operator never meant to be part of the name
+    // (a stray space from a paste, an accidental trailing keystroke), and
+    // the server's own `min(1)` does not strip it -- an untrimmed save
+    // would create "Signup " and " Signup" as two different, confusingly
+    // near-duplicate funnels rather than normalising to the same one.
     const request =
       isEditing && editId != null
-        ? client.patchFunnel(activeId, editId, { name, ...definition })
-        : client.createFunnel(activeId, name, definition)
+        ? client.patchFunnel(activeId, editId, { name: trimmedName, ...definition })
+        : client.createFunnel(activeId, trimmedName, definition)
     request
       // CREATE -> the list (Funnels fetches fresh on every mount, no cache
       // held above it, which is what makes a newly created funnel show up
@@ -249,7 +272,7 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
         >
           Preview
         </Button>
-        <Button type="button" onClick={handleSave} disabled={!canSubmit || saving || hasPredicates}>
+        <Button type="button" onClick={handleSave} disabled={!canSave || saving || hasPredicates}>
           Save
         </Button>
       </div>

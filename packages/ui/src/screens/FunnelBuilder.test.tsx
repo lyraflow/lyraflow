@@ -178,8 +178,60 @@ describe('FunnelBuilder', () => {
     })
     renderBuilder(client)
     await fillTwoSteps()
+    // Defect 1 fix: Save is disabled without a name, so this now has to
+    // type one before it can trigger the 409 the test is actually about.
+    await userEvent.type(screen.getByLabelText(/name/i), 'Signup')
     await userEvent.click(screen.getByRole('button', { name: /save/i }))
     expect(await screen.findByRole('alert')).toHaveTextContent(/already exists/i)
+  })
+})
+
+// Defect 1 from the Task 8 visual pass: `canSubmit` never checked the name
+// field, so two valid steps plus an empty (or whitespace-only) name left
+// Save enabled and `POST /v1/funnels` a guaranteed 400 -- every EXISTING
+// test types a name before saving, which is exactly why 243 green tests and
+// three reviews missed it. These assert the actual REQUEST, not only the
+// button's `disabled` attribute: a mutation that removes `disabled` but
+// leaves `handleSave`'s own guard in place must still fail here.
+describe('FunnelBuilder — Save requires a non-empty name', () => {
+  it('disables Save, and never calls createFunnel, with two valid steps and an empty name', async () => {
+    const client = fakeBuilderClient()
+    renderBuilder(client)
+    await fillTwoSteps()
+    const save = screen.getByRole('button', { name: /^save$/i })
+    expect(save).toBeDisabled()
+    await userEvent.click(save)
+    expect(client.createFunnel).not.toHaveBeenCalled()
+  })
+
+  it('typing a name enables Save', async () => {
+    renderBuilder()
+    await fillTwoSteps()
+    await userEvent.type(screen.getByLabelText(/name/i), 'Signup')
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeEnabled()
+  })
+
+  it('treats a whitespace-only name as empty: Save stays disabled and createFunnel is never called', async () => {
+    const client = fakeBuilderClient()
+    renderBuilder(client)
+    await fillTwoSteps()
+    await userEvent.type(screen.getByLabelText(/name/i), '   ')
+    const save = screen.getByRole('button', { name: /^save$/i })
+    expect(save).toBeDisabled()
+    await userEvent.click(save)
+    expect(client.createFunnel).not.toHaveBeenCalled()
+  })
+
+  it('sends the name trimmed, not the raw field value', async () => {
+    const client = fakeBuilderClient()
+    renderBuilder(client)
+    await fillTwoSteps()
+    await userEvent.type(screen.getByLabelText(/name/i), '  Signup  ')
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    await waitFor(() => expect(client.createFunnel).toHaveBeenCalled())
+    const call = client.createFunnel.mock.calls[0]
+    if (!call) throw new Error('createFunnel was not called')
+    expect(call[1]).toBe('Signup')
   })
 })
 
@@ -267,6 +319,9 @@ describe('FunnelBuilder -- invented mutations', () => {
       </MemoryRouter>,
     )
     await fillTwoSteps()
+    // Defect 1 fix: Save is disabled without a name, so this now has to
+    // type one before it can trigger the 401 the test is actually about.
+    await userEvent.type(screen.getByLabelText(/name/i), 'Signup')
     await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
     await waitFor(() => expect(onUnauthorized).toHaveBeenCalled())
     expect(screen.queryByRole('alert')).toBeNull()
