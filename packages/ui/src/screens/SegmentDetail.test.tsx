@@ -516,3 +516,72 @@ describe('SegmentDetail -- Task 9: edit link and delete', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 })
+
+// --- The count's own instant, and the people underneath it. Both are about
+// the same thing: this screen showing two facts from two different moments
+// with nothing saying so.
+
+describe('SegmentDetail -- what instant the number is from', () => {
+  it('renders the instant the count was computed at, beside the count', async () => {
+    // A preview can be served from the server's cache up to its TTL, and
+    // the response deliberately reports the STORED `as_of` on a hit so a
+    // client can say so -- a bare number cannot be told apart from a live
+    // one. Pinned by VALUE, two hours after `PREVIEW.as_of`, so a render
+    // that reached for `new Date()` instead of the response's own field
+    // reads "just now" and fails here.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      vi.setSystemTime(new Date('2026-08-16T02:00:00.000Z'))
+      renderDetail()
+      expect(await screen.findByTestId('segment-detail-count')).toHaveTextContent('42')
+      const asOf = screen.getByTestId('segment-detail-as-of')
+      expect(asOf).toHaveTextContent('2 hours ago')
+      expect(asOf).not.toHaveTextContent('just now')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('re-running the count clears the people below it, rather than leaving the previous run on screen', async () => {
+    // `MemberList` keyed on the segment id alone did not remount when Run
+    // replaced the count, so the count above and the people below came from
+    // different runs with nothing distinguishing them. Each member fetch
+    // below is tagged with the run it belongs to, which is the only way to
+    // tell "the previous run's rows are still here" from "the same rows
+    // were legitimately fetched again".
+    let run = 0
+    const previewSavedSegment = vi.fn(
+      async (
+        _projectId: number,
+        _id: number,
+        options?: { include?: string[]; cursor?: string },
+      ) => {
+        if (options?.include == null) {
+          run += 1
+          return { ...PREVIEW, person_count: 40 + run }
+        }
+        return {
+          ...PREVIEW,
+          members: [{ ...MEMBER, person_id: `person-from-run-${run}` }],
+          next_cursor: null,
+          window_exhausted: false,
+        }
+      },
+    )
+    const client = fakeClient({ previewSavedSegment })
+    renderDetail(client)
+    expect(await screen.findByTestId('segment-detail-count')).toHaveTextContent('41')
+
+    await userEvent.click(screen.getByRole('button', { name: /show people/i }))
+    expect(await screen.findByText('person-from-run-1')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: /^run$/i }))
+    await waitFor(() => expect(screen.getByTestId('segment-detail-count')).toHaveTextContent('42'))
+    // Run 1's people are gone the instant run 2's count lands -- they are
+    // not silently relabelled as belonging to it.
+    expect(screen.queryByText('person-from-run-1')).toBeNull()
+
+    await userEvent.click(screen.getByRole('button', { name: /show people/i }))
+    expect(await screen.findByText('person-from-run-2')).toBeInTheDocument()
+  })
+})

@@ -6,13 +6,13 @@ import {
 } from '@lyraflow/core/segments/validate.js'
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter, Route, Routes } from 'react-router'
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import type { Segment, SegmentPreview } from '../api/types.js'
-import { ProjectProvider } from '../app/ProjectContext.js'
+import { ProjectProvider, useProject } from '../app/ProjectContext.js'
 import { ROUTES, segmentEditPath, segmentPath } from '../app/Router.js'
 import { DEBOUNCE_MS, SegmentBuilder } from './SegmentBuilder.js'
 
@@ -385,6 +385,101 @@ describe('SegmentBuilder -- Task 9: the rename rule', () => {
     expect(alert).toHaveTextContent(/could not save this segment/i)
     expect(alert).not.toHaveTextContent(/nothing was changed/i)
     expect(alert).not.toHaveTextContent(/nothing changed/i)
+  })
+
+  // --- After a PARTIAL save, the fetch-time snapshot describes a server
+  // state that no longer exists. The retry advice above is only honest if
+  // each request advances its own baseline the moment it commits: the
+  // operator's natural response to a save error is to change something and
+  // save again, and against a stale baseline that second save silently
+  // drops whichever field they reverted. Two tests, one per side, because
+  // either baseline can be the one that committed.
+
+  it('after a partial save, reverting the name still sends the rename -- the committed side is the new baseline', async () => {
+    const client = fakeClient({
+      updateSegmentTree: vi
+        .fn()
+        .mockRejectedValueOnce(new ApiError(500, 'server_error'))
+        .mockResolvedValue(SEGMENT),
+    })
+    renderEdit(client, { id: 7, name: 'Old', filter: TREE })
+    await screen.findByTestId('condition-0')
+    await userEvent.clear(screen.getByLabelText(/name/i))
+    await userEvent.type(screen.getByLabelText(/name/i), 'New')
+    await negateTheFirstCondition()
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+
+    // The rename committed; the tree update did not. The server now holds
+    // `New`, which is not what `originalName` was fetched as.
+    await waitFor(() => expect(client.renameSegment).toHaveBeenCalledWith(1, 7, 'New'))
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not save this segment/i)
+
+    // The operator abandons the rename and saves again.
+    await userEvent.clear(screen.getByLabelText(/name/i))
+    await userEvent.type(screen.getByLabelText(/name/i), 'Old')
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+
+    await waitFor(() => expect(client.updateSegmentTree).toHaveBeenCalledTimes(2))
+    // The assertion that matters is the REQUEST: without this the screen
+    // navigates away reporting success while the segment is still called
+    // `New` on the server.
+    expect(client.renameSegment).toHaveBeenCalledTimes(2)
+    expect(client.renameSegment).toHaveBeenLastCalledWith(1, 7, 'Old')
+  })
+
+  it('after a partial save, reverting the tree still sends the tree -- the committed side is the new baseline', async () => {
+    // The mirror: this time the TREE update is the side that lands.
+    const client = fakeClient({
+      renameSegment: vi
+        .fn()
+        .mockRejectedValueOnce(new ApiError(500, 'server_error'))
+        .mockResolvedValue(SEGMENT),
+    })
+    renderEdit(client, { id: 7, name: 'Old', filter: TREE })
+    await screen.findByTestId('condition-0')
+    await userEvent.clear(screen.getByLabelText(/name/i))
+    await userEvent.type(screen.getByLabelText(/name/i), 'New')
+    await negateTheFirstCondition()
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+
+    await waitFor(() => expect(client.updateSegmentTree).toHaveBeenCalledTimes(1))
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not save this segment/i)
+
+    // The operator un-negates, restoring the tree the segment was FETCHED
+    // with -- which the successful first request means is no longer the
+    // tree the server holds.
+    await negateTheFirstCondition()
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+
+    await waitFor(() => expect(client.updateSegmentTree).toHaveBeenCalledTimes(2))
+    const second = client.updateSegmentTree.mock.calls[1]
+    if (!second) throw new Error('a second tree update was expected')
+    expect(second[2]).toEqual({ ast_version: 1, filter: TREE })
+  })
+
+  // --- A stored name is compared TRIMMED on both sides. Otherwise a
+  // segment named with surrounding whitespace issues a rename nobody asked
+  // for on every save, and "a save with neither changed issues no request
+  // at all" stops being true of exactly those segments.
+
+  it('a stored name with surrounding whitespace is not a rename: a tree-only edit sends only the tree', async () => {
+    const client = fakeClient()
+    renderEdit(client, { id: 7, name: '  Paying customers  ', filter: TREE })
+    await screen.findByTestId('condition-0')
+    await negateTheFirstCondition()
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    await waitFor(() => expect(client.updateSegmentTree).toHaveBeenCalledTimes(1))
+    expect(client.renameSegment).not.toHaveBeenCalled()
+  })
+
+  it('a save with nothing changed issues no request at all, for a whitespace-padded name too', async () => {
+    const client = fakeClient()
+    renderEdit(client, { id: 7, name: '  Paying customers  ', filter: TREE })
+    await screen.findByTestId('condition-0')
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    expect(await screen.findByText('segment detail')).toBeInTheDocument()
+    expect(client.renameSegment).not.toHaveBeenCalled()
+    expect(client.updateSegmentTree).not.toHaveBeenCalled()
   })
 })
 
@@ -860,5 +955,340 @@ describe('SegmentBuilder -- Task 7: live counts', () => {
     await userEvent.click(screen.getByRole('button', { name: /run/i }))
     await waitFor(() => expect(client.previewSegment).toHaveBeenCalledTimes(1))
     expect(await screen.findByTestId('segment-preview-count')).toHaveTextContent('42')
+  })
+
+  // --- The count's own instant. A preview can be served from the server's
+  // cache up to its TTL, and the response deliberately carries the STORED
+  // `as_of` on a hit so a client can say so -- a bare number cannot be told
+  // apart from a live one. `FunnelBuilder`/`FunnelDetail` already render
+  // exactly this field through `formatRelative`; this screen discarded it.
+
+  it('renders the instant a count was computed at, beside the count', async () => {
+    await withFakeTimers(async () => {
+      // Pinned by VALUE, not by shape: two hours after `PREVIEW.as_of`, so
+      // a render that reached for `new Date()` (or for the moment the
+      // request was issued) instead of the response's own `as_of` reads
+      // "just now" and fails here.
+      vi.setSystemTime(new Date('2026-08-16T02:00:00.000Z'))
+      const client = fakeClient()
+      renderBuilder(client, SEGMENT.id)
+      await screen.findByTestId('condition-0')
+      await userEvent.click(screen.getByRole('button', { name: /run/i }))
+      expect(await screen.findByTestId('segment-preview-count')).toHaveTextContent('42')
+      const asOf = screen.getByTestId('segment-preview-as-of')
+      expect(asOf).toHaveTextContent('2 hours ago')
+      expect(asOf).not.toHaveTextContent('just now')
+    })
+  })
+
+  it('a count left standing for a tree that has since changed says so, rather than only dimming', async () => {
+    // The transition the "click Run to see a count" sentence can never
+    // cover, because it renders only when there has NEVER been a result: a
+    // count lands, the tree is then edited, and the number stays on screen
+    // at half opacity answering a tree the operator can no longer see. A
+    // costly tree is used throughout so no auto-preview can race in and
+    // replace the result while the assertion runs.
+    const client = fakeClient({
+      segment: vi.fn(async () => ({ ...SEGMENT, filter: EVER_BEHAVIOUR })),
+    })
+    renderBuilder(client, SEGMENT.id)
+    await screen.findByTestId('condition-0')
+    await userEvent.click(screen.getByRole('button', { name: /run/i }))
+    expect(await screen.findByTestId('segment-preview-count')).toHaveTextContent('42')
+    expect(screen.queryByTestId('segment-preview-stale-note')).toBeNull()
+
+    await userEvent.click(
+      within(screen.getByTestId('condition-0')).getByRole('button', { name: /negate/i }),
+    )
+    expect(screen.getByTestId('segment-preview')).toHaveAttribute('data-stale', 'true')
+    // The count is still there -- this is not "hide it", it is "say what it
+    // is". A dimmed number with no words is the thing being fixed.
+    expect(screen.getByTestId('segment-preview-count')).toHaveTextContent('42')
+    expect(screen.getByTestId('segment-preview-stale-note')).toHaveTextContent(/earlier version/i)
+  })
+})
+
+// --- Every tree fixture above has a `group` at its root, and that is the
+// shape being broken here. `SegmentQuery.filter` is the whole `FilterNode`
+// union, so a segment authored by the CLI can legally carry a bare leaf, or
+// a `not`, at its root. The editor wraps such a root in a one-child `and`
+// group to render it -- and while that wrapping happened invisibly inside
+// `TreeEditor`, this screen computed `costWarnings` against the UN-wrapped
+// tree it still held, so every warning path was exactly one segment shorter
+// than the `ConditionRow` it named and `warningsAt`'s exact-length match
+// dropped all of them. The operator was told the segment was expensive and
+// shown nothing about which condition. The fix is one tree: `normaliseRoot`
+// is applied where a tree ENTERS this screen's state, and `TreeEditor` takes
+// a `Group`, so there is no second tree to disagree with.
+
+describe('SegmentBuilder -- a root that is not a group', () => {
+  const everBehaviour: FilterNode = {
+    kind: 'behavior',
+    event: 'purchase',
+    aggregate: 'count',
+    window: { kind: 'ever' },
+    operator: '>=',
+    value: 1,
+  }
+  const bareTrait: FilterNode = { kind: 'trait', key: 'plan', operator: '=', value: 'pro' }
+
+  it('renders a bare-leaf root cost warning against the condition row that names it', async () => {
+    const client = fakeClient({
+      segment: vi.fn(async () => ({ ...SEGMENT, filter: everBehaviour })),
+    })
+    renderBuilder(client, SEGMENT.id)
+    const row = await screen.findByTestId('condition-0')
+    expect(within(row).getByText(/scans all history/i)).toBeInTheDocument()
+  })
+
+  it('renders a not-rooted tree cost warning against the condition row that names it', async () => {
+    // A second shape, one level deeper again: `not` never consumes a path
+    // segment in the editor's addressing, so the negated behaviour leaf is
+    // still `condition-0`.
+    const client = fakeClient({
+      segment: vi.fn(async () => ({
+        ...SEGMENT,
+        filter: { kind: 'not', child: everBehaviour } as FilterNode,
+      })),
+    })
+    renderBuilder(client, SEGMENT.id)
+    const row = await screen.findByTestId('condition-0')
+    expect(within(row).getByText(/scans all history/i)).toBeInTheDocument()
+  })
+
+  it('a group root still renders its warning against the row that names it (the control)', async () => {
+    // Passes today, and must keep passing -- it is what makes the two above
+    // a PATH defect rather than a warnings defect.
+    const client = fakeClient({
+      segment: vi.fn(async () => ({
+        ...SEGMENT,
+        filter: { kind: 'group', op: 'and', children: [everBehaviour] } as FilterNode,
+      })),
+    })
+    renderBuilder(client, SEGMENT.id)
+    const row = await screen.findByTestId('condition-0')
+    expect(within(row).getByText(/scans all history/i)).toBeInTheDocument()
+  })
+
+  // --- The save path. Normalising on entry must not make a stored bare-leaf
+  // tree silently acquire a wrapper group the operator never asked for.
+
+  it('opening a bare-leaf-rooted segment and saving it untouched sends nothing at all', async () => {
+    // `originalRoot` holds the SAME normalised tree the editor renders, so
+    // there is nothing to differ and no request to make -- the stored tree
+    // keeps its shape unless the operator actually edits it.
+    const client = fakeClient({
+      segment: vi.fn(async () => ({ ...SEGMENT, filter: bareTrait })),
+    })
+    renderBuilder(client, SEGMENT.id)
+    await screen.findByTestId('condition-0')
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    expect(await screen.findByText('segment detail')).toBeInTheDocument()
+    expect(client.updateSegmentTree).not.toHaveBeenCalled()
+    expect(client.renameSegment).not.toHaveBeenCalled()
+  })
+
+  it('editing a bare-leaf-rooted segment saves the wrapped shape the editor showed', async () => {
+    // The accepted behaviour change, pinned rather than left implicit: an
+    // EDITED bare-leaf root is written back wrapped in a one-child `and`,
+    // which compiles identically to the bare child. This was already true
+    // before the tree was normalised on entry -- every edit came back up
+    // from the editor wrapped -- so what is new is only that an UNTOUCHED
+    // segment now provably sends nothing (the test above).
+    const client = fakeClient({
+      segment: vi.fn(async () => ({ ...SEGMENT, filter: bareTrait })),
+    })
+    renderBuilder(client, SEGMENT.id)
+    await screen.findByTestId('condition-0')
+    await userEvent.click(
+      within(screen.getByTestId('condition-0')).getByRole('button', { name: /negate/i }),
+    )
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    await waitFor(() => expect(client.updateSegmentTree).toHaveBeenCalledTimes(1))
+    const call = client.updateSegmentTree.mock.calls[0]
+    if (!call) throw new Error('updateSegmentTree was not called')
+    expect(call[2]).toEqual({
+      ast_version: 1,
+      filter: {
+        kind: 'group',
+        op: 'and',
+        children: [{ kind: 'not', child: bareTrait }],
+      },
+    })
+  })
+})
+
+// --- Every fixture above mounts ONE builder against ONE segment in ONE
+// project and never changes either while mounted; `renderEdit` mutates the
+// client's mock BEFORE rendering. There was no test in this file where the
+// load effect ran twice, which is the shape being broken here.
+//
+// The invariant: this screen's state must never describe a segment other
+// than the one addressed by (`activeId`, `editId`) right now. Writing state
+// only on a SUCCESSFUL load broke it in four places at once -- a failing
+// re-fetch, a 404 after a project switch, edit -> edit, and edit -> the
+// create route, which React reconciles onto the same component instance --
+// and `handleSave` then combined the previous segment's tree with the id in
+// the URL and the currently active project.
+//
+// The routes below carry NO `key`, deliberately. `AppRouter` gives its two
+// `SegmentBuilder` routes distinct keys as defence in depth, but a key is
+// one edit away from being removed; these tests hold the screen to the
+// harder case, where the instance survives every navigation.
+
+const PROJECTS_TWO = [
+  ...PROJECTS,
+  {
+    id: 2,
+    name: 'Beta',
+    slug: 'beta',
+    created_at: '',
+    retention_months: 24,
+    monthly_event_quota: null,
+  },
+]
+
+/** The header project switcher, reduced to the one thing it does that
+ * matters here -- it is reachable from every screen, including an open
+ * segment editor. */
+function SwitchProject() {
+  const { setActiveId } = useProject()
+  return (
+    <button type="button" onClick={() => setActiveId(2)}>
+      switch project
+    </button>
+  )
+}
+
+function GoTo(props: { to: string; label: string }) {
+  const navigate = useNavigate()
+  return (
+    <button type="button" onClick={() => navigate(props.to)}>
+      {props.label}
+    </button>
+  )
+}
+
+/** Like `renderBuilder`, but the project and the route can both change
+ * while the builder stays mounted. */
+function renderLiveBuilder(client: ApiClient, initialPath: string) {
+  render(
+    <MemoryRouter initialEntries={[initialPath]}>
+      <ProjectProvider projects={PROJECTS_TWO} initialId={1}>
+        <SwitchProject />
+        <GoTo to={segmentEditPath(8)} label="go to segment 8" />
+        <GoTo to={ROUTES.segmentNew} label="go to create" />
+        <Routes>
+          <Route path={ROUTES.segmentNew} element={<SegmentBuilder client={client} />} />
+          <Route path="/segments/:id/edit" element={<SegmentBuilder client={client} />} />
+          <Route path={ROUTES.segments} element={<p>segments list</p>} />
+          <Route path="/segments/:id" element={<p>segment detail</p>} />
+        </Routes>
+      </ProjectProvider>
+    </MemoryRouter>,
+  )
+}
+
+describe('SegmentBuilder -- the identity its state describes', () => {
+  it('a project switch whose fetch 404s leaves nothing of the previous project segment on screen', async () => {
+    const client = fakeClient({
+      segment: vi.fn(async (projectId: number) => {
+        if (projectId !== 1) throw new ApiError(404, 'not_found')
+        return SEGMENT
+      }),
+    })
+    renderLiveBuilder(client, segmentEditPath(7))
+    expect(await screen.findByTestId('condition-0')).toBeInTheDocument()
+    expect(screen.getByLabelText(/name/i)).toHaveValue('Paying customers')
+
+    await userEvent.click(screen.getByRole('button', { name: /switch project/i }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not load this segment/i)
+
+    // Not merely "an error is shown above it" -- the previous project's
+    // segment is GONE. It was fully editable here, one click from being
+    // written to the same id under a different project.
+    expect(screen.queryByTestId('condition-0')).toBeNull()
+    expect(screen.getByLabelText(/name/i)).toHaveValue('')
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+  })
+
+  it('refuses to save a segment it never loaded, even once the form has been filled in by hand', async () => {
+    // The reset above already leaves an empty, unsaveable form -- so this
+    // fills in a name and a condition by hand, which is two clicks away
+    // after any failed load, leaving `canSave`'s completed-load term as the
+    // only thing between it and a cross-project write.
+    const client = fakeClient({
+      segment: vi.fn(async (projectId: number) => {
+        if (projectId !== 1) throw new ApiError(404, 'not_found')
+        return SEGMENT
+      }),
+    })
+    renderLiveBuilder(client, segmentEditPath(7))
+    await screen.findByTestId('condition-0')
+    await userEvent.click(screen.getByRole('button', { name: /switch project/i }))
+    await screen.findByRole('alert')
+
+    await userEvent.type(screen.getByLabelText(/name/i), 'Anything at all')
+    await userEvent.click(screen.getByRole('button', { name: /add condition/i }))
+    const save = screen.getByRole('button', { name: /^save$/i })
+    expect(save).toBeDisabled()
+    // Asserted on the REQUEST as well as the control -- a screen that
+    // disables the wrong button but still fires the call would pass a
+    // control-only test.
+    await userEvent.click(save)
+    expect(client.updateSegmentTree).not.toHaveBeenCalled()
+    expect(client.renameSegment).not.toHaveBeenCalled()
+    expect(client.createSegment).not.toHaveBeenCalled()
+  })
+
+  it('edit -> edit with a failing second fetch never leaves the first segment tree on screen', async () => {
+    const client = fakeClient({
+      segment: vi.fn(async (_projectId: number, id: number) => {
+        if (id !== 7) throw new ApiError(500, 'server_error')
+        return SEGMENT
+      }),
+    })
+    renderLiveBuilder(client, segmentEditPath(7))
+    expect(await screen.findByTestId('condition-0')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: /go to segment 8/i }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not load this segment/i)
+    expect(screen.queryByTestId('condition-0')).toBeNull()
+    expect(screen.getByLabelText(/name/i)).toHaveValue('')
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+  })
+
+  it('edit -> the create route opens an empty form, never the previous segment pre-filled', async () => {
+    const client = fakeClient()
+    renderLiveBuilder(client, segmentEditPath(7))
+    await screen.findByTestId('condition-0')
+
+    await userEvent.click(screen.getByRole('button', { name: /go to create/i }))
+    expect(await screen.findByRole('heading', { name: /create segment/i })).toBeInTheDocument()
+    expect(screen.getByLabelText(/name/i)).toHaveValue('')
+    expect(screen.queryByTestId('condition-0')).toBeNull()
+    expect(screen.getByText(/no conditions yet/i)).toBeInTheDocument()
+
+    const save = screen.getByRole('button', { name: /^save$/i })
+    expect(save).toBeDisabled()
+    await userEvent.click(save)
+    expect(client.createSegment).not.toHaveBeenCalled()
+  })
+
+  it('a count run for the previous segment is not left standing against the next one', async () => {
+    // The same invariant applied to the derived state a save does not read:
+    // a preview belongs to the tree that answered it, and that tree is gone.
+    const client = fakeClient({
+      segment: vi.fn(async (_projectId: number, id: number) => ({ ...SEGMENT, id })),
+    })
+    renderLiveBuilder(client, segmentEditPath(7))
+    await screen.findByTestId('condition-0')
+    await userEvent.click(screen.getByRole('button', { name: /^run$/i }))
+    expect(await screen.findByTestId('segment-preview-count')).toHaveTextContent('42')
+
+    await userEvent.click(screen.getByRole('button', { name: /go to segment 8/i }))
+    await waitFor(() => expect(client.segment).toHaveBeenCalledTimes(2))
+    await screen.findByTestId('condition-0')
+    expect(screen.queryByTestId('segment-preview-count')).toBeNull()
   })
 })

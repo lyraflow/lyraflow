@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import type { ApiClient } from '../../api/client.js'
-import { TreeEditor } from './TreeEditor.js'
+import { TreeEditor, normaliseRoot } from './TreeEditor.js'
 
 const trait = (key: string): FilterNode => ({ kind: 'trait', key, operator: '=', value: 'x' })
 const group = (...children: FilterNode[]): Group => ({ kind: 'group', op: 'and', children })
@@ -111,9 +111,55 @@ describe('TreeEditor', () => {
     expect((next.children[0] as Group).children[0]?.kind).toBe('not')
   })
 
-  // --- Controller correction 1: the root is not necessarily a group -------
+  // --- The root is not necessarily a group -------------------------------
+  //
+  // `normaliseRoot` is exported and applied by the tree's OWNER rather than
+  // silently inside `TreeEditor`, and `TreeEditor`'s `value` is a `Group`
+  // so that the type system forbids a caller from holding one tree while
+  // this component renders another. `normaliseRoot`'s own doc comment has
+  // the case: while the wrapping happened in here, every `costWarnings`
+  // path was one segment shorter than the row it named.
 
-  describe('normalising a non-group root', () => {
+  describe('normaliseRoot', () => {
+    it('wraps each non-group root kind in a one-child and-group', () => {
+      // Every non-group member of the FilterNode union, not just the trait
+      // the editor tests below happen to use -- a fifth leaf kind added
+      // later has to be added here too.
+      const leaves: FilterNode[] = [
+        trait('z'),
+        { kind: 'not', child: trait('z') },
+        { kind: 'context', field: 'country', scope: 'latest', operator: '=', value: 'TR' },
+        {
+          kind: 'lifecycle',
+          field: 'first_seen',
+          operator: '>',
+          value: '2026-01-01T00:00:00.000Z',
+        },
+        {
+          kind: 'behavior',
+          event: 'purchase',
+          aggregate: 'count',
+          window: { kind: 'ever' },
+          operator: '>=',
+          value: 1,
+        },
+      ]
+      for (const leaf of leaves) {
+        expect(normaliseRoot(leaf)).toEqual({ kind: 'group', op: 'and', children: [leaf] })
+      }
+    })
+
+    it('returns a group root unchanged, and is idempotent', () => {
+      // Idempotence is what makes it safe to apply at EVERY point a tree
+      // enters the builder's state -- the load, and every edit coming back
+      // up from this editor -- without ever double-wrapping.
+      const g = group(trait('a'))
+      expect(normaliseRoot(g)).toBe(g)
+      expect(normaliseRoot(normaliseRoot(trait('a')))).toEqual(group(trait('a')))
+    })
+  })
+
+  describe('rendering a normalised non-group root', () => {
     it('wraps a bare condition root in a one-child group rather than crashing', () => {
       // A segment authored by the CLI can legally have a bare trait (or
       // context/lifecycle/behavior/not) at its root -- SegmentQuery.filter
@@ -124,7 +170,12 @@ describe('TreeEditor', () => {
       // fixture in this file, so this can't coincidentally pass against a
       // stub that happens to hardcode 'a'/'b' as its own placeholder text.
       render(
-        <TreeEditor value={trait('z')} onChange={vi.fn()} client={client} projectId={projectId} />,
+        <TreeEditor
+          value={normaliseRoot(trait('z'))}
+          onChange={vi.fn()}
+          client={client}
+          projectId={projectId}
+        />,
       )
       expect(screen.getByTestId('group-')).toBeInTheDocument()
       // Task 5 replaced the placeholder leaf (a `summarise` text span) with
@@ -142,7 +193,12 @@ describe('TreeEditor', () => {
     it('edits inside a normalised root reach the server root wrapped, not bare', async () => {
       const onChange = vi.fn()
       render(
-        <TreeEditor value={trait('a')} onChange={onChange} client={client} projectId={projectId} />,
+        <TreeEditor
+          value={normaliseRoot(trait('a'))}
+          onChange={onChange}
+          client={client}
+          projectId={projectId}
+        />,
       )
       await userEvent.click(
         within(screen.getByTestId('condition-0')).getByRole('button', { name: /negate/i }),
@@ -162,7 +218,12 @@ describe('TreeEditor', () => {
       // normalisation, not because the operator authored one.
       const onChange = vi.fn()
       render(
-        <TreeEditor value={trait('a')} onChange={onChange} client={client} projectId={projectId} />,
+        <TreeEditor
+          value={normaliseRoot(trait('a'))}
+          onChange={onChange}
+          client={client}
+          projectId={projectId}
+        />,
       )
       await userEvent.click(
         within(screen.getByTestId('condition-0')).getByRole('button', { name: /remove/i }),
@@ -231,7 +292,7 @@ describe('TreeEditor', () => {
     })
 
     it('disables Add condition and Add group while a group is negated, since insertAt cannot target a not wrapper', () => {
-      const negatedRoot: FilterNode = {
+      const negatedRoot: Group = {
         kind: 'group',
         op: 'and',
         children: [{ kind: 'not', child: group(trait('a')) }],

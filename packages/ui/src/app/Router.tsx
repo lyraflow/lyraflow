@@ -64,11 +64,32 @@ export function AppRouter(props: {
   const funnelDetail = <FunnelDetail client={props.client} onUnauthorized={props.onUnauthorized} />
   const funnelEdit = <FunnelBuilder client={props.client} onUnauthorized={props.onUnauthorized} />
   const segments = <Segments client={props.client} onUnauthorized={props.onUnauthorized} />
-  const segmentNew = <SegmentBuilder client={props.client} onUnauthorized={props.onUnauthorized} />
+  // `<Routes>` renders the matched route's element as a SINGLE child, which
+  // React reconciles by type and key -- with no key, navigating from
+  // `/segments/:id/edit` to `/segments/new` keeps the same `SegmentBuilder`
+  // instance and all of its state. Distinct keys make that navigation a
+  // remount.
+  //
+  // DEFENCE IN DEPTH, deliberately not the fix. `SegmentBuilder`'s own load
+  // effect resets every piece of its state at the start of each identity
+  // change and refuses to save from a state it has not loaded, which is
+  // what actually closes the edit -> new door; these keys are a second
+  // mechanism for the same invariant, and the screen's tests pass with them
+  // removed on purpose, so a future reader who deletes them has not
+  // reopened anything.
+  const segmentNew = (
+    <SegmentBuilder key="segment-new" client={props.client} onUnauthorized={props.onUnauthorized} />
+  )
   const segmentDetail = (
     <SegmentDetail client={props.client} onUnauthorized={props.onUnauthorized} />
   )
-  const segmentEdit = <SegmentBuilder client={props.client} onUnauthorized={props.onUnauthorized} />
+  const segmentEdit = (
+    <SegmentBuilder
+      key="segment-edit"
+      client={props.client}
+      onUnauthorized={props.onUnauthorized}
+    />
+  )
   return (
     <BrowserRouter>
       <Shell email={props.email} onLogout={props.onLogout}>

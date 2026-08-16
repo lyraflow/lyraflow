@@ -10,6 +10,7 @@ import { useProject } from '../app/ProjectContext.js'
 import { ROUTES, segmentEditPath } from '../app/Router.js'
 import { Button } from '../components/ui/button.js'
 import { WarningPanel } from './funnels/WarningPanel.js'
+import { formatRelative } from './funnels/format.js'
 import { MemberList } from './segments/MemberList.js'
 import { summarise } from './segments/summarise.js'
 
@@ -61,6 +62,13 @@ export function SegmentDetail(props: { client: ApiClient; onUnauthorized?: () =>
   const [segment, setSegment] = useState<Segment | null>(null)
   const [segmentError, setSegmentError] = useState<string | null>(null)
   const [preview, setPreview] = useState<SegmentPreview | null>(null)
+  // Bumped every time a preview result is ACCEPTED (never merely issued,
+  // and never for a response discarded by the answer-id guard). Feeds
+  // `MemberList`'s key below so a re-run resets the people underneath the
+  // count. Not `preview.as_of` alone: a cache hit inside the server's TTL
+  // reports the SAME stored instant, so keying on it would leave a re-run
+  // that did land a fresh response showing the previous run's rows.
+  const [previewRun, setPreviewRun] = useState(0)
   const [previewing, setPreviewing] = useState(false)
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
@@ -81,6 +89,7 @@ export function SegmentDetail(props: { client: ApiClient; onUnauthorized?: () =>
       .then((r) => {
         if (answerId !== answerIdRef.current) return
         setPreview(r)
+        setPreviewRun((n) => n + 1)
       })
       .catch((err: unknown) => {
         if (err instanceof ApiError && err.status === 401) {
@@ -275,29 +284,49 @@ export function SegmentDetail(props: { client: ApiClient; onUnauthorized?: () =>
           </div>
 
           {preview != null && (
-            <p
-              data-testid="segment-detail-count"
-              className="text-2xl font-semibold text-foreground"
-            >
-              {preview.person_count.toLocaleString('en-US')}
-            </p>
+            <div className="flex min-w-0 flex-col gap-1">
+              <p
+                data-testid="segment-detail-count"
+                className="text-2xl font-semibold text-foreground"
+              >
+                {preview.person_count.toLocaleString('en-US')}
+              </p>
+              {/* This number can be a cache hit up to the server's TTL old
+               * -- `previewSavedSegment` deliberately reports the STORED
+               * `as_of` on a hit precisely so a client can tell -- and a
+               * count with no instant beside it cannot be told apart from
+               * a live one. Same treatment as `FunnelDetail`'s own
+               * subtitle: `formatRelative` on the result's own `as_of`. */}
+              <p className="text-sm text-muted-foreground">
+                as of{' '}
+                <span data-testid="segment-detail-as-of">
+                  {formatRelative(preview.as_of, new Date())}
+                </span>
+              </p>
+            </div>
           )}
 
-          {/* `key={validId}` remounts `MemberList` -- discarding whatever
-           * page it had loaded, including anything in flight -- the instant
-           * the segment on screen changes, the same reset `Settings.tsx`
-           * uses for `LimitsSection`. `MemberList`'s own doc comment has the
-           * full reasoning for why that (rather than a second answer-id ref
-           * threaded down into a child) is enough: a response for the
-           * segment navigated away from lands against an unmounted
-           * component and simply has nowhere to apply itself. Gated on
-           * `preview != null` -- there is nothing useful to page through
-           * before a count has ever been run once, and on `activeId`/
-           * `validId` being non-null so the callback below never has to
-           * guess at a project or segment id. */}
+          {/* The key remounts `MemberList` -- discarding whatever page it
+           * had loaded, including anything in flight -- the same reset
+           * `Settings.tsx` uses for `LimitsSection`. `MemberList`'s own doc
+           * comment has the full reasoning for why that (rather than a
+           * second answer-id ref threaded down into a child) is enough: a
+           * response for the segment navigated away from lands against an
+           * unmounted component and simply has nowhere to apply itself.
+           *
+           * Keyed on the RUN as well as the segment. On `validId` alone,
+           * clicking Run replaced the count above and left the people below
+           * untouched, so the two halves of this screen showed different
+           * instants with nothing saying so -- the exact conflation the
+           * `as_of` line above exists to prevent, one element lower.
+           *
+           * Gated on `preview != null` -- there is nothing useful to page
+           * through before a count has ever been run once, and on
+           * `activeId`/`validId` being non-null so the callback below never
+           * has to guess at a project or segment id. */}
           {preview != null && activeId != null && validId != null && (
             <MemberList
-              key={validId}
+              key={`${validId}:${previewRun}`}
               fetchPage={(cursor) =>
                 client
                   .previewSavedSegment(activeId, validId, { include: ['members'], cursor })
