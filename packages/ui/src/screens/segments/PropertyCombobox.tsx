@@ -17,8 +17,8 @@ const DEBOUNCE_MS = 250
  * seen is legitimate, the same reasoning `EventCombobox`'s own doc comment
  * gives for event names.
  *
- * `event` scopes suggestions to one event's own properties (controller
- * correction 2, Task 6 brief): a behaviour's, or a funnel step's, `where`
+ * `event` scopes suggestions to one event's own properties:
+ * a behaviour's, or a funnel step's, `where`
  * predicates constrain THAT event, so suggesting every property in the
  * project is noise -- worse than noise for a project with many event types,
  * since most suggestions cannot match. Pass `undefined` for "suggest across
@@ -29,7 +29,7 @@ const DEBOUNCE_MS = 250
  * Nothing here reads a `Behavior` or any segment-specific type -- `client`,
  * `projectId`, an event NAME (not a node), and a plain string value. That is
  * what keeps it equally usable from a future funnel-step predicate editor,
- * not just this task's `WherePredicates`.
+ * not just `WherePredicates`.
  */
 export function PropertyCombobox(props: {
   client: ApiClient

@@ -15,10 +15,10 @@ import { MemberList } from './segments/MemberList.js'
 import { summarise } from './segments/summarise.js'
 
 /**
- * Views a saved segment: its filter, its live count, and (Task 8) the
+ * Views a saved segment: its filter, its live count, and the
  * people it matches.
  *
- * Task 9 wires Edit (a plain link to `SegmentBuilder`'s edit route -- the
+ * Wires Edit (a plain link to `SegmentBuilder`'s edit route -- the
  * rename/tree-update split lives there, not here) and Delete, behind a
  * confirmation, same two-step shape and same reasoning as `FunnelDetail`'s
  * own `handleDelete`: deletion is the one action on this screen with no

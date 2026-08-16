@@ -16,7 +16,7 @@ function toText(v: Scalar): string {
 
 /**
  * The shared value control every condition form renders through --
- * `TraitForm`, `ContextForm`, `LifecycleForm` here, and Task 6's
+ * `TraitForm`, `ContextForm`, `LifecycleForm` here, and
  * `BehaviourForm`. One text-like input for every operator except
  * `between`, which gets two.
  *

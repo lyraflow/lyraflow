@@ -11,7 +11,7 @@ const group = (...children: FilterNode[]): Group => ({ kind: 'group', op: 'and',
 
 // None of this file's fixtures carry a `behavior` leaf, so nothing here
 // ever reaches the network -- a stub is enough to satisfy `TreeEditor`'s
-// required `client`/`projectId` props (threaded through for Task 6's
+// required `client`/`projectId` props (threaded through for
 // `BehaviourForm`, see `TreeEditor`'s own doc comment).
 const client = {} as unknown as ApiClient
 const projectId = 1
@@ -163,9 +163,9 @@ describe('TreeEditor', () => {
     it('wraps a bare condition root in a one-child group rather than crashing', () => {
       // A segment authored by the CLI can legally have a bare trait (or
       // context/lifecycle/behavior/not) at its root -- SegmentQuery.filter
-      // is the whole FilterNode union, not just Group. The plan's own Step
-      // 3 text ("renders the root through GroupCard") assumed a group;
-      // this is the fix, at the one place a tree enters the editor.
+      // is the whole FilterNode union, not just Group. An earlier version
+      // of this screen ("renders the root through GroupCard") assumed a
+      // group; this is the fix, at the one place a tree enters the editor.
       // `trait('z')`, not `trait('a')` -- a distinct key from every other
       // fixture in this file, so this can't coincidentally pass against a
       // stub that happens to hardcode 'a'/'b' as its own placeholder text.
@@ -178,7 +178,7 @@ describe('TreeEditor', () => {
         />,
       )
       expect(screen.getByTestId('group-')).toBeInTheDocument()
-      // Task 5 replaced the placeholder leaf (a `summarise` text span) with
+      // The placeholder leaf (a `summarise` text span) was replaced with
       // a real `TraitForm`, whose fields don't concatenate into "z = x" as
       // DOM text content -- an `<input>`'s `value` is never a text node.
       // Reading each field back through its own control pins the same
@@ -212,7 +212,7 @@ describe('TreeEditor', () => {
     })
 
     it('removing the only condition of a normalised root leaves the legal empty-root shape', async () => {
-      // Controller correction 2: removeAt returns an empty root GROUP for
+      // `removeAt` returns an empty root GROUP for
       // the root case, not null or a collapse -- and that must hold even
       // when the root only became a group via this screen's own
       // normalisation, not because the operator authored one.
@@ -247,7 +247,7 @@ describe('TreeEditor', () => {
     })
   })
 
-  // --- Group-level controls: the brief's given tests only exercise leaf
+  // --- Group-level controls: the tests above only exercise leaf
   // negate/remove through ConditionRow. GroupCard owns its own Remove and
   // Negate for a nested group, addressed at the group's own path -- these
   // pin that those don't leak into a sibling either, the same defect class
@@ -306,8 +306,8 @@ describe('TreeEditor', () => {
     })
   })
 
-  // --- Same local index, different depth: the sharpest form of "shape the
-  // brief's tests have in common" -- every given fixture has at most ONE
+  // --- Same local index, different depth: the sharpest form of "what shape
+  // the tests have in common" -- every given fixture has at most ONE
   // leaf at any given local child index, so a testid (or key) computed from
   // the LOCAL index alone, rather than the full path, would still pass all
   // five. This fixture puts a leaf at local index 0 in the ROOT'S OWN
@@ -359,7 +359,7 @@ describe('TreeEditor', () => {
   })
 
   it('Add group appends a new nested group seeded with one condition, never empty', async () => {
-    // Controller ruling (fix round 1): a group with zero children is not a
+    // A group with zero children is not a
     // state this editor should be able to produce -- it violates the AST's
     // `children.min(1)` the instant it exists, before the operator has done
     // anything wrong. Seeded with the SAME default condition "Add

@@ -112,7 +112,7 @@ describe('AppRouter', () => {
     expect(link).toHaveAttribute('aria-current', 'page')
   })
 
-  // Task 3's own trap: there is no declaration-order guarantee to pin
+  // There is no declaration-order guarantee to pin
   // (`<Routes>` ranks by path specificity via `matchRoutes()`, verified on
   // the funnels branch by moving routes after the catch-all and watching
   // every test stay green) -- so this pins resolution instead, exactly

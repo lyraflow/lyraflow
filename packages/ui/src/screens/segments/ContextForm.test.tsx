@@ -29,7 +29,7 @@ describe('ContextForm', () => {
     expect(screen.getByRole('combobox', { name: /field/i })).toHaveValue('utm_source')
   })
 
-  // --- Mutations invented beyond the brief --------------------------------
+  // --- Mutations invented beyond the tests above --------------------------
 
   it('changing the field updates only field, leaving scope/operator/value untouched', async () => {
     // The fixture deliberately gives scope, operator and value distinct,

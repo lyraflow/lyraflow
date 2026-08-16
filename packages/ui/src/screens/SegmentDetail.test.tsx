@@ -158,7 +158,7 @@ describe('SegmentDetail', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
-  // --- Task 7: live counts, the read-only side. Cheap auto-previews the
+  // --- Live counts, the read-only side. Cheap auto-previews the
   // instant the segment is known; a cost warning waits for an explicit Run.
 
   it('auto-previews a cheap saved segment on open', async () => {
@@ -259,7 +259,7 @@ describe('SegmentDetail', () => {
     expect(screen.getByRole('button', { name: /run/i })).toBeEnabled()
   })
 
-  // Important 2 (fix round 1): the test above navigates to a segment that
+  // The test above navigates to a segment that
   // ITSELF issues a replacement request (its own auto-preview) -- collapsing
   // `answerIdRef` and `requestIdRef` into one shared ref still passes it,
   // since the newer call's own `.finally` clears `previewing` regardless.
@@ -327,7 +327,7 @@ describe('SegmentDetail', () => {
     expect(screen.queryByTestId('segment-detail-count')).toBeNull()
   })
 
-  // --- Task 8 fix round 1 (Important 1): the wiring between this screen and
+  // --- The wiring between this screen and
   // `MemberList` -- the real `fetchPage` closure that actually calls
   // `previewSavedSegment` with `include`/`cursor`, defaults its optional
   // response fields, and routes a 401 -- had NO coverage. `MemberList.test.tsx`
@@ -432,7 +432,7 @@ describe('SegmentDetail', () => {
   })
 })
 
-// --- Task 9: Edit link and delete-behind-confirmation. Rename/tree-update
+// --- Edit link and delete-behind-confirmation. Rename/tree-update
 // themselves live on `SegmentBuilder` (its own "Task 9" describe block in
 // `SegmentBuilder.test.tsx`) -- this file only covers what THIS screen owns:
 // linking to the edit route, and never calling `deleteSegment` before an

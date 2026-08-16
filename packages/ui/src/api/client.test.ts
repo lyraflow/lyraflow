@@ -437,7 +437,7 @@ describe('createClient', () => {
 
   describe('segments', () => {
     // Invented: `segment` (singular) had zero coverage the way `funnel`
-    // (singular) once did (see fix round 1 above) -- mutating it to send
+    // (singular) once did -- mutating it to send
     // PUT to the wrong path left the whole suite green. Pins verb, path and
     // project header the same way the funnel equivalent already does.
     it('segment GETs a single segment by id under the project header', async () => {
@@ -505,7 +505,7 @@ describe('createClient', () => {
       expect(new Headers(init.headers).get('x-lyraflow-project')).toBe('3')
     })
 
-    // Fix round 1: previewSavedSegment had zero coverage -- a reviewer
+    // previewSavedSegment had zero coverage -- a reviewer
     // stubbed all nine segment methods in turn and this was the only one
     // where the whole suite (40/40) stayed green against a no-op stub.
     // Pins verb, path, project header, and that a call with no options

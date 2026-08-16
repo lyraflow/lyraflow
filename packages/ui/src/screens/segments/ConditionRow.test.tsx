@@ -66,8 +66,8 @@ const LEAF_KINDS = [
 
 describe('ConditionRow', () => {
   it('keeps the condition-<path> testid the recursion addresses nodes through', () => {
-    // Controller correction (binding, this task's brief): the ConditionRow
-    // testid contract Task 4's recursion tests depend on at arbitrary
+    // The ConditionRow
+    // testid contract the recursion tests depend on at arbitrary
     // depth. A leaf renderer that drops it leaves those tests passing
     // while addressing nothing.
     render(
@@ -107,7 +107,7 @@ describe('ConditionRow', () => {
   )
 
   it('every leaf kind the AST defines now has a real form -- the fallback summary is unreachable from here', () => {
-    // Task 6 gave `behavior` its own form (`BehaviourForm`), the last of
+    // `behavior` got its own form (`BehaviourForm`), the last of
     // the four leaf kinds still on the placeholder. Pinned by asserting
     // BehaviourForm's own distinguishing field (Aggregate, which no other
     // form renders) is present, rather than the one-line `summarise` text
@@ -172,7 +172,7 @@ describe('ConditionRow', () => {
     )
   })
 
-  // Task 10 (visual pass): a negated leaf used to render pixel-identical to
+  // A negated leaf used to render pixel-identical to
   // a non-negated one. `aria-pressed` on the Negate button was the ONLY
   // signal, and the vendored Button has no pressed styling, so
   // `not (status = churned)` read on screen as `status = churned` -- the
@@ -418,7 +418,7 @@ describe('ConditionRow', () => {
     expect(schemaEvents.mock.calls[0]?.[0]).toBe(42)
   })
 
-  // Task 7, fix round 1 (Important 1): every SegmentBuilder/SegmentDetail
+  // Every SegmentBuilder/SegmentDetail
   // fixture carrying a cost warning had exactly ONE condition in the whole
   // tree, so "the warning appears inside condition-0" was true whether path
   // association worked or not -- `const ownWarnings = warnings` (render

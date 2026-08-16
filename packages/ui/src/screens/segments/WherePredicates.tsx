@@ -17,7 +17,7 @@ function newPredicate(): WherePredicate {
 
 /**
  * Editor for a `WherePredicate[]` -- the property constraints on ONE event,
- * scoped by `event` (controller correction 2: `undefined` for "no scoping",
+ * scoped by `event` (`undefined` for "no scoping",
  * never the literal `'*'` or `''`; the caller decides that, this component
  * only forwards it).
  *

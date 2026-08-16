@@ -13,7 +13,7 @@ import { GroupCard } from './GroupCard.js'
 // The behaviour-cap fixtures below render REAL `behavior` leaves, each of
 // which mounts a real `BehaviourForm` -> `EventCombobox`, whose debounced
 // effect calls `client.schemaEvents` even with a non-empty seeded `value`
-// (fix round 1: an earlier `{}` stub here left this throwing
+// (an earlier `{}` stub here left this throwing
 // "schemaEvents is not a function" as an uncaught async exception once
 // those fixtures existed, since none of the OTHER fixtures in this file
 // ever reached a behavior leaf).
@@ -196,7 +196,7 @@ describe('GroupCard -- the three server-side caps', () => {
   }, 15000)
 
   it('one below the node cap: Add condition (costs 1 node) is enabled, Add group (costs 2) is not', () => {
-    // The off-by-one this task's own math has to get right: at
+    // The off-by-one this has to get right: at
     // MAX_TREE_NODES - 1 total nodes, one more leaf still fits (reaches
     // the cap exactly, which validateTree allows) but a group -- which
     // costs itself PLUS its seeded child, `newGroup`'s own doc comment --
@@ -293,7 +293,7 @@ describe('GroupCard -- the three server-side caps', () => {
     expect(rootAdd.getByRole('button', { name: /^add group$/i })).toBeEnabled()
   })
 
-  // --- MAX_BEHAVIOR_NODES: fix round 1 (coordinator Important 1). --------
+  // --- MAX_BEHAVIOR_NODES. -----------------------------------------------
   // Gating on the tree's EXISTING behaviour count alone blocked a control
   // that could never itself add one -- `newCondition()`/`newGroup()` both
   // hardcode a `trait`, and there is no kind-switcher anywhere in this

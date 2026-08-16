@@ -201,8 +201,8 @@ export function negateAt(root: FilterNode, path: number[]): FilterNode {
  * packages/core/src/segments/validate.ts exactly -- same yield-self-first
  * order, same `depth + 1` on descent into a `group` child or a `not`'s
  * child -- because `countNodes`, `maxDepth` and `countBehaviours` below
- * exist to disable UI controls *before* the server would reject a tree
- * (Task 6). If this walk disagreed with validateTree's, the UI would either
+ * exist to disable UI controls *before* the server would reject a tree.
+ * If this walk disagreed with validateTree's, the UI would either
  * block a legal tree or let an illegal one through the same click that
  * `validateTree` would then reject.
  */

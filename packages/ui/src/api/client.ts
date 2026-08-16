@@ -119,10 +119,10 @@ export interface ApiClient {
     id: number,
     options?: PreviewOptions,
   ): Promise<SegmentPreview>
-  // Task 6's behaviour form needs property autocomplete as well as event
+  // The behaviour form needs property autocomplete as well as event
   // autocomplete. `schemaEvents` already exists from the funnels work;
-  // this one does not, and adding it here rather than mid-task keeps Task 6
-  // from inventing a second fetch site.
+  // this one does not, and adding it here rather than inventing a second
+  // fetch site mid-form.
   schemaProperties(projectId: number, event: string | undefined, q: string): Promise<string[]>
   schemaEvents(projectId: number, q: string): Promise<string[]>
 }

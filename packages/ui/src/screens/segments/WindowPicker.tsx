@@ -26,7 +26,7 @@ const MAX_WINDOW_N = 3650
  * input error wearing an outage's clothes. This is (at least) the sixth
  * home of that check in this repository.
  *
- * Fix round 1: this used to check ONLY the lower bound (positive, safe
+ * This used to check ONLY the lower bound (positive, safe
  * integer), which is exactly the same defect class the aggregate/property
  * rule in `BehaviourForm` exists to prevent for a different field -- a form
  * that lets the operator build a state the schema refuses, then reports

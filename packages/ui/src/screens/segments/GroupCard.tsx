@@ -19,8 +19,8 @@ import {
   replaceAt,
 } from './tree.js'
 
-/** A new, empty leaf inserted by "Add condition". Tasks 5 and 6 give an
- * operator real fields to fill in; until then it renders through
+/** A new, empty leaf inserted by "Add condition". Per-kind forms later give
+ * an operator real fields to fill in; until then it renders through
  * `ConditionRow`'s placeholder body exactly like any other trait node. */
 function newCondition(): FilterNode {
   return { kind: 'trait', key: '', operator: '=', value: '' }
@@ -30,7 +30,7 @@ function newCondition(): FilterNode {
  * A new nested group inserted by "Add group" -- seeded with ONE default
  * condition (the same one `newCondition` inserts), never empty.
  *
- * Controller ruling (Task 4 fix round 1): a group with zero children is not
+ * A group with zero children is not
  * a state this editor should be able to produce. `removeAt` collapses a
  * group emptied BY REMOVAL, but nothing stopped one being BORN empty --
  * "Add group" used to insert `{ children: [] }`, which is invalid the
@@ -41,7 +41,7 @@ function newCondition(): FilterNode {
  * makes it unreachable instead, and keeps "Add condition" and "Add group"
  * agreeing on what a freshly-added condition looks like.
  *
- * `SegmentBuilder`'s empty-root save-disable (controller correction 2)
+ * `SegmentBuilder`'s empty-root save-disable
  * remains the backstop for the one empty-group state that IS still
  * reachable: removing the root's last remaining condition, which
  * `removeAt` deliberately leaves as an empty root rather than collapsing.
@@ -76,9 +76,9 @@ function newGroup(): FilterNode {
  * `extraBehaviors` is ALWAYS 0 from both call sites below, and that is
  * deliberate, not an oversight: `newCondition()` and `newGroup()` both
  * hardcode a `trait` leaf -- there is no kind-switcher anywhere in this
- * plan, so neither control this task ships can ever itself create a
+ * plan, so neither control here can ever itself create a
  * `behavior` node. Gating on the tree's EXISTING `behaviorCount` alone
- * (fix round 1, replacing an earlier version of this function that did
+ * (replacing an earlier version of this function that did
  * exactly that) would block "Add condition"/"Add group" on a tree the
  * server would happily accept the trait into -- the caps exist to stop the
  * server rejecting a tree the operator built, not the other way round.
@@ -165,11 +165,11 @@ function capBlock(
  * Negate control right beside the disabled ones does.
  *
  * `client`/`projectId`/`onUnauthorized` are threaded through, unused by this
- * component itself, purely to reach `BehaviourForm` (Task 6) at whatever
+ * component itself, purely to reach `BehaviourForm` at whatever
  * depth a `behavior` leaf sits -- the same reason `StepRows` threads them to
  * `EventCombobox` in the funnels builder.
  *
- * Task 6 also adds the three server-side caps (`MAX_TREE_NODES`,
+ * This also adds the three server-side caps (`MAX_TREE_NODES`,
  * `MAX_TREE_DEPTH`, `MAX_BEHAVIOR_NODES`, all from
  * `packages/core/src/segments/validate.js`) as a DISABLE here, computed
  * fresh on every render from `root` -- see `capBlock`'s own doc comment for
@@ -184,10 +184,10 @@ export function GroupCard(props: {
   client: ApiClient
   projectId: number
   onUnauthorized?: () => void
-  /** Task 7: the whole tree's `costWarnings()` list, passed through
+  /** The whole tree's `costWarnings()` list, passed through
    * unfiltered at every level -- only `ConditionRow`, at the leaf a warning
    * actually names, picks its own out via `warningsAt`. Defaults to `[]` so
-   * every caller from before this task (this file's own tests included)
+   * every caller from before this (this file's own tests included)
    * keeps working unchanged. */
   warnings?: CostWarning[]
 }) {

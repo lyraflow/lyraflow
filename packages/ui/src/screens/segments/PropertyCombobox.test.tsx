@@ -28,7 +28,7 @@ describe('PropertyCombobox', () => {
   })
 
   it('passes `undefined`, never the literal event string, when there is no event to scope to', async () => {
-    // Controller correction 2, Task 6 brief: the CALLER decides whether an
+    // The CALLER decides whether an
     // event scopes suggestions -- this component only forwards whatever it
     // is given. Pinned at this level (rather than only through
     // BehaviourForm) so the two components' contract is checked

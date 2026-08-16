@@ -55,10 +55,10 @@ describe('tree edits are pure', () => {
     expect(countBehaviours(root as never)).toBe(0)
   })
 
-  // --- Mutations invented beyond the brief -------------------------------
+  // --- Mutations invented beyond the tests above -------------------------
 
   it('shares untouched subtrees by reference rather than deep-cloning', () => {
-    // The brief is explicit that this must not deep-clone: sharing is what
+    // This must not deep-clone: sharing is what
     // keeps a 100-node tree cheap to re-render. A correct-but-cloning
     // implementation would pass every value-equality test above and still
     // violate this, so it needs its own assertion.
@@ -134,7 +134,7 @@ describe('tree edits are pure', () => {
     expect(nodeAt(root as never, [])).toBe(root)
   })
 
-  // --- Collapsing an emptied group (fix round 1) --------------------------
+  // --- Collapsing an emptied group ------------------------------------
   //
   // A `group` requires at least one child; removing the last child of a
   // non-root group would otherwise produce an illegal, server-rejecting

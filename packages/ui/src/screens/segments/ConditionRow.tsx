@@ -20,17 +20,16 @@ import { warningsAt } from './warnings.js'
  * The leaf renderer: dispatches on `node.kind` -- unwrapping a `not` first,
  * the same way `summarise` already does, so a negated leaf still shows the
  * real form for what it negates rather than falling back to plain text.
- * `trait`/`context`/`lifecycle` get their real per-kind forms (Task 5), and
- * `behavior` gets `BehaviourForm` (Task 6) -- every leaf kind the AST
+ * `trait`/`context`/`lifecycle` get their real per-kind forms, and
+ * `behavior` gets `BehaviourForm` -- every leaf kind the AST
  * defines now has one. The `default` branch below is defensive only: it
  * stays reachable in the TYPE system (nothing here asserts exhaustiveness),
  * so a leaf kind added to the AST later without a matching form here still
  * renders the one-line `summarise` text instead of nothing at all.
  *
- * This component's actual job, unchanged from Task 4, is the STRUCTURE
+ * This component's actual job is the STRUCTURE
  * around whatever body renders: the `condition-<path>` testid the
- * recursion's own tests address nodes through at arbitrary depth (the
- * controller correction, both this task's brief and Task 4's), and
+ * recursion's own tests address nodes through at arbitrary depth, and
  * Remove/Negate, which this component NEVER computes a path for itself --
  * `path` and the three callbacks all come from the caller (`GroupCard`),
  * addressed to this node's own position. That is what keeps "negate the
@@ -45,7 +44,7 @@ import { warningsAt } from './warnings.js'
  * forwarding to `props.onChange`, so a form component never has to know
  * whether the node it is editing is currently negated.
  *
- * Task 7: `warnings` is the FULL `costWarnings()` list for the whole tree,
+ * `warnings` is the FULL `costWarnings()` list for the whole tree,
  * not pre-filtered by the caller -- `warningsAt` (own doc comment,
  * `warnings.ts`) picks out only the ones addressed to THIS node's own
  * `path`, rendered inside this component's own testid wrapper rather than
@@ -53,7 +52,7 @@ import { warningsAt } from './warnings.js'
  * condition scans all history" is actionable read against the row it
  * names; the same sentence in a panel above 40 conditions is not. Defaults
  * to `[]` so every existing caller (every test in this file, `GroupCard`'s
- * own recursion before this task) keeps working unchanged.
+ * own recursion) keeps working unchanged.
  */
 function wrapLike(original: FilterNode, next: FilterNode): FilterNode {
   return original.kind === 'not' ? { kind: 'not', child: next } : next

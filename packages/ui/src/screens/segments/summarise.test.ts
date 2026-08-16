@@ -30,7 +30,7 @@ describe('summarise', () => {
     expect(summarise({ kind: 'not', child: trait('a') } as never)).toBe('not (a = x)')
   })
 
-  // --- Mutations invented beyond the brief --------------------------------
+  // --- Mutations invented beyond the tests above --------------------------
   //
   // Every trait/group fixture above uses the same operator ('=') and the
   // same value ('x') on every node, and every top-level test is a
@@ -116,9 +116,9 @@ describe('summarise', () => {
     expect(summarise(t as never)).toBe('age between 18 and 65')
   })
 
-  // --- Fix round 2: `behavior.where` was previously unexercised -----------
+  // --- `behavior.where` was previously unexercised ------------------------
   //
-  // `grep -n "where" summarise.test.ts` returned nothing before this round:
+  // `grep -n "where" summarise.test.ts` returned nothing before this:
   // the phrasing, the join separator between predicates and the per-
   // predicate format were all unverified. A single-predicate fixture alone
   // would not pin the join, since its rendering is identical whether the

@@ -31,8 +31,8 @@ import { WindowPicker } from './WindowPicker.js'
  *   one.** Delegated to `ValueInput` entirely, the same as every other
  *   condition form -- not reimplemented here.
  *
- * Property and predicate suggestions are scoped to the CHOSEN event
- * (controller correction 2, Task 6 brief): `scopeEvent` is `undefined` when
+ * Property and predicate suggestions are scoped to the CHOSEN event:
+ * `scopeEvent` is `undefined` when
  * `node.event` is `'*'` or unset, which is the honest "suggest across every
  * event" answer for a condition that does not name one -- never the literal
  * string forwarded to the schema endpoint.

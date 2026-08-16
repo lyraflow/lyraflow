@@ -55,9 +55,9 @@ export function normaliseRoot(value: FilterNode): Group {
  * `client`/`projectId`/`onUnauthorized` are passed straight through to
  * `GroupCard` -- this component owns no state and makes no requests of its
  * own; they exist only so a `behavior` leaf, at whatever depth, can reach
- * `BehaviourForm` (Task 6).
+ * `BehaviourForm`.
  *
- * `warnings` (Task 7) is likewise passed straight through, unfiltered --
+ * `warnings` is likewise passed straight through, unfiltered --
  * `SegmentBuilder` computes the whole tree's `costWarnings()` once and hands
  * it down; only `ConditionRow`, at whatever depth, picks out the ones
  * addressed to its own path. Defaults to `[]`.

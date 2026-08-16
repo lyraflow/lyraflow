@@ -85,7 +85,7 @@ describe('WindowPicker', () => {
     expect(screen.getByLabelText('Window amount')).toHaveAttribute('aria-invalid', 'true')
   })
 
-  // Fix round 1 (coordinator Important 2): `ast.ts` bounds `last.n` above
+  // `ast.ts` bounds `last.n` above
   // too -- `z.number().int().positive().max(3650)` -- and the original
   // version of this control checked only the lower bound. 3650 and 3651
   // together pin the actual boundary rather than just "some large number

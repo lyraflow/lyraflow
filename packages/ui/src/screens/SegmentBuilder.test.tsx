@@ -55,28 +55,28 @@ function fakeClient(over: Record<string, unknown> = {}) {
   return {
     segment: vi.fn(async () => SEGMENT),
     createSegment: vi.fn(async () => ({ ...SEGMENT, id: 42 })),
-    // Task 9: rename ONLY (never carries a tree) vs tree update ONLY
+    // Rename ONLY (never carries a tree) vs tree update ONLY
     // (never carries a name) -- two methods, deliberately, so a caller
     // cannot send the wrong one by accident (this file's own "the sharpest
     // rule in this plan" tests, below).
     renameSegment: vi.fn(async () => SEGMENT),
     updateSegmentTree: vi.fn(async () => SEGMENT),
-    // Task 6's cap fixtures render REAL `behavior` leaves -- each one
+    // The cap fixtures render REAL `behavior` leaves -- each one
     // mounts a `BehaviourForm` -> `EventCombobox`, whose debounced effect
     // calls `schemaEvents` even with a non-empty seeded value. Without
-    // this, that fires as an uncaught async exception (fix round 1) once
-    // any fixture in this file reaches a behavior leaf, since no test
-    // before Task 6 ever did.
+    // this, that fires as an uncaught async exception once
+    // any fixture in this file reaches a behavior leaf, since no earlier
+    // test ever did.
     schemaEvents: vi.fn(async () => []),
     schemaProperties: vi.fn(async () => []),
-    // Task 7: EVERY dirtying edit in this file now starts a real
+    // EVERY dirtying edit in this file now starts a real
     // `debounceMs` timer that, once it fires, calls this -- on real timers
     // (every test above this point) that is a genuine 600ms wall-clock
     // wait, not a no-op, so a fixture that dirties the tree but finishes
     // its own assertions slower than that (this machine's own documented
     // contention) would otherwise hit an unmocked `previewSegment` and
     // throw inside a timer callback. Same defensive shape as
-    // `schemaEvents`/`schemaProperties` above, one task later.
+    // `schemaEvents`/`schemaProperties` above.
     previewSegment: vi.fn(async () => PREVIEW),
     ...over,
   } as unknown as ApiClient & {
@@ -104,7 +104,7 @@ function renderBuilder(client: ApiClient = fakeClient(), editId?: number) {
   )
 }
 
-/** Task 9: renders in EDIT mode against a segment shaped by `overrides`
+/** Renders in EDIT mode against a segment shaped by `overrides`
  * (`{ ...SEGMENT, ...overrides }`) -- mutates the given `fakeClient`'s own
  * `segment` mock in place rather than building a fresh client, so a test
  * can still assert on the SAME client object's `renameSegment`/
@@ -181,7 +181,7 @@ describe('SegmentBuilder -- edit', () => {
   it('seeds the name and tree from the fetched segment', async () => {
     renderBuilder(fakeClient(), SEGMENT.id)
     expect(await screen.findByLabelText(/name/i)).toHaveValue('Paying customers')
-    // Task 5 replaced the placeholder leaf (plain `summarise` text) with a
+    // The placeholder leaf (plain `summarise` text) was replaced with a
     // real `TraitForm` -- an `<input>`'s `value` is never DOM text content,
     // so the fetched trait's data is pinned through its own fields instead.
     const condition = within(screen.getByTestId('condition-0'))
@@ -190,11 +190,11 @@ describe('SegmentBuilder -- edit', () => {
     expect(condition.getByRole('textbox', { name: /^value$/i })).toHaveValue('pro')
   })
 
-  // Task 9 changed what an UNCHANGED save does (nothing reaches the server
-  // at all -- see SegmentBuilder's own doc comment), so this fixture now
-  // makes a real tree edit (appending to the existing trait's value) before
-  // saving, to keep pinning "edit mode goes through updateSegmentTree, not
-  // createSegment" as a distinct fact from Task 9's own three tests below.
+  // An UNCHANGED save sends nothing to the server at all (see
+  // SegmentBuilder's own doc comment), so this fixture makes a real tree
+  // edit (appending to the existing trait's value) before saving, to keep
+  // pinning "edit mode goes through updateSegmentTree, not createSegment"
+  // as a distinct fact from the three tests below.
   it('save sends the current tree through updateSegmentTree, never createSegment', async () => {
     const client = fakeClient()
     renderBuilder(client, SEGMENT.id)
@@ -223,7 +223,7 @@ describe('SegmentBuilder -- edit', () => {
   })
 
   it('a save with no name or tree change reaches neither renameSegment nor updateSegmentTree, and still navigates to detail', async () => {
-    // The other half of the coincidence this task's brief warns about: a
+    // The other half of the coincidence: a
     // fixture where NOTHING changed must not be indistinguishable from one
     // where the tree happens to round-trip back to its original shape --
     // this pins that clicking Save on an untouched segment issues no
@@ -260,7 +260,7 @@ describe('SegmentBuilder -- edit', () => {
   })
 })
 
-// --- Task 9: the sharpest rule in this plan. `PATCH /v1/segments/:id`
+// --- The sharpest rule in this plan. `PATCH /v1/segments/:id`
 // decides whether to touch the filter tree by whether the body carries one
 // AT ALL, not by comparing old against new -- so a rename that ships the
 // whole definition resets the segment's cached count snapshot and returns
@@ -328,10 +328,10 @@ describe('SegmentBuilder -- Task 9: the rename rule', () => {
     expect(renameCall[2]).toBe('New')
   })
 
-  // Beyond the brief, mutation 1: a save with ONLY a name change must not
+  // Mutation 1: a save with ONLY a name change must not
   // merely skip `updateSegmentTree` -- it must not navigate before the
   // rename's own promise settles, and it must navigate to DETAIL (edit's
-  // own destination, controller correction), never the list (create's).
+  // own destination), never the list (create's).
   it('a rename-only save navigates to the segment detail route, not the list', async () => {
     const client = fakeClient()
     renderEdit(client, { id: 7, name: 'Old', filter: TREE })
@@ -343,10 +343,10 @@ describe('SegmentBuilder -- Task 9: the rename rule', () => {
     expect(screen.queryByText('segments list')).toBeNull()
   })
 
-  // Beyond the brief, mutation 2: a tree that is edited and then edited BACK
+  // Mutation 2: a tree that is edited and then edited BACK
   // to its exact original shape (negate, negate again) must read as
   // UNCHANGED -- content equality against `originalRoot`, not the `dirty`
-  // flag Task 7 already sets and never clears. A rename alongside a
+  // flag, which is set once and never cleared. A rename alongside a
   // round-tripped tree edit must still take the rename-only path.
   it('a tree edited back to its original shape is not treated as a tree change, even alongside a rename', async () => {
     const client = fakeClient()
@@ -361,7 +361,7 @@ describe('SegmentBuilder -- Task 9: the rename rule', () => {
     expect(client.updateSegmentTree).not.toHaveBeenCalled()
   })
 
-  // Fix round 1: an edit save can issue TWO PATCHes (rename + tree update),
+  // An edit save can issue TWO PATCHes (rename + tree update),
   // and `Promise.all` rejects the instant either one does -- possibly AFTER
   // the other has already committed. The error copy used to say "nothing
   // was changed on the server", which is false in exactly this shape. This
@@ -483,7 +483,7 @@ describe('SegmentBuilder -- Task 9: the rename rule', () => {
   })
 })
 
-// --- Task 6: the three server-side tree caps, enforced end to end through
+// --- The three server-side tree caps, enforced end to end through
 // SegmentBuilder -- GroupCard computes them from the SAME `root` this
 // screen owns (see SegmentBuilder's own doc comment on why the wiring
 // lives here), so these pin the whole chain rather than GroupCard in
@@ -527,7 +527,7 @@ describe('SegmentBuilder -- the three server-side tree caps', () => {
     expect(screen.getByText(new RegExp(String(MAX_TREE_NODES)))).toBeInTheDocument()
     // Letting the server reject a tree the operator spent five minutes
     // building is the failure being prevented -- so nothing this screen
-    // can send (today or once Task 7 wires previewSegment in) fires.
+    // can send (today, or once previewSegment is wired in) fires.
     expect(client.previewSegment).not.toHaveBeenCalled()
     expect(client.createSegment).not.toHaveBeenCalled()
     expect(client.updateSegmentTree).not.toHaveBeenCalled()
@@ -561,7 +561,7 @@ describe('SegmentBuilder -- the three server-side tree caps', () => {
     expect(client.previewSegment).not.toHaveBeenCalled()
   })
 
-  // Fix round 1 (coordinator Important 1): a tree already at the
+  // A tree already at the
   // behaviour cap must NOT block Add-condition -- `newCondition()` always
   // inserts a `trait`, never a `behavior`, and there is no kind-switcher
   // anywhere in this plan to change that. The server would accept the
@@ -594,7 +594,7 @@ describe('SegmentBuilder -- the three server-side tree caps', () => {
   }, 15000)
 })
 
-// --- Task 7: live counts -- cheap automatically, costly on request. Fake
+// --- Live counts -- cheap automatically, costly on request. Fake
 // timers are scoped to `withFakeTimers`, per test, never file- or
 // describe-wide -- every test above this point relies on real timers, and
 // `shouldAdvanceTime: true` (Feed.test.tsx's own `withFakeTimers`, mirrored
@@ -649,7 +649,7 @@ describe('SegmentBuilder -- Task 7: live counts', () => {
     ],
   }
 
-  // Task 7, fix round 1 (Important 1): `EVER_BEHAVIOUR` above has exactly
+  // `EVER_BEHAVIOUR` above has exactly
   // ONE condition -- "the warning appears inside condition-0" was true
   // whether path association worked or not, and a mutation rendering EVERY
   // warning on EVERY row (`const ownWarnings = warnings`, dropping
@@ -884,7 +884,7 @@ describe('SegmentBuilder -- Task 7: live counts', () => {
     ],
   }
 
-  // Important 2 (fix round 1): every stale-response test above issues a
+  // Every stale-response test above issues a
   // REPLACEMENT request for the newer state (a second edit, or navigating
   // to a segment that itself auto-previews) -- collapsing `answerIdRef` and
   // `requestIdRef` into a single shared ref still passed every one of them.

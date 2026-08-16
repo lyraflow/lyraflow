@@ -5,8 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '../../api/client.js'
 import { BehaviourForm } from './BehaviourForm.js'
 
-/** A minimal legal `Behavior`, overridable per test -- mirrors the brief's
- * own `beh()` helper. */
+/** A minimal legal `Behavior`, overridable per test. */
 function beh(over: Partial<Behavior> = {}): Behavior {
   return {
     kind: 'behavior',
@@ -27,7 +26,7 @@ function fakeClient(): ApiClient {
 }
 
 describe('BehaviourForm', () => {
-  // --- Brief Step 1, verbatim rule -----------------------------------
+  // --- The property-field rule -----------------------------------------
 
   it('hides the property field for count and requires it for the others', async () => {
     const { rerender } = render(
@@ -64,12 +63,12 @@ describe('BehaviourForm', () => {
       />,
     )
     await userEvent.selectOptions(screen.getByLabelText(/aggregate/i), 'count')
-    // Stub check (Task 6 report): `onChange.mock.calls.at(-1)?.[0].property`
+    // Stub check: `onChange.mock.calls.at(-1)?.[0].property`
     // evaluates to `undefined` -- and so passes `.toBeUndefined()` -- when
     // `onChange` was NEVER CALLED AT ALL, because the `?.` short-circuits
     // the whole chain including `.property`, not just the `[0]` index. A
     // component that dropped the wire-up entirely (calls nothing) passed
-    // this exact assertion from the brief verbatim. Guarding on the call
+    // this exact assertion. Guarding on the call
     // actually having happened, and on WHAT changed (not just what's
     // absent), is what makes this pin the real behaviour rather than the
     // absence of one.

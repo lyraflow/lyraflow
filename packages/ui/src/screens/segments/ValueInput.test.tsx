@@ -20,7 +20,7 @@ describe('ValueInput', () => {
     expect(onChange).toHaveBeenCalledWith('a')
   })
 
-  // --- Mutations invented beyond the brief --------------------------------
+  // --- Mutations invented beyond the tests above --------------------------
 
   it('expands a lone scalar into a two-slot tuple when switching TO between', () => {
     // The mirror image of the given "does not strand a second value" test:

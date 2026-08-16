@@ -34,8 +34,8 @@ export const DEBOUNCE_MS = 600
  * Creates a new segment or edits an existing one -- `useParams().id`
  * decides which, the same split `FunnelBuilder` uses.
  *
- * Task 4 wired this to `TreeEditor` and to create/tree-update. Task 9 adds
- * the split save a rename requires. `PATCH /v1/segments/:id` decides
+ * Wires this to `TreeEditor` and to create/tree-update, and splits the save
+ * a rename requires. `PATCH /v1/segments/:id` decides
  * whether to touch the filter tree by whether the request body carries one
  * AT ALL, not by comparing old against new -- so a rename that ships the
  * whole definition resets the segment's cached count snapshot, silently,
@@ -51,7 +51,7 @@ export const DEBOUNCE_MS = 600
  * after a partial failure the fetched values describe a state that no
  * longer exists. That is the reference `handleSave` compares the CURRENT
  * `name`/`root` against to decide what actually changed. Content equality
- * (`JSON.stringify`), not the `dirty` flag Task 7 already tracks: `dirty`
+ * (`JSON.stringify`), not the `dirty` flag already tracked: `dirty`
  * answers "has TreeEditor's onChange ever fired", which a negate-twice
  * round trip (back to the original shape) still leaves true, and sending a
  * tree that already matches the server's own copy would trip the exact
@@ -63,7 +63,7 @@ export const DEBOUNCE_MS = 600
  * Saving still does not reach the server merely from opening a segment --
  * only from an explicit Save.
  *
- * Task 6 threads `client`/`projectId`/`onUnauthorized` down into
+ * Threads `client`/`projectId`/`onUnauthorized` down into
  * `TreeEditor` -- unused directly by this component, needed only so a
  * `behavior` leaf's `BehaviourForm`, at whatever depth, can reach the
  * schema-autocomplete endpoints. Gated on `activeId != null` the same way
@@ -74,7 +74,7 @@ export const DEBOUNCE_MS = 600
  * so "Add condition"/"Add group" disable before a save could ever reach the
  * server's own `validateTree` rejection.
  *
- * Task 7 -- live counts, the interaction that justifies this screen being a
+ * Live counts -- the interaction that justifies this screen being a
  * stateful client rather than a form post. `costWarnings` is a PURE
  * function of `root`, no round trip -- computed fresh on every render and
  * never fetched. A cheap tree (no warnings) previews itself automatically,
@@ -129,7 +129,7 @@ export function SegmentBuilder(props: {
   // address -- which is exactly how every warning on such a segment went
   // missing.
   const [root, setRoot] = useState<Group>(EMPTY_ROOT)
-  // Task 9: the name/tree the SERVER is believed to hold. Seeded by the
+  // The name/tree the SERVER is believed to hold. Seeded by the
   // load effect below -- see this component's own doc comment for why
   // `handleSave` compares against THESE rather than the `dirty` flag --
   // and advanced by `handleSave` for whichever of its two requests
@@ -170,7 +170,7 @@ export function SegmentBuilder(props: {
   const [saveError, setSaveError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
 
-  // Task 7. `dirty` is false until the first REAL edit (`handleRootChange`,
+  // `dirty` is false until the first REAL edit (`handleRootChange`,
   // below) -- separately from the fetch effect's own `setRoot(s.filter)`,
   // which must never itself count as one. See this component's own doc
   // comment for why that distinction is load-bearing.
@@ -267,7 +267,7 @@ export function SegmentBuilder(props: {
   }, [client, activeId, editId, isEditing, identity, onUnauthorized])
 
   const trimmedName = name.trim()
-  // Controller correction 2 (binding): the root can legitimately be empty
+  // The root can legitimately be empty
   // -- `removeAt` returns exactly this shape when an operator empties the
   // tree by removing its last condition, and a brand-new segment starts
   // here too. A segment with no conditions is not a segment, so save is
@@ -279,7 +279,7 @@ export function SegmentBuilder(props: {
   // a NESTED empty group inside an otherwise non-empty root still leaves
   // the root with at least one child, and is the server's own
   // `children.min(1)` to reject on that inner group -- this screen only
-  // pre-empts the one empty state the correction names. `root` is always a
+  // pre-empts the one empty state described above. `root` is always a
   // group (see its declaration), so there is no non-group branch to take:
   // a bare-leaf root normalises to a one-child group and reads as having a
   // condition through the same expression.
@@ -372,7 +372,7 @@ export function SegmentBuilder(props: {
 
     if (!isEditing || editId == null) {
       // Create has no "what changed" to compute -- the whole definition is
-      // new, and lands on the LIST (controller correction; see Task 4).
+      // new, and lands on the LIST.
       client
         .createSegment(activeId, trimmedName, { ast_version: AST_VERSION, filter: root })
         .then(() => navigate(ROUTES.segments))
@@ -529,9 +529,9 @@ export function SegmentBuilder(props: {
         </p>
       )}
 
-      {/* No page-level `WarningPanel` here, deliberately -- Task 7's own
-       * brief: "render it against the offending condition, not as prose in
-       * a panel", which `ConditionRow` already does above, per node, via
+      {/* No page-level `WarningPanel` here, deliberately -- a warning
+       * renders against the offending condition, not as prose in
+       * a panel, which `ConditionRow` already does above, per node, via
        * `warningsAt`. A second, vaguer copy here would be exactly the "which
        * of 40 conditions is meant" problem the per-condition rendering
        * exists to avoid. `WarningPanel` is reused on `SegmentDetail`

@@ -44,7 +44,7 @@ function SegmentRow(props: { segment: Segment }) {
          * timestamp live in the SAME element, not merely both somewhere in
          * the row -- `toHaveTextContent` on the row matches concatenated
          * descendant text, so scoping to the row alone would still pass if
-         * a future change split these into sibling spans (fix round 1). */}
+         * a future change split these into sibling spans. */}
         <span className="text-sm text-muted-foreground" data-testid="segment-count">
           {segmentCountLabel(segment, new Date())}
         </span>

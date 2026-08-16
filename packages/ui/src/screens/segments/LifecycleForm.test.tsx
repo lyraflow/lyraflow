@@ -23,7 +23,7 @@ describe('LifecycleForm', () => {
   })
 
   it('renders the value control as a datetime picker, not a free text box', () => {
-    // The single most concrete requirement in the brief: "Lifecycle values
+    // The single most concrete requirement: "Lifecycle values
     // must parse as datetimes; use a datetime control rather than a free
     // text box." A stub that rendered a plain text input with the right
     // value would pass every OTHER assertion in this file.
