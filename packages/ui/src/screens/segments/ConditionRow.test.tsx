@@ -40,6 +40,30 @@ function fakeClient(): ApiClient {
   } as unknown as ApiClient
 }
 
+/**
+ * Every leaf kind the AST defines, each paired with a field only its own
+ * form renders. One list, used by every per-kind table below, so a kind
+ * added to the AST later is added HERE once and every property those tables
+ * assert (the real form renders; the `Not` badge tracks negation) starts
+ * being required of it.
+ *
+ * The reason this is a shared list rather than a fixture per test: the badge
+ * tests below used to assert presence and absence on the same `trait` node,
+ * which is a coincidence point -- suppressing the badge for every kind
+ * EXCEPT trait left the whole suite green while a negated behaviour
+ * condition, the one whose misreading changes which population you email,
+ * rendered pixel-identical to a non-negated one.
+ */
+const LEAF_KINDS = [
+  ['trait', traitNode, 'textbox', /key/i],
+  ['context', contextNode, 'combobox', /field/i],
+  ['lifecycle', lifecycleNode, 'combobox', /^field$/i],
+  // `EventCombobox`'s own `<input list=...>` computes an ARIA role of
+  // "combobox", not "textbox" -- the `list` attribute is itself what flips
+  // the accessible role, same as `ContextForm`'s native `<select>`.
+  ['behavior', behaviorNode, 'combobox', /event/i],
+] as const
+
 describe('ConditionRow', () => {
   it('keeps the condition-<path> testid the recursion addresses nodes through', () => {
     // Controller correction (binding, this task's brief): the ConditionRow
@@ -60,15 +84,7 @@ describe('ConditionRow', () => {
     expect(screen.getByTestId('condition-2-0')).toBeInTheDocument()
   })
 
-  it.each([
-    ['trait', traitNode, 'textbox', /key/i],
-    ['context', contextNode, 'combobox', /field/i],
-    ['lifecycle', lifecycleNode, 'combobox', /^field$/i],
-    // `EventCombobox`'s own `<input list=...>` computes an ARIA role of
-    // "combobox", not "textbox" -- the `list` attribute is itself what
-    // flips the accessible role, same as `ContextForm`'s native `<select>`.
-    ['behavior', behaviorNode, 'combobox', /event/i],
-  ] as const)(
+  it.each(LEAF_KINDS)(
     'renders the real %s form, not the placeholder summary',
     (_kind, node, role, fieldLabel) => {
       render(
@@ -212,6 +228,93 @@ describe('ConditionRow', () => {
     const row = screen.getByTestId('condition-1-2')
     expect(within(row).queryByText('Not', { selector: ':not(button)' })).toBeNull()
     expect(within(row).getByRole('textbox', { name: /key/i })).toHaveValue('status')
+  })
+
+  // The two tests above use the same `trait` fixture for both the presence
+  // and the absence assertion, which is a coincidence point: the badge can be
+  // rendered for `trait` alone and suppressed for `context`, `lifecycle` and
+  // `behavior` with both of them -- and every other test that existed --
+  // still passing. The pair below drives the SAME two assertions from
+  // `LEAF_KINDS`, so the badge's presence is required to be a function of
+  // `negated` alone: not of the leaf kind, and not of anything else the
+  // dispatch below it happens to know.
+
+  it.each(LEAF_KINDS)(
+    'renders the "Not" badge on a negated %s leaf, whatever the leaf kind',
+    (_kind, node, role, fieldLabel) => {
+      render(
+        <ConditionRow
+          node={{ kind: 'not', child: node }}
+          path={[1, 2]}
+          onChange={vi.fn()}
+          onRemove={vi.fn()}
+          onNegate={vi.fn()}
+          client={fakeClient()}
+          projectId={1}
+        />,
+      )
+      const row = screen.getByTestId('condition-1-2')
+      const badge = within(row).getByText('Not', { selector: ':not(button)' })
+      expect(badge.closest('button')).toBeNull()
+      // Additive, not a replacement: this kind's own real form still renders
+      // beside the badge rather than being swapped for it.
+      expect(within(row).getByRole(role, { name: fieldLabel })).toBeInTheDocument()
+      expect(within(row).getByRole('button', { name: /negate/i })).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      )
+    },
+  )
+
+  it.each(LEAF_KINDS)(
+    'renders no "Not" badge on the same %s leaf un-negated',
+    (_kind, node, role, fieldLabel) => {
+      render(
+        <ConditionRow
+          node={node}
+          path={[1, 2]}
+          onChange={vi.fn()}
+          onRemove={vi.fn()}
+          onNegate={vi.fn()}
+          client={fakeClient()}
+          projectId={1}
+        />,
+      )
+      const row = screen.getByTestId('condition-1-2')
+      expect(within(row).queryByText('Not', { selector: ':not(button)' })).toBeNull()
+      expect(within(row).getByRole(role, { name: fieldLabel })).toBeInTheDocument()
+      expect(within(row).getByRole('button', { name: /negate/i })).toHaveAttribute(
+        'aria-pressed',
+        'false',
+      )
+    },
+  )
+
+  it('gives the Negate button pressed STYLING, not `aria-pressed` alone', () => {
+    // `aria-pressed` on its own is invisible here: the vendored `Button` has
+    // no pressed styling of any variant, so the `aria-pressed:` utility
+    // classes on this one button are the only thing that makes a pressed
+    // Negate look different from an unpressed one. Nothing else asserts
+    // them, so deleting the `className` prop is a silent regression to
+    // "a negated leaf looks exactly like a non-negated one" -- half of the
+    // defect the badge above fixes. Asserted on the class attribute because
+    // jsdom computes no styles for utility classes; this is the only signal
+    // available at this level.
+    render(
+      <ConditionRow
+        node={{ kind: 'not', child: traitNode }}
+        path={[0]}
+        onChange={vi.fn()}
+        onRemove={vi.fn()}
+        onNegate={vi.fn()}
+        client={fakeClient()}
+        projectId={1}
+      />,
+    )
+    const negate = within(screen.getByTestId('condition-0')).getByRole('button', {
+      name: /negate/i,
+    })
+    expect(negate.className).toMatch(/aria-pressed:/)
   })
 
   /** `ConditionRow` is fully controlled, same as every form it renders --

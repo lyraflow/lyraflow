@@ -123,12 +123,30 @@ function capBlock(
  * "Match" operator select, its children (each a nested `GroupCard` or a
  * `ConditionRow`), and controls to add a condition or a nested group.
  *
- * Every child is keyed by ITS OWN PATH, joined to a string -- never by
- * array index. An index key lets React reuse a removed or shifted child's
- * component instance (and whatever local state Tasks 5/6 give it) for
- * whatever node now sits at that index after an insert or remove, which is
- * exactly wrong: the instance should follow the NODE, and a node's identity
- * here is its path. Every handler below is created fresh inside this
+ * **Children are keyed BY POSITION, and that is a known limitation rather
+ * than a design.** `childPath` is this group's own path with the child's
+ * array index appended, so the key is the array index with a prefix on it:
+ * after a removal or a reorder, `key="1-0"` belongs to whatever node now
+ * sits at that position, and React reuses the previous occupant's component
+ * instance for it. A key that made the instance follow the NODE would need a
+ * per-node identity the AST does not carry -- nothing in a `FilterNode`
+ * survives an edit, and this component would have to mint and store ids
+ * itself.
+ *
+ * What makes it tolerable is that there is almost no instance-local state
+ * below here to mis-associate: every form is fully CONTROLLED, rendering
+ * from the node it is handed on every render, so a reused instance shows the
+ * right node's values as soon as it re-renders with them. The known
+ * exceptions are the two comboboxes -- `PropertyCombobox` and, under a
+ * `behavior` leaf, `EventCombobox` -- which mirror their value into local
+ * `text` state and re-sync it in an effect: after a removal each paints the
+ * removed sibling's name for one commit before correcting itself.
+ * `WherePredicates` keys its own rows the same way with the same component
+ * beneath it. Anything added below here that holds state a re-render cannot
+ * correct -- an uncommitted draft, a focus/selection position, an animation
+ * -- makes this a real defect and needs the identity fixed first.
+ *
+ * Independently of the key: every handler below is created fresh inside this
  * render's `.map` callback, closing over `childPath` computed THIS render
  * -- never a path captured once and reused across renders -- and every one
  * calls a `tree.ts` function against the FULL `root` and hands the whole

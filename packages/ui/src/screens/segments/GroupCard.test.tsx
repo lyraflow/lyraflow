@@ -73,6 +73,108 @@ function pathToDeepestGroup(root: Group): number[] {
   return path
 }
 
+/** Two leaves at the root and two more inside a nested group, so every
+ * assertion below has a SIBLING to be confused with and a path with more
+ * than one segment in it. A flat two-child root would let "removes the right
+ * child" pass on an implementation that always removed the last one. */
+function nestedRoot(): Group {
+  return {
+    kind: 'group',
+    op: 'and',
+    children: [trait('k0'), { kind: 'group', op: 'and', children: [trait('k10'), trait('k11')] }],
+  }
+}
+
+describe('GroupCard -- the child callbacks it builds', () => {
+  // This file used to pass 9/9 against a `ConditionRow` replaced by a
+  // component that renders a plausible row and calls nothing: the testid, a
+  // `Not` badge, static text, and Negate/Remove buttons wired to nothing. So
+  // none of it exercised the `onChange`/`onRemove`/`onNegate` closures
+  // GroupCard itself builds and hands to each leaf -- that wiring was pinned
+  // only in `TreeEditor.test.tsx`, one level up, by accident of where the
+  // tests happened to be written. A later change to those three closures
+  // could therefore go red only in a file whose name does not mention
+  // GroupCard. The three tests below drive each closure through the DOM and
+  // assert on the whole new root it produces.
+  //
+  // Each leaf is addressed through its `condition-<path>` testid rather than
+  // by accessible name: the nested group's own Negate/Remove (its
+  // `group-1-controls` wrapper) and both of its leaves' Negate/Remove live
+  // inside the same card, so an unscoped `getByRole('button', { name:
+  // /negate/i })` is ambiguous the moment a card has children.
+
+  it("a leaf's Remove removes that leaf and nothing else, at its own nested path", async () => {
+    const onChange = vi.fn()
+    render(
+      <GroupCard
+        root={nestedRoot()}
+        path={[]}
+        onChange={onChange}
+        client={client}
+        projectId={projectId}
+      />,
+    )
+    const row = within(screen.getByTestId('condition-1-0'))
+    await userEvent.click(row.getByRole('button', { name: /^remove$/i }))
+
+    expect(onChange).toHaveBeenCalledTimes(1)
+    const next = onChange.mock.calls[0]?.[0] as Group
+    expect(next.children[0]).toEqual(trait('k0'))
+    const nested = next.children[1] as Group
+    expect(nested.children).toEqual([trait('k11')])
+  })
+
+  it("a leaf's Negate wraps that leaf in `not`, leaving its sibling and its parent alone", async () => {
+    const onChange = vi.fn()
+    render(
+      <GroupCard
+        root={nestedRoot()}
+        path={[]}
+        onChange={onChange}
+        client={client}
+        projectId={projectId}
+      />,
+    )
+    const row = within(screen.getByTestId('condition-1-1'))
+    await userEvent.click(row.getByRole('button', { name: /^negate$/i }))
+
+    expect(onChange).toHaveBeenCalledTimes(1)
+    const next = onChange.mock.calls[0]?.[0] as Group
+    expect(next.children[0]).toEqual(trait('k0'))
+    const nested = next.children[1] as Group
+    // The negation lands on the leaf that was clicked -- not on its sibling,
+    // and not on the group that contains them both.
+    expect(nested.kind).toBe('group')
+    expect(nested.children[0]).toEqual(trait('k10'))
+    expect(nested.children[1]).toEqual({ kind: 'not', child: trait('k11') })
+  })
+
+  it("a leaf's own edit replaces that leaf in place, and hands back the whole new root", async () => {
+    const onChange = vi.fn()
+    render(
+      <GroupCard
+        root={nestedRoot()}
+        path={[]}
+        onChange={onChange}
+        client={client}
+        projectId={projectId}
+      />,
+    )
+    const row = within(screen.getByTestId('condition-1-0'))
+    await userEvent.selectOptions(row.getByRole('combobox', { name: /operator/i }), '!=')
+
+    expect(onChange).toHaveBeenCalledTimes(1)
+    const next = onChange.mock.calls[0]?.[0] as Group
+    // A whole new root, not the edited leaf on its own -- the caller above
+    // GroupCard replaces its entire tree with whatever arrives here.
+    expect(next.kind).toBe('group')
+    expect(next.children[0]).toEqual(trait('k0'))
+    const nested = next.children[1] as Group
+    expect(nested.children[0]).toEqual({ ...trait('k10'), operator: '!=' })
+    expect(nested.children[1]).toEqual(trait('k11'))
+  })
+})
+
 describe('GroupCard -- the three server-side caps', () => {
   // --- MAX_TREE_NODES: global, so checked identically at any depth -----
 
