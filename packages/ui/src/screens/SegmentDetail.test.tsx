@@ -432,11 +432,11 @@ describe('SegmentDetail', () => {
   })
 })
 
-// --- Edit link and delete-behind-confirmation. Rename/tree-update
-// themselves live on `SegmentBuilder` (its own "Task 9" describe block in
-// `SegmentBuilder.test.tsx`) -- this file only covers what THIS screen owns:
-// linking to the edit route, and never calling `deleteSegment` before an
-// explicit second click confirms it.
+// --- Edit link and delete-behind-confirmation. Rename and tree-update
+// themselves live on `SegmentBuilder` (its own "the rename rule" describe
+// block in `SegmentBuilder.test.tsx`) -- this file only covers what THIS
+// screen owns: linking to the edit route, and never calling `deleteSegment`
+// before an explicit second click confirms it.
 
 describe('SegmentDetail -- edit link and delete', () => {
   it('links Edit to the segment edit route', async () => {
