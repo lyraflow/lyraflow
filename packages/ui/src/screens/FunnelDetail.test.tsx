@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
-import type { Funnel, FunnelRunResult } from '../api/types.js'
+import type { Funnel, FunnelRunResult, Segment } from '../api/types.js'
 import { ProjectProvider } from '../app/ProjectContext.js'
 import { ROUTES, funnelPath } from '../app/Router.js'
 import { FunnelDetail } from './FunnelDetail.js'
@@ -919,5 +919,90 @@ describe('FunnelDetail — segment name resolution (issue #94)', () => {
     // The rest of the page must not break just because this one lookup 401ed.
     expect(screen.queryByRole('alert')).toBeNull()
     expect(screen.getByText(/Entered 1,204/)).toBeInTheDocument()
+  })
+})
+
+// Fix round 1 review (issue #94): the funnel/run effects already have a
+// dedicated race block ("response identity survives every way a second
+// request can be issued") because a response landing after the question on
+// screen changed once shipped wrong-range numbers under a confident label.
+// The segments fetch is the same class of race and was, until this test,
+// protected only by the `cancelled` closure flag in FunnelDetail's segments
+// effect -- real, but unpinned: a refactor (an AbortController, a reworked
+// dependency array) could remove it silently with the whole suite green.
+describe('FunnelDetail — segments response identity survives a project switch mid-flight', () => {
+  function renderWithProjects(client: ApiClient, initialId: number) {
+    return render(
+      <MemoryRouter initialEntries={[funnelPath(FUNNEL.id)]}>
+        <ProjectProvider projects={[PROJECT_1, PROJECT_2]} initialId={initialId}>
+          <Routes>
+            <Route path="/funnels/:id" element={<FunnelDetail client={client} />} />
+            <Route path={ROUTES.funnels} element={<p>deleted</p>} />
+          </Routes>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+  }
+
+  // Both projects' segment lists deliberately share the SAME id (4) under a
+  // DIFFERENT name -- this is what makes the test fail if the stale
+  // response is applied to the wrong project, rather than merely if nothing
+  // renders. A guard that only suppressed rendering on error, without
+  // actually discarding the stale response, would still pass a test built
+  // on non-overlapping ids.
+  //
+  // The mutation this pins: remove the `if (cancelled) return` checks in
+  // FunnelDetail's segments effect -- this test alone fails (project 1's
+  // name renders after the switch to project 2).
+  it('discards a segments response for the project switched away from, even though it names the same id', async () => {
+    const segP1 = deferred<Segment[]>()
+    const segP2 = deferred<Segment[]>()
+    const segments = vi.fn((projectId: number) => (projectId === 1 ? segP1.promise : segP2.promise))
+    const client = fakeClient({
+      funnel: vi.fn(async () => ({ ...FUNNEL, segment_id: 4 })),
+      segments,
+    })
+    const { rerender } = renderWithProjects(client, 1)
+    await screen.findByTestId('funnel-step-1')
+    await waitFor(() => expect(segments).toHaveBeenCalledWith(1))
+
+    // Switching the active project re-renders the same route (no unmount)
+    // -- the exact shape that makes a stale-response race possible, the
+    // same pattern the funnel/run race block above applies to `runFunnel`.
+    rerender(
+      <MemoryRouter initialEntries={[funnelPath(FUNNEL.id)]}>
+        <ProjectProvider projects={[PROJECT_1, PROJECT_2]} initialId={2}>
+          <Routes>
+            <Route path="/funnels/:id" element={<FunnelDetail client={client} />} />
+            <Route path={ROUTES.funnels} element={<p>deleted</p>} />
+          </Routes>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(segments).toHaveBeenCalledWith(2))
+
+    // Project 1's stale response lands now, AFTER the switch to project 2.
+    await act(async () => {
+      segP1.resolve([{ id: 4, name: 'Alpha Paying customers', stale: false }])
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    // Must not show project 1's name -- project 2's own lookup hasn't
+    // resolved yet, so this falls back to the bare id.
+    expect(screen.getByTestId('funnel-segment-filter')).toHaveTextContent('#4')
+    expect(screen.queryByText(/Alpha Paying customers/)).toBeNull()
+
+    // Now project 2's own response lands.
+    await act(async () => {
+      segP2.resolve([{ id: 4, name: 'Beta Paying customers', stale: false }])
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(screen.getByTestId('funnel-segment-filter')).toHaveTextContent(
+      'Beta Paying customers (#4)',
+    )
+    // The stale project-1 response must never have applied, even after
+    // project 2's own resolves -- not before, not after.
+    expect(screen.queryByText(/Alpha Paying customers/)).toBeNull()
   })
 })
