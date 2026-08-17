@@ -1,3 +1,4 @@
+import { MAX_WHERE_PREDICATES } from '@lyraflow/core/segments/ast.js'
 import type { WherePredicate } from '@lyraflow/core/segments/ast.js'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -161,6 +162,58 @@ describe('WherePredicates', () => {
       'amt',
     )
     await waitFor(() => expect(schemaProperties).toHaveBeenCalledWith(7, undefined, 'amt'))
+  })
+
+  it('refuses to add beyond the cap the AST itself enforces, and says which limit', async () => {
+    // `MAX_WHERE_PREDICATES` comes from the schema that rejects an
+    // eleventh, not from a number retyped here: a test asserting a literal
+    // 10 would keep passing after the schema moved.
+    const onChange = vi.fn()
+    const value: WherePredicate[] = Array.from({ length: MAX_WHERE_PREDICATES }, (_, i) => ({
+      property: `p${i}`,
+      operator: '=' as const,
+      value: 'x',
+    }))
+    render(
+      <WherePredicates
+        id="beh"
+        event="checkout"
+        client={fakeClient()}
+        projectId={1}
+        value={value}
+        onChange={onChange}
+      />,
+    )
+    const add = screen.getByRole('button', { name: /add predicate/i })
+    expect(add).toBeDisabled()
+    // Clicked anyway: a disabled native button never fires its handler, so
+    // this turns "the control looks right" into "no eleventh predicate can
+    // reach the caller". Removing the `disabled` prop alone fails here.
+    await userEvent.click(add)
+    expect(onChange).not.toHaveBeenCalled()
+    expect(screen.getByText(new RegExp(`maximum is ${MAX_WHERE_PREDICATES}`))).toBeInTheDocument()
+  })
+
+  it('one below the cap still adds, so the gate is the cap and not the control', async () => {
+    const onChange = vi.fn()
+    const value: WherePredicate[] = Array.from({ length: MAX_WHERE_PREDICATES - 1 }, (_, i) => ({
+      property: `p${i}`,
+      operator: '=' as const,
+      value: 'x',
+    }))
+    render(
+      <WherePredicates
+        id="beh"
+        event="checkout"
+        client={fakeClient()}
+        projectId={1}
+        value={value}
+        onChange={onChange}
+      />,
+    )
+    await userEvent.click(screen.getByRole('button', { name: /add predicate/i }))
+    expect(onChange).toHaveBeenCalledWith([...value, { property: '', operator: '=', value: '' }])
+    expect(screen.queryByText(/maximum is/)).toBeNull()
   })
 
   it('switching to `between` gives two value inputs, reusing ValueInput rather than reimplementing it', () => {

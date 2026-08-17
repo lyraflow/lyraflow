@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { WherePredicate } from '../segments/ast.js'
+import { MAX_WHERE_PREDICATES, WherePredicate } from '../segments/ast.js'
 
 /**
  * One step: an event, and optional constraints on THAT event's own
@@ -18,7 +18,7 @@ import { WherePredicate } from '../segments/ast.js'
  */
 export const FunnelStep = z.object({
   event: z.string().min(1).max(128),
-  where: z.array(WherePredicate).max(10).optional(),
+  where: z.array(WherePredicate).max(MAX_WHERE_PREDICATES).optional(),
 })
 export type FunnelStep = z.infer<typeof FunnelStep>
 

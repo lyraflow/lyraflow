@@ -70,12 +70,21 @@ export const WherePredicate = z
   .and(valueFor(z.enum(COMPARISON_OPERATORS)))
 export type WherePredicate = z.infer<typeof WherePredicate>
 
+/**
+ * How many predicates one event may carry — a behaviour's, or a funnel
+ * step's. Named rather than repeated as a bare `10` at each `where` array:
+ * an editor that disables its own "add" control has to know the same number
+ * the schema rejects on, and two literals a package apart drift into a form
+ * that lets an operator build a step the server then refuses.
+ */
+export const MAX_WHERE_PREDICATES = 10
+
 export const Behavior = z
   .object({
     kind: z.literal('behavior'),
     /** An event name, or '*' for any event. */
     event: z.string().min(1).max(128),
-    where: z.array(WherePredicate).max(10).optional(),
+    where: z.array(WherePredicate).max(MAX_WHERE_PREDICATES).optional(),
     aggregate: z.enum(AGGREGATES),
     property: z.string().min(1).max(128).optional(),
     window: Window,

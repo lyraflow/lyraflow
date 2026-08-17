@@ -1,4 +1,5 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import type { FunnelStep } from '@lyraflow/core/funnels/ast.js'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../../api/client.js'
@@ -6,7 +7,36 @@ import type { ApiClient } from '../../api/client.js'
 import { MIN_STEPS, StepRows } from './StepRows.js'
 
 function fakeClient(): ApiClient {
-  return { schemaEvents: vi.fn(async () => []) } as unknown as ApiClient
+  return {
+    schemaEvents: vi.fn(async () => []),
+    schemaProperties: vi.fn(async () => []),
+  } as unknown as ApiClient
+}
+
+/** TWO steps, each carrying TWO predicates -- the shape every predicate
+ * test below needs and none of them may shrink.
+ *
+ * A single-predicate step cannot tell "edits the predicate you clicked"
+ * from "edits the first predicate", and a single-step list cannot tell
+ * "adds to the step you clicked" from "adds to step 1". Both wrong
+ * implementations pass every assertion a one-of-each fixture can make. */
+function twoStepsTwoPredicatesEach(): FunnelStep[] {
+  return [
+    {
+      event: 'page_view',
+      where: [
+        { property: 'path', operator: '=', value: '/changelog' },
+        { property: 'referrer', operator: '!=', value: 'internal' },
+      ],
+    },
+    {
+      event: 'signup_started',
+      where: [
+        { property: 'plan', operator: '=', value: 'pro' },
+        { property: 'seats', operator: '>', value: 5 },
+      ],
+    },
+  ]
 }
 
 describe('StepRows', () => {
@@ -78,20 +108,194 @@ describe('StepRows', () => {
     expect(onChange).toHaveBeenLastCalledWith([{ event: 'b' }, { event: 'a' }])
   })
 
-  it('disables the event field of a step carrying a CLI-authored predicate', () => {
+  it('leaves the event field of a predicate-carrying step editable', async () => {
+    // The inverse of the rule this component used to enforce: a step with a
+    // `where` array is no longer locked, because the predicates can now be
+    // edited here rather than only dropped or misrepresented.
+    const onChange = vi.fn()
+    render(
+      <StepRows
+        client={fakeClient()}
+        projectId={1}
+        steps={twoStepsTwoPredicatesEach()}
+        onChange={onChange}
+      />,
+    )
+    expect(screen.getByLabelText('Step 1')).toBeEnabled()
+    expect(screen.getByLabelText('Step 2')).toBeEnabled()
+
+    await userEvent.type(screen.getByLabelText('Step 2'), 'x')
+    // Retyping the event KEEPS the predicates -- clearing them would be
+    // data loss on a step the operator may be mid-edit on. What changes is
+    // only which event `PropertyCombobox` scopes its suggestions to.
+    expect(onChange).toHaveBeenLastCalledWith([
+      twoStepsTwoPredicatesEach()[0],
+      { ...twoStepsTwoPredicatesEach()[1], event: 'signup_startedx' },
+    ])
+  })
+})
+
+describe('StepRows -- per-step where predicates', () => {
+  it("renders each step's own predicates, operator included", () => {
+    // Also the regression pin for the redeclared field name: this package
+    // used to spell the operator `op` while the wire spells it `operator`,
+    // so a stored predicate rendered with a blank operator. Reading the
+    // operator off a rendered control is what catches that; reading the
+    // property alone never would.
+    render(
+      <StepRows
+        client={fakeClient()}
+        projectId={1}
+        steps={twoStepsTwoPredicatesEach()}
+        onChange={() => {}}
+      />,
+    )
+    const s1p0 = within(screen.getByTestId('step-1-where-0'))
+    expect(s1p0.getByLabelText('Property')).toHaveValue('path')
+    expect(s1p0.getByRole('combobox', { name: /operator/i })).toHaveValue('=')
+    expect(s1p0.getByRole('textbox', { name: /^value$/i })).toHaveValue('/changelog')
+
+    const s2p1 = within(screen.getByTestId('step-2-where-1'))
+    expect(s2p1.getByLabelText('Property')).toHaveValue('seats')
+    expect(s2p1.getByRole('combobox', { name: /operator/i })).toHaveValue('>')
+    expect(s2p1.getByRole('textbox', { name: /^value$/i })).toHaveValue('5')
+  })
+
+  it('editing a predicate changes that step and that predicate only', async () => {
+    const onChange = vi.fn()
+    render(
+      <StepRows
+        client={fakeClient()}
+        projectId={1}
+        steps={twoStepsTwoPredicatesEach()}
+        onChange={onChange}
+      />,
+    )
+    await userEvent.selectOptions(
+      within(screen.getByTestId('step-2-where-1')).getByRole('combobox', { name: /operator/i }),
+      '<=',
+    )
+    expect(onChange).toHaveBeenLastCalledWith([
+      twoStepsTwoPredicatesEach()[0],
+      {
+        event: 'signup_started',
+        where: [
+          { property: 'plan', operator: '=', value: 'pro' },
+          { property: 'seats', operator: '<=', value: 5 },
+        ],
+      },
+    ])
+  })
+
+  it('adds a predicate to the step whose own Add button was clicked', async () => {
+    const onChange = vi.fn()
+    render(
+      <StepRows
+        client={fakeClient()}
+        projectId={1}
+        steps={twoStepsTwoPredicatesEach()}
+        onChange={onChange}
+      />,
+    )
+    await userEvent.click(
+      within(screen.getByTestId('step-2-where')).getByRole('button', { name: /add predicate/i }),
+    )
+    expect(onChange).toHaveBeenLastCalledWith([
+      twoStepsTwoPredicatesEach()[0],
+      {
+        event: 'signup_started',
+        where: [
+          { property: 'plan', operator: '=', value: 'pro' },
+          { property: 'seats', operator: '>', value: 5 },
+          { property: '', operator: '=', value: '' },
+        ],
+      },
+    ])
+  })
+
+  it("removing a step's last predicate leaves the step with no `where` key at all", async () => {
+    const onChange = vi.fn()
     render(
       <StepRows
         client={fakeClient()}
         projectId={1}
         steps={[
-          { event: 'a' },
-          { event: 'b', where: [{ property: 'plan', op: '=', value: 'pro' }] },
+          { event: 'page_view', where: [{ property: 'path', operator: '=', value: '/changelog' }] },
+          { event: 'signup_started', where: [{ property: 'plan', operator: '=', value: 'pro' }] },
+        ]}
+        onChange={onChange}
+      />,
+    )
+    await userEvent.click(
+      within(screen.getByTestId('step-2-where-0')).getByRole('button', { name: /remove/i }),
+    )
+    // `toStrictEqual`, not `toEqual`: the point is that the key is GONE,
+    // and `toEqual` treats `{ event, where: undefined }` as equal to
+    // `{ event }` -- which is exactly the wrong shape this pins against.
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual([
+      { event: 'page_view', where: [{ property: 'path', operator: '=', value: '/changelog' }] },
+      { event: 'signup_started' },
+    ])
+  })
+
+  it("scopes property suggestions to that step's own event", async () => {
+    const schemaProperties = vi.fn(async () => [])
+    render(
+      <StepRows
+        client={{ schemaEvents: vi.fn(async () => []), schemaProperties } as unknown as ApiClient}
+        projectId={7}
+        steps={twoStepsTwoPredicatesEach()}
+        onChange={() => {}}
+      />,
+    )
+    await userEvent.type(
+      within(screen.getByTestId('step-2-where-0')).getByLabelText('Property'),
+      'x',
+    )
+    await waitFor(() => expect(schemaProperties).toHaveBeenCalledWith(7, 'signup_started', 'planx'))
+    // Step 1's event must never have been asked about by step 2's field.
+    expect(schemaProperties).not.toHaveBeenCalledWith(7, 'page_view', 'planx')
+  })
+
+  it('a step with no event yet scopes to every event, never to an empty event name', async () => {
+    const schemaProperties = vi.fn(async () => [])
+    render(
+      <StepRows
+        client={{ schemaEvents: vi.fn(async () => []), schemaProperties } as unknown as ApiClient}
+        projectId={7}
+        steps={[
+          { event: '', where: [{ property: 'path', operator: '=', value: '/a' }] },
+          { event: 'b' },
         ]}
         onChange={() => {}}
       />,
     )
-    expect(screen.getByLabelText('Step 1')).toBeEnabled()
-    expect(screen.getByLabelText('Step 2')).toBeDisabled()
+    await userEvent.type(
+      within(screen.getByTestId('step-1-where-0')).getByLabelText('Property'),
+      'x',
+    )
+    await waitFor(() => expect(schemaProperties).toHaveBeenCalledWith(7, undefined, 'pathx'))
+  })
+
+  it('threads onUnauthorized out of a predicate field, not just the event field', async () => {
+    const onUnauthorized = vi.fn()
+    const schemaProperties = vi.fn(async () => {
+      throw new ApiError(401, 'unauthorized')
+    })
+    render(
+      <StepRows
+        client={{ schemaEvents: vi.fn(async () => []), schemaProperties } as unknown as ApiClient}
+        projectId={1}
+        steps={twoStepsTwoPredicatesEach()}
+        onChange={() => {}}
+        onUnauthorized={onUnauthorized}
+      />,
+    )
+    await userEvent.type(
+      within(screen.getByTestId('step-1-where-0')).getByLabelText('Property'),
+      'x',
+    )
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalled())
   })
 })
 

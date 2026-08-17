@@ -1,3 +1,4 @@
+import { MAX_WHERE_PREDICATES } from '@lyraflow/core/segments/ast.js'
 import type { WherePredicate } from '@lyraflow/core/segments/ast.js'
 import type { ApiClient } from '../../api/client.js'
 import { Button } from '../../components/ui/button.js'
@@ -25,10 +26,13 @@ function newPredicate(): WherePredicate {
  * the type `packages/core/src/funnels/ast.ts` already reuses VERBATIM for a
  * funnel step's own `where` ("A caller writes the same predicate in a
  * segment and in a funnel step... a second spelling would be two grammars
- * for one idea", that file's own doc comment). A future funnel-step
- * predicate editor can render this exact component against `step.where` and
- * `step.event` -- there is no segment-specific assumption baked in here to
- * unpick first.
+ * for one idea", that file's own doc comment). `StepRows` renders this exact
+ * component against `step.where` and `step.event`; it needed no fork, and
+ * the only change either caller asked for was the shared cap below.
+ *
+ * It therefore has TWO callers now, and a change made for one is a change
+ * to the other: keep every prop about "an event and its predicates", never
+ * about a behaviour node or a funnel step.
  *
  * `value` is `undefined` for "no predicates yet" -- `Behavior.where` is
  * `.optional()`, not a default `[]`, and this preserves that distinction on
@@ -47,6 +51,12 @@ export function WherePredicates(props: {
 }) {
   const { id, event, client, projectId, value, onChange, onUnauthorized } = props
   const predicates = value ?? []
+  // The AST caps a `where` array at `MAX_WHERE_PREDICATES` for a behaviour
+  // and for a funnel step alike, and the constant comes from the schema
+  // that rejects it rather than being retyped here -- a form that lets an
+  // operator build an eleventh predicate has only moved the refusal to
+  // after they finished writing it.
+  const atCap = predicates.length >= MAX_WHERE_PREDICATES
 
   function updateAt(i: number, next: WherePredicate) {
     onChange(predicates.map((p, idx) => (idx === i ? next : p)))
@@ -60,7 +70,11 @@ export function WherePredicates(props: {
   }
 
   return (
-    <div className="flex flex-col gap-2 border-l border-border pl-3">
+    // The whole list is addressable, not just its rows: with more than one
+    // of these on a screen (a funnel's steps each have their own), "Add
+    // predicate" is otherwise ambiguous between them -- to a test, and to
+    // anything else addressing controls by name.
+    <div data-testid={`${id}-where`} className="flex flex-col gap-2 border-l border-border pl-3">
       <span className="text-sm font-medium text-foreground">Where</span>
       {predicates.map((p, i) => {
         const rowId = `${id}-where-${i}`
@@ -92,9 +106,24 @@ export function WherePredicates(props: {
           </div>
         )
       })}
-      <Button type="button" variant="outline" size="sm" className="self-start" onClick={add}>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="self-start"
+        disabled={atCap}
+        onClick={add}
+      >
         Add predicate
       </Button>
+      {/* Said, not merely enforced -- the same shape `GroupCard` uses for
+       * the three tree caps: a control that stops working without saying
+       * which limit it hit reads as a broken button. */}
+      {atCap && (
+        <p className="text-xs text-muted-foreground">
+          {`Adding here would bring this event to ${MAX_WHERE_PREDICATES + 1} property conditions; the maximum is ${MAX_WHERE_PREDICATES}.`}
+        </p>
+      )}
     </div>
   )
 }

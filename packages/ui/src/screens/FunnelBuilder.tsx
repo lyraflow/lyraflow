@@ -37,12 +37,11 @@ const DEFAULT_WINDOW_UNIT: WindowUnit = 'days'
  * name field -- an operator previewing a funnel they haven't named yet is
  * a normal, common order of operations, and gating it on the name would
  * make Preview lie about being ready before the numbers ever mattered.
- * Save carries two MORE gates Preview does not: `canSave` additionally
+ * Save carries one MORE gate Preview does not: `canSave` additionally
  * requires a non-empty, trimmed name (the server's `CreateBody` is
  * `z.string().min(1).max(200)`, so an unchecked empty or whitespace-only
- * name is a guaranteed 400 for a field the form never marked required),
- * and `hasPredicates` (see below) -- both because only Save can lose data
- * or fail outright; Preview never writes anything back.
+ * name is a guaranteed 400 for a field the form never marked required) --
+ * because only Save can fail outright; Preview never writes anything back.
  *
  * `POST /v1/funnels` needs a FLAT body (`{ name, ...definition }`) --
  * `client.createFunnel` already does that spread internally, so this
@@ -140,21 +139,17 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
   // too (see this function's own doc comment above), and Preview is
   // deliberately NOT gated on the name field -- a name-empty `canSubmit`
   // would silently start requiring one there as well. Save alone needs
-  // `canSave`; `handleSave` repeats this same check below, same shape as
-  // the existing `hasPredicates` guard on the line after it.
+  // `canSave`; `handleSave` repeats this same check below.
   const trimmedName = name.trim()
   const canSave = canSubmit && trimmedName !== ''
-  // A step carrying a `where` predicate was authored by the CLI -- this
-  // screen can only ever represent a step's event name, so a save from
-  // here would silently drop the predicate array and hand the server a
-  // step that measures a different population, all while returning 200.
-  // Disabling ONLY the affected step's event field (as StepRows already
-  // does) is not enough: every OTHER field on the same funnel would still
-  // save through the very PATCH that drops it. The whole save control is
-  // disabled instead, so there is no path from "operator clicks Save" to
-  // "predicate silently lost" -- not through the button, and not through
-  // `handleSave` itself, which repeats this guard below.
-  const hasPredicates = steps.some((s) => (s.where?.length ?? 0) > 0)
+  // There is deliberately no further gate about `where` predicates. Save used
+  // to refuse any funnel whose steps carried one, because this screen could
+  // represent only a step's event name and a save from here would silently
+  // drop the predicate array -- handing the server a step that measures a
+  // different population while returning 200. `StepRows` now edits
+  // predicates in place and round-trips them through `buildDefinition`
+  // untouched, so the loss that gate existed to prevent has no path left to
+  // take.
 
   function buildDefinition(): FunnelDefinition {
     // `windowSeconds` is guaranteed non-null here -- both callers below
@@ -200,13 +195,12 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
     JSON.stringify(buildDefinition()) !== JSON.stringify(previewedDefinition)
 
   function handleSave() {
-    // Repeats the `hasPredicates` guard (and now the name guard, via
-    // `canSave`) already reflected in the button's `disabled` prop below --
-    // deliberately, not redundantly. The button state is what an operator
-    // sees; this is what actually stops the request. A mutation that only
-    // removes the `disabled` attribute must still find no path to
-    // `patchFunnel`/`createFunnel` here.
-    if (!canSave || activeId == null || hasPredicates) return
+    // Repeats the `canSave` gate already reflected in the button's
+    // `disabled` prop below -- deliberately, not redundantly. The button
+    // state is what an operator sees; this is what actually stops the
+    // request. A mutation that only removes the `disabled` attribute must
+    // still find no path to `patchFunnel`/`createFunnel` here.
+    if (!canSave || activeId == null) return
     setSaving(true)
     setSaveError(null)
     const definition = buildDefinition()
@@ -294,13 +288,6 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
         />
       )}
 
-      {hasPredicates && (
-        <p className="text-sm text-muted-foreground">
-          One or more steps above were authored with the CLI and cannot be edited or saved from this
-          screen. Edit them with the CLI, or remove the affected step here to continue.
-        </p>
-      )}
-
       <div className="flex gap-2">
         <Button
           type="button"
@@ -310,7 +297,7 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
         >
           Preview
         </Button>
-        <Button type="button" onClick={handleSave} disabled={!canSave || saving || hasPredicates}>
+        <Button type="button" onClick={handleSave} disabled={!canSave || saving}>
           Save
         </Button>
       </div>

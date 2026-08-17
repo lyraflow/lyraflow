@@ -16,6 +16,10 @@
       "types": "./dist/segments/ast.d.ts",
       "default": "./dist/segments/ast.js"
     },
+    "./funnels/ast.js": {
+      "types": "./dist/funnels/ast.d.ts",
+      "default": "./dist/funnels/ast.js"
+    },
     "./segments/validate.js": {
       "types": "./dist/segments/validate.d.ts",
       "default": "./dist/segments/validate.js"

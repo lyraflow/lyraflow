@@ -89,4 +89,16 @@ describe('production bundle', () => {
     expect(validate.MAX_TREE_DEPTH).toBe(10)
     expect(typeof validate.costWarnings).toBe('function')
   })
+
+  it('the funnel step module the UI types against pulls in nothing node-only', async () => {
+    // `api/types.ts` re-exports `FunnelStep` from here, and
+    // `WherePredicates` reads `MAX_WHERE_PREDICATES` from the segments AST
+    // this module shares. The type re-export is erased, so it cannot break
+    // the bundle on its own -- but the next thing to reach for a value from
+    // this subpath would, and by then the failure is a white screen rather
+    // than a red test. Same guard as the two above, one module earlier.
+    const ast = await import('@lyraflow/core/funnels/ast.js')
+    expect(ast.FUNNEL_DEFINITION_VERSION).toBe(1)
+    expect(typeof ast.FunnelStep.parse).toBe('function')
+  })
 })
