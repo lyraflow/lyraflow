@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { AST_VERSION, SegmentQuery } from './ast.js'
+import {
+  AST_VERSION,
+  CONTEXT_FIELDS,
+  EVENT_COLUMN_FIELDS,
+  SegmentQuery,
+  WherePredicate,
+} from './ast.js'
 
 const trait = { kind: 'trait', key: 'plan', operator: '=', value: 'trial' }
 
@@ -113,5 +119,37 @@ describe('SegmentQuery', () => {
     let node: unknown = trait
     for (let i = 0; i < 5; i++) node = { kind: 'group', op: 'or', children: [node] }
     expect(SegmentQuery.safeParse({ ast_version: 1, filter: node }).success).toBe(true)
+  })
+})
+
+describe('EVENT_COLUMN_FIELDS', () => {
+  it('contains every context field, so the two lists cannot diverge', () => {
+    for (const field of CONTEXT_FIELDS) {
+      expect(EVENT_COLUMN_FIELDS).toContain(field)
+    }
+  })
+
+  it('names the per-event columns no context condition can read back', () => {
+    // The four that prompted the whole list. `path` in particular is the
+    // first predicate a new operator writes, and the one that returns zero
+    // with no explanation; a list built only from CONTEXT_FIELDS would miss
+    // exactly it.
+    for (const field of ['path', 'url', 'utm_term', 'utm_content']) {
+      expect(EVENT_COLUMN_FIELDS).toContain(field)
+      expect(CONTEXT_FIELDS).not.toContain(field)
+    }
+  })
+
+  it('lists each name once', () => {
+    expect(new Set(EVENT_COLUMN_FIELDS).size).toBe(EVENT_COLUMN_FIELDS.length)
+  })
+
+  it('does not make any of these names invalid to write as a predicate', () => {
+    // Informational, never a validation rule: `properties` comes from the
+    // caller's own bag and `path` from `context`, so a property genuinely
+    // named `path` exists and its predicate is a real one.
+    expect(
+      WherePredicate.safeParse({ property: 'path', operator: '=', value: '/changelog' }).success,
+    ).toBe(true)
   })
 })

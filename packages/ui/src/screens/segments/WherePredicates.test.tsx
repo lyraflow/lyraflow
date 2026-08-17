@@ -2,6 +2,7 @@ import { MAX_WHERE_PREDICATES } from '@lyraflow/core/segments/ast.js'
 import type { WherePredicate } from '@lyraflow/core/segments/ast.js'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '../../api/client.js'
 import { WherePredicates } from './WherePredicates.js'
@@ -214,6 +215,75 @@ describe('WherePredicates', () => {
     await userEvent.click(screen.getByRole('button', { name: /add predicate/i }))
     expect(onChange).toHaveBeenCalledWith([...value, { property: '', operator: '=', value: '' }])
     expect(screen.queryByText(/maximum is/)).toBeNull()
+  })
+
+  it('says a column-backed field cannot match here, on the row that names it', async () => {
+    // Two predicates, only ONE of them column-backed: a fixture with a
+    // single row cannot tell "notes the row you are looking at" from "notes
+    // the first row".
+    const onChange = vi.fn()
+    const value: WherePredicate[] = [
+      { property: 'page', operator: '=', value: 'changelog' },
+      { property: 'path', operator: '=', value: '/changelog' },
+    ]
+    render(
+      <WherePredicates
+        id="beh"
+        event="page_view"
+        client={fakeClient()}
+        projectId={1}
+        value={value}
+        onChange={onChange}
+      />,
+    )
+    expect(screen.queryByTestId('beh-where-0-note')).toBeNull()
+    const note = screen.getByTestId('beh-where-1-note')
+    expect(note).toHaveTextContent('recorded on the event itself')
+    expect(note).toHaveTextContent('path')
+    // Informing, not preventing: nothing about the value reaches the caller
+    // differently, and no control is disabled.
+    expect(screen.getByRole('button', { name: /add predicate/i })).toBeEnabled()
+    expect(within(screen.getByTestId('beh-where-1')).getByLabelText('Property')).toHaveValue('path')
+  })
+
+  it('the note appears as the name is typed, before anything is saved', async () => {
+    // The point of the whole thing: the operator learns why `path` cannot
+    // work WHILE writing it, not after a run answers zero. Driven through
+    // the real control, with the parent re-rendering from `onChange`, so
+    // this fails if the note is computed from anything but the live value.
+    function Harness() {
+      const [value, setValue] = useState<WherePredicate[] | undefined>([
+        { property: '', operator: '=', value: '' },
+      ])
+      return (
+        <WherePredicates
+          id="beh"
+          event="page_view"
+          client={fakeClient()}
+          projectId={1}
+          value={value}
+          onChange={setValue}
+        />
+      )
+    }
+    render(<Harness />)
+    expect(screen.queryByTestId('beh-where-0-note')).toBeNull()
+    await userEvent.type(screen.getByLabelText('Property'), 'path')
+    expect(screen.getByTestId('beh-where-0-note')).toHaveTextContent('filters properties only')
+  })
+
+  it('says nothing at all for an ordinary property name', () => {
+    render(
+      <WherePredicates
+        id="beh"
+        event="page_view"
+        client={fakeClient()}
+        projectId={1}
+        value={[{ property: 'page', operator: '=', value: 'changelog' }]}
+        onChange={vi.fn()}
+      />,
+    )
+    expect(screen.queryByTestId('beh-where-0-note')).toBeNull()
   })
 
   it('switching to `between` gives two value inputs, reusing ValueInput rather than reimplementing it', () => {

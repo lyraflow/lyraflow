@@ -141,6 +141,47 @@ function renderDetail(client: ApiClient, onUnauthorized?: () => void) {
   )
 }
 
+describe('FunnelDetail — a narrowed step says so', () => {
+  it('hands the stored definition to the chart, so each step shows its OWN predicates', async () => {
+    // Two narrowed steps, two predicates each, four operators. Without the
+    // definition reaching `StepBars` these two steps render as bare event
+    // names and are indistinguishable from any other funnel over the same
+    // pair -- which is the whole complaint.
+    const funnel: Funnel = {
+      ...FUNNEL,
+      steps: [
+        {
+          event: 'page_view',
+          where: [
+            { property: 'page', operator: '=', value: 'changelog' },
+            { property: 'duration_ms', operator: '>=', value: 30 },
+          ],
+        },
+        {
+          event: 'signup_completed',
+          where: [
+            { property: 'plan', operator: '!=', value: 'free' },
+            { property: 'seats', operator: '<=', value: 10 },
+          ],
+        },
+      ],
+    }
+    renderDetail(fakeClient({ funnel: vi.fn(async () => funnel) }))
+    expect(await screen.findByTestId('funnel-step-1-where')).toHaveTextContent(
+      'where page is changelog, duration_ms at least 30',
+    )
+    expect(screen.getByTestId('funnel-step-2-where')).toHaveTextContent(
+      'where plan is not free, seats at most 10',
+    )
+  })
+
+  it('shows no clause for a funnel whose steps carry none', async () => {
+    renderDetail(fakeClient())
+    await screen.findByTestId('funnel-step-1')
+    expect(screen.queryByTestId('funnel-step-1-where')).toBeNull()
+  })
+})
+
 // Controller correction (binding, from Funnels.test.tsx/Task 2): `vi.setSystemTime()`
 // alone is a no-op -- it must follow `vi.useFakeTimers()`, or a pinned-time
 // assertion depends on real wall-clock time and passes or fails by accident.

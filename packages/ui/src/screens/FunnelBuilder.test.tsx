@@ -123,6 +123,57 @@ describe('FunnelBuilder', () => {
     expect(screen.getByRole('button', { name: /save/i })).toBeEnabled()
   })
 
+  it('shows the predicates being edited on the preview chart, and drops them once a step is retyped', async () => {
+    // Two ends of one wiring. First: the form's CURRENT steps reach
+    // `StepBars`, so a preview of a narrowed funnel is not a chart of bare
+    // event names. Second: retyping step 1's event makes the definition and
+    // the result disagree at that position, and `StepBars` then shows
+    // nothing there rather than labelling last preview's numbers with this
+    // edit's predicates.
+    const client = fakeBuilderClient()
+    renderBuilder(client)
+    await fillTwoSteps()
+    await userEvent.click(
+      within(screen.getByTestId('step-1-where')).getByRole('button', { name: /add predicate/i }),
+    )
+    await userEvent.type(
+      within(screen.getByTestId('step-1-where-0')).getByLabelText('Property'),
+      'page',
+    )
+    await userEvent.type(
+      within(screen.getByTestId('step-1-where-0')).getByRole('textbox', { name: /^value$/i }),
+      'changelog',
+    )
+    await userEvent.click(
+      within(screen.getByTestId('step-2-where')).getByRole('button', { name: /add predicate/i }),
+    )
+    await userEvent.type(
+      within(screen.getByTestId('step-2-where-0')).getByLabelText('Property'),
+      'plan',
+    )
+    await userEvent.selectOptions(
+      within(screen.getByTestId('step-2-where-0')).getByRole('combobox', { name: /operator/i }),
+      '!=',
+    )
+    await userEvent.type(
+      within(screen.getByTestId('step-2-where-0')).getByRole('textbox', { name: /^value$/i }),
+      'free',
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: /preview/i }))
+    expect(await screen.findByTestId('funnel-step-1-where')).toHaveTextContent(
+      'where page is changelog',
+    )
+    expect(screen.getByTestId('funnel-step-2-where')).toHaveTextContent('where plan is not free')
+
+    await userEvent.clear(screen.getByLabelText('Step 1'))
+    await userEvent.type(screen.getByLabelText('Step 1'), 'landing_view')
+    expect(screen.queryByTestId('funnel-step-1-where')).toBeNull()
+    // The step that still lines up keeps its clause -- the guard is per
+    // position, not a whole-chart switch.
+    expect(screen.getByTestId('funnel-step-2-where')).toHaveTextContent('where plan is not free')
+  })
+
   it('previews without saving', async () => {
     const client = fakeBuilderClient()
     renderBuilder(client)

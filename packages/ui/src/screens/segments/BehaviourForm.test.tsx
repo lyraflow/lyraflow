@@ -247,6 +247,34 @@ describe('BehaviourForm', () => {
     await waitFor(() => expect(schemaProperties).toHaveBeenCalledWith(1, undefined, 'q'))
   })
 
+  it("warns about a column-backed field here too -- a segment's where predicates hit the same compiler", () => {
+    // Not a separate fix: `BehaviourForm` and `StepRows` render the SAME
+    // `WherePredicates` against the SAME `wherePredicate` compiler, so a
+    // behaviour's `where` on `path` reads the same empty map slot a funnel
+    // step's does. This test exists so that stays true -- a note wired into
+    // one caller only would pass every funnel test and leave this screen
+    // exactly as it was.
+    render(
+      <BehaviourForm
+        id="beh"
+        node={beh({
+          event: 'page_view',
+          where: [
+            { property: 'page', operator: '=', value: 'changelog' },
+            { property: 'referrer', operator: '!=', value: '' },
+          ],
+        })}
+        onChange={vi.fn()}
+        client={fakeClient()}
+        projectId={1}
+      />,
+    )
+    expect(screen.queryByTestId('beh-where-0-note')).toBeNull()
+    const note = screen.getByTestId('beh-where-1-note')
+    expect(note).toHaveTextContent('recorded on the event itself')
+    expect(note).toHaveTextContent('context condition')
+  })
+
   it('adding a where predicate through the form updates the node, not a detached copy', async () => {
     const onChange = vi.fn()
     render(

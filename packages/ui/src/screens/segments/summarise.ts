@@ -22,24 +22,7 @@
  * place and each variant carries its own preposition instead.
  */
 import type { FilterNode } from '@lyraflow/core/segments/ast.js'
-import { formatBound, operatorWord, windowPhrase } from './vocabulary.js'
-
-/**
- * A condition's value. `between` carries a two-slot tuple (`ValueInput`'s own
- * doc comment), which reads as "X and Y" -- so the join is part of the
- * VALUE's rendering rather than the operator's, and `formatScalar` is applied
- * to each slot rather than to the pair.
- *
- * `formatScalar` is how a `lifecycle` bound gets rendered as a date while a
- * trait value is left exactly as stored: a trait's value is arbitrary
- * operator data that merely might look like a date, and reformatting it would
- * be this module inventing a type for it.
- */
-function formatValue(value: unknown, formatScalar: (v: unknown) => string = String): string {
-  if (Array.isArray(value)) return value.map((v) => formatValue(v, formatScalar)).join(' and ')
-  if (value === null) return 'null'
-  return formatScalar(value)
-}
+import { formatBound, formatValue, operatorWord, wherePhrase, windowPhrase } from './vocabulary.js'
 
 /** A `lifecycle` value: always a datetime by the AST's own refine, so it is
  * rendered as one. A non-string scalar cannot be a reading and is left
@@ -105,10 +88,10 @@ export function summarise(node: FilterNode): string {
       const clause = node.aggregate === 'count' ? 'count' : `${node.aggregate} of ${node.property}`
       const base = `${clause} of ${node.event} ${windowPhrase(node.window)} ${operatorWord(node.operator)} ${formatValue(node.value)}`
       if (!node.where || node.where.length === 0) return base
-      const where = node.where
-        .map((w) => `${w.property} ${operatorWord(w.operator)} ${formatValue(w.value)}`)
-        .join(', ')
-      return `${base} where ${where}`
+      // `wherePhrase` (vocabulary.ts) renders the list, unterminated, and
+      // `needsBrackets` above closes it -- the funnel screens render the
+      // same clause and close it their own way.
+      return `${base} where ${wherePhrase(node.where)}`
     }
     default:
       return node satisfies never

@@ -6,6 +6,7 @@ import { OperatorSelect } from './OperatorSelect.js'
 import { PropertyCombobox } from './PropertyCombobox.js'
 import type { ConditionValue } from './ValueInput.js'
 import { ValueInput } from './ValueInput.js'
+import { columnFieldNote } from './columnFields.js'
 
 /** A freshly added predicate -- an empty property, `=`, and an empty value,
  * the same starting shape `GroupCard.newCondition` gives a fresh trait leaf.
@@ -79,30 +80,45 @@ export function WherePredicates(props: {
       {predicates.map((p, i) => {
         const rowId = `${id}-where-${i}`
         const operatorId = `${rowId}-operator`
+        // Said HERE, while the name is being typed, rather than at save
+        // time: the predicate is not invalid, it simply reads a map this
+        // name is not in, and a rejection on save would refuse a field this
+        // builder deliberately leaves free-typed. See `columnFields.ts`.
+        const note = columnFieldNote(p.property)
         return (
-          <div key={rowId} data-testid={rowId} className="flex min-w-0 flex-wrap items-end gap-2">
-            <PropertyCombobox
-              client={client}
-              projectId={projectId}
-              event={event}
-              value={p.property}
-              onChange={(property) => updateAt(i, { ...p, property })}
-              label="Property"
-              onUnauthorized={onUnauthorized}
-            />
-            <OperatorSelect
-              id={operatorId}
-              value={p.operator}
-              onChange={(operator) => updateAt(i, { ...p, operator })}
-            />
-            <ValueInput
-              operator={p.operator}
-              value={p.value as ConditionValue}
-              onChange={(val) => updateAt(i, { ...p, value: val } as WherePredicate)}
-            />
-            <Button type="button" variant="outline" size="sm" onClick={() => removeAt(i)}>
-              Remove
-            </Button>
+          <div key={rowId} data-testid={rowId} className="flex min-w-0 flex-col gap-1">
+            <div className="flex min-w-0 flex-wrap items-end gap-2">
+              <PropertyCombobox
+                client={client}
+                projectId={projectId}
+                event={event}
+                value={p.property}
+                onChange={(property) => updateAt(i, { ...p, property })}
+                label="Property"
+                onUnauthorized={onUnauthorized}
+              />
+              <OperatorSelect
+                id={operatorId}
+                value={p.operator}
+                onChange={(operator) => updateAt(i, { ...p, operator })}
+              />
+              <ValueInput
+                operator={p.operator}
+                value={p.value as ConditionValue}
+                onChange={(val) => updateAt(i, { ...p, value: val } as WherePredicate)}
+              />
+              <Button type="button" variant="outline" size="sm" onClick={() => removeAt(i)}>
+                Remove
+              </Button>
+            </div>
+            {/* Muted, not `destructive` and not `role="alert"`: this is a
+             * limit of where the value lives, not an error the operator
+             * caused, and nothing here refuses the input. */}
+            {note != null && (
+              <p data-testid={`${rowId}-note`} className="text-xs text-muted-foreground">
+                {note}
+              </p>
+            )}
           </div>
         )
       })}

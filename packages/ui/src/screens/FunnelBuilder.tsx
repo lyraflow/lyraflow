@@ -323,7 +323,12 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
               {formatRelative(previewResult.as_of, new Date())}
             </span>
           </p>
-          <StepBars result={previewResult} />
+          {/* The form's CURRENT steps. `StepBars` checks each position's
+           * event name against the result's own before showing a clause,
+           * so editing a step after previewing drops the narrowing rather
+           * than labelling last preview's numbers with this edit's
+           * predicates. */}
+          <StepBars result={previewResult} definition={steps} />
         </div>
       )}
     </div>

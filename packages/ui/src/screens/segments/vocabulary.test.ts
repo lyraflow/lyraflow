@@ -6,7 +6,9 @@ import {
   OPERATOR_WORDS,
   WINDOW_KIND_OPTIONS,
   formatBound,
+  formatValue,
   operatorWord,
+  wherePhrase,
   windowPhrase,
 } from './vocabulary.js'
 
@@ -236,5 +238,53 @@ describe('formatBound -- a stored instant', () => {
     // saved segment means by an offset nobody recorded -- so `10:00` stays
     // `10:00` even though this suite is 5h30 from UTC.
     expect(formatBound('2026-06-01T10:00')).toBe('1 Jun 2026, 10:00')
+  })
+})
+
+describe('formatValue', () => {
+  it('joins a `between` pair with "and", because the join belongs to the value', () => {
+    expect(formatValue([100, 5000])).toBe('100 and 5000')
+  })
+
+  it('renders null as the word, not as an empty string', () => {
+    expect(formatValue(null)).toBe('null')
+  })
+
+  it('applies the scalar formatter to each slot of a pair, not to the pair', () => {
+    expect(formatValue([1, 2], (v) => `<${v}>`)).toBe('<1> and <2>')
+  })
+})
+
+describe('wherePhrase', () => {
+  it('reads each predicate in the operator words, never the raw symbol', () => {
+    // Two predicates and two DIFFERENT operators: a single-predicate list
+    // whose only operator is `=` cannot tell a worded operator from a
+    // symbol, since "is" and "=" both look like a pass at a glance.
+    const phrase = wherePhrase([
+      { property: 'page', operator: '=', value: 'changelog' },
+      { property: 'duration_ms', operator: '>=', value: 30 },
+    ])
+    expect(phrase).toBe('page is changelog, duration_ms at least 30')
+    expect(phrase).not.toContain('>=')
+    expect(phrase).not.toContain('=')
+  })
+
+  it('renders a `between` predicate through formatValue', () => {
+    expect(wherePhrase([{ property: 'amount', operator: 'between', value: [1, 100] }])).toBe(
+      'amount between 1 and 100',
+    )
+  })
+
+  it('adds no terminator of its own -- the caller closes the list', () => {
+    // Deliberate: `summarise` brackets the whole behaviour and the funnel
+    // screens bracket the clause. A terminator here would give both two.
+    const phrase = wherePhrase([{ property: 'page', operator: '=', value: 'changelog' }])
+    expect(phrase).toBe('page is changelog')
+    expect(phrase.endsWith(')')).toBe(false)
+    expect(phrase.endsWith(',')).toBe(false)
+  })
+
+  it('is empty for an empty list, rather than a stray separator', () => {
+    expect(wherePhrase([])).toBe('')
   })
 })

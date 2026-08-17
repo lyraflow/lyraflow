@@ -4,6 +4,8 @@
  * because deriving one from the other is a multiplication callers get
  * subtly wrong. See packages/core/src/funnels/levels.ts.
  */
+import type { FunnelStep } from '../../api/types.js'
+import { wherePhrase } from '../segments/vocabulary.js'
 import { secondsToWindowInput } from './WindowField.js'
 
 /** A server-supplied 0..1 rate as a percentage. Exact 0 and 1 render without
@@ -70,4 +72,40 @@ export function formatRelative(iso: string, now: Date): string {
   if (delta < HOUR) return plural(Math.floor(delta / MINUTE), 'minute')
   if (delta < DAY) return plural(Math.floor(delta / HOUR), 'hour')
   return plural(Math.floor(delta / DAY), 'day')
+}
+
+/**
+ * One step of a funnel, as prose: its event, plus the predicates narrowing
+ * it if it carries any.
+ *
+ * `page_view (where page is changelog, duration_ms at least 30)`.
+ *
+ * A step's predicates could only be written through the API until the
+ * builder gained an editor for them, so every screen that lists a funnel
+ * rendered the bare event name and two funnels differing only in their
+ * predicates were the same row. Predicated steps are ordinary now, which
+ * makes that ambiguity the common case rather than the exotic one.
+ *
+ * The words are `wherePhrase`'s, i.e. the segments vocabulary's -- `at
+ * least`, `is not`, `between X and Y` -- so a predicate reads the same here,
+ * in a segment's summary, and on the control that authored it. Spelling the
+ * operator a second way in this package is exactly the drift that module
+ * exists to prevent.
+ *
+ * **The brackets are load-bearing, not decoration.** `wherePhrase` returns a
+ * comma-separated list with no terminator (its own doc comment), and these
+ * labels get joined by ` -> ` into a chain: without them,
+ * `page_view where page is changelog, duration_ms at least 30 -> signup`
+ * leaves a reader no marker for where step 1's predicates stop, and a
+ * summary that can be misread is worse than none -- acting on the wrong
+ * population looks exactly like acting on the right one.
+ */
+export function stepLabel(step: FunnelStep): string {
+  if (step.where == null || step.where.length === 0) return step.event
+  return `${step.event} (where ${wherePhrase(step.where)})`
+}
+
+/** A funnel's steps as one line, in order. */
+export function stepChain(steps: readonly FunnelStep[]): string {
+  return steps.map(stepLabel).join(' → ')
 }

@@ -7,7 +7,7 @@ import { useProject } from '../app/ProjectContext.js'
 import { ROUTES, funnelPath } from '../app/Router.js'
 import { Badge } from '../components/ui/badge.js'
 import { Button } from '../components/ui/button.js'
-import { formatPercent, formatRelative, formatWindow } from './funnels/format.js'
+import { formatPercent, formatRelative, formatWindow, stepChain } from './funnels/format.js'
 
 /**
  * `last_entered`/`last_converted`/`last_evaluated_at` are a CACHE the
@@ -48,10 +48,17 @@ function funnelRateLabel(f: Funnel, now: Date): string {
 }
 
 /** A stale funnel's `steps` no longer parse -- rendering an empty step chain
- * would read as "a funnel with zero steps" rather than "unreadable". */
+ * would read as "a funnel with zero steps" rather than "unreadable".
+ *
+ * Otherwise `stepChain`, which shows each step's own `where` predicates
+ * rather than the bare event name: this row used to render two funnels
+ * differing only in their predicates identically, which was tolerable while
+ * only the API could write one and is not now that the builder does. The
+ * brackets `stepChain` puts round each clause are what keep one step's
+ * predicates from reading as the next step's -- see its own doc comment. */
 function stepSummary(f: Funnel): string {
   if (f.stale) return 'Steps cannot be read'
-  return f.steps.map((s) => s.event).join(' → ')
+  return stepChain(f.steps)
 }
 
 /**
@@ -75,7 +82,12 @@ function FunnelRow(props: { funnel: Funnel }) {
         className="flex flex-col gap-1 rounded-md border border-border bg-card px-4 py-3 hover:bg-muted"
       >
         <span className="font-medium text-foreground">{funnel.name}</span>
-        <span className="text-sm text-muted-foreground">{stepSummary(funnel)}</span>
+        {/* `break-words`: a step chain now carries operator-typed values,
+         * and one long unbroken token (a URL, a UUID) would otherwise push
+         * the row wider than the viewport at 390px. */}
+        <span className="min-w-0 break-words text-sm text-muted-foreground">
+          {stepSummary(funnel)}
+        </span>
         <span className="flex items-center gap-2 text-sm text-muted-foreground">
           <span>{formatWindow(funnel.window_seconds)}</span>
           {funnel.segment_id != null && <Badge variant="secondary">Segment filter</Badge>}

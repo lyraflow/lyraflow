@@ -18,7 +18,7 @@
  * counts, and deliberately renders no tree as prose at all -- is untouched.
  */
 import { COMPARISON_OPERATORS } from '@lyraflow/core/segments/ast.js'
-import type { ComparisonOperator, Window } from '@lyraflow/core/segments/ast.js'
+import type { ComparisonOperator, WherePredicate, Window } from '@lyraflow/core/segments/ast.js'
 import { toPickerValue } from './datetime.js'
 
 /**
@@ -179,4 +179,49 @@ export function windowPhrase(window: Window): string {
     default:
       return window satisfies never
   }
+}
+
+/**
+ * A condition's value, as prose.
+ *
+ * `between` carries a two-slot tuple (`ValueInput`'s own doc comment), which
+ * reads as "X and Y" -- so the join is part of the VALUE's rendering rather
+ * than the operator's, and `formatScalar` is applied to each slot rather
+ * than to the pair.
+ *
+ * `formatScalar` is how a `lifecycle` bound gets rendered as a date while a
+ * trait value is left exactly as stored: a trait's value is arbitrary
+ * operator data that merely might look like a date, and reformatting it
+ * would be inventing a type for it.
+ *
+ * Lives here rather than in `summarise.ts`, where it started, because the
+ * funnel screens render a `where` clause too and a second copy of "how a
+ * value reads" is the same drift `operatorWord` exists to prevent -- one
+ * copy would have kept `between`'s "and" and the other would not.
+ */
+export function formatValue(value: unknown, formatScalar: (v: unknown) => string = String): string {
+  if (Array.isArray(value)) return value.map((v) => formatValue(v, formatScalar)).join(' and ')
+  if (value === null) return 'null'
+  return formatScalar(value)
+}
+
+/**
+ * A `where` list as prose: `page is changelog, duration_ms at least 30`.
+ *
+ * WITHOUT the leading word "where" and without any terminator, deliberately.
+ * It is a comma-separated list, so whatever follows it reads as one more
+ * predicate unless the CALLER closes it -- `summarise` brackets the whole
+ * behaviour when a group's join would otherwise be absorbed, and the funnel
+ * screens bracket the clause itself. Baking a terminator in here would give
+ * the callers that already close it two.
+ *
+ * Read by `summarise` (the segments list and detail), by the funnels list,
+ * and by the funnel step bars, so the same predicate reads identically on
+ * all four -- and so it reads in the operator's words on all four, which is
+ * the whole reason `operatorWord` is not a raw `w.operator`.
+ */
+export function wherePhrase(where: readonly WherePredicate[]): string {
+  return where
+    .map((w) => `${w.property} ${operatorWord(w.operator)} ${formatValue(w.value)}`)
+    .join(', ')
 }

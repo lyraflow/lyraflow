@@ -495,7 +495,11 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
             <span data-testid="funnel-range-label">{formatRangeDays(result.range)}</span> · as of{' '}
             <span data-testid="funnel-as-of">{formatRelative(result.as_of, new Date())}</span>
           </p>
-          <StepBars result={result} />
+          {/* The definition's own steps, so a narrowed step reads as one.
+           * `funnel` can legitimately still be null here -- the fetch and
+           * the run are independent requests -- and `StepBars` renders no
+           * clause at all rather than one it cannot place. */}
+          <StepBars result={result} definition={funnel?.steps} />
         </div>
       )}
     </div>

@@ -142,6 +142,50 @@ describe('Funnels list', () => {
     expect(row).toHaveTextContent(/cannot be read/i)
   })
 
+  it("shows each step's own narrowing, so two funnels differing only in predicates are different rows", async () => {
+    // Two narrowed steps, two predicates each, four operators, none of them
+    // shared between the steps: one narrowed step could not tell "each
+    // step's own" from "the first step's, twice", one predicate per step
+    // could not exercise the comma join, and an all-`=` fixture could not
+    // tell a worded operator from a raw symbol.
+    renderList([
+      {
+        ...RUN_ONCE,
+        steps: [
+          {
+            event: 'page_view',
+            where: [
+              { property: 'page', operator: '=', value: 'changelog' },
+              { property: 'duration_ms', operator: '>=', value: 30 },
+            ],
+          },
+          {
+            event: 'signup_completed',
+            where: [
+              { property: 'plan', operator: '!=', value: 'free' },
+              { property: 'seats', operator: '<=', value: 10 },
+            ],
+          },
+        ],
+      },
+    ])
+    const row = await screen.findByRole('link', { name: /Signup flow/ })
+    expect(row).toHaveTextContent(
+      'page_view (where page is changelog, duration_ms at least 30) → ' +
+        'signup_completed (where plan is not free, seats at most 10)',
+    )
+    // The words are the builder's, never the AST's.
+    expect(row.textContent ?? '').not.toContain('>=')
+    expect(row.textContent ?? '').not.toContain('!=')
+  })
+
+  it('leaves an un-narrowed chain exactly as it read before', async () => {
+    renderList([RUN_ONCE])
+    const row = await screen.findByRole('link', { name: /Signup flow/ })
+    expect(row).toHaveTextContent('page_view → signup_completed')
+    expect(row.textContent ?? '').not.toContain('where')
+  })
+
   it('offers the builder when there are no funnels', async () => {
     renderList([])
     expect(await screen.findByRole('link', { name: /create.*funnel/i })).toBeInTheDocument()
