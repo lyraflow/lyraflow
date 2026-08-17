@@ -27,6 +27,7 @@ import {
   emitObject,
   resolveMode,
 } from './api/output.js'
+import { runSeedDemo } from './seed/command.js'
 import {
   EmptyPasswordError,
   StdinTimeoutError,
@@ -634,6 +635,36 @@ async function main(): Promise<void> {
       break
     }
 
+    case 'seed-demo': {
+      // Same shape as `set-admin-password` above: database handles, not an HTTP
+      // client, because the ninety days of history this writes cannot be
+      // created through the ingest API at all (see seed/rows.ts). The handles
+      // are opened by the callback rather than here, so a usage error never
+      // opens a connection it then has to close.
+      process.exitCode = await runSeedDemo(
+        args,
+        {
+          write: (s) => process.stdout.write(s),
+          writeErr: (s) => process.stderr.write(s),
+          isTty: process.stdout.isTTY ?? false,
+          now: () => new Date(),
+        },
+        () => {
+          const { pg, ch } = clients()
+          return {
+            pg,
+            ch,
+            database: env('LYRAFLOW_CLICKHOUSE_DB'),
+            close: async () => {
+              await pg.end()
+              await ch.close()
+            },
+          }
+        },
+      )
+      break
+    }
+
     case 'healthcheck': {
       const url = process.env.LYRAFLOW_URL ?? 'http://localhost:3000'
       const res = await fetch(`${url}/ready`)
@@ -779,7 +810,7 @@ async function main(): Promise<void> {
 
     default:
       console.error(
-        'Usage: lyraflow <--version|migrate|create-project|set-admin-password|healthcheck|events|stats|persons|deletions|segments|funnels|schema|snippet>',
+        'Usage: lyraflow <--version|migrate|create-project|set-admin-password|seed-demo|healthcheck|events|stats|persons|deletions|segments|funnels|schema|snippet>',
       )
       process.exit(2)
   }
