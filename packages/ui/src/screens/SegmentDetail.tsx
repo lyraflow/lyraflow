@@ -277,7 +277,13 @@ export function SegmentDetail(props: { client: ApiClient; onUnauthorized?: () =>
 
       {segment != null && !segment.stale && (
         <>
-          <p className="text-sm text-muted-foreground">{summarise(segment.filter as FilterNode)}</p>
+          {/* `data-testid` so a test can assert on the SUMMARY rather than on
+           * "somewhere on the page": the cost warnings below name the same
+           * event this sentence does, so matching by text alone is ambiguous
+           * on exactly the trees worth asserting about. */}
+          <p className="text-sm text-muted-foreground" data-testid="segment-detail-summary">
+            {summarise(segment.filter as FilterNode)}
+          </p>
 
           <WarningPanel warnings={warnings} />
 

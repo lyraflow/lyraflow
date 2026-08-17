@@ -2,19 +2,7 @@ import type { Window } from '@lyraflow/core/segments/ast.js'
 import { Input } from '../../components/ui/input.js'
 import { Label } from '../../components/ui/label.js'
 import { localZone, toInstant, toPickerValue } from './datetime.js'
-
-/**
- * The three window variants with the words an OPERATOR reads, in the order
- * `ast.ts` declares them. The labels are the operator's vocabulary, not the
- * AST's -- the same rule `ConditionRow`'s `LEAF_KINDS` follows. `kind` on the
- * left is the only thing that ever reaches a node, so every existing test
- * that selects an option by its VALUE keeps working unchanged.
- */
-const WINDOW_KINDS = [
-  { kind: 'last', label: 'in the last…' },
-  { kind: 'absolute', label: 'between two dates' },
-  { kind: 'ever', label: 'any time' },
-] as const
+import { WINDOW_KIND_OPTIONS } from './vocabulary.js'
 
 /** Only the `last` variant has a `unit` -- `Window['unit']` does not
  * typecheck across the whole union, so this is pulled out via `Extract`
@@ -140,7 +128,13 @@ export function WindowPicker(props: {
         onChange={(e) => setKind(e.target.value as Window['kind'])}
         className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground shadow-xs"
       >
-        {WINDOW_KINDS.map(({ kind, label }) => (
+        {/* The words an OPERATOR reads, in the order `ast.ts` declares the
+         * variants -- from `vocabulary.ts`, which `summarise` reads too, so
+         * the sentence a saved segment is summarised in and the control that
+         * built it can never name the same window differently. `kind` is the
+         * only thing that ever reaches a node, so every test that selects an
+         * option by its VALUE keeps working unchanged. */}
+        {WINDOW_KIND_OPTIONS.map(({ kind, label }) => (
           <option key={kind} value={kind}>
             {label}
           </option>

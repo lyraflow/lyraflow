@@ -1,48 +1,14 @@
-import { COMPARISON_OPERATORS } from '@lyraflow/core/segments/ast.js'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
-import { OPERATOR_OPTIONS, OperatorSelect } from './OperatorSelect.js'
+import { OperatorSelect } from './OperatorSelect.js'
+import { OPERATOR_OPTIONS } from './vocabulary.js'
 
-describe('OPERATOR_OPTIONS', () => {
-  it('covers every operator core declares, in core’s own order', () => {
-    // Driven off `COMPARISON_OPERATORS`, so an operator added there and not
-    // given a word cannot quietly go missing from the list either.
-    expect(OPERATOR_OPTIONS.map((o) => o.value)).toEqual([...COMPARISON_OPERATORS])
-  })
-
-  it('gives every operator a word, and never falls back to the raw symbol', () => {
-    // The failure this exists to catch is silent by construction: an
-    // operator with no label renders as `>=` beside six that read as
-    // English, which looks like a styling slip rather than a missing entry.
-    // `tsc` refuses the missing key first (the labels are an exhaustive
-    // `Record`), and this is the half a test can see.
-    //
-    // Asserted as "is made of words" rather than "differs from its symbol":
-    // `between` is BOTH, legitimately, so a difference test would have to
-    // carve out an exception and would then be blind to a raw `<=` too. Every
-    // symbol in `COMPARISON_OPERATORS` fails this pattern; every word passes.
-    for (const { label } of OPERATOR_OPTIONS) {
-      expect(label).toMatch(/^[a-z ]+$/)
-    }
-    // ...and the pattern really does reject the symbols it is meant to.
-    for (const symbol of ['=', '!=', '>', '>=', '<', '<=']) {
-      expect(symbol).not.toMatch(/^[a-z ]+$/)
-    }
-  })
-
-  it('leaves every option’s stored value exactly as the AST spells it', () => {
-    expect(OPERATOR_OPTIONS.map((o) => o.value)).toEqual([
-      '=',
-      '!=',
-      '>',
-      '>=',
-      '<',
-      '<=',
-      'between',
-    ])
-  })
-})
+// The `OPERATOR_OPTIONS` pins moved to `vocabulary.test.ts` with the list
+// itself -- `summarise` reads the same words now, so they are no longer this
+// component's own. What stays here is what only the CONTROL can be wrong
+// about: that the words reach the DOM, in order, still carrying the AST's
+// values.
 
 describe('OperatorSelect', () => {
   it('renders the words, not the symbols', () => {
@@ -59,6 +25,9 @@ describe('OperatorSelect', () => {
       'at most',
       'between',
     ])
+    // ...and they are the SHARED words, not a second list this component
+    // happens to agree with today: the same record `summarise` reads.
+    expect(options.map((o) => o.textContent)).toEqual(OPERATOR_OPTIONS.map((o) => o.label))
   })
 
   it('keeps the accessible name `Operator`, which several suites address it by', () => {

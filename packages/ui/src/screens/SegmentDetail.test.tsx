@@ -125,7 +125,28 @@ describe('SegmentDetail', () => {
   it('shows the segment name and filter summary', async () => {
     renderDetail()
     expect(await screen.findByText('Paying customers')).toBeInTheDocument()
-    expect(screen.getByText(/plan = pro/i)).toBeInTheDocument()
+    // The words, not the AST: this screen renders the same `summarise` the
+    // list does, and both used to show `=`.
+    expect(screen.getByText(/plan is pro/i)).toBeInTheDocument()
+    expect(screen.queryByText(/plan = pro/i)).toBeNull()
+  })
+
+  it('summarises a saved tree in the words the builder uses, not in the AST’s symbols', async () => {
+    // The screens an operator visits most rendered `>=` and the phrase
+    // "in ever" while the builder read as English. Driven through the real
+    // `summarise` (nothing is stubbed here), on a tree carrying the two
+    // things that were worst: an unbounded window and a symbol operator.
+    const client = fakeClient({
+      segment: vi.fn(async () => ({ ...SEGMENT, filter: EVER_BEHAVIOUR })),
+    })
+    renderDetail(client)
+    await screen.findByText('Paying customers')
+    const summary = screen.getByTestId('segment-detail-summary')
+    expect(summary).toHaveTextContent('import_started')
+    expect(summary).toHaveTextContent('at any time')
+    expect(summary).toHaveTextContent('at least')
+    expect(summary).not.toHaveTextContent('in ever')
+    expect(summary).not.toHaveTextContent('>=')
   })
 
   it('a stale segment shows the read-only error and never previews', async () => {

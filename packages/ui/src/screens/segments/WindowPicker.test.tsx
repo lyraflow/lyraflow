@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { WindowPicker, zoneNote } from './WindowPicker.js'
+import { WINDOW_KIND_OPTIONS } from './vocabulary.js'
 
 describe('WindowPicker', () => {
   it('renders the last-variant fields (amount, unit) when given a `last` window', () => {
@@ -123,6 +124,11 @@ describe('WindowPicker', () => {
       'between two dates',
       'any time',
     ])
+    // ...and they are the SHARED words, from the one module `summarise` reads
+    // too. A control with its own private copy of this list is how the list
+    // screen came to say "in ever" while this select said "any time".
+    expect(options.map((o) => o.value)).toEqual(WINDOW_KIND_OPTIONS.map((o) => o.kind))
+    expect(options.map((o) => o.textContent)).toEqual(WINDOW_KIND_OPTIONS.map((o) => o.label))
   })
 
   it('states what `any time` costs beside the control that chooses it, not only after the fact', () => {

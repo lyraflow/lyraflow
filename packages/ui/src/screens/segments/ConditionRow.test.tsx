@@ -7,6 +7,7 @@ import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '../../api/client.js'
 import { ConditionRow } from './ConditionRow.js'
+import { summarise } from './summarise.js'
 
 const traitNode: Trait = { kind: 'trait', key: 'plan', operator: '=', value: 'pro' }
 const contextNode: Context = {
@@ -148,9 +149,14 @@ describe('ConditionRow', () => {
     // `behavior` got its own form (`BehaviourForm`), the last of
     // the four leaf kinds still on the placeholder. Pinned by asserting
     // BehaviourForm's own distinguishing field (Aggregate, which no other
-    // form renders) is present, rather than the one-line `summarise` text
-    // ("count of checkout in last 7 days >= 1") the placeholder used to
-    // show for this exact fixture.
+    // form renders) is present, rather than the one-line `summarise` text the
+    // placeholder used to show for this exact fixture.
+    //
+    // The absence is asserted against `summarise(behaviorNode)` itself rather
+    // than against a frozen literal of what it used to return: the summary's
+    // wording has since changed (the operator words and the window phrasing
+    // moved to `vocabulary.ts`), and a literal from the old wording is an
+    // assertion that can no longer fail even if the fallback DOES render.
     render(
       <ConditionRow
         node={behaviorNode}
@@ -164,7 +170,7 @@ describe('ConditionRow', () => {
     )
     const row = screen.getByTestId('condition-0')
     expect(within(row).getByRole('combobox', { name: /aggregate/i })).toHaveValue('count')
-    expect(row).not.toHaveTextContent('count of checkout in last 7 days >= 1')
+    expect(row).not.toHaveTextContent(summarise(behaviorNode))
   })
 
   it('unwraps a negated leaf so the real form still renders what it negates', () => {

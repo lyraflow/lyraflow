@@ -79,6 +79,46 @@ describe('Segments list', () => {
     expect(row).not.toHaveTextContent(/\b0\b/)
   })
 
+  it('summarises a row in the words the builder uses, not in the AST’s symbols', async () => {
+    // This is the screen an operator reads first and returns to most, and it
+    // was the one still speaking the AST: `>=` for "at least", and the phrase
+    // "in ever" for an unbounded window, which is not English. Driven through
+    // the real `summarise` -- nothing here is stubbed -- on a tree carrying
+    // both, plus a lifecycle bound that used to render as a UTC ISO string
+    // with milliseconds in it.
+    renderList([
+      {
+        ...SEG,
+        filter: {
+          kind: 'group',
+          op: 'and',
+          children: [
+            {
+              kind: 'behavior',
+              event: 'docs_search',
+              aggregate: 'count',
+              window: { kind: 'ever' },
+              operator: '>=',
+              value: 20,
+            },
+            { kind: 'lifecycle', field: 'first_seen', operator: '>=', value: '2026-06-01T09:00' },
+          ],
+        },
+      },
+    ])
+    const row = await screen.findByRole('link', { name: /Paying customers/ })
+    const summary = screen.getByText(/docs_search/)
+    expect(summary).toHaveTextContent('at any time')
+    expect(summary).toHaveTextContent('at least')
+    expect(summary).toHaveTextContent('1 Jun 2026, 09:00')
+    expect(summary).not.toHaveTextContent('in ever')
+    expect(summary).not.toHaveTextContent('>=')
+    expect(summary).not.toHaveTextContent('2026-06-01T09:00')
+    // Asserted on the row as well, so a second, un-reworded rendering of the
+    // same tree elsewhere in the row would fail too.
+    expect(row).not.toHaveTextContent('in ever')
+  })
+
   it('marks a stale segment instead of rendering an empty tree', async () => {
     renderList([{ ...SEG, stale: true }])
     expect(await screen.findByText(/cannot be read/i)).toBeInTheDocument()
