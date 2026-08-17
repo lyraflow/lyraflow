@@ -1,8 +1,9 @@
-import { AGGREGATES, COMPARISON_OPERATORS } from '@lyraflow/core/segments/ast.js'
-import type { Aggregate, Behavior, ComparisonOperator } from '@lyraflow/core/segments/ast.js'
+import { AGGREGATES } from '@lyraflow/core/segments/ast.js'
+import type { Aggregate, Behavior } from '@lyraflow/core/segments/ast.js'
 import type { ApiClient } from '../../api/client.js'
 import { Label } from '../../components/ui/label.js'
 import { EventCombobox } from '../funnels/EventCombobox.js'
+import { OperatorSelect } from './OperatorSelect.js'
 import { PropertyCombobox } from './PropertyCombobox.js'
 import type { ConditionValue } from './ValueInput.js'
 import { ValueInput } from './ValueInput.js'
@@ -98,29 +99,34 @@ export function BehaviourForm(props: {
             onUnauthorized={onUnauthorized}
           />
         )}
-        <div className="flex flex-col gap-1">
-          <Label htmlFor={operatorId}>Operator</Label>
-          <select
-            id={operatorId}
-            aria-label="Operator"
-            value={node.operator}
-            onChange={(e) => onChange({ ...node, operator: e.target.value as ComparisonOperator })}
-            className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground shadow-xs"
-          >
-            {COMPARISON_OPERATORS.map((op) => (
-              <option key={op} value={op}>
-                {op}
-              </option>
-            ))}
-          </select>
-        </div>
+        <OperatorSelect
+          id={operatorId}
+          value={node.operator}
+          onChange={(operator) => onChange({ ...node, operator })}
+        />
         <ValueInput
           operator={node.operator}
           value={node.value as ConditionValue}
           onChange={(value) => onChange({ ...node, value } as Behavior)}
         />
+        {/* The word that finishes the sentence for the one aggregate whose
+         * comparison is against a NUMBER OF OCCURRENCES. "purchase count at
+         * least 3 times in the last 10 days" reads; "sum of amount at least 3
+         * times" does not, so this appears only for `count`. */}
+        {node.aggregate === 'count' && (
+          <span className="pb-2 text-sm text-muted-foreground">times</span>
+        )}
       </div>
 
+      {/* Kept on its own line rather than folded into the wrapping row above,
+       * and that is a measured choice, not an oversight. The `last` variant is
+       * three rows tall (label, select, then amount+unit) against two for
+       * every other control, so under the row's `items-end` it would
+       * bottom-align and hang its own select a full row ABOVE its
+       * neighbours -- the same class of accident `ConditionRow`'s own layout
+       * comment records, where width after layout did not predict the break.
+       * The sentence still reads across the wrap: "purchase count at least 3
+       * times" / "in the last 10 days". */}
       <WindowPicker
         id={id}
         value={node.window}

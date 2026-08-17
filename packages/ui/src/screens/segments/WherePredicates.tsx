@@ -1,8 +1,7 @@
-import { COMPARISON_OPERATORS } from '@lyraflow/core/segments/ast.js'
-import type { ComparisonOperator, WherePredicate } from '@lyraflow/core/segments/ast.js'
+import type { WherePredicate } from '@lyraflow/core/segments/ast.js'
 import type { ApiClient } from '../../api/client.js'
 import { Button } from '../../components/ui/button.js'
-import { Label } from '../../components/ui/label.js'
+import { OperatorSelect } from './OperatorSelect.js'
 import { PropertyCombobox } from './PropertyCombobox.js'
 import type { ConditionValue } from './ValueInput.js'
 import { ValueInput } from './ValueInput.js'
@@ -77,24 +76,11 @@ export function WherePredicates(props: {
               label="Property"
               onUnauthorized={onUnauthorized}
             />
-            <div className="flex flex-col gap-1">
-              <Label htmlFor={operatorId}>Operator</Label>
-              <select
-                id={operatorId}
-                aria-label="Operator"
-                value={p.operator}
-                onChange={(e) =>
-                  updateAt(i, { ...p, operator: e.target.value as ComparisonOperator })
-                }
-                className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground shadow-xs"
-              >
-                {COMPARISON_OPERATORS.map((op) => (
-                  <option key={op} value={op}>
-                    {op}
-                  </option>
-                ))}
-              </select>
-            </div>
+            <OperatorSelect
+              id={operatorId}
+              value={p.operator}
+              onChange={(operator) => updateAt(i, { ...p, operator })}
+            />
             <ValueInput
               operator={p.operator}
               value={p.value as ConditionValue}

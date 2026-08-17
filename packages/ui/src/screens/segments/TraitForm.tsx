@@ -1,7 +1,6 @@
-import { COMPARISON_OPERATORS } from '@lyraflow/core/segments/ast.js'
-import type { ComparisonOperator, Trait } from '@lyraflow/core/segments/ast.js'
+import type { Trait } from '@lyraflow/core/segments/ast.js'
 import type { ApiClient } from '../../api/client.js'
-import { Label } from '../../components/ui/label.js'
+import { OperatorSelect } from './OperatorSelect.js'
 import { PropertyCombobox } from './PropertyCombobox.js'
 import type { ConditionValue } from './ValueInput.js'
 import { ValueInput } from './ValueInput.js'
@@ -65,22 +64,11 @@ export function TraitForm(props: {
         suggestOnEmpty
         onUnauthorized={onUnauthorized}
       />
-      <div className="flex flex-col gap-1">
-        <Label htmlFor={operatorId}>Operator</Label>
-        <select
-          id={operatorId}
-          aria-label="Operator"
-          value={node.operator}
-          onChange={(e) => onChange({ ...node, operator: e.target.value as ComparisonOperator })}
-          className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground shadow-xs"
-        >
-          {COMPARISON_OPERATORS.map((op) => (
-            <option key={op} value={op}>
-              {op}
-            </option>
-          ))}
-        </select>
-      </div>
+      <OperatorSelect
+        id={operatorId}
+        value={node.operator}
+        onChange={(operator) => onChange({ ...node, operator })}
+      />
       <ValueInput
         operator={node.operator}
         value={node.value as ConditionValue}

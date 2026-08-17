@@ -265,4 +265,64 @@ describe('BehaviourForm', () => {
     expect(call.event).toBe('checkout_completed')
     expect(call.aggregate).toBe('count')
   })
+
+  // --- Reading the row as a sentence ------------------------------------
+  //
+  // The row is a form, but an operator reads it as a claim about people:
+  // "purchase at least 3 times in the last 10 days". The symbols were the
+  // part that had to be translated in the operator's head; the connective
+  // is what stops the translated version reading as a word salad.
+
+  it('reads left to right as a sentence, with no symbol left to translate', () => {
+    render(
+      <BehaviourForm
+        id="beh"
+        node={beh({
+          event: 'purchase',
+          aggregate: 'count',
+          operator: '>=',
+          value: 3,
+          window: { kind: 'last', n: 10, unit: 'days' },
+        })}
+        onChange={vi.fn()}
+        client={fakeClient()}
+        projectId={1}
+      />,
+    )
+    // Every control still carries the AST's own value...
+    expect(screen.getByLabelText(/operator/i)).toHaveValue('>=')
+    expect(screen.getByLabelText('Window')).toHaveValue('last')
+    // ...and what the operator actually reads, control by control in the
+    // order they appear, spells the sentence out. The event, the count and
+    // the window amount are typed into fields, so they are read off their
+    // values; the rest are the words this change introduced.
+    expect(screen.getByLabelText(/event/i)).toHaveValue('purchase')
+    expect(
+      screen.getByLabelText(/operator/i).querySelector('option[value=">="]')?.textContent,
+    ).toBe('at least')
+    expect(screen.getByRole('textbox', { name: /^value$/i })).toHaveValue('3')
+    expect(screen.getByText('times')).toBeInTheDocument()
+    expect(screen.getByLabelText('Window').querySelector('option[value="last"]')?.textContent).toBe(
+      'in the last…',
+    )
+    expect(screen.getByLabelText('Window amount')).toHaveValue(10)
+    expect(screen.getByLabelText('Window unit')).toHaveValue('days')
+    // The raw comparison symbol appears nowhere a person reads.
+    expect(screen.queryByText('>=')).toBeNull()
+  })
+
+  it('drops the "times" connective for an aggregate that does not count occurrences', () => {
+    // "sum of amount at least 3 times" is not a sentence, so the connective
+    // belongs to `count` alone rather than to every behaviour.
+    render(
+      <BehaviourForm
+        id="beh"
+        node={beh({ aggregate: 'sum', property: 'amount', operator: '>=', value: 3 })}
+        onChange={vi.fn()}
+        client={fakeClient()}
+        projectId={1}
+      />,
+    )
+    expect(screen.queryByText('times')).toBeNull()
+  })
 })
