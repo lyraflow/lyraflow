@@ -125,6 +125,12 @@ export interface ApiClient {
   // fetch site mid-form.
   schemaProperties(projectId: number, event: string | undefined, q: string): Promise<string[]>
   schemaEvents(projectId: number, q: string): Promise<string[]>
+  // The values one trait holds. `trait` is required, not optional like
+  // `schemaProperties`' `event`: the endpoint refuses a request without one,
+  // and the type says so here rather than letting a caller discover it as a
+  // 400. Expensive on the server — see the route's own comment — so callers
+  // must reach it on an explicit interaction, never on render.
+  schemaTraitValues(projectId: number, trait: string, q: string): Promise<string[]>
 }
 
 function qs(params: Record<string, string | number | undefined>): string {
@@ -271,5 +277,13 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
           projectId,
         )
       ).events.map((e) => e.event_name),
+    schemaTraitValues: async (projectId, trait, q) =>
+      (
+        await call<{ values: { value: string }[] }>(
+          `/v1/schema/trait-values${qs({ trait, q, limit: 50 })}`,
+          {},
+          projectId,
+        )
+      ).values.map((v) => v.value),
   }
 }

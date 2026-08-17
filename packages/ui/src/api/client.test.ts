@@ -628,5 +628,43 @@ describe('createClient', () => {
       const [path] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
       expect(String(path)).not.toMatch(/[?&]event=/)
     })
+
+    it('schemaTraitValues sends trait and q in the query string and maps to value', async () => {
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response(JSON.stringify({ values: [{ value: 'free' }, { value: 'pro' }] }), {
+            status: 200,
+          }),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      const out = await client.schemaTraitValues(3, 'plan', 'p')
+
+      expect(out).toEqual(['free', 'pro'])
+      const [path, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+      const url = String(path)
+      expect(url).toMatch(/^\/v1\/schema\/trait-values\?/)
+      expect(url).toMatch(/[?&]trait=plan(&|$)/)
+      expect(url).toMatch(/[?&]q=p(&|$)/)
+      expect(new Headers(init.headers).get('x-lyraflow-project')).toBe('3')
+    })
+
+    // The empty query means "everything this trait holds", and `qs` drops an
+    // empty string rather than sending `q=` — but `trait` must survive that
+    // same call, since without it the endpoint answers 400 and the field
+    // would be silently suggestion-less on the very interaction that opens
+    // it.
+    it('schemaTraitValues keeps trait when the query is empty', async () => {
+      const fetchImpl = vi.fn(
+        async () => new Response(JSON.stringify({ values: [] }), { status: 200 }),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      await client.schemaTraitValues(3, 'plan', '')
+
+      const [path] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+      expect(String(path)).toMatch(/[?&]trait=plan(&|$)/)
+      expect(String(path)).not.toMatch(/[?&]q=/)
+    })
   })
 })

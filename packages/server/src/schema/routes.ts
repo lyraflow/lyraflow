@@ -17,6 +17,17 @@ const Query = z.object({
   limit: z.coerce.number().int().positive().max(SCHEMA_MAX_LIMIT).default(50),
 })
 
+/** `trait` is REQUIRED, unlike `event` on the properties route. There is no
+ * useful "values of every trait" read — the values of `plan` and the values
+ * of `country` share no namespace — and, more to the point, an omitted trait
+ * would turn the scan documented on the route below into a scan with no
+ * filter at all. */
+const TraitValueQuery = z.object({
+  trait: z.string().min(1).max(128),
+  q: z.string().max(128).optional(),
+  limit: z.coerce.number().int().positive().max(SCHEMA_MAX_LIMIT).default(50),
+})
+
 /**
  * Autocomplete source for the segment builder.
  *
@@ -75,5 +86,82 @@ export function registerSchemaRoutes(app: FastifyInstance, deps: SchemaDeps): vo
     return reply
       .code(200)
       .send({ properties: await rs.json<{ property_key: string; value_kind: string }>() })
+  })
+
+  /**
+   * The values one trait actually holds, so the segment builder can stop
+   * asking an operator to guess whether a plan is `pro`, `Pro` or `tier_2`.
+   * Getting that wrong produces a segment that is silently empty rather than
+   * an error, which is why the guess is worth removing.
+   *
+   * THIS READ IS EXPENSIVE, and unlike its two neighbours above it does not
+   * get cheaper with a narrower filter. `person_traits` is ordered by
+   * `(project_id, anonymous_id, user_id, trait_key)`, so `trait_key` is the
+   * LAST key part: filtering on it without an identity cannot seek, and the
+   * query reads the project's whole trait partition every time. The two
+   * routes above read `event_schema`, a purpose-built catalogue with one row
+   * per (event, property); this one scans a fact table with one row per
+   * person per trait.
+   *
+   * Three things follow, and all three are load-bearing rather than
+   * stylistic:
+   *
+   *  - the `LIMIT` is not optional. It caps what is RETURNED, not what is
+   *    read, so it is a response-size bound and not a cost bound — but it is
+   *    the only one this shape admits;
+   *  - `q` is a prefix filter, matching the other two routes, so a typing
+   *    operator narrows rather than re-reads a growing list;
+   *  - the CLIENT must call this only on an explicit interaction — a focus
+   *    or a keystroke in the value field — never eagerly on render. That is
+   *    deliberately the opposite of how the trait-NAME field behaves, which
+   *    fetches before the first keystroke because it reads the cheap
+   *    catalogue. One partition scan per rendered condition row would be
+   *    indefensible in a product that ships cost warnings.
+   *
+   * String values only. `has_num` is what distinguishes a numeric trait from
+   * a string one, and a numeric trait's `value_str` is the meaningless
+   * default `''` documented in `004_person_traits.sql` — a picklist of ages
+   * or revenue figures would not help anyone anyway. There is deliberately
+   * no second `value_str != ''` guard on top: with `has_num = 0` in place the
+   * only rows it could remove are traits a project genuinely set to the empty
+   * string, and hiding a recorded value is not this endpoint's job.
+   *
+   * Server-key gated for the same reason as its neighbours — the values a
+   * project's traits take are a description of its customers.
+   */
+  app.get('/v1/schema/trait-values', async (req, reply) => {
+    const project = await authenticate(req, reply)
+    if (!project) return
+    const q = TraitValueQuery.safeParse(req.query)
+    if (!q.success) return reply.code(400).send({ error: 'invalid query' })
+
+    // The inner GROUP BY is the `traits` CTE's own idiom (`compile.ts`):
+    // AggregatingMergeTree holds argMax STATES, so one row per
+    // (project, identity, trait_key) only exists after `argMaxMerge`. No
+    // person resolution, though — the question is which values exist, not
+    // who holds them, and two devices that later merge into one person
+    // contribute the same value either way.
+    const rs = await ch.query({
+      query: `SELECT DISTINCT value FROM (
+                SELECT
+                  argMaxMerge(value_str) AS value,
+                  argMaxMerge(has_num)   AS has_num
+                FROM person_traits
+                WHERE project_id = {projectId:UInt32} AND trait_key = {trait:String}
+                GROUP BY project_id, anonymous_id, user_id, trait_key
+              )
+              WHERE has_num = 0
+                AND ({q:String} = '' OR startsWith(value, {q:String}))
+              ORDER BY value ASC
+              LIMIT {limit:UInt32}`,
+      query_params: {
+        projectId: project.id,
+        trait: q.data.trait,
+        q: q.data.q ?? '',
+        limit: q.data.limit,
+      },
+      format: 'JSONEachRow',
+    })
+    return reply.code(200).send({ values: await rs.json<{ value: string }>() })
   })
 }
