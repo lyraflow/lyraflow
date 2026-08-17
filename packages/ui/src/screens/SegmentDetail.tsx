@@ -15,8 +15,13 @@ import { MemberList } from './segments/MemberList.js'
 import { summarise } from './segments/summarise.js'
 
 /**
- * Views a saved segment: its filter, its live count, and the
- * people it matches.
+ * Views a saved segment: its filter, its count, and the people it matches.
+ *
+ * On arrival it shows the server's CACHED count and when that count was taken
+ * -- the same pair the list row shows -- and replaces it with a fresh one as
+ * soon as a preview lands. See the cached block below for why a screen that
+ * showed nothing until Run was worse than uninformative rather than merely
+ * empty.
  *
  * Wires Edit (a plain link to `SegmentBuilder`'s edit route -- the
  * rename/tree-update split lives there, not here) and Delete, behind a
@@ -297,6 +302,54 @@ export function SegmentDetail(props: { client: ApiClient; onUnauthorized?: () =>
               </p>
             )}
           </div>
+
+          {/* What the row you clicked through from was already showing.
+           *
+           * Before this, arriving here showed no count at all until a Run
+           * landed -- which for a costly segment means until the operator
+           * clicks. That is worse than uninformative: the list one click back
+           * displayed the number, so a blank detail screen implies the count
+           * is unknown when it is merely not fresh. `GET /v1/segments/:id`
+           * already returns `last_count`/`last_evaluated_at` (the same
+           * `toWire` the list route uses), so this costs no extra request.
+           *
+           * Withdrawn the moment a real preview lands -- two counts on one
+           * screen, one stale, is the conflation the `as of` line below
+           * exists to prevent -- and marked as STORED while it is up, since
+           * a bare number cannot be told from a fresh one.
+           *
+           * A segment that has never been evaluated says so rather than
+           * rendering `last_count ?? 0`: never evaluated and matched nobody
+           * are different facts, and the list already keeps them apart
+           * (`segmentCountLabel`, `Segments.tsx`). */}
+          {preview == null && (
+            <div className="flex min-w-0 flex-col gap-1">
+              {segment.last_evaluated_at == null ? (
+                <p
+                  data-testid="segment-detail-cached-count"
+                  className="text-sm text-muted-foreground"
+                >
+                  Not evaluated yet. Run to count the people in this segment.
+                </p>
+              ) : (
+                <>
+                  <p
+                    data-testid="segment-detail-cached-count"
+                    className="text-2xl font-semibold text-foreground"
+                  >
+                    {(segment.last_count ?? 0).toLocaleString('en-US')}
+                  </p>
+                  <p className="text-sm text-muted-foreground">
+                    stored count, as of{' '}
+                    <span data-testid="segment-detail-cached-as-of">
+                      {formatRelative(segment.last_evaluated_at, new Date())}
+                    </span>
+                    . Run to refresh it.
+                  </p>
+                </>
+              )}
+            </div>
+          )}
 
           {preview != null && (
             <div className="flex min-w-0 flex-col gap-1">

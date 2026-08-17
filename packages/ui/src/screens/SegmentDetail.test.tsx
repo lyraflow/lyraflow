@@ -201,6 +201,68 @@ describe('SegmentDetail', () => {
     expect(screen.queryByTestId('segment-detail-count')).toBeNull()
   })
 
+  // --- The stored count, on arrival. The list row an operator clicks through
+  // from already shows a segment's cached count and when it was taken; this
+  // screen used to show neither until a Run landed, which for a costly segment
+  // means until the operator clicks. A blank screen where the previous one had
+  // a number does not read as "not fresh", it reads as "unknown".
+
+  it('shows the stored count and the instant it was taken, before any Run', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      // Three hours after this segment's own `last_evaluated_at`, so a render
+      // that reached for `new Date()` (or for the preview's `as_of`) reads
+      // "just now" and fails here. `1,284` also pins the thousands separator
+      // the list uses, and is a number no fixture on this screen can supply
+      // by accident -- the preview's own count is 42.
+      vi.setSystemTime(new Date('2026-08-15T03:00:00.000Z'))
+      const client = fakeClient({
+        segment: vi.fn(async () => ({ ...SEGMENT, filter: EVER_BEHAVIOUR, last_count: 1284 })),
+      })
+      renderDetail(client)
+      const cached = await screen.findByTestId('segment-detail-cached-count')
+      expect(cached).toHaveTextContent('1,284')
+      expect(screen.getByTestId('segment-detail-cached-as-of')).toHaveTextContent('3 hours ago')
+      // Marked as the STORED value rather than a fresh one -- a bare number
+      // here would be indistinguishable from a count just run.
+      expect(screen.getByText(/stored count/i)).toBeInTheDocument()
+      // And it costs no second request: `GET /v1/segments/:id` already
+      // carries `last_count`/`last_evaluated_at`.
+      expect(client.previewSavedSegment).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('says a never-evaluated segment has not been evaluated, rather than showing 0', async () => {
+    // Never evaluated and matched nobody are different facts. The list keeps
+    // them apart (`segmentCountLabel`); so must this.
+    const client = fakeClient({
+      segment: vi.fn(async () => ({
+        ...SEGMENT,
+        filter: EVER_BEHAVIOUR,
+        last_count: null,
+        last_evaluated_at: null,
+      })),
+    })
+    renderDetail(client)
+    const cached = await screen.findByTestId('segment-detail-cached-count')
+    expect(cached).toHaveTextContent(/not evaluated yet/i)
+    expect(cached).not.toHaveTextContent(/\b0\b/)
+    expect(screen.queryByTestId('segment-detail-cached-as-of')).toBeNull()
+  })
+
+  it('replaces the stored count with the fresh one once a preview lands', async () => {
+    // Two counts on one screen, one of them stale, is the conflation the
+    // `as of` line exists to prevent -- so the cached pair is withdrawn
+    // rather than left standing beside a live number.
+    const client = fakeClient()
+    renderDetail(client)
+    expect(await screen.findByTestId('segment-detail-count')).toHaveTextContent('42')
+    expect(screen.queryByTestId('segment-detail-cached-count')).toBeNull()
+    expect(screen.queryByText(/stored count/i)).toBeNull()
+  })
+
   it('clicking Run on a costly segment fetches the count explicitly', async () => {
     const client = fakeClient({
       segment: vi.fn(async () => ({ ...SEGMENT, filter: EVER_BEHAVIOUR })),
