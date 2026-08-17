@@ -4,10 +4,10 @@ import {
   MAX_TREE_DEPTH,
   MAX_TREE_NODES,
 } from '@lyraflow/core/segments/validate.js'
-import { act, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
@@ -328,6 +328,90 @@ describe('SegmentBuilder -- an incomplete draft', () => {
     // Said once, though the window raises an issue for each of its two
     // bounds -- the row has one thing to say.
     expect(row().getAllByText(/not finished/i)).toHaveLength(1)
+  })
+
+  // The consequence of the window fix, and the one place the row-level
+  // messaging used to say something untrue: an operator who chose an
+  // absolute range and filled in BOTH fields was told the condition was not
+  // finished, because the tree the picker produced was one the schema
+  // refused. Driven through the real control -- every other fixture in this
+  // suite builds a window object directly, which is exactly why nothing
+  // here ever went red for it.
+  //
+  // In a zone that is not UTC, because the container this runs in defaults
+  // to UTC and a missing conversion is invisible there.
+  describe('an absolute window filled in through the picker', () => {
+    const LOCAL_FROM = '2026-08-01T10:00'
+    const LOCAL_TO = '2026-09-01T02:00'
+    const INSTANT_FROM = '2026-08-01T04:30:00.000Z'
+    const INSTANT_TO = '2026-08-31T20:30:00.000Z'
+
+    // Via `vi.stubEnv`, not a direct `process.env` write: this package
+    // carries no `@types/node`, and CI typechecks before it runs anything.
+    beforeAll(() => {
+      vi.stubEnv('TZ', 'Asia/Kolkata')
+    })
+    afterAll(() => {
+      vi.unstubAllEnvs()
+    })
+
+    it('is running in a zone that is not UTC, so a missing conversion is observable', () => {
+      expect(new Date(LOCAL_FROM).toISOString()).toBe(INSTANT_FROM)
+    })
+
+    /** Gets a behaviour condition on screen with an `absolute` window
+     * selected and neither bound filled in. */
+    async function anAbsoluteWindow() {
+      await screen.findByTestId('group-')
+      await userEvent.type(screen.getByLabelText(/name/i), 'VIPs')
+      await addAFilledCondition()
+      const row = within(screen.getByTestId('condition-0'))
+      await userEvent.selectOptions(
+        row.getByRole('combobox', { name: 'Match on' }),
+        'what they did',
+      )
+      await userEvent.type(row.getByRole('combobox', { name: /event/i }), 'checkout')
+      await userEvent.selectOptions(row.getByRole('combobox', { name: 'Window' }), 'absolute')
+    }
+
+    it('is finished once both bounds are filled in, and Save is offered', async () => {
+      renderBuilder()
+      await anAbsoluteWindow()
+      const row = () => within(screen.getByTestId('condition-0'))
+      expect(row().getByText(/not finished/i)).toBeInTheDocument()
+      expect(saveButton()).toBeDisabled()
+
+      fireEvent.change(row().getByLabelText('From'), { target: { value: LOCAL_FROM } })
+      // Still unfinished with only ONE bound -- so "finished" cannot be
+      // passing merely because the message stopped being computed.
+      expect(row().getByText(/not finished/i)).toBeInTheDocument()
+      fireEvent.change(row().getByLabelText('To'), { target: { value: LOCAL_TO } })
+
+      expect(row().queryByText(/not finished/i)).toBeNull()
+      expect(saveButton()).toBeEnabled()
+    })
+
+    it('saves the bounds as UTC instants, and shows the operator’s own wall-clock back', async () => {
+      const client = fakeClient()
+      renderBuilder(client)
+      await anAbsoluteWindow()
+      const row = () => within(screen.getByTestId('condition-0'))
+      fireEvent.change(row().getByLabelText('From'), { target: { value: LOCAL_FROM } })
+      fireEvent.change(row().getByLabelText('To'), { target: { value: LOCAL_TO } })
+
+      // What the picker shows is what was typed -- the read direction,
+      // which a conversion applied only on write would break.
+      expect(row().getByLabelText('From')).toHaveValue(LOCAL_FROM)
+      expect(row().getByLabelText('To')).toHaveValue(LOCAL_TO)
+
+      await userEvent.click(saveButton())
+      await waitFor(() => expect(client.createSegment).toHaveBeenCalledTimes(1))
+      const sent = client.createSegment.mock.calls[0]?.[2] as { filter: FilterNode }
+      const leaf = (sent.filter as { children: FilterNode[] }).children[0] as {
+        window: { from: string; to: string }
+      }
+      expect(leaf.window).toEqual({ kind: 'absolute', from: INSTANT_FROM, to: INSTANT_TO })
+    })
   })
 
   it('a kind switch leaves no stale message from the kind it switched away from', async () => {
@@ -1177,6 +1261,98 @@ describe('SegmentBuilder -- live counts', () => {
     expect(screen.getByTestId('segment-preview-count')).toHaveTextContent('42')
     expect(screen.getByTestId('segment-preview-stale-note')).toHaveTextContent(/earlier version/i)
   })
+
+  // --- A tree the server cannot parse is never previewed, on either path.
+  //
+  // Adding a condition marks the tree dirty, so the debounce fired
+  // `previewSegment` on a tree carrying `newCondition()`'s empty `key` and
+  // the operator got an error banner about a condition they had not started
+  // filling in. The gate is `draft.complete` -- the SAME `safeParse` Save is
+  // already refused on, never a second notion of "filled in".
+  //
+  // The two halves are pinned SEPARATELY and cannot stand in for each other:
+  // the guard inside `runPreview` is the only thing on the automatic path
+  // (which has no button and therefore no attribute), and the button's own
+  // `disabled` is the only thing an assertion on the control can see.
+
+  it('does not auto-preview a condition that has not been filled in', async () => {
+    await withFakeTimers(async () => {
+      const client = fakeClient()
+      renderBuilder(client)
+      await screen.findByTestId('group-')
+      // Deliberately NOT `addAFilledCondition` -- the whole point is the
+      // tree between the click and the first keystroke.
+      await userEvent.click(screen.getByRole('button', { name: /add condition/i }))
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(DEBOUNCE_MS * 4)
+      })
+      expect(client.previewSegment).not.toHaveBeenCalled()
+      // ...and no banner about it either: the row already says what is
+      // wrong, and a preview error would be about the wrong thing entirely.
+      expect(screen.queryByText(/could not preview/i)).toBeNull()
+      expect(
+        within(screen.getByTestId('condition-0')).getByText(/not finished/i),
+      ).toBeInTheDocument()
+    })
+  })
+
+  it('auto-previews the same tree the moment it becomes complete', async () => {
+    // The other side of the gate, so "never previews" cannot pass for
+    // "previews only complete trees". Same fixture, one keystroke apart.
+    await withFakeTimers(async () => {
+      const client = fakeClient()
+      renderBuilder(client)
+      await screen.findByTestId('group-')
+      await userEvent.click(screen.getByRole('button', { name: /add condition/i }))
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(DEBOUNCE_MS * 4)
+      })
+      expect(client.previewSegment).not.toHaveBeenCalled()
+
+      await userEvent.type(traitKeyOf(), 'plan')
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(DEBOUNCE_MS)
+      })
+      await waitFor(() => expect(client.previewSegment).toHaveBeenCalledTimes(1))
+    })
+  })
+
+  it('disables Run while a condition is unfinished, and re-enables it once filled in', async () => {
+    const client = fakeClient()
+    renderBuilder(client)
+    await screen.findByTestId('group-')
+    await userEvent.click(screen.getByRole('button', { name: /add condition/i }))
+    const run = () => screen.getByRole('button', { name: /^run$/i })
+    expect(run()).toBeDisabled()
+    // ...and on the REQUEST too, because a screen that disables the wrong
+    // control and still fires the call would pass a control-only test.
+    await userEvent.click(run())
+    expect(client.previewSegment).not.toHaveBeenCalled()
+
+    await userEvent.type(traitKeyOf(), 'plan')
+    expect(run()).toBeEnabled()
+  })
+
+  it('refuses Run for an incompleteness nested inside a leaf, not only for a blank top-level field', async () => {
+    // An `absolute` window with neither bound filled in raises its issues at
+    // `window.from`/`window.to`, two levels inside the leaf. A gate that
+    // looked at the node's own fields rather than at the whole-tree parse
+    // would let this one through.
+    const client = fakeClient()
+    renderBuilder(client)
+    await screen.findByTestId('group-')
+    await addAFilledCondition()
+    const row = () => within(screen.getByTestId('condition-0'))
+    await userEvent.selectOptions(
+      row().getByRole('combobox', { name: 'Match on' }),
+      'what they did',
+    )
+    await userEvent.type(row().getByRole('combobox', { name: /event/i }), 'checkout')
+    expect(screen.getByRole('button', { name: /^run$/i })).toBeEnabled()
+
+    await userEvent.selectOptions(row().getByRole('combobox', { name: 'Window' }), 'absolute')
+    expect(screen.getByRole('button', { name: /^run$/i })).toBeDisabled()
+  })
 })
 
 // --- Every tree fixture above has a `group` at its root, and that is the
@@ -1568,7 +1744,10 @@ describe('SegmentBuilder -- composing a new segment across a project switch', ()
     renderLiveBuilder(client, ROUTES.segmentNew)
     await screen.findByTestId('group-')
     await userEvent.type(screen.getByLabelText(/name/i), 'VIPs')
-    await userEvent.click(screen.getByRole('button', { name: /add condition/i }))
+    // Through the shared helper, which FILLS the condition in: Run refuses a
+    // tree the server cannot parse, so a bare "Add condition" here would
+    // leave nothing to count and this would pass for the wrong reason.
+    await addAFilledCondition()
     await userEvent.click(screen.getByRole('button', { name: /^run$/i }))
     expect(await screen.findByTestId('segment-preview-count')).toHaveTextContent('42')
 

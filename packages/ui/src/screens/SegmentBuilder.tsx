@@ -83,7 +83,9 @@ export const DEBOUNCE_MS = 600
  * never fetched. A cheap tree (no warnings) previews itself automatically,
  * `debounceMs` after the operator stops editing; a tree carrying a warning never does,
  * and waits for an explicit click on "Run" instead, which works
- * regardless of warnings. Two things keep this from doing the wrong thing:
+ * regardless of warnings. Neither path previews a tree the server cannot
+ * parse -- see `runPreview`'s own `draft.complete` guard. Two things keep this
+ * from doing the wrong thing:
  *
  * - `dirty` -- false until the FIRST real edit (`handleRootChange`, wired
  *   to `TreeEditor`'s `onChange`), separately from the effect that SEEDS
@@ -478,6 +480,25 @@ export function SegmentBuilder(props: {
 
   const runPreview = useCallback(() => {
     if (activeId == null || !hasConditions || stale) return
+    // The SAME completeness Save is gated on -- `draft.complete`, one
+    // `safeParse` against the real schema, never a second hand-written notion
+    // of "filled in" that would drift from it.
+    //
+    // Adding a condition marks the tree dirty and fired a preview on a tree
+    // the server cannot parse (`newCondition()` has always produced an empty
+    // `key`), so the operator got an error banner about a condition they had
+    // not started filling in. An incomplete tree is simply not previewed; the
+    // row-level "not finished" message already explains why, so nothing new
+    // is said here.
+    //
+    // Here rather than only on the button's `disabled`, and both rather than
+    // either: an attribute is a hint to a pointer, and this function is also
+    // reached by the debounce effect below, which has no attribute at all.
+    // `ConditionRow`'s `switchRefusal` is the same arrangement for the same
+    // reason. Each half is pinned by its own test -- one asserts the control
+    // is disabled, the other drives the automatic path, which the attribute
+    // cannot reach.
+    if (!draft.complete) return
     const requestId = ++requestIdRef.current
     const answerId = ++answerIdRef.current
     const requestedRoot = root
@@ -508,7 +529,7 @@ export function SegmentBuilder(props: {
         if (requestId !== requestIdRef.current) return
         setPreviewing(false)
       })
-  }, [client, activeId, hasConditions, stale, root, onUnauthorized])
+  }, [client, activeId, hasConditions, stale, draft.complete, root, onUnauthorized])
 
   // The auto half of the split: a CHEAP, dirty, non-empty, non-stale tree
   // previews itself `debounceMs` after the most recent edit. A tree
@@ -767,14 +788,22 @@ export function SegmentBuilder(props: {
         <Button type="button" onClick={handleSave} disabled={!canSave || saving}>
           Save
         </Button>
-        {/* Explicit override, always available -- the only way a costly tree
-         * ever gets counted, and a plain way to force a fresh number for a
-         * cheap one too, regardless of `dirty`/debounce state. */}
+        {/* The explicit override for a COST warning -- the only way a costly
+         * tree ever gets counted, and a plain way to force a fresh number for
+         * a cheap one too, regardless of `dirty`/debounce state.
+         *
+         * It overrides the cost gate and nothing else. Completeness is not a
+         * judgement call the operator can overrule: an incomplete tree is one
+         * the server cannot parse, so Run on it buys an error banner about a
+         * condition they have not finished writing. Disabled with no sentence
+         * beside it here on purpose -- the row that is unfinished already says
+         * so, which is the answer, where the page-level version of it would
+         * only ask which of forty conditions was meant. */}
         <Button
           type="button"
           variant="outline"
           onClick={runPreview}
-          disabled={!hasConditions || stale || activeId == null || previewing}
+          disabled={!hasConditions || !draft.complete || stale || activeId == null || previewing}
         >
           Run
         </Button>
