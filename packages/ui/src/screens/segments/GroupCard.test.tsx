@@ -179,11 +179,21 @@ describe('GroupCard -- the child callbacks it builds', () => {
 describe('GroupCard -- the three server-side caps', () => {
   // --- MAX_TREE_NODES: global, so checked identically at any depth -----
 
-  // Rendering MAX_TREE_NODES - 1 real leaves (each a full TraitForm) is
-  // slow in jsdom -- comfortably under 5s in isolation but occasionally over
-  // the default 5000ms budget under this box's own documented contention. A
-  // longer per-test timeout, not a smaller fixture: the fixture size IS the
-  // thing under test (the exact boundary value), here and below.
+  // Rendering MAX_TREE_NODES - 1 real leaves (each a full TraitForm) is slow
+  // in jsdom. A longer per-test timeout, not a smaller fixture: the fixture
+  // size IS the thing under test (the exact boundary value), here and below.
+  //
+  // The budget is 60s because 15s was not enough and the shortfall was not
+  // marginal: these three timed out in CI at 22.9s, 24.2s and 26.3s. The cost
+  // per leaf roughly doubled when a condition gained its kind selector, two
+  // schema-backed comboboxes (each mounting a debounced effect, so ~99 timers
+  // and ~99 lookups against the fake client) and a completeness check. Two
+  // separate reviewers measured the old margin as thinner than one background
+  // docker stack before it actually broke, so treat 60s as headroom that has
+  // already been spent once rather than as a number with room to spare: if a
+  // future change makes a row heavier again, make the ROW cheaper rather than
+  // raising this further. A test that takes half a minute is already a cost
+  // paid on every CI run.
   it('disables Add condition and Add group at the node cap, and says the limit', () => {
     const root = flatRoot(MAX_TREE_NODES - 1) // countNodes === MAX_TREE_NODES exactly
     render(
@@ -194,7 +204,7 @@ describe('GroupCard -- the three server-side caps', () => {
     expect(add).toBeDisabled()
     expect(addGroup).toBeDisabled()
     expect(screen.getByText(new RegExp(String(MAX_TREE_NODES)))).toBeInTheDocument()
-  }, 15000)
+  }, 60_000)
 
   it('one below the node cap: Add condition (costs 1 node) is enabled, Add group (costs 2) is not', () => {
     // The off-by-one this has to get right: at
@@ -208,7 +218,7 @@ describe('GroupCard -- the three server-side caps', () => {
     )
     expect(screen.getByRole('button', { name: /^add condition$/i })).toBeEnabled()
     expect(screen.getByRole('button', { name: /^add group$/i })).toBeDisabled()
-  }, 15000)
+  }, 60_000)
 
   it('clicking a node-capped Add condition never calls onChange', async () => {
     const onChange = vi.fn()
@@ -218,7 +228,7 @@ describe('GroupCard -- the three server-side caps', () => {
     )
     await userEvent.click(screen.getByRole('button', { name: /^add condition$/i }))
     expect(onChange).not.toHaveBeenCalled()
-  }, 15000)
+  }, 60_000)
 
   // --- MAX_TREE_DEPTH: local to the group's own position ----------------
 
