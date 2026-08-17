@@ -253,7 +253,14 @@ export function ConditionRow(props: {
   function setKind(next: LeafKind) {
     // Re-selecting the kind a node already has must not throw the node
     // away: `defaultLeaf` would replace an edited condition with a blank
-    // one of the same kind.
+    // one of the same kind. `WindowPicker`'s own `setKind` opens with the
+    // same line for the same reason.
+    //
+    // NOT COVERED BY A TEST, and deliberately not given one that looks as
+    // though it is: a `<select>` fires no `change` event for the value it
+    // already holds, in a browser or under `fireEvent`, so removing this
+    // line leaves the whole suite green. It guards the handler itself, not
+    // a path the DOM can currently take to it.
     if (next === inner.kind) return
     // Not merely the `disabled` attribute below: an attribute is a hint to
     // a pointer, and a `change` event can arrive without one (keyboard, a
