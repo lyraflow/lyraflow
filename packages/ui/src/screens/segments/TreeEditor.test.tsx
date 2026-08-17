@@ -424,3 +424,25 @@ describe('TreeEditor', () => {
     expect(next.children).toEqual([trait('a'), trait('b')])
   })
 })
+
+// --- The other hand-off on the way to a row: this component to the root
+// `GroupCard`. `GroupCard.test.tsx` pins the group-to-group one; a prop
+// dropped HERE leaves every row in the tree silent while both of those
+// files stay green.
+describe('TreeEditor -- passing incompleteness down to the rows', () => {
+  it('hands the incomplete paths to the root group, unfiltered', () => {
+    render(
+      <TreeEditor
+        value={group(trait('a'), group(trait('b'), trait('c')))}
+        onChange={vi.fn()}
+        client={client}
+        projectId={projectId}
+        incomplete={[[1, 1]]}
+      />,
+    )
+    expect(
+      within(screen.getByTestId('condition-1-1')).getByText(/not finished/i),
+    ).toBeInTheDocument()
+    expect(within(screen.getByTestId('condition-0')).queryByText(/not finished/i)).toBeNull()
+  })
+})

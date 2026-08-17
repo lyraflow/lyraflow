@@ -1,6 +1,6 @@
-import { FilterNode as FilterNodeSchema } from '@lyraflow/core/segments/ast.js'
+import { AST_VERSION, FilterNode as FilterNodeSchema } from '@lyraflow/core/segments/ast.js'
 import type { Context, FilterNode, Lifecycle, Trait } from '@lyraflow/core/segments/ast.js'
-import { MAX_BEHAVIOR_NODES } from '@lyraflow/core/segments/validate.js'
+import { MAX_BEHAVIOR_NODES, costWarnings } from '@lyraflow/core/segments/validate.js'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
@@ -75,6 +75,32 @@ const LEAF_KINDS = [
   // the accessible role, same as `ContextForm`'s native `<select>`.
   ['behavior', behaviorNode, 'combobox', /event/i, 'what they did'],
 ] as const
+
+/**
+ * Which fields of a fresh node of each kind are allowed to be blank, as
+ * DOTTED PATHS into the node -- the convention being that an empty field
+ * means "not filled in yet" and only the one thing the operator alone can
+ * supply is left for them (`ConditionRow`'s own `defaultLeaf` doc comment).
+ *
+ * Stated as an exact list rather than "at most one issue" so it is
+ * two-sided: seeding `key` with an invented example fails it from one
+ * direction, and breaking `window`/`aggregate`/`field` fails it from the
+ * other.
+ */
+const PLACEHOLDER_FIELDS: Record<string, string[]> = {
+  trait: ['key'],
+  behavior: ['event'],
+  context: [],
+  lifecycle: [],
+}
+
+/** The dotted paths of every field of `node` the REAL AST schema refuses --
+ * empty for a node that parses. Never a hand-written notion of "filled in":
+ * a second definition of validity is what drifts from the server's. */
+function unfilledFields(node: FilterNode): string[] {
+  const parsed = FilterNodeSchema.safeParse(node)
+  return parsed.success ? [] : parsed.error.issues.map((i) => i.path.join('.'))
+}
 
 describe('ConditionRow', () => {
   it('keeps the condition-<path> testid the recursion addresses nodes through', () => {
@@ -502,6 +528,83 @@ describe('ConditionRow', () => {
     expect(screen.queryByText(/scans all history/i)).toBeNull()
   })
 
+  // --- "Not finished yet" is said on the row, never in a page banner. ------
+  // Same arrangement as the cost warnings above, and pinned the same way:
+  // the whole tree's list is handed to every row unfiltered, and each row
+  // picks out only what names its own path. The coincidence this avoids is
+  // the one the warning tests already caught once -- a fixture with exactly
+  // one condition cannot tell "renders on its own row" apart from "renders
+  // on every row".
+
+  it('renders its own incompleteness message, and not one addressed to a different path', () => {
+    const incomplete = [[1]]
+    const { rerender } = render(
+      <ConditionRow
+        node={traitNode}
+        path={[0]}
+        onChange={vi.fn()}
+        onRemove={vi.fn()}
+        onNegate={vi.fn()}
+        client={fakeClient()}
+        projectId={1}
+        incomplete={incomplete}
+      />,
+    )
+    expect(within(screen.getByTestId('condition-0')).queryByText(/not finished/i)).toBeNull()
+
+    rerender(
+      <ConditionRow
+        node={traitNode}
+        path={[1]}
+        onChange={vi.fn()}
+        onRemove={vi.fn()}
+        onNegate={vi.fn()}
+        client={fakeClient()}
+        projectId={1}
+        incomplete={incomplete}
+      />,
+    )
+    expect(within(screen.getByTestId('condition-1')).getByText(/not finished/i)).toBeInTheDocument()
+  })
+
+  it('says nothing at all when no path is incomplete', () => {
+    render(
+      <ConditionRow
+        node={traitNode}
+        path={[0]}
+        onChange={vi.fn()}
+        onRemove={vi.fn()}
+        onNegate={vi.fn()}
+        client={fakeClient()}
+        projectId={1}
+        incomplete={[]}
+      />,
+    )
+    expect(screen.queryByText(/not finished/i)).toBeNull()
+  })
+
+  it('renders the message at a nested path, not only at a one-segment one', () => {
+    // A row two levels down is addressed by a two-segment path, and a
+    // filter that compared only the first segment -- or only the last --
+    // would put the message on the wrong row without ever going red at
+    // depth zero.
+    render(
+      <ConditionRow
+        node={traitNode}
+        path={[2, 0]}
+        onChange={vi.fn()}
+        onRemove={vi.fn()}
+        onNegate={vi.fn()}
+        client={fakeClient()}
+        projectId={1}
+        incomplete={[[2, 0]]}
+      />,
+    )
+    expect(
+      within(screen.getByTestId('condition-2-0')).getByText(/not finished/i),
+    ).toBeInTheDocument()
+  })
+
   // --- The kind switcher. --------------------------------------------------
   // Until it existed, `GroupCard`'s `newCondition()` hardcoded a `trait` and
   // NOTHING anywhere could change a condition's kind, so three of the four
@@ -536,7 +639,7 @@ describe('ConditionRow', () => {
   })
 
   it.each(LEAF_KINDS)(
-    'switching to %s replaces the node with one the AST itself accepts',
+    'switching to %s leaves exactly the not-filled-in-yet fields blank, and every other field a real choice',
     async (kind, _node, role, fieldLabel, label) => {
       // The starting node is always of a DIFFERENT kind, so every row of
       // this table is a real switch rather than a no-op.
@@ -546,13 +649,19 @@ describe('ConditionRow', () => {
 
       const next = onNode.mock.calls.at(-1)?.[0] as FilterNode
       expect(next.kind).toBe(kind)
-      // Against the REAL schema from core, never a shape written out here:
-      // a test that asserts what the code produces cannot catch the code
-      // producing something the AST refuses. `ast.ts`'s refines are the
-      // point -- `count` must carry no property, a lifecycle value must
-      // parse as a datetime, a trait key cannot be empty.
-      const parsed = FilterNodeSchema.safeParse(next)
-      expect(parsed.success ? [] : parsed.error.issues).toEqual([])
+      // Measured against the REAL schema from core, never a shape written
+      // out here: a test that asserts what the code produces cannot catch
+      // the code producing something the AST refuses.
+      //
+      // Two-sided, which is the whole point. An empty field means "not
+      // filled in yet" (`defaultLeaf`'s own doc comment) and only the one
+      // field the operator alone can supply may be blank -- so this pins
+      // BOTH that a fresh trait does not arrive with an invented `key` and
+      // that nothing ELSE about the fresh node is broken. `ast.ts`'s
+      // refines are the second half: `count` must carry no property, a
+      // lifecycle value must parse as a datetime, a `last` window's `n`
+      // must be a positive integer within 3650.
+      expect(unfilledFields(next)).toEqual(PLACEHOLDER_FIELDS[kind])
       // ...and the row now renders that kind's own first field, so the
       // switch is visible to the operator and not merely to the tree.
       expect(
@@ -560,6 +669,39 @@ describe('ConditionRow', () => {
       ).toBeInTheDocument()
     },
   )
+
+  it('a fresh behaviour carries no cost warning of its own', async () => {
+    // Why `event` starts EMPTY rather than at `'*'`, which is legal and
+    // would parse. `'*'` MEANS "any event": it raises a cost warning the
+    // instant the condition appears, and suppresses `SegmentBuilder`'s
+    // automatic preview with it. A brand-new condition the operator has not
+    // finished writing must not arrive carrying a warning about scanning
+    // everything. Measured through `costWarnings` itself, so re-seeding the
+    // field with any value that trips it -- `'*'`, or an `ever` window --
+    // fails here.
+    const onNode = vi.fn()
+    render(<Harness initial={traitNode} onNode={onNode} />)
+    await userEvent.selectOptions(kindSelect(), 'what they did')
+
+    const next = onNode.mock.calls.at(-1)?.[0] as FilterNode
+    expect(costWarnings({ ast_version: AST_VERSION, filter: next })).toEqual([])
+  })
+
+  it('a fresh behaviour keeps the real choices around the blank field', async () => {
+    // The other half of "revert the invented defaults": only the event is a
+    // placeholder. A bounded window rather than `ever` (which would scan all
+    // history), and `count`, the one aggregate that must carry no property.
+    const onNode = vi.fn()
+    render(<Harness initial={traitNode} onNode={onNode} />)
+    await userEvent.selectOptions(kindSelect(), 'what they did')
+
+    const next = onNode.mock.calls.at(-1)?.[0] as FilterNode
+    if (next.kind !== 'behavior') throw new Error('unreachable')
+    expect(next.event).toBe('')
+    expect(next.aggregate).toBe('count')
+    expect(next).not.toHaveProperty('property')
+    expect(next.window).toEqual({ kind: 'last', n: 30, unit: 'days' })
+  })
 
   it("switching away from a kind and back does not resurrect the old node's fields", async () => {
     // `WindowPicker`'s own rule, one level up: a switch REPLACES the node
@@ -585,8 +727,10 @@ describe('ConditionRow', () => {
     // ...and nothing of the context node it passed through did either.
     expect(next).not.toHaveProperty('field')
     expect(next).not.toHaveProperty('scope')
-    const parsed = FilterNodeSchema.safeParse(next)
-    expect(parsed.success ? [] : parsed.error.issues).toEqual([])
+    // A blank `key` and nothing else -- the round trip leaves a fresh
+    // DRAFT, not a node carrying a plausible key nobody chose.
+    expect(next.key).toBe('')
+    expect(unfilledFields(next)).toEqual(PLACEHOLDER_FIELDS.trait)
   })
 
   it('keeps a negated condition negated across a kind switch', async () => {
@@ -602,8 +746,10 @@ describe('ConditionRow', () => {
     expect(next.kind).toBe('not')
     if (next.kind !== 'not') throw new Error('unreachable')
     expect(next.child.kind).toBe('behavior')
-    const parsed = FilterNodeSchema.safeParse(next)
-    expect(parsed.success ? [] : parsed.error.issues).toEqual([])
+    // The `not` is carried across, and the node inside it is the same fresh
+    // draft a bare switch produces -- the blank `event` reached through the
+    // wrapper, nothing else.
+    expect(unfilledFields(next)).toEqual(['child.event'])
     // And the row still SAYS so, both ways it says it.
     const row = screen.getByTestId('condition-0')
     expect(within(row).getByText('Not', { selector: ':not(button)' })).toBeInTheDocument()
@@ -651,8 +797,7 @@ describe('ConditionRow', () => {
 
     const next = onNode.mock.calls.at(-1)?.[0] as FilterNode
     expect(next.kind).toBe('trait')
-    const parsed = FilterNodeSchema.safeParse(next)
-    expect(parsed.success ? [] : parsed.error.issues).toEqual([])
+    expect(unfilledFields(next)).toEqual(PLACEHOLDER_FIELDS.trait)
   })
 
   it('still allows a trait condition to be switched to a NON-behaviour kind at the cap', async () => {
@@ -665,8 +810,7 @@ describe('ConditionRow', () => {
 
     const next = onNode.mock.calls.at(-1)?.[0] as FilterNode
     expect(next.kind).toBe('lifecycle')
-    const parsed = FilterNodeSchema.safeParse(next)
-    expect(parsed.success ? [] : parsed.error.issues).toEqual([])
+    expect(unfilledFields(next)).toEqual(PLACEHOLDER_FIELDS.lifecycle)
   })
 
   it("does not disable a behaviour row's OWN option at the cap, nor tell it about a cap it is not blocked by", () => {

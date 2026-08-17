@@ -73,8 +73,21 @@ export function TreeEditor(props: {
   projectId: number
   onUnauthorized?: () => void
   warnings?: CostWarning[]
+  /** Passed straight through, unfiltered, exactly like `warnings` --
+   * `SegmentBuilder` computes the whole tree's `completeness()` once and
+   * hands the incomplete paths down; only `ConditionRow`, at whatever
+   * depth, picks out whether one names its own row. Defaults to `[]`. */
+  incomplete?: number[][]
 }) {
-  const { value, onChange, client, projectId, onUnauthorized, warnings = [] } = props
+  const {
+    value,
+    onChange,
+    client,
+    projectId,
+    onUnauthorized,
+    warnings = [],
+    incomplete = [],
+  } = props
   return (
     <GroupCard
       root={value}
@@ -84,6 +97,7 @@ export function TreeEditor(props: {
       projectId={projectId}
       onUnauthorized={onUnauthorized}
       warnings={warnings}
+      incomplete={incomplete}
     />
   )
 }

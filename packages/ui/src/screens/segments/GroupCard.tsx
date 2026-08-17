@@ -19,9 +19,12 @@ import {
   replaceAt,
 } from './tree.js'
 
-/** A new, empty leaf inserted by "Add condition". Per-kind forms later give
- * an operator real fields to fill in; until then it renders through
- * `ConditionRow`'s placeholder body exactly like any other trait node. */
+/** A new, empty leaf inserted by "Add condition" -- an incomplete DRAFT,
+ * deliberately. An empty `key` means "not filled in yet"; the builder holds
+ * the draft, refuses Save while it stands, and the row says so itself
+ * (`ConditionRow`'s own `defaultLeaf` doc comment has the full rule). This
+ * is not a node the server would accept, and it is not meant to be: the
+ * alternative is seeding a plausible key the operator never chose. */
 function newCondition(): FilterNode {
   return { kind: 'trait', key: '', operator: '=', value: '' }
 }
@@ -40,6 +43,14 @@ function newCondition(): FilterNode {
  * a rule that keeps the state unreachable. Seeding with `newCondition()`
  * makes it unreachable instead, and keeps "Add condition" and "Add group"
  * agreeing on what a freshly-added condition looks like.
+ *
+ * Note what this is NOT saying, now that a freshly-added condition is
+ * itself an incomplete draft. A blank `key` is a field the operator has not
+ * reached yet, and the editor is the right place to hold it; an empty
+ * `children` array is a SHAPE nothing in this editor should ever be able to
+ * produce, and no amount of typing turns it into a segment. The first is a
+ * state to render honestly and refuse to save; the second is a state to
+ * make unreachable.
  *
  * `SegmentBuilder`'s empty-root save-disable
  * remains the backstop for the one empty-group state that IS still
@@ -197,8 +208,22 @@ export function GroupCard(props: {
    * every caller from before this (this file's own tests included)
    * keeps working unchanged. */
   warnings?: CostWarning[]
+  /** The whole tree's incomplete-node paths (`completeness`,
+   * `warnings.ts`), threaded through at every level exactly like
+   * `warnings` above and filtered nowhere but at the leaf, by
+   * `ConditionRow`'s own `incompleteAt`. Defaults to `[]`. */
+  incomplete?: number[][]
 }) {
-  const { root, path, onChange, client, projectId, onUnauthorized, warnings = [] } = props
+  const {
+    root,
+    path,
+    onChange,
+    client,
+    projectId,
+    onUnauthorized,
+    warnings = [],
+    incomplete = [],
+  } = props
   const node = nodeAt(root, path)
   // Defensive only -- every caller of GroupCard (TreeEditor for the root,
   // this component for a nested group) resolves `path` from the tree it is
@@ -315,6 +340,7 @@ export function GroupCard(props: {
                 projectId={projectId}
                 onUnauthorized={onUnauthorized}
                 warnings={warnings}
+                incomplete={incomplete}
               />
             )
           }
@@ -330,6 +356,7 @@ export function GroupCard(props: {
               projectId={projectId}
               onUnauthorized={onUnauthorized}
               warnings={warnings}
+              incomplete={incomplete}
               behaviorCap={behaviorSwitchCap}
             />
           )

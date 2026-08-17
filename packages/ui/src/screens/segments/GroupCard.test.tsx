@@ -404,3 +404,70 @@ describe('GroupCard -- the three server-side caps', () => {
     expect(nested.queryByText(new RegExp(String(MAX_TREE_NODES)))).toBeNull()
   })
 })
+
+// --- "Not finished yet" is threaded down, unfiltered, exactly like the
+// cost warnings -- and every row of a card has to be able to disagree with
+// every other about it. A fixture with exactly ONE condition cannot tell
+// "renders on the incomplete row" apart from "renders on every row", and
+// this codebase has produced that coincidence before: a warning that
+// rendered on every row passed all 31 tests that existed at the time.
+describe('GroupCard -- incompleteness lands on the row it names', () => {
+  it('shows the message on the incomplete row and on none of its siblings, at depth', () => {
+    // `nestedRoot()` is `[trait, [trait, trait]]`, so the addressed row
+    // (`[1, 0]`) has a sibling INSIDE its own group and one at the root --
+    // two different ways of getting it wrong, both observable here.
+    render(
+      <GroupCard
+        root={nestedRoot()}
+        path={[]}
+        onChange={vi.fn()}
+        client={client}
+        projectId={projectId}
+        incomplete={[[1, 0]]}
+      />,
+    )
+    expect(
+      within(screen.getByTestId('condition-1-0')).getByText(/not finished/i),
+    ).toBeInTheDocument()
+    expect(within(screen.getByTestId('condition-1-1')).queryByText(/not finished/i)).toBeNull()
+    expect(within(screen.getByTestId('condition-0')).queryByText(/not finished/i)).toBeNull()
+  })
+
+  it('shows nothing anywhere when the list is empty', () => {
+    // The inverse: a mutation that renders the sentence unconditionally
+    // still passes an assertion that only checks one row lacks it.
+    render(
+      <GroupCard
+        root={nestedRoot()}
+        path={[]}
+        onChange={vi.fn()}
+        client={client}
+        projectId={projectId}
+        incomplete={[]}
+      />,
+    )
+    expect(screen.queryByText(/not finished/i)).toBeNull()
+  })
+
+  it('reaches a row inside a nested group at all -- the recursion passes the list down', () => {
+    // The threading pin. `GroupCard` renders a nested group through
+    // ANOTHER `GroupCard`, and a prop dropped at that hand-off leaves every
+    // top-level row correct while every nested row goes silent -- a
+    // fixture that only ever addresses `[0]` would never notice.
+    render(
+      <GroupCard
+        root={nestedRoot()}
+        path={[]}
+        onChange={vi.fn()}
+        client={client}
+        projectId={projectId}
+        incomplete={[[0], [1, 1]]}
+      />,
+    )
+    expect(within(screen.getByTestId('condition-0')).getByText(/not finished/i)).toBeInTheDocument()
+    expect(
+      within(screen.getByTestId('condition-1-1')).getByText(/not finished/i),
+    ).toBeInTheDocument()
+    expect(within(screen.getByTestId('condition-1-0')).queryByText(/not finished/i)).toBeNull()
+  })
+})

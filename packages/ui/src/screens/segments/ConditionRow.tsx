@@ -16,7 +16,7 @@ import { ContextForm } from './ContextForm.js'
 import { LIFECYCLE_FIELDS, LifecycleForm } from './LifecycleForm.js'
 import { TraitForm } from './TraitForm.js'
 import { summarise } from './summarise.js'
-import { warningsAt } from './warnings.js'
+import { incompleteAt, warningsAt } from './warnings.js'
 
 /**
  * The four leaf kinds the AST defines, in the order the switcher offers
@@ -34,23 +34,6 @@ const LEAF_KINDS = [
 ] as const
 
 type LeafKind = (typeof LEAF_KINDS)[number]['kind']
-
-/**
- * A fresh `trait`'s key cannot be the empty string the rest of this builder
- * uses for "not filled in yet": `ast.ts` declares `key` as
- * `z.string().min(1)`, so an empty one is a node the AST refuses the instant
- * it exists. This seeds the very example `TraitForm`'s own placeholder
- * suggests ("e.g. plan"), which the operator then replaces through that
- * form's combobox.
- */
-const DEFAULT_TRAIT_KEY = 'plan'
-
-/** `ast.ts`'s own spelling of "any event" for a `behavior`'s `event` -- the
- * one legal value that names no event, since the field is `min(1)` and so
- * cannot be left blank. It carries a cost warning of its own
- * (`costWarnings`, `validate.ts`), which is the honest thing to say about a
- * condition that matches every event and is exactly the prompt to name one. */
-const ANY_EVENT = '*'
 
 /** The window a fresh `behavior` starts with. Bounded rather than `ever`,
  * so a condition the operator has not finished writing cannot start out
@@ -78,27 +61,48 @@ function datetimeLocal(at: Date): string {
  * refuse to parse back -- produced by this UI rather than by a hand-built
  * request. A partially-converted node is a shape the AST does not describe.
  *
- * Every default here is VALID THE INSTANT IT EXISTS, checked against the
- * real schemas in this file's tests rather than by eye:
+ * **An empty field here means "not filled in yet", and that is the whole
+ * rule.** The AST is a STORAGE schema; a half-typed condition is a
+ * legitimate editing state and an illegitimate storage state, so this seeds
+ * a DRAFT rather than a saveable node. An earlier version of this comment
+ * said the opposite -- that every default had to be valid the instant it
+ * existed -- and paying that bill is what made a fresh `trait` arrive with
+ * `key: 'plan'` and a fresh `behavior` with `event: '*'`: data the operator
+ * never chose, presented as though they had. The builder now refuses Save
+ * while any condition is incomplete and says so on the row itself
+ * (`completeness`/`incompleteAt`, `warnings.ts`), which is what makes an
+ * honest blank affordable.
  *
- * - `trait` needs a non-empty `key` (`DEFAULT_TRAIT_KEY` above);
- * - `behavior` is `count`, which is the one aggregate that must carry NO
- *   `property` (`ast.ts`'s refine), and needs a non-empty `event`;
- * - `context`/`lifecycle` take their field from the enum that is the
- *   compiler's injection boundary -- `CONTEXT_FIELDS` from core,
- *   `LIFECYCLE_FIELDS` from `LifecycleForm` -- never a literal chosen here;
- * - `lifecycle` values must parse as datetimes, so it starts at `now`
- *   rather than at the empty string every other kind's value starts at.
+ * So the split below is between a real CHOICE and a placeholder:
  *
- * None of them uses `between`, so the "exactly two values" half of
- * `valueFor`'s refine is satisfied by construction too.
+ * - `key` (`trait`) and `event` (`behavior`) start EMPTY. They are the one
+ *   thing only the operator can supply, and no value this file invents for
+ *   them is more honest than saying nothing.
+ * - Everything else is a real choice and stays one. `behavior` is `count`,
+ *   the one aggregate that must carry NO `property` (`ast.ts`'s refine),
+ *   over a bounded 30-day window -- never `ever`, so a condition the
+ *   operator has not finished writing cannot start out scanning all
+ *   history. `context`/`lifecycle` take their field from the enum that is
+ *   the compiler's injection boundary -- `CONTEXT_FIELDS` from core,
+ *   `LIFECYCLE_FIELDS` from `LifecycleForm` -- never a literal chosen here.
+ *   `lifecycle` values must parse as datetimes, so it starts at `now`.
+ * - None of them uses `between`, so the "exactly two values" half of
+ *   `valueFor`'s refine is satisfied by construction.
+ *
+ * `event: '*'` deserves its own line, because it is legal and therefore
+ * tempting: it parses, so it would keep the old rule. But it MEANS "any
+ * event", which raises a cost warning of its own the instant the condition
+ * appears and suppresses the automatic preview with it. A brand-new
+ * condition nobody has finished writing must not arrive carrying a scary
+ * warning about scanning everything. This file's tests pin that a fresh
+ * behaviour raises no cost warning at all.
  */
 function defaultLeaf(kind: LeafKind, now: Date): FilterNode {
   switch (kind) {
     case 'behavior':
       return {
         kind: 'behavior',
-        event: ANY_EVENT,
+        event: '',
         aggregate: 'count',
         window: { kind: 'last', n: DEFAULT_WINDOW_DAYS, unit: 'days' },
         operator: '>=',
@@ -120,7 +124,7 @@ function defaultLeaf(kind: LeafKind, now: Date): FilterNode {
         value: datetimeLocal(now),
       }
     default:
-      return { kind: 'trait', key: DEFAULT_TRAIT_KEY, operator: '=', value: '' }
+      return { kind: 'trait', key: '', operator: '=', value: '' }
   }
 }
 
@@ -162,6 +166,15 @@ function defaultLeaf(kind: LeafKind, now: Date): FilterNode {
  * to `[]` so every existing caller (every test in this file, `GroupCard`'s
  * own recursion) keeps working unchanged.
  *
+ * `incomplete` is the SAME arrangement for the other thing a row has to say
+ * about itself: the full list of editor paths whose node does not parse
+ * against the AST (`completeness`, `warnings.ts`), passed down unfiltered,
+ * with `incompleteAt` picking out whether THIS row is one of them. A
+ * page-level "something is not filled in" banner would be the exact "which
+ * of 40 conditions is meant" problem the per-condition rendering exists to
+ * avoid, and the answer is the one thing the operator needs. Defaults to
+ * `[]`.
+ *
  * The "Match on" select is what makes the other three kinds REACHABLE at
  * all: until it existed, `GroupCard`'s `newCondition()` hardcoded a `trait`
  * and nothing anywhere could change a condition's kind, so the behaviour
@@ -200,6 +213,7 @@ export function ConditionRow(props: {
   projectId: number
   onUnauthorized?: () => void
   warnings?: CostWarning[]
+  incomplete?: number[][]
   behaviorCap?: { blocked: boolean; message: string }
 }) {
   const {
@@ -212,9 +226,14 @@ export function ConditionRow(props: {
     projectId,
     onUnauthorized,
     warnings = [],
+    incomplete = [],
     behaviorCap = { blocked: false, message: '' },
   } = props
   const ownWarnings = warningsAt(warnings, path)
+  // Recomputed from the tree on every render, never remembered -- which is
+  // what keeps a kind switch from leaving the previous kind's message
+  // standing over a condition that no longer has that problem.
+  const notFinished = incompleteAt(incomplete, path)
   // Whether THIS node is currently negated -- drives `aria-pressed` AND
   // which node the per-kind form below actually edits (the one `node`
   // wraps, never the `not` itself). `onNegate` toggles it either way
@@ -371,6 +390,16 @@ export function ConditionRow(props: {
         </div>
         {body()}
       </div>
+      {/* Said on the row it is about, never in a page-level banner -- the
+       * same rule the cost warnings below follow, and for the same reason.
+       * An operator who clicks "Add condition" and then Save gets a Save
+       * button that is disabled; without this, nothing on screen says which
+       * of their conditions is holding it down, or why. */}
+      {notFinished && (
+        <p className="text-xs text-muted-foreground">
+          This condition is not finished. Fill in its remaining fields before saving.
+        </p>
+      )}
       {/* Said, not merely refused -- the same treatment "Add condition"
        * gives a cap it is blocked by, and for the same reason: a control
        * that is disabled with no sentence beside it is indistinguishable

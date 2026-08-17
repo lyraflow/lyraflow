@@ -13,6 +13,7 @@ import { Input } from '../components/ui/input.js'
 import { Label } from '../components/ui/label.js'
 import { formatRelative } from './funnels/format.js'
 import { TreeEditor, normaliseRoot } from './segments/TreeEditor.js'
+import { completeness } from './segments/warnings.js'
 
 /** A brand-new segment's starting tree: a legal, empty root group. The same
  * shape `removeAt` leaves behind when an operator empties an existing
@@ -406,6 +407,23 @@ export function SegmentBuilder(props: {
   }, [client, activeId, editId, isEditing, identity, formIdentity, onUnauthorized])
 
   const trimmedName = name.trim()
+  /**
+   * Whether the tree on screen is STORABLE, and which rows are not
+   * finished -- one `safeParse` against the real `FilterNode` schema from
+   * core (`completeness`, `segments/warnings.ts`), pure and synchronous
+   * like `costWarnings` below, never a second, hand-written notion of
+   * "filled in" that would drift from the one the server enforces.
+   *
+   * The convention it enforces: an empty field means "not filled in yet",
+   * the builder may hold an incomplete draft, and Save is refused while it
+   * does. Without this, "Add condition" followed by Save shipped a tree
+   * with an empty `key` -- `ast.ts` declares it `z.string().min(1)` -- and
+   * the operator got a save error for a form this screen had let them
+   * build. `.incomplete` goes down the editor so the sentence lands on the
+   * row that is actually incomplete rather than in a banner here; see
+   * `ConditionRow`.
+   */
+  const draft = useMemo(() => completeness(root), [root])
   // The root can legitimately be empty
   // -- `removeAt` returns exactly this shape when an operator empties the
   // tree by removing its last condition, and a brand-new segment starts
@@ -428,7 +446,13 @@ export function SegmentBuilder(props: {
   // survived an identity change, this refuses to write ANY tree to a
   // segment whose own definition this screen has not successfully read
   // under the project it is about to write to.
-  const canSave = trimmedName !== '' && hasConditions && activeId != null && !stale && loaded
+  // `draft.complete` sits alongside the terms that were already here rather
+  // than replacing `hasConditions`: an empty root fails both, but the empty
+  // root is the one incomplete state this screen says something about
+  // itself ("No conditions yet", below), and it is the one state where
+  // there is no row for a message to land on.
+  const canSave =
+    trimmedName !== '' && hasConditions && draft.complete && activeId != null && !stale && loaded
 
   // The real edit path -- wired to `TreeEditor`'s `onChange` below, never
   // called by the fetch effect above. Marks the tree dirty (see this
@@ -729,6 +753,7 @@ export function SegmentBuilder(props: {
           projectId={activeId}
           onUnauthorized={onUnauthorized}
           warnings={warnings}
+          incomplete={draft.incomplete}
         />
       )}
 

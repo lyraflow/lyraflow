@@ -104,6 +104,29 @@ function renderBuilder(client: ApiClient = fakeClient(), editId?: number) {
   )
 }
 
+const saveButton = () => screen.getByRole('button', { name: /^save$/i })
+
+/** The trait-key field of the row at `path` -- `condition-<path>` scoped,
+ * because an unscoped `getByRole` is ambiguous the moment there is more
+ * than one condition. */
+const traitKeyOf = (path = '0') =>
+  within(screen.getByTestId(`condition-${path}`)).getByRole('combobox', { name: /^trait$/i })
+
+/**
+ * Adds a condition AND fills in the one field a fresh one leaves blank.
+ *
+ * An empty field means "not filled in yet", so a freshly added condition is
+ * an incomplete DRAFT and Save stays disabled until it is filled in --
+ * pinned on its own, immediately below. Every fixture in this file that
+ * needs a SAVEABLE tree goes through here rather than repeating the two
+ * steps, so a change to what a fresh condition looks like lands in one
+ * place instead of eleven.
+ */
+async function addAFilledCondition(key = 'plan') {
+  await userEvent.click(screen.getByRole('button', { name: /add condition/i }))
+  await userEvent.type(traitKeyOf(), key)
+}
+
 /** Renders in EDIT mode against a segment shaped by `overrides`
  * (`{ ...SEGMENT, ...overrides }`) -- mutates the given `fakeClient`'s own
  * `segment` mock in place rather than building a fresh client, so a test
@@ -125,20 +148,49 @@ describe('SegmentBuilder -- create', () => {
     expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
   })
 
-  it('enables save once a name is set and a condition exists, disabled again if either is missing', async () => {
+  it('a freshly added condition leaves Save disabled until it is filled in', async () => {
+    // The live defect, stated as the operator hits it: click "Add
+    // condition", click Save. `newCondition()` produces `key: ''`, which
+    // `ast.ts` declares `z.string().min(1)`, so the server refused the tree
+    // and the operator got a save error for a form this screen had let them
+    // build. Every other fixture in this suite fills the fields in first,
+    // which is why nothing here ever went red for it.
+    const client = fakeClient()
+    renderBuilder(client)
+    await userEvent.type(screen.getByLabelText(/name/i), 'VIPs')
+    await userEvent.click(screen.getByRole('button', { name: /add condition/i }))
+
+    // Asserted on the CONTROL, not on some validation function's return:
+    // the promise this keeps is about what the Save button offers.
+    expect(saveButton()).toBeDisabled()
+    // ...and on the REQUEST as well, because a screen that disables the
+    // wrong control and still fires the call would pass a control-only
+    // test.
+    await userEvent.click(saveButton())
+    expect(client.createSegment).not.toHaveBeenCalled()
+    // ...and the row itself says why, rather than leaving a dead button
+    // with no explanation anywhere on the page.
+    expect(within(screen.getByTestId('condition-0')).getByText(/not finished/i)).toBeInTheDocument()
+
+    await userEvent.type(traitKeyOf(), 'plan')
+    expect(saveButton()).toBeEnabled()
+    expect(within(screen.getByTestId('condition-0')).queryByText(/not finished/i)).toBeNull()
+  })
+
+  it('enables save once a name is set and a complete condition exists, disabled again if either is missing', async () => {
     renderBuilder()
     await userEvent.type(screen.getByLabelText(/name/i), 'VIPs')
-    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
-    await userEvent.click(screen.getByRole('button', { name: /add condition/i }))
-    expect(screen.getByRole('button', { name: /^save$/i })).toBeEnabled()
+    expect(saveButton()).toBeDisabled()
+    await addAFilledCondition()
+    expect(saveButton()).toBeEnabled()
   })
 
   it('save creates the segment with the typed name and current tree, then navigates to the list', async () => {
     const client = fakeClient()
     renderBuilder(client)
     await userEvent.type(screen.getByLabelText(/name/i), 'VIPs')
-    await userEvent.click(screen.getByRole('button', { name: /add condition/i }))
-    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    await addAFilledCondition()
+    await userEvent.click(saveButton())
     await waitFor(() => expect(client.createSegment).toHaveBeenCalledTimes(1))
     const call = client.createSegment.mock.calls[0]
     if (!call) throw new Error('createSegment was not called')
@@ -149,7 +201,7 @@ describe('SegmentBuilder -- create', () => {
       filter: {
         kind: 'group',
         op: 'and',
-        children: [{ kind: 'trait', key: '', operator: '=', value: '' }],
+        children: [{ kind: 'trait', key: 'plan', operator: '=', value: '' }],
       },
     })
     expect(await screen.findByText('segments list')).toBeInTheDocument()
@@ -170,10 +222,133 @@ describe('SegmentBuilder -- create', () => {
       </MemoryRouter>,
     )
     await userEvent.type(screen.getByLabelText(/name/i), 'VIPs')
-    await userEvent.click(screen.getByRole('button', { name: /add condition/i }))
-    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    await addAFilledCondition()
+    await userEvent.click(saveButton())
     await waitFor(() => expect(onUnauthorized).toHaveBeenCalled())
     expect(screen.queryByRole('alert')).toBeNull()
+  })
+})
+
+// --- An empty field means "not filled in yet". The AST is a STORAGE
+// schema, so a half-typed condition is a legitimate editing state and an
+// illegitimate storage state: the builder holds the draft, Save is refused
+// while any condition is incomplete, and the incomplete condition says so
+// on its own row rather than in a page-level banner. These drive the whole
+// screen -- the tree, the real Zod schema, the path mapping and the button
+// -- rather than any one of those in isolation.
+describe('SegmentBuilder -- an incomplete draft', () => {
+  const INCOMPLETE_AT_DEPTH: FilterNode = {
+    kind: 'group',
+    op: 'and',
+    children: [
+      { kind: 'trait', key: 'plan', operator: '=', value: 'pro' },
+      {
+        kind: 'group',
+        op: 'or',
+        children: [
+          { kind: 'trait', key: '', operator: '=', value: '' },
+          { kind: 'trait', key: 'tier', operator: '=', value: 'free' },
+        ],
+      },
+    ],
+  }
+
+  it('lands the message on the incomplete row at depth, and on neither of its complete siblings', async () => {
+    // A fixture with exactly one condition cannot tell "renders on the
+    // incomplete row" apart from "renders on every row", and this codebase
+    // has produced that coincidence six times. Two complete siblings here,
+    // one in the same group as the incomplete row and one at the root, so a
+    // message on the wrong row is a distinct assertable failure.
+    const client = fakeClient()
+    renderEdit(client, { id: 7, filter: INCOMPLETE_AT_DEPTH })
+    await screen.findByTestId('condition-1-0')
+
+    expect(
+      within(screen.getByTestId('condition-1-0')).getByText(/not finished/i),
+    ).toBeInTheDocument()
+    expect(within(screen.getByTestId('condition-1-1')).queryByText(/not finished/i)).toBeNull()
+    expect(within(screen.getByTestId('condition-0')).queryByText(/not finished/i)).toBeNull()
+    expect(saveButton()).toBeDisabled()
+  })
+
+  it('filling in the incomplete row at depth clears its message and enables Save', async () => {
+    const client = fakeClient()
+    renderEdit(client, { id: 7, filter: INCOMPLETE_AT_DEPTH })
+    await screen.findByTestId('condition-1-0')
+
+    await userEvent.type(traitKeyOf('1-0'), 'region')
+    expect(within(screen.getByTestId('condition-1-0')).queryByText(/not finished/i)).toBeNull()
+    expect(saveButton()).toBeEnabled()
+  })
+
+  // --- Three DIFFERENT incomplete shapes, so the check cannot be
+  // accidentally trait-specific: a blank `key` on a trait, a blank `event`
+  // on a behaviour, and an `absolute` window with neither bound filled in.
+
+  it('catches a behaviour whose event has not been named', async () => {
+    renderBuilder()
+    await screen.findByTestId('group-')
+    await userEvent.type(screen.getByLabelText(/name/i), 'VIPs')
+    await addAFilledCondition()
+    expect(saveButton()).toBeEnabled()
+
+    const row = () => within(screen.getByTestId('condition-0'))
+    await userEvent.selectOptions(
+      row().getByRole('combobox', { name: 'Match on' }),
+      'what they did',
+    )
+    expect(row().getByText(/not finished/i)).toBeInTheDocument()
+    expect(saveButton()).toBeDisabled()
+
+    await userEvent.type(row().getByRole('combobox', { name: /event/i }), 'checkout')
+    expect(row().queryByText(/not finished/i)).toBeNull()
+    expect(saveButton()).toBeEnabled()
+  })
+
+  it('catches an absolute window with neither bound filled in', async () => {
+    renderBuilder()
+    await screen.findByTestId('group-')
+    await userEvent.type(screen.getByLabelText(/name/i), 'VIPs')
+    await addAFilledCondition()
+    const row = () => within(screen.getByTestId('condition-0'))
+    await userEvent.selectOptions(
+      row().getByRole('combobox', { name: 'Match on' }),
+      'what they did',
+    )
+    await userEvent.type(row().getByRole('combobox', { name: /event/i }), 'checkout')
+    expect(saveButton()).toBeEnabled()
+
+    // The incompleteness is now two levels INSIDE the leaf
+    // (`window.from`/`window.to`), not a field of the node itself -- a path
+    // mapping that only looked at the last segment, or that treated every
+    // number in the path as a child index, would lose it or move it.
+    await userEvent.selectOptions(row().getByRole('combobox', { name: 'Window' }), 'absolute')
+    expect(row().getByText(/not finished/i)).toBeInTheDocument()
+    expect(saveButton()).toBeDisabled()
+    // Said once, though the window raises an issue for each of its two
+    // bounds -- the row has one thing to say.
+    expect(row().getAllByText(/not finished/i)).toHaveLength(1)
+  })
+
+  it('a kind switch leaves no stale message from the kind it switched away from', async () => {
+    // The message is derived from the tree on every render, never
+    // remembered -- so switching an incomplete condition to a kind whose
+    // own default is complete must clear it in the same commit. A cached
+    // flag would leave the sentence standing over a condition that no
+    // longer has that problem, with Save enabled beside it.
+    renderBuilder()
+    await screen.findByTestId('group-')
+    await userEvent.type(screen.getByLabelText(/name/i), 'VIPs')
+    await userEvent.click(screen.getByRole('button', { name: /add condition/i }))
+    const row = () => within(screen.getByTestId('condition-0'))
+    expect(row().getByText(/not finished/i)).toBeInTheDocument()
+
+    await userEvent.selectOptions(
+      row().getByRole('combobox', { name: 'Match on' }),
+      'where they came from',
+    )
+    expect(row().queryByText(/not finished/i)).toBeNull()
+    expect(saveButton()).toBeEnabled()
   })
 })
 
@@ -627,11 +802,7 @@ describe('SegmentBuilder -- live counts', () => {
    * (`SegmentBuilder`'s own doc comment on why merely opening a segment
    * must not). */
   async function typeATrait() {
-    await userEvent.click(screen.getByRole('button', { name: /add condition/i }))
-    await userEvent.type(
-      within(screen.getByTestId('condition-0')).getByRole('combobox', { name: /^trait$/i }),
-      'plan',
-    )
+    await addAFilledCondition()
   }
 
   const EVER_BEHAVIOUR: FilterNode = {
@@ -1241,7 +1412,11 @@ describe('SegmentBuilder -- the identity its state describes', () => {
     await screen.findByRole('alert')
 
     await userEvent.type(screen.getByLabelText(/name/i), 'Anything at all')
-    await userEvent.click(screen.getByRole('button', { name: /add condition/i }))
+    // FILLED in, deliberately: a freshly added condition is an incomplete
+    // draft, which disables Save on its own, and this test is about the
+    // completed-load term being the thing that refuses. Leaving the key
+    // blank would let `loaded` be removed entirely with this still green.
+    await addAFilledCondition()
     const save = screen.getByRole('button', { name: /^save$/i })
     expect(save).toBeDisabled()
     // Asserted on the REQUEST as well as the control -- a screen that
@@ -1317,11 +1492,12 @@ describe('SegmentBuilder -- the identity its state describes', () => {
       expect(screen.getByRole('alert')).toHaveTextContent(/could not load this segment/i),
     )
 
-    // Filled in by hand, as in the sibling test above: the reset leaves an
-    // empty form, so the completed-load term is the only thing between two
-    // clicks and a write to a segment whose definition was never read.
+    // Filled in by hand, as in the sibling test above -- name AND condition,
+    // so every other term of `canSave` is satisfied and the completed-load
+    // term is the only thing between two clicks and a write to a segment
+    // whose definition was never read.
     await userEvent.type(screen.getByLabelText(/name/i), 'Anything at all')
-    await userEvent.click(screen.getByRole('button', { name: /add condition/i }))
+    await addAFilledCondition()
     const save = screen.getByRole('button', { name: /^save$/i })
     expect(save).toBeDisabled()
     await userEvent.click(save)
@@ -1368,14 +1544,14 @@ describe('SegmentBuilder -- composing a new segment across a project switch', ()
     renderLiveBuilder(client, ROUTES.segmentNew)
     await screen.findByTestId('group-')
     await userEvent.type(screen.getByLabelText(/name/i), 'VIPs')
-    await userEvent.click(screen.getByRole('button', { name: /add condition/i }))
-    expect(screen.getByRole('button', { name: /^save$/i })).toBeEnabled()
+    await addAFilledCondition()
+    expect(saveButton()).toBeEnabled()
 
     await userEvent.click(screen.getByRole('button', { name: /switch project/i }))
 
     expect(screen.getByLabelText(/name/i)).toHaveValue('VIPs')
     expect(screen.getByTestId('condition-0')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /^save$/i })).toBeEnabled()
+    expect(saveButton()).toBeEnabled()
   })
 
   it('drops a count computed under the project that was just switched away from', async () => {
@@ -1694,10 +1870,10 @@ function gatedCreateClient() {
 async function composeAndSaveANewSegment(client: ApiClient & { createSegment: Mock }) {
   await screen.findByTestId('group-')
   await userEvent.type(screen.getByLabelText(/name/i), 'VIPs')
-  await userEvent.click(screen.getByRole('button', { name: /add condition/i }))
-  await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+  await addAFilledCondition()
+  await userEvent.click(saveButton())
   await waitFor(() => expect(client.createSegment).toHaveBeenCalledTimes(1))
-  expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+  expect(saveButton()).toBeDisabled()
 }
 
 describe('SegmentBuilder -- a create still in flight when the project changes', () => {
