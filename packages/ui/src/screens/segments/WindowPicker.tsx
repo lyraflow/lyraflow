@@ -1,8 +1,20 @@
 import type { Window } from '@lyraflow/core/segments/ast.js'
 import { Input } from '../../components/ui/input.js'
 import { Label } from '../../components/ui/label.js'
+import { localZone, toInstant, toPickerValue } from './datetime.js'
 
-const WINDOW_KINDS = ['last', 'absolute', 'ever'] as const
+/**
+ * The three window variants with the words an OPERATOR reads, in the order
+ * `ast.ts` declares them. The labels are the operator's vocabulary, not the
+ * AST's -- the same rule `ConditionRow`'s `LEAF_KINDS` follows. `kind` on the
+ * left is the only thing that ever reaches a node, so every existing test
+ * that selects an option by its VALUE keeps working unchanged.
+ */
+const WINDOW_KINDS = [
+  { kind: 'last', label: 'in the last…' },
+  { kind: 'absolute', label: 'between two dates' },
+  { kind: 'ever', label: 'any time' },
+] as const
 
 /** Only the `last` variant has a `unit` -- `Window['unit']` does not
  * typecheck across the whole union, so this is pulled out via `Extract`
@@ -53,6 +65,20 @@ function isValidN(n: number): boolean {
  * `id` scopes every control's DOM id to the caller's own row, the same
  * convention `TraitForm`/`ContextForm`/`LifecycleForm` use -- `BehaviourForm`
  * renders one of these per behaviour condition.
+ *
+ * **The `absolute` variant stores UTC and displays local** (`datetime.ts`,
+ * which owns both directions and explains why). This control used to write
+ * the input's OWN value straight onto the node -- `2026-08-01T10:00`, local
+ * wall-clock with no zone -- which `ast.ts`'s `z.string().datetime()` refuses,
+ * so choosing an absolute range and filling in both bounds had never once
+ * produced a saveable tree. Nothing caught it because every test in this
+ * screen built a window object directly rather than driving this picker; the
+ * round-trip test in this file's suite is the one that could not have.
+ *
+ * The consequence that had to be fixed with it: the builder's completeness
+ * check reads the SAME schema, so it reported a window with both bounds
+ * filled in as "not finished", which was the only place the row-level
+ * messaging said something untrue.
  */
 export function WindowPicker(props: {
   id: string
@@ -80,12 +106,33 @@ export function WindowPicker(props: {
         onChange={(e) => setKind(e.target.value as Window['kind'])}
         className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground shadow-xs"
       >
-        {WINDOW_KINDS.map((kind) => (
+        {WINDOW_KINDS.map(({ kind, label }) => (
           <option key={kind} value={kind}>
-            {kind === 'last' ? 'in the last' : kind === 'absolute' ? 'between' : 'ever'}
+            {label}
           </option>
         ))}
       </select>
+
+      {/* The cost of `ever`, said WHERE IT IS CHOSEN. `costWarnings` already
+       * raises the same fact against the finished condition, and that warning
+       * stays -- but a warning read after the fact explains a decision the
+       * operator has already made, whereas the same sentence beside the
+       * control informs the decision itself. Rendered inside this component,
+       * not by the row, so it is present even where there is no row: the
+       * window is the only place the choice is actually made.
+       *
+       * Worded so it shares NO phrase with `costWarnings`' own sentence. The
+       * two are meant to be read in different places at different moments,
+       * and a test asserting the warning landed on the right row must not be
+       * able to match this instead -- three of them could, before this was
+       * reworded, which is a coincidence the suite would have carried
+       * silently. */}
+      {value.kind === 'ever' && (
+        <p className="text-xs text-muted-foreground">
+          Any time places no bound at all on the search: this condition reads every event the
+          project has ever recorded, and is the most expensive window to count.
+        </p>
+      )}
 
       {value.kind === 'last' && (
         <div className="flex items-center gap-2">
@@ -122,21 +169,37 @@ export function WindowPicker(props: {
       )}
 
       {value.kind === 'absolute' && (
-        <div className="flex items-center gap-2">
-          <Input
-            type="datetime-local"
-            aria-label="From"
-            value={value.from}
-            onChange={(e) => onChange({ kind: 'absolute', from: e.target.value, to: value.to })}
-          />
-          <span className="text-sm text-muted-foreground">to</span>
-          <Input
-            type="datetime-local"
-            aria-label="To"
-            value={value.to}
-            onChange={(e) => onChange({ kind: 'absolute', from: value.from, to: e.target.value })}
-          />
-        </div>
+        <>
+          <div className="flex items-center gap-2">
+            <Input
+              type="datetime-local"
+              aria-label="From"
+              value={toPickerValue(value.from)}
+              onChange={(e) =>
+                onChange({ kind: 'absolute', from: toInstant(e.target.value), to: value.to })
+              }
+            />
+            <span className="text-sm text-muted-foreground">to</span>
+            <Input
+              type="datetime-local"
+              aria-label="To"
+              value={toPickerValue(value.to)}
+              onChange={(e) =>
+                onChange({ kind: 'absolute', from: value.from, to: toInstant(e.target.value) })
+              }
+            />
+          </div>
+          {/* An unlabelled datetime is ambiguous, and the product's own voice
+           * is to volunteer that kind of limit rather than let someone
+           * discover it from a count that is hours off. The zone comes from
+           * the runtime (`localZone`), never from a guess -- and it is named,
+           * not merely implied, because "your local time" does not tell an
+           * operator on a shared machine, a VPN or a travelling laptop WHICH
+           * local. */}
+          <p className="text-xs text-muted-foreground">
+            Times are in {localZone()}, your browser's timezone. They are stored and counted in UTC.
+          </p>
+        </>
       )}
     </div>
   )

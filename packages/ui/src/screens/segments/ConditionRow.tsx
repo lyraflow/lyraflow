@@ -15,6 +15,7 @@ import { BehaviourForm } from './BehaviourForm.js'
 import { ContextForm } from './ContextForm.js'
 import { LIFECYCLE_FIELDS, LifecycleForm } from './LifecycleForm.js'
 import { TraitForm } from './TraitForm.js'
+import { datetimeLocal } from './datetime.js'
 import { summarise } from './summarise.js'
 import { incompleteAt, warningsAt } from './warnings.js'
 
@@ -39,18 +40,6 @@ type LeafKind = (typeof LEAF_KINDS)[number]['kind']
  * so a condition the operator has not finished writing cannot start out
  * scanning all history. */
 const DEFAULT_WINDOW_DAYS = 30
-
-/**
- * `datetime-local`'s own value format (`YYYY-MM-DDTHH:mm`), in LOCAL time --
- * the format `LifecycleForm`'s input renders and writes back, and one
- * `new Date()` parses, which is what `ast.ts`'s `Lifecycle` refine requires
- * of every value. `toISOString()` would be UTC with a `Z`, which that input
- * refuses to display at all.
- */
-function datetimeLocal(at: Date): string {
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}T${pad(at.getHours())}:${pad(at.getMinutes())}`
-}
 
 /**
  * The node a switch to `kind` REPLACES the old one with -- a whole fresh

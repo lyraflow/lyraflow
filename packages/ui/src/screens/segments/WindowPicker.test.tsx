@@ -1,7 +1,9 @@
+import { Window as WindowSchema } from '@lyraflow/core/segments/ast.js'
 import type { Window } from '@lyraflow/core/segments/ast.js'
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { useState } from 'react'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { WindowPicker } from './WindowPicker.js'
 
 describe('WindowPicker', () => {
@@ -102,5 +104,165 @@ describe('WindowPicker', () => {
     render(<WindowPicker id="beh" value={value} onChange={vi.fn()} />)
     expect(screen.getByLabelText('Window amount')).toHaveAttribute('aria-invalid', 'true')
     expect(screen.getByText(/enter a whole number/i)).toBeInTheDocument()
+  })
+
+  // --- The words. Presentation only: every `value` below is the AST's own
+  // `kind`, unchanged, which is what keeps the tests above (and every other
+  // file that selects a window by value) working untouched.
+
+  it('offers the three modes as plain words rather than as the AST’s kinds', () => {
+    render(
+      <WindowPicker id="beh" value={{ kind: 'last', n: 30, unit: 'days' }} onChange={vi.fn()} />,
+    )
+    const options = Array.from(
+      screen.getByLabelText('Window').querySelectorAll('option'),
+    ) as HTMLOptionElement[]
+    expect(options.map((o) => o.value)).toEqual(['last', 'absolute', 'ever'])
+    expect(options.map((o) => o.textContent)).toEqual([
+      'in the last…',
+      'between two dates',
+      'any time',
+    ])
+  })
+
+  it('states what `any time` costs beside the control that chooses it, not only after the fact', () => {
+    // Rendered ALONE, with no `ConditionRow` and therefore no cost-warning
+    // list anywhere on screen: what this asserts can only have come from the
+    // picker itself. `costWarnings`' own sentence stays where it was; this is
+    // the additional one, at the point of choice.
+    render(<WindowPicker id="beh" value={{ kind: 'ever' }} onChange={vi.fn()} />)
+    expect(screen.getByText(/most expensive window/i)).toBeInTheDocument()
+  })
+
+  it('says nothing about cost for a bounded window', () => {
+    render(
+      <WindowPicker id="beh" value={{ kind: 'last', n: 30, unit: 'days' }} onChange={vi.fn()} />,
+    )
+    expect(screen.queryByText(/most expensive window/i)).toBeNull()
+  })
+})
+
+/**
+ * The absolute window's own suite, in a zone that is NOT UTC.
+ *
+ * The container this runs in defaults to UTC, where a correct conversion and
+ * no conversion at all agree on every value -- so every assertion below would
+ * pass against the defect it exists to catch. `datetime.test.ts`'s own header
+ * has the full reasoning and the same fixtures; `+05:30` at `10:00` differs
+ * from UTC in both the hour and the minute.
+ */
+describe('WindowPicker -- the absolute window stores UTC and displays local', () => {
+  const ZONE = 'Asia/Kolkata'
+  const LOCAL = '2026-08-01T10:00'
+  const INSTANT = '2026-08-01T04:30:00.000Z'
+  const LOCAL_TO = '2026-09-01T02:00'
+  const INSTANT_TO = '2026-08-31T20:30:00.000Z'
+
+  // Via `vi.stubEnv`, not a direct `process.env` write: this package carries
+  // no `@types/node`, and CI typechecks before it runs anything.
+  beforeAll(() => {
+    vi.stubEnv('TZ', ZONE)
+  })
+  afterAll(() => {
+    vi.unstubAllEnvs()
+  })
+
+  it('is running in a zone that is not UTC, so a missing conversion is observable', () => {
+    // Guards every assertion below. In UTC -- the container's own default --
+    // a correct conversion and no conversion at all agree on every fixture
+    // here, so this suite would pass against the very defect it exists for.
+    expect(new Date(LOCAL).toISOString()).toBe(INSTANT)
+  })
+
+  /** The picker wired to real state, which is the only way a ROUND TRIP can
+   * be observed: a conversion applied on write but not on read is invisible
+   * to a test that drives one direction and asserts on the callback. */
+  function Stateful(props: { initial: Window; onChange?: (next: Window) => void }) {
+    const [value, setValue] = useState<Window>(props.initial)
+    return (
+      <WindowPicker
+        id="beh"
+        value={value}
+        onChange={(next) => {
+          setValue(next)
+          props.onChange?.(next)
+        }}
+      />
+    )
+  }
+
+  const EMPTY: Window = { kind: 'absolute', from: '', to: '' }
+
+  it('writes the From bound as the UTC instant the local reading names', () => {
+    const onChange = vi.fn()
+    render(<WindowPicker id="beh" value={EMPTY} onChange={onChange} />)
+    fireEvent.change(screen.getByLabelText('From'), { target: { value: LOCAL } })
+    expect(onChange).toHaveBeenLastCalledWith({ kind: 'absolute', from: INSTANT, to: '' })
+  })
+
+  it('writes the To bound as the UTC instant the local reading names', () => {
+    const onChange = vi.fn()
+    render(<WindowPicker id="beh" value={EMPTY} onChange={onChange} />)
+    fireEvent.change(screen.getByLabelText('To'), { target: { value: LOCAL_TO } })
+    expect(onChange).toHaveBeenLastCalledWith({ kind: 'absolute', from: '', to: INSTANT_TO })
+  })
+
+  it('displays a stored UTC instant as the local reading, not as the raw string', () => {
+    render(
+      <WindowPicker
+        id="beh"
+        value={{ kind: 'absolute', from: INSTANT, to: INSTANT_TO }}
+        onChange={vi.fn()}
+      />,
+    )
+    expect(screen.getByLabelText('From')).toHaveValue(LOCAL)
+    expect(screen.getByLabelText('To')).toHaveValue(LOCAL_TO)
+  })
+
+  it('round-trips: what the operator entered is what the picker shows back', () => {
+    render(<Stateful initial={EMPTY} />)
+    fireEvent.change(screen.getByLabelText('From'), { target: { value: LOCAL } })
+    fireEvent.change(screen.getByLabelText('To'), { target: { value: LOCAL_TO } })
+    expect(screen.getByLabelText('From')).toHaveValue(LOCAL)
+    expect(screen.getByLabelText('To')).toHaveValue(LOCAL_TO)
+  })
+
+  it('produces a window the AST accepts once both bounds are filled in -- which it never did', () => {
+    // The defect as the operator met it: choose an absolute range, fill both
+    // fields, and the tree the screen produced was one the server refused,
+    // so the builder reported the condition as unfinished. Asserted against
+    // the REAL schema from core rather than against a string shape, because
+    // the string shape is what was wrong.
+    let latest: Window = EMPTY
+    render(
+      <Stateful
+        initial={EMPTY}
+        onChange={(next) => {
+          latest = next
+        }}
+      />,
+    )
+    expect(WindowSchema.safeParse(EMPTY).success).toBe(false)
+    fireEvent.change(screen.getByLabelText('From'), { target: { value: LOCAL } })
+    fireEvent.change(screen.getByLabelText('To'), { target: { value: LOCAL_TO } })
+    expect(WindowSchema.safeParse(latest).success).toBe(true)
+  })
+
+  it('names the zone the operator is reading, taken from the runtime', () => {
+    render(<WindowPicker id="beh" value={EMPTY} onChange={vi.fn()} />)
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone
+    expect(screen.getByText(new RegExp(`Times are in ${zone}`))).toBeInTheDocument()
+  })
+
+  it('says nothing about a timezone when no absolute range is being chosen', () => {
+    render(<WindowPicker id="beh" value={{ kind: 'ever' }} onChange={vi.fn()} />)
+    expect(screen.queryByText(/Times are in/)).toBeNull()
+  })
+
+  it('clearing a bound returns it to empty rather than to some invented instant', () => {
+    render(<Stateful initial={{ kind: 'absolute', from: INSTANT, to: INSTANT_TO }} />)
+    fireEvent.change(screen.getByLabelText('From'), { target: { value: '' } })
+    expect(screen.getByLabelText('From')).toHaveValue('')
+    expect(screen.getByLabelText('To')).toHaveValue(LOCAL_TO)
   })
 })
