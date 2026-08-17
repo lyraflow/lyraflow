@@ -163,4 +163,96 @@ describe('PropertyCombobox', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(/could not load suggestions/i)
     expect(screen.getByLabelText('Property')).toBeEnabled()
   })
+
+  it('does not re-ask the server just because the parent re-rendered', async () => {
+    // `onUnauthorized` is the kind of callback a parent re-creates inline on
+    // every one of ITS renders. While it was named in the lookup effect's
+    // dependency list, an unrelated render anywhere above this field issued
+    // another request for a query that had not changed -- one wasted call per
+    // parent render, against an endpoint whose cost is the reason the trait
+    // VALUE lookup is deliberately on-demand.
+    //
+    // A fresh arrow on every render is the point of this test, not an
+    // oversight: a stable `useCallback` would pass whether or not the bug
+    // exists, which makes it the coincidence-point version of this test.
+    const schemaProperties = vi.fn(async () => ['amount_cents'])
+    const client = { schemaProperties } as unknown as ApiClient
+    const view = render(
+      <PropertyCombobox
+        client={client}
+        projectId={7}
+        event="checkout"
+        value="amount"
+        onChange={vi.fn()}
+        label="Property"
+        onUnauthorized={() => {}}
+      />,
+    )
+    await waitFor(() => expect(schemaProperties).toHaveBeenCalledTimes(1))
+
+    // The debounce has to be allowed to ELAPSE between re-renders, and this
+    // is the whole difficulty of pinning this. Re-rendering three times in a
+    // row proves nothing: each re-run of the effect clears the pending timer
+    // and sets a new one, so the lookup still fires exactly once and the
+    // assertion passes whether or not the dependency is there. That version of
+    // this test was written first and passed against the bug.
+    //
+    // Waiting past the debounce after a re-render is what separates them: with
+    // `onUnauthorized` in the dependency list, the effect re-runs, its new
+    // timer expires, and a second identical request goes out.
+    view.rerender(
+      <PropertyCombobox
+        client={client}
+        projectId={7}
+        event="checkout"
+        value="amount"
+        onChange={vi.fn()}
+        label="Property"
+        onUnauthorized={() => {}}
+      />,
+    )
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    // Same query, same event, same project: a parent render is a new chance to
+    // ask and not a new question.
+    expect(schemaProperties).toHaveBeenCalledTimes(1)
+  })
+
+  it('still routes a 401 through the callback the parent passed most recently', async () => {
+    // The other half of holding the callback in a ref: reading `.current`
+    // must not pin the FIRST callback the component ever saw. Without this,
+    // moving the callback out of the dependency list could be "fixed" by
+    // capturing it once, which silently routes an expired session to a
+    // handler the parent has already replaced.
+    const schemaProperties = vi.fn(async () => {
+      throw new ApiError(401, 'unauthorized')
+    })
+    const client = { schemaProperties } as unknown as ApiClient
+    const stale = vi.fn()
+    const current = vi.fn()
+    const view = render(
+      <PropertyCombobox
+        client={client}
+        projectId={7}
+        event="checkout"
+        value=""
+        onChange={vi.fn()}
+        label="Property"
+        onUnauthorized={stale}
+      />,
+    )
+    view.rerender(
+      <PropertyCombobox
+        client={client}
+        projectId={7}
+        event="checkout"
+        value=""
+        onChange={vi.fn()}
+        label="Property"
+        onUnauthorized={current}
+      />,
+    )
+    await userEvent.type(screen.getByLabelText('Property'), 'amount')
+    await waitFor(() => expect(current).toHaveBeenCalledTimes(1))
+    expect(stale).not.toHaveBeenCalled()
+  })
 })

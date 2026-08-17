@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { ApiError } from '../../api/client.js'
 import type { ApiClient } from '../../api/client.js'
 import { Input } from '../../components/ui/input.js'
@@ -86,6 +86,21 @@ export function PropertyCombobox(props: {
   // nothing" -- without it, `emptyMessage` renders during the first debounce
   // and tells the operator no traits exist before anything has been asked.
   const [fetched, setFetched] = useState(false)
+  // `onUnauthorized` is a callback a parent typically re-creates on every one
+  // of ITS renders, so naming it in the lookup effect's dependency list makes
+  // an unrelated parent render re-run the lookup -- a redundant request per
+  // keystroke elsewhere on the page. Held in a ref instead, and read only
+  // inside the async continuation below.
+  //
+  // A plain `useEffect` is right here, unlike the identity ref in
+  // `SegmentBuilder` which must be written in `useLayoutEffect`: nothing
+  // reads this one to make a decision DURING render, only after an await, so
+  // there is no window in which a stale value changes what the component
+  // renders or refuses.
+  const unauthorizedRef = useRef(onUnauthorized)
+  useEffect(() => {
+    unauthorizedRef.current = onUnauthorized
+  }, [onUnauthorized])
   // Same reasoning as EventCombobox's own `loadError`: a 401 routes to
   // `onUnauthorized`, any other failure says the suggestions themselves
   // failed rather than silently implying the property has none -- free
@@ -116,7 +131,7 @@ export function PropertyCombobox(props: {
         })
         .catch((err: unknown) => {
           if (err instanceof ApiError && err.status === 401) {
-            onUnauthorized?.()
+            unauthorizedRef.current?.()
             return
           }
           setOptions([])
@@ -133,7 +148,7 @@ export function PropertyCombobox(props: {
     // event must re-scope the very next lookup, not keep serving
     // suggestions for whichever event was selected when this field first
     // fetched.
-  }, [text, event, client, projectId, onUnauthorized, suggestOnEmpty])
+  }, [text, event, client, projectId, suggestOnEmpty])
 
   return (
     <div className="flex flex-col gap-1">
