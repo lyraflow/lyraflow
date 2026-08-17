@@ -61,6 +61,40 @@ function newGroup(): FilterNode {
   return { kind: 'group', op: 'and', children: [newCondition()] }
 }
 
+/**
+ * How each join mode is named to a person -- read TWICE in this file, by the
+ * "Match" select at the top of the card and by the sentence above the card's
+ * own "Add" controls, and deliberately the same strings in both places.
+ *
+ * That identity is the whole mechanism: stacked "Add condition"/"Add group"
+ * pairs at the bottom of a nest differ only by an indent step (35px against a
+ * ~110px button), and no border or tint can carry the difference -- every
+ * surface in this palette sits within ~1.1:1 of its neighbours by design, and
+ * indentation was just REDUCED below `sm` to stop nested fields being clipped.
+ * Words can: repeating the group's own header phrase beside its Add controls
+ * is legible at the text contrast the palette already guarantees, and the
+ * operator matches it by reading rather than by tracing a rail upwards.
+ *
+ * `and`/`or` are the AST's own values (`Group['op']`), so nothing here is a
+ * second spelling of a stored value.
+ */
+const MATCH_LABELS: Record<Group['op'], string> = {
+  and: 'all conditions (AND)',
+  or: 'any condition (OR)',
+}
+
+/**
+ * Which group a set of "Add" controls acts on, in words.
+ *
+ * The root is named rather than merely described, because "which group did
+ * that add to" is asked most often about the outermost pair -- the one at the
+ * very bottom of the page, furthest from the header it belongs to.
+ */
+function addLabel(isRoot: boolean, op: Group['op']): string {
+  const which = isRoot ? 'the top-level group' : 'this group'
+  return `Add to ${which}: ${MATCH_LABELS[op]}`
+}
+
 /** Whether a control is blocked by one of the three server-side caps
  * (`packages/core/src/segments/validate.js`), and which one -- so the
  * button can say what it's waiting on rather than merely refuse.
@@ -235,6 +269,10 @@ export function GroupCard(props: {
   const isRoot = path.length === 0
   const testId = `group-${path.join('-')}`
   const matchId = `${testId}-match`
+  // Scoped to this group's own path, like every other id in this tree: a
+  // flat literal would have every group's buttons describing the ROOT's
+  // label, which is the exact confusion this is here to remove.
+  const addLabelId = `${testId}-add-label`
 
   // Global counts (the whole tree shares one budget for these), local depth
   // (this group's own position) -- see `capBlock`'s own doc comment.
@@ -271,8 +309,11 @@ export function GroupCard(props: {
           onChange={(e) => setOp(e.target.value as 'and' | 'or')}
           className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground shadow-xs"
         >
-          <option value="and">all conditions (AND)</option>
-          <option value="or">any condition (OR)</option>
+          {/* From `MATCH_LABELS`, which the Add controls' own sentence below
+           * reads as well -- see that record's doc comment for why the two
+           * have to be the same words rather than merely mean the same. */}
+          <option value="and">{MATCH_LABELS.and}</option>
+          <option value="or">{MATCH_LABELS.or}</option>
         </select>
 
         {/* The root is never removable (tree.ts's removeAt rejects
@@ -390,11 +431,26 @@ export function GroupCard(props: {
        * disambiguates "this group's own Add controls" from a
        * descendant's. */}
       <div className="flex flex-col gap-1" data-testid={`${testId}-add`}>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* WHICH group these two controls add to, said in words -- the one
+           * thing that reads at depth three (see `MATCH_LABELS`). On the same
+           * flex line as the buttons rather than above them, so the eye lands
+           * on the words at the same height as the pair they belong to; it
+           * wraps onto its own line when there is no room, which is the width
+           * where the buttons are nearly the only thing on the line anyway.
+           *
+           * Tied to both buttons with `aria-describedby` as well as by
+           * position: read aloud, "Add condition" alone has exactly the
+           * ambiguity this fixes, and the accessible NAME is left untouched
+           * (several suites address these buttons by it). */}
+          <span id={addLabelId} className="text-xs text-muted-foreground">
+            {addLabel(isRoot, group.op)}
+          </span>
           <Button
             type="button"
             variant="outline"
             size="sm"
+            aria-describedby={addLabelId}
             disabled={negated || conditionCap.blocked}
             onClick={() => onChange(insertAt(root, path, newCondition()))}
           >
@@ -404,6 +460,7 @@ export function GroupCard(props: {
             type="button"
             variant="outline"
             size="sm"
+            aria-describedby={addLabelId}
             disabled={negated || groupCap.blocked}
             onClick={() => onChange(insertAt(root, path, newGroup()))}
           >

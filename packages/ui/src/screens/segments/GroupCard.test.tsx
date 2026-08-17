@@ -6,6 +6,7 @@ import {
 } from '@lyraflow/core/segments/validate.js'
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '../../api/client.js'
 import { GroupCard } from './GroupCard.js'
@@ -469,5 +470,147 @@ describe('GroupCard -- incompleteness lands on the row it names', () => {
       within(screen.getByTestId('condition-1-1')).getByText(/not finished/i),
     ).toBeInTheDocument()
     expect(within(screen.getByTestId('condition-1-0')).queryByText(/not finished/i)).toBeNull()
+  })
+})
+
+// --- Which group an "Add" pair belongs to, in words.
+//
+// At depth three the pairs stack vertically, identical in size, label and
+// colour, separated by one indent step (35px) against a ~110px button. The
+// other levers are unavailable: indentation was just REDUCED below `sm` to stop
+// nested fields being clipped, and a tint or a heavier rule cannot carry it
+// either, since every surface in this palette sits within ~1.1:1 of its
+// neighbours by design. So each pair names its own group, in the same phrase
+// that group's own "Match" select shows.
+//
+// `deepChain()` is the shape that actually failed: three nested groups whose
+// Add pairs stack, with ALTERNATING join modes, so a label reading the root's
+// `op` -- or any ancestor's -- renders the wrong words rather than
+// coincidentally the right ones.
+function deepChain(): Group {
+  return {
+    kind: 'group',
+    op: 'and',
+    children: [
+      {
+        kind: 'group',
+        op: 'or',
+        children: [{ kind: 'group', op: 'and', children: [trait('leaf')] }],
+      },
+    ],
+  }
+}
+
+describe('GroupCard -- each Add pair says which group it adds to', () => {
+  it('names the group beside its own Add controls, at every depth, with its own join mode', () => {
+    render(
+      <GroupCard
+        root={deepChain()}
+        path={[]}
+        onChange={vi.fn()}
+        client={client}
+        projectId={projectId}
+      />,
+    )
+    // Scoped to each group's own `-add` wrapper -- which holds that group's
+    // label and buttons and nothing of any descendant's -- because the whole
+    // difficulty is that three of these are on screen at once.
+    const root = within(screen.getByTestId('group--add'))
+    const middle = within(screen.getByTestId('group-0-add'))
+    const deepest = within(screen.getByTestId('group-0-0-add'))
+    expect(root.getByText('Add to the top-level group: all conditions (AND)')).toBeVisible()
+    expect(middle.getByText('Add to this group: any condition (OR)')).toBeVisible()
+    expect(deepest.getByText('Add to this group: all conditions (AND)')).toBeVisible()
+    // No pair claims another's mode: the middle group is the only `or` here,
+    // so neither of the other two labels may mention it, and the root is the
+    // only group that may call itself top-level.
+    expect(root.queryByText(/any condition/)).toBeNull()
+    expect(deepest.queryByText(/any condition/)).toBeNull()
+    expect(middle.queryByText(/top-level/)).toBeNull()
+    expect(deepest.queryByText(/top-level/)).toBeNull()
+  })
+
+  it('follows the group’s own join mode when it changes, rather than the mode it was born with', async () => {
+    // A label computed once, or read off the root, survives a fixture that
+    // only ever renders the initial tree. This drives the select and re-reads
+    // the label beside the buttons.
+    function Harness() {
+      const [root, setRoot] = useState<FilterNode>(deepChain())
+      return (
+        <GroupCard root={root} path={[]} onChange={setRoot} client={client} projectId={projectId} />
+      )
+    }
+    render(<Harness />)
+    const deepest = () => within(screen.getByTestId('group-0-0-add'))
+    expect(deepest().getByText('Add to this group: all conditions (AND)')).toBeVisible()
+    await userEvent.selectOptions(
+      within(screen.getByTestId('group-0-0')).getByLabelText('Match'),
+      'or',
+    )
+    expect(deepest().getByText('Add to this group: any condition (OR)')).toBeVisible()
+    // ...and only that group's label moved: its parent is still `or` and its
+    // grandparent still `and`.
+    expect(
+      within(screen.getByTestId('group-0-add')).getByText('Add to this group: any condition (OR)'),
+    ).toBeVisible()
+    expect(
+      within(screen.getByTestId('group--add')).getByText(
+        'Add to the top-level group: all conditions (AND)',
+      ),
+    ).toBeVisible()
+  })
+
+  it('ties the label to both buttons for a reader who cannot see the layout', () => {
+    // Position alone carries this for a sighted operator; read aloud, "Add
+    // condition" is exactly as ambiguous as it was. Each group's buttons point
+    // at their OWN label, scoped by path -- a flat id would have every group in
+    // the tree describing the root's.
+    render(
+      <GroupCard
+        root={deepChain()}
+        path={[]}
+        onChange={vi.fn()}
+        client={client}
+        projectId={projectId}
+      />,
+    )
+    for (const [testId, expected] of [
+      ['group--add', 'Add to the top-level group: all conditions (AND)'],
+      ['group-0-add', 'Add to this group: any condition (OR)'],
+      ['group-0-0-add', 'Add to this group: all conditions (AND)'],
+    ] as const) {
+      const wrapper = screen.getByTestId(testId)
+      for (const name of ['Add condition', 'Add group']) {
+        const button = within(wrapper).getByRole('button', { name })
+        const describedBy = button.getAttribute('aria-describedby')
+        expect(describedBy).toBe(`${testId}-label`)
+        expect(document.getElementById(describedBy ?? '')?.textContent).toBe(expected)
+        // The accessible NAME is untouched -- several suites address these
+        // buttons by it.
+        expect(button).toHaveAccessibleName(name)
+      }
+    }
+  })
+
+  it('uses the same words the group’s own Match select offers, not a paraphrase', () => {
+    // The mechanism, pinned: the operator recognises the phrase from the
+    // header rather than tracing a rail upwards. A label reading "matching
+    // all" or "AND group" would still identify the group and would break that
+    // tie -- so the label is asserted against the option's OWN text, not
+    // against a literal repeated here.
+    render(
+      <GroupCard
+        root={{ kind: 'group', op: 'or', children: [trait('a')] }}
+        path={[]}
+        onChange={vi.fn()}
+        client={client}
+        projectId={projectId}
+      />,
+    )
+    const option = screen.getByLabelText('Match').querySelector('option[value="or"]')?.textContent
+    expect(option).toBe('any condition (OR)')
+    expect(
+      within(screen.getByTestId('group--add')).getByText(`Add to the top-level group: ${option}`),
+    ).toBeVisible()
   })
 })
