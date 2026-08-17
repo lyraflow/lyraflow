@@ -23,6 +23,29 @@ one fix is contained in 0.3.0.
 
 ## Unreleased
 
+### Added
+
+- **`lyraflow seed-demo <project>` fills a project with reproducible demo
+  data.** 400 synthetic people and 5,000 events over 90 days by default, with a
+  signup-to-purchase funnel that has real drop-off, identify traits (string,
+  numeric and boolean), first-touch UTM campaigns, purchase amounts, and
+  visitors who browsed anonymously before signing up — so the segments, funnels
+  and feed screens have something to show on a fresh install. `--persons`,
+  `--events`, `--days`, `--seed` and `--anchor`; `--help` for the rest. At a
+  fixed seed the data is identical run to run, so a screen can be compared
+  before and after a change.
+
+  Two things to know, both documented in the README's *Demo data* section and
+  in `--help`. It writes to Postgres and ClickHouse **directly** rather than
+  through the ingest API: `/v1/batch` clamps every client timestamp to within
+  24 hours of arrival — deliberately, so a wrong device clock cannot corrupt a
+  time-windowed segment — which makes ninety days of backdated history
+  impossible to create over HTTP. That clamp is unchanged and there is no
+  trusted-backdating flag. And it is **additive only**: it has no reset, no
+  wipe and no `--force`, so it cannot delete anything, including its own
+  earlier output. Running it again adds another cohort rather than replacing
+  one.
+
 ### Changed
 
 - **`@lyraflow/sdk-browser`'s `autoPageView` now defaults to `true`.** A
