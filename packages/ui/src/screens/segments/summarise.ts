@@ -49,15 +49,44 @@ function asBound(value: unknown): string {
 }
 
 /**
- * A child rendered *inside* a group's join gets parenthesised when it is
- * itself a group, so precedence survives being flattened onto one line --
- * `a or (b and c)` is not the same segment as `a or b and c`. The top-level
- * call in `summarise` never adds this outer pair: a group passed directly
- * renders as its bare join, matching how the builder shows the tree it is
- * currently inside rather than a clause nested one level down.
+ * Whether a child's own rendering ends in a join word that nothing closes, so
+ * the group's following ` and ` / ` or ` would read as part of the CHILD
+ * rather than as the group's own operator.
+ *
+ * Three shapes do, and only the first was originally handled:
+ *
+ * - a nested **group**, because `a or (b and c)` is not the same segment as
+ *   `a or b and c`;
+ * - a **`where`** clause, which is a comma-separated list with no terminator:
+ *   `count of purchase ... where currency is USD, amount more than 50 and
+ *   (utm_source ...)` gives a reader no way to tell whether that `and`
+ *   introduces a fourth predicate or the tree's next branch;
+ * - **`between`**, whose value renders as `100 and 5000` (`formatValue`'s own
+ *   doc comment says the join belongs to the value, not the operator), so
+ *   `... between 100 and 5000 and country (latest) is not TR` has two `and`s
+ *   doing different jobs and no way to tell them apart.
+ *
+ * All three were reachable together in one real segment, and the summary is
+ * the only place most operators ever read a definition back -- misreading one
+ * means acting on the wrong population, which is the whole reason this string
+ * exists.
+ */
+function needsBrackets(node: FilterNode): boolean {
+  if (node.kind === 'group') return true
+  if (node.kind === 'behavior' && (node.where?.length ?? 0) > 0) return true
+  return node.kind !== 'not' && node.operator === 'between'
+}
+
+/**
+ * A child rendered *inside* a group's join gets parenthesised when its own
+ * rendering would otherwise absorb the group's operator -- see
+ * `needsBrackets`. The top-level call in `summarise` never adds this outer
+ * pair: a group passed directly renders as its bare join, matching how the
+ * builder shows the tree it is currently inside rather than a clause nested
+ * one level down.
  */
 function part(node: FilterNode): string {
-  return node.kind === 'group' ? `(${summarise(node)})` : summarise(node)
+  return needsBrackets(node) ? `(${summarise(node)})` : summarise(node)
 }
 
 export function summarise(node: FilterNode): string {

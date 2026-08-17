@@ -402,3 +402,102 @@ describe('summarise -- a stored instant, read in the operator’s own zone', () 
     expect(summarise(l as never)).toBe('first_seen at least 1 Jul 2026, 09:00')
   })
 })
+
+describe('summarise -- a clause never swallows the tree’s own join word', () => {
+  // Every one of these renders an ` and ` that belongs to the CHILD. Without
+  // brackets around that child, the group's own ` and `/` or ` lands directly
+  // after it and a reader cannot tell which is which -- and this string is the
+  // only place most operators ever read a definition back, so misreading it
+  // means acting on the wrong population.
+  //
+  // All three shapes appeared together in one real segment on the list screen,
+  // and only the nested-group case was handled.
+
+  it('brackets a behaviour carrying a where clause', () => {
+    const out = summarise({
+      kind: 'group',
+      op: 'and',
+      children: [
+        {
+          kind: 'behavior',
+          event: 'purchase',
+          aggregate: 'count',
+          operator: '>=',
+          value: 3,
+          window: { kind: 'last', n: 90, unit: 'days' },
+          where: [
+            { property: 'currency', operator: '=', value: 'USD' },
+            { property: 'amount', operator: '>', value: 50 },
+          ],
+        },
+        { kind: 'trait', key: 'plan', operator: '=', value: 'pro' },
+      ],
+    })
+    // The where list must close before the tree's `and`.
+    expect(out).toContain('amount more than 50) and plan is pro')
+    // And the ambiguous reading must be gone outright.
+    expect(out).not.toContain('amount more than 50 and plan')
+  })
+
+  it('brackets a between condition, whose value is itself joined by "and"', () => {
+    // `formatValue` renders a two-element value as "100 and 5000", so a bare
+    // `between` child puts two `and`s in a row doing different jobs.
+    const out = summarise({
+      kind: 'group',
+      op: 'and',
+      children: [
+        { kind: 'trait', key: 'seats', operator: 'between', value: [100, 5000] },
+        { kind: 'trait', key: 'plan', operator: '=', value: 'pro' },
+      ],
+    })
+    expect(out).toContain('(seats between 100 and 5000) and plan is pro')
+    expect(out).not.toContain('5000 and plan is pro')
+  })
+
+  it('brackets a between condition inside an or, where the misreading changes the segment', () => {
+    // With `or` the stakes are visible: unbracketed, "seats between 100 and
+    // 5000 or plan is pro" could be read as "between 100" and "(5000 or plan
+    // is pro)".
+    const out = summarise({
+      kind: 'group',
+      op: 'or',
+      children: [
+        { kind: 'trait', key: 'seats', operator: 'between', value: [100, 5000] },
+        { kind: 'trait', key: 'plan', operator: '=', value: 'pro' },
+      ],
+    })
+    expect(out).toBe('(seats between 100 and 5000) or plan is pro')
+  })
+
+  it('leaves a self-delimiting child alone, so brackets stay meaningful', () => {
+    // The counter-half: bracketing everything would be as unreadable as
+    // bracketing nothing. A plain leaf, and a `not` (which already renders its
+    // own parentheses), must not gain a second pair.
+    const out = summarise({
+      kind: 'group',
+      op: 'and',
+      children: [
+        { kind: 'trait', key: 'plan', operator: '=', value: 'pro' },
+        { kind: 'not', child: { kind: 'trait', key: 'is_trial', operator: '=', value: true } },
+      ],
+    })
+    expect(out).toBe('plan is pro and not (is_trial is true)')
+  })
+
+  it('does not bracket a top-level behaviour with a where clause', () => {
+    // `part` is only reached inside a group's join. A definition that IS one
+    // behaviour has nothing following it, so an outer pair would be noise --
+    // the same reason a top-level group renders as its bare join.
+    const out = summarise({
+      kind: 'behavior',
+      event: 'purchase',
+      aggregate: 'count',
+      operator: '>=',
+      value: 1,
+      window: { kind: 'ever' },
+      where: [{ property: 'amount', operator: '>', value: 50 }],
+    })
+    expect(out).not.toMatch(/^\(/)
+    expect(out).toContain('where amount more than 50')
+  })
+})
