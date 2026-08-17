@@ -103,17 +103,40 @@ afterAll(async () => {
   await ch.close()
 })
 
+/**
+ * Every row this seeder writes carries an `anonymous_id` of the form
+ * `demo-device-…` (`generate.ts`), and every absolute count below is scoped by
+ * that as well as by `project_id`.
+ *
+ * Scoping by project alone is not isolation, and this is not hypothetical: the
+ * project here is created by slug and takes whatever serial id it is given, so
+ * on a database where it is the first project created it gets **id 1** — and
+ * `packages/db/src/schema-clickhouse.test.ts` inserts events under a
+ * *hardcoded* `project_id: 1`, whose materialised view then adds its own
+ * `device_index` rows. That is exactly how this file first went red in CI and
+ * not locally: `expected 63 to be 60`, the three extra being that file's
+ * `anon-1` and friends. Locally the database already held other projects, so
+ * the id was high and the collision never happened.
+ *
+ * The prefix predicate is what makes these counts mean "the rows this seeder
+ * wrote" rather than "the rows in this project, whoever wrote them".
+ *
+ * Alias-aware: two of the queries below select from `events AS e`, where the
+ * column needs qualifying but the function call must not be.
+ */
+const ours = (alias = '') => `startsWith(${alias}anonymous_id, 'demo-device-')`
+
 describe('insertDemoData', () => {
   it('writes every generated event into events', async () => {
-    expect(await scalar(`SELECT count() AS n FROM events WHERE project_id = ${projectId}`)).toBe(
-      900,
-    )
+    expect(
+      await scalar(`SELECT count() AS n FROM events WHERE project_id = ${projectId} AND ${ours()}`),
+    ).toBe(900)
   })
 
   it('spreads the stored timestamps across the whole window rather than one day', async () => {
     const rs = await ch.query({
       query: `SELECT min(timestamp) AS lo, max(timestamp) AS hi
-              FROM events WHERE project_id = ${projectId}`,
+              FROM events WHERE project_id = ${projectId} AND ${ours()}`,
       format: 'JSONEachRow',
     })
     const [row] = await rs.json<{ lo: string; hi: string }>()
@@ -168,7 +191,8 @@ describe('insertDemoData', () => {
 
   it('populates device_index with one row set per device', async () => {
     const devices = await scalar(
-      `SELECT uniqExact(anonymous_id) AS n FROM device_index WHERE project_id = ${projectId}`,
+      `SELECT uniqExact(anonymous_id) AS n FROM device_index
+       WHERE project_id = ${projectId} AND ${ours()}`,
     )
     expect(devices).toBe(60)
   })
@@ -177,7 +201,7 @@ describe('insertDemoData', () => {
     const withSource = await scalar(
       `SELECT count() AS n FROM (
          SELECT argMinMerge(first_source) AS s FROM device_index
-         WHERE project_id = ${projectId}
+         WHERE project_id = ${projectId} AND ${ours()}
          GROUP BY project_id, anonymous_id, user_id, month
        ) WHERE s != ''`,
     )
@@ -203,7 +227,7 @@ describe('insertDemoData', () => {
     const resolved = resolvedPersonExpr({ database: CH_DB, alias: 'e' })
     const rs = await ch.query({
       query: `SELECT ${resolved} AS person_id, count() AS n
-              FROM events AS e WHERE e.project_id = ${projectId}
+              FROM events AS e WHERE e.project_id = ${projectId} AND ${ours('e.')}
               GROUP BY person_id`,
       format: 'JSONEachRow',
     })
@@ -237,14 +261,17 @@ describe('insertDemoData', () => {
     const ids = anonymousOnly.map((p) => `'${p.anonymousId}'`).join(',')
     const n = await scalar(
       `SELECT uniqExact(person_id) AS n FROM (
-         SELECT ${resolved} AS person_id FROM events AS e WHERE e.project_id = ${projectId}
+         SELECT ${resolved} AS person_id FROM events AS e
+         WHERE e.project_id = ${projectId} AND ${ours('e.')}
        ) WHERE person_id IN (${ids})`,
     )
     expect(n).toBe(anonymousOnly.length)
   })
 
   it('adds to what is already there rather than replacing it', async () => {
-    const before = await scalar(`SELECT count() AS n FROM events WHERE project_id = ${projectId}`)
+    const before = await scalar(
+      `SELECT count() AS n FROM events WHERE project_id = ${projectId} AND ${ours()}`,
+    )
     const second = generateDemoData({
       seed: 32,
       persons: 10,
@@ -253,8 +280,8 @@ describe('insertDemoData', () => {
       anchor: ANCHOR,
     })
     await insertDemoData(second, { ch, pg, database: CH_DB, projectId })
-    expect(await scalar(`SELECT count() AS n FROM events WHERE project_id = ${projectId}`)).toBe(
-      before + 120,
-    )
+    expect(
+      await scalar(`SELECT count() AS n FROM events WHERE project_id = ${projectId} AND ${ours()}`),
+    ).toBe(before + 120)
   })
 })
