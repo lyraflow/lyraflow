@@ -20,30 +20,38 @@ type Answer = { trait: string; options: string[] } | { trait: string; failed: tr
  *
  * ## Why this is not `PropertyCombobox`
  *
- * `PropertyCombobox` is the trait NAME field, and the two fields are
- * deliberately opposites:
+ * Both fields render the same `Combobox` -- the same input, the same popup,
+ * the same keyboard handling, and both open on focus. What differs is WHEN
+ * each one asks the server, and that difference is the whole reason this is
+ * a separate component:
  *
- *  - it fetches on render (`suggestOnEmpty`) because it reads `event_schema`,
- *    a catalogue with one row per property. This one must NOT: its endpoint
- *    scans the project's whole trait partition, so a lookup per rendered
- *    condition row is a cost nobody asked for. Nothing is fetched until the
- *    operator focuses or types in the box;
+ *  - `PropertyCombobox` (the trait NAME field) fetches on mount, because it
+ *    reads `event_schema`, a catalogue with one row per property key. This
+ *    one must NOT: `person_traits` is ordered by `(project_id,
+ *    anonymous_id, user_id, trait_key)`, so a lookup by trait cannot use the
+ *    sort key at all and scans the project's whole trait partition. A
+ *    segment builder renders one of these per condition row, so fetching on
+ *    mount would put N partition scans behind opening a screen nobody has
+ *    typed into yet. Nothing is fetched until the operator focuses a value
+ *    box -- which is also the moment the popup opens, so the list is there
+ *    by the time they could read it;
  *  - it keys off an event name and owns its own `<input>`. This one keys off
  *    a TRAIT name, and cannot own its input at all: `between` needs two
  *    boxes, and the reshaping that keeps `operator` and `value` agreeing
  *    lives in `ValueInput` and must keep living there.
  *
- * Reaching those through flags on the shared component would have meant a
- * third client method, an eagerness switch and a second scope, none of which
- * the property caller would ever pass -- so the two fields stay two
- * components, and what they genuinely share (`ValueInput`) stays shared.
+ * Reaching those through flags on the shared field wrapper would have meant
+ * a third client method, an eagerness switch and a second scope, none of
+ * which the property caller would ever pass -- so the two stay two
+ * components over one `Combobox`, and what they genuinely share
+ * (`ValueInput`) stays shared.
  *
  * ## Free-typed
  *
  * The suggestions are never a whitelist, exactly as for the trait name: a
  * segment may be written ahead of the data that fills it. Everything here
- * only populates a `<datalist>`; typing anything at all still works, and a
- * failed or empty lookup leaves the field fully usable.
+ * only populates a list; typing anything at all still works, and a failed or
+ * empty lookup leaves the field fully usable.
  */
 export function TraitValueField(props: {
   client: ApiClient
@@ -133,20 +141,18 @@ export function TraitValueField(props: {
           onChange={onChange}
           suggest={{
             options,
+            // The popup must not assert an absence before anything has been
+            // asked: until a lookup answers for THIS trait, it says it is
+            // still looking rather than "none recorded".
+            loading: !fetched && !loadError,
+            emptyMessage: 'No values recorded for this trait yet -- you can still type one.',
+            errorMessage: loadError
+              ? 'Could not load suggestions. You can still type the value.'
+              : undefined,
             onInteract: (text) => setAsk({ trait: key, q: text.trim() }),
           }}
         />
       </div>
-      {fetched && options.length === 0 && (
-        <p className="text-xs text-muted-foreground">
-          No values recorded for this trait yet -- you can still type one.
-        </p>
-      )}
-      {loadError && (
-        <p role="alert" className="text-xs text-destructive">
-          Could not load suggestions. You can still type the value.
-        </p>
-      )}
     </div>
   )
 }

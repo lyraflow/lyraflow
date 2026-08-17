@@ -1,5 +1,5 @@
 import type { Trait } from '@lyraflow/core/segments/ast.js'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
@@ -147,7 +147,17 @@ describe('TraitForm -- knowing what to type', () => {
       />,
     )
     await waitFor(() => expect(client.schemaProperties).toHaveBeenCalledWith(7, '$identify', ''))
-    await waitFor(() => expect(document.querySelectorAll('datalist option')).toHaveLength(3))
+    // ...and focusing shows them, without a keystroke. Both halves matter:
+    // the fetch alone is invisible, and a popup that opens on an empty list
+    // is the field this replaced.
+    await userEvent.click(screen.getByRole('combobox', { name: /^trait$/i }))
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole('listbox'))
+          .queryAllByRole('option')
+          .map((o) => o.textContent),
+      ).toEqual(['country', 'plan', 'signup_source']),
+    )
   })
 
   it('scopes suggestions to identify traits, never every property in the project', async () => {
@@ -177,6 +187,9 @@ describe('TraitForm -- knowing what to type', () => {
         projectId={7}
       />,
     )
+    // In the popup, where the operator is looking when they find it empty --
+    // not in a line under a field they have already given up on.
+    await userEvent.click(screen.getByRole('combobox', { name: /^trait$/i }))
     await waitFor(() => expect(screen.getByText(/no traits recorded yet/i)).toBeInTheDocument())
   })
 
@@ -196,6 +209,10 @@ describe('TraitForm -- knowing what to type', () => {
       />,
     )
     await waitFor(() => expect(client.schemaProperties).toHaveBeenCalled())
+    // Opened, so the popup is on screen and had every chance to say it: the
+    // assertion would pass trivially against a closed one.
+    await userEvent.click(screen.getByRole('combobox', { name: /^trait$/i }))
+    expect(screen.getByRole('listbox')).toBeInTheDocument()
     expect(screen.queryByText(/no traits recorded yet/i)).not.toBeInTheDocument()
   })
 
@@ -287,15 +304,16 @@ describe('TraitForm -- knowing what to type in the value box', () => {
     await userEvent.click(box)
     await waitFor(() =>
       expect(
-        Array.from(document.querySelectorAll('datalist option')).map((o) =>
-          o.getAttribute('value'),
-        ),
+        within(screen.getByRole('listbox'))
+          .queryAllByRole('option')
+          .map((o) => o.textContent),
       ).toContain('pro'),
     )
     // The suggestions are not a whitelist -- see TraitValueField's own test.
     // Asserted through the real form too, because this is the rule most
     // likely to be lost when someone later reaches for a `<select>`.
     expect(box).not.toBeDisabled()
-    expect(box).toHaveAttribute('list')
+    expect(box).toHaveAttribute('aria-controls', screen.getByRole('listbox').id)
+    expect(box).not.toHaveAttribute('readonly')
   })
 })

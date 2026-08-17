@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../../api/client.js'
@@ -22,9 +22,37 @@ describe('PropertyCombobox', () => {
     await waitFor(() =>
       expect(schemaProperties).toHaveBeenCalledWith(1, 'checkout_completed', 'amount'),
     )
-    expect(
-      await screen.findByRole('option', { name: 'amount_currency', hidden: true }),
-    ).toBeInTheDocument()
+    expect(await screen.findByRole('option', { name: 'amount_currency' })).toBeInTheDocument()
+  })
+
+  // The rule this field's own doc comment used to argue AGAINST, and the
+  // correction: an unfiltered list is noisy, but a picker that shows nothing
+  // until the operator already knows the first letters of the answer is not
+  // a picker at all. `event_schema` is a catalogue, so asking on render is
+  // affordable -- and the popup opens on focus with what came back.
+  it('asks with an empty query on mount, and shows the answer on focus', async () => {
+    const schemaProperties = vi.fn(async () => ['amount_cents', 'currency', 'plan_id'])
+    render(
+      <PropertyCombobox
+        client={{ schemaProperties } as unknown as ApiClient}
+        projectId={1}
+        event="checkout_completed"
+        value=""
+        onChange={() => {}}
+        label="Property"
+      />,
+    )
+    await waitFor(() => expect(schemaProperties).toHaveBeenCalledWith(1, 'checkout_completed', ''))
+    expect(screen.queryByRole('listbox')).toBeNull()
+
+    await userEvent.click(screen.getByLabelText('Property'))
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole('listbox'))
+          .queryAllByRole('option')
+          .map((o) => o.textContent),
+      ).toEqual(['amount_cents', 'currency', 'plan_id']),
+    )
   })
 
   it('passes `undefined`, never the literal event string, when there is no event to scope to', async () => {
@@ -119,6 +147,8 @@ describe('PropertyCombobox', () => {
       />,
     )
     await userEvent.type(screen.getByLabelText('Property'), 'abc')
+    // Not even the mount lookup has fired: each keystroke replaced its
+    // pending timer before the debounce could elapse.
     expect(schemaProperties).not.toHaveBeenCalled()
     await waitFor(() => expect(schemaProperties).toHaveBeenCalledTimes(1))
     expect(schemaProperties).toHaveBeenCalledWith(1, undefined, 'abc')

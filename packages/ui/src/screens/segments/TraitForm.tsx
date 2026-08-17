@@ -32,14 +32,10 @@ const IDENTIFY_EVENT = '$identify'
  * operator then has to guess between `pro`, `Pro` and `tier_2`, and a wrong
  * guess produces a segment that is silently empty rather than an error. But
  * those suggestions come from a scan of the trait table rather than a
- * catalogue, so they are fetched only when the operator touches the value
- * box -- never on render, unlike the name field directly above it. That
- * asymmetry is the cost of the two reads, not an inconsistency.
- *
- * `suggestOnEmpty` is on here and off for `where` predicates on purpose: a
- * project's trait namespace is small and its operator's problem is not
- * narrowing a list but knowing which traits exist at all, whereas an event's
- * property namespace is large and an unfiltered list is mostly noise.
+ * catalogue, so they are fetched only when the operator focuses the value
+ * box -- never on render, unlike the name field directly above it. Both
+ * fields open their list on focus; only the moment of the REQUEST differs,
+ * and that asymmetry is the cost of the two reads, not an inconsistency.
  *
  * `id` scopes every control's DOM id to this row's own path -- `ConditionRow`
  * renders one of these per leaf, and an unscoped id (`"trait-key"` on every
@@ -70,7 +66,6 @@ export function TraitForm(props: {
         placeholder="e.g. plan"
         hint="Set on a person by identify(). Start typing to search."
         emptyMessage="No traits recorded yet -- they appear here once your app calls identify()."
-        suggestOnEmpty
         onUnauthorized={onUnauthorized}
       />
       <OperatorSelect

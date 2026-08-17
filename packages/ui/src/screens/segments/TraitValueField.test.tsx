@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
@@ -18,8 +18,18 @@ function client(values: string[] = []): ApiClient {
   return { schemaTraitValues: vi.fn(async () => values) } as unknown as ApiClient
 }
 
-const suggestions = () =>
-  Array.from(document.querySelectorAll('datalist option')).map((o) => o.getAttribute('value'))
+/** Whatever the open popup is offering. The suggestions live in a real
+ * `role="listbox"` now rather than a `<datalist>`, and only the focused
+ * box's popup is open -- so every reader below is taken while a value box
+ * has focus. */
+const suggestions = () => {
+  const list = screen.queryByRole('listbox')
+  return list === null
+    ? []
+    : within(list)
+        .queryAllByRole('option')
+        .map((o) => o.textContent)
+}
 
 /** Controlled the way `ConditionRow` controls the real thing, so a typed
  * character survives to the next keystroke instead of the input snapping
@@ -86,19 +96,43 @@ describe('TraitValueField', () => {
     await waitFor(() => expect(c.schemaTraitValues).toHaveBeenCalledWith(7, 'signup_source', ''))
   })
 
-  it('offers what came back, attached to the box the operator is typing in', async () => {
+  it('offers what came back, in the popup the box the operator is in controls', async () => {
     const c = client(['free', 'pro'])
     render(<Harness client={c} />)
 
     await userEvent.click(screen.getByRole('combobox', { name: /^value$/i }))
     await waitFor(() => expect(suggestions()).toEqual(['free', 'pro']))
 
-    // Options that exist but are attached to nothing are invisible to the
-    // operator: the `list` attribute is the whole mechanism, so it is
-    // asserted rather than assumed.
-    const list = document.querySelector('datalist')
-    expect(list?.id).toBeTruthy()
-    expect(screen.getByRole('combobox', { name: /^value$/i })).toHaveAttribute('list', list?.id)
+    // Options that exist but belong to no field are invisible to the
+    // operator: `aria-controls` is the whole mechanism now that the list is
+    // a popup of this component's own, so it is asserted rather than assumed.
+    const list = screen.getByRole('listbox')
+    expect(list.id).toBeTruthy()
+    expect(screen.getByRole('combobox', { name: /^value$/i })).toHaveAttribute(
+      'aria-controls',
+      list.id,
+    )
+  })
+
+  it('takes the value that was clicked, not the first one offered', async () => {
+    // Three values, and the LAST is chosen: with one option a "picks what
+    // you clicked" test cannot be told apart from "picks whatever there is",
+    // and with the first it cannot be told apart from "picks index 0".
+    const onChange = vi.fn()
+    render(
+      <TraitValueField
+        client={client(['enterprise', 'free', 'pro'])}
+        projectId={7}
+        trait="plan"
+        operator="="
+        value=""
+        onChange={onChange}
+      />,
+    )
+    await userEvent.click(screen.getByRole('combobox', { name: /^value$/i }))
+    await waitFor(() => expect(suggestions()).toEqual(['enterprise', 'free', 'pro']))
+    await userEvent.click(screen.getByRole('option', { name: 'pro' }))
+    expect(onChange).toHaveBeenLastCalledWith('pro')
   })
 
   it('narrows the lookup with what has been typed so far', async () => {
@@ -326,12 +360,22 @@ describe('TraitValueField -- between', () => {
     const c = client(['free', 'pro'])
     render(<BetweenHarness client={c} />)
 
+    // One box at a time, because only the focused box's popup is open --
+    // and `aria-controls` is asserted each time, since options belonging to
+    // no field are invisible to the operator.
     await userEvent.click(screen.getByRole('combobox', { name: 'Value 1' }))
     await waitFor(() => expect(suggestions()).toEqual(['free', 'pro']))
+    expect(screen.getByRole('combobox', { name: 'Value 1' })).toHaveAttribute(
+      'aria-controls',
+      screen.getByRole('listbox').id,
+    )
 
-    const list = document.querySelector('datalist')?.id
-    expect(screen.getByRole('combobox', { name: 'Value 1' })).toHaveAttribute('list', list)
-    expect(screen.getByRole('combobox', { name: 'Value 2' })).toHaveAttribute('list', list)
+    await userEvent.click(screen.getByRole('combobox', { name: 'Value 2' }))
+    await waitFor(() => expect(suggestions()).toEqual(['free', 'pro']))
+    expect(screen.getByRole('combobox', { name: 'Value 2' })).toHaveAttribute(
+      'aria-controls',
+      screen.getByRole('listbox').id,
+    )
   })
 
   // The prefix comes from the box being edited, not from the whole value: a

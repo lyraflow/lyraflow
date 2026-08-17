@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { ValueInput } from './ValueInput.js'
@@ -91,15 +91,16 @@ describe('ValueInput', () => {
   // --- Suggestions, and the callers that want none -------------------------
 
   // Three of this component's five callers pass no `suggest`, and must be
-  // untouched by the one that does. `list` is what turns an input into a
-  // combobox to the accessibility tree, so an unconditional datalist would
-  // silently re-label every value box in the builder as a field that offers
-  // choices it does not have.
-  it('stays a plain text box, with no list, when no suggestions are offered', () => {
+  // untouched by the one that does. A box that offers no choices must not
+  // describe itself as one that does -- an unconditional combobox would
+  // silently re-label every value field in the builder, and focusing one
+  // would open a popup with nothing in it.
+  it('stays a plain text box when no suggestions are offered', async () => {
     render(<ValueInput operator="=" value="a" onChange={vi.fn()} />)
     const box = screen.getByRole('textbox', { name: 'Value' })
-    expect(box).not.toHaveAttribute('list')
-    expect(document.querySelector('datalist')).toBeNull()
+    expect(screen.queryByRole('combobox')).toBeNull()
+    await userEvent.click(box)
+    expect(screen.queryByRole('listbox')).toBeNull()
   })
 
   it('reports focus and every keystroke to the caller that offers suggestions', async () => {
@@ -132,22 +133,51 @@ describe('ValueInput', () => {
         operator="between"
         value={['a', 'b']}
         onChange={vi.fn()}
-        suggest={{ options: ['free'], onInteract }}
+        suggest={{ options: ['free', 'pro', 'enterprise'], onInteract }}
       />,
     )
     const first = screen.getByRole('combobox', { name: 'Value 1' })
     const second = screen.getByRole('combobox', { name: 'Value 2' })
-    const list = document.querySelector('datalist')?.id
-    expect(list).toBeTruthy()
-    expect(first).toHaveAttribute('list', list)
-    expect(second).toHaveAttribute('list', list)
 
+    // Only the focused box has a popup open, so "the same list" is checked
+    // one box at a time. Three options, not one: a single-option fixture
+    // could not tell "the same list" from "any list at all".
+    await userEvent.click(second)
+    expect(
+      within(screen.getByRole('listbox'))
+        .queryAllByRole('option')
+        .map((o) => o.textContent),
+    ).toEqual(['free', 'pro', 'enterprise'])
     // Each box reports ITS OWN text. A shared list does not mean a shared
     // prefix: seeding the upper bound's lookup with the lower bound's text
     // would filter against something nobody is editing.
-    await userEvent.click(second)
     expect(onInteract).toHaveBeenLastCalledWith('b')
+
     await userEvent.click(first)
+    expect(
+      within(screen.getByRole('listbox'))
+        .queryAllByRole('option')
+        .map((o) => o.textContent),
+    ).toEqual(['free', 'pro', 'enterprise'])
     expect(onInteract).toHaveBeenLastCalledWith('a')
+  })
+
+  it('chooses into the bound that was clicked, leaving the other one alone', async () => {
+    // The `between` pair is where a shared list is most likely to write to
+    // the wrong slot: both boxes render from one options array, so a
+    // selection handler that closed over the wrong bound would still show
+    // the right names.
+    const onChange = vi.fn()
+    render(
+      <ValueInput
+        operator="between"
+        value={['a', 'b']}
+        onChange={onChange}
+        suggest={{ options: ['free', 'pro', 'enterprise'], onInteract: vi.fn() }}
+      />,
+    )
+    await userEvent.click(screen.getByRole('combobox', { name: 'Value 2' }))
+    await userEvent.click(screen.getByRole('option', { name: 'enterprise' }))
+    expect(onChange).toHaveBeenLastCalledWith(['a', 'enterprise'])
   })
 })
