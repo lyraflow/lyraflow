@@ -190,7 +190,7 @@ describe('TreeEditor', () => {
       const condition = within(screen.getByTestId('condition-0'))
       expect(condition.getByRole('combobox', { name: /^trait$/i })).toHaveValue('z')
       expect(condition.getByRole('combobox', { name: /operator/i })).toHaveValue('=')
-      expect(condition.getByRole('textbox', { name: /^value$/i })).toHaveValue('x')
+      expect(condition.getByRole('combobox', { name: /^value$/i })).toHaveValue('x')
     })
 
     it('edits inside a normalised root reach the server root wrapped, not bare', async () => {

@@ -87,4 +87,67 @@ describe('ValueInput', () => {
     render(<ValueInput operator="=" value={null} onChange={vi.fn()} />)
     expect(screen.getByRole('textbox')).toHaveValue('')
   })
+
+  // --- Suggestions, and the callers that want none -------------------------
+
+  // Three of this component's five callers pass no `suggest`, and must be
+  // untouched by the one that does. `list` is what turns an input into a
+  // combobox to the accessibility tree, so an unconditional datalist would
+  // silently re-label every value box in the builder as a field that offers
+  // choices it does not have.
+  it('stays a plain text box, with no list, when no suggestions are offered', () => {
+    render(<ValueInput operator="=" value="a" onChange={vi.fn()} />)
+    const box = screen.getByRole('textbox', { name: 'Value' })
+    expect(box).not.toHaveAttribute('list')
+    expect(document.querySelector('datalist')).toBeNull()
+  })
+
+  it('reports focus and every keystroke to the caller that offers suggestions', async () => {
+    // Both, not just typing: focusing an empty box is the interaction that
+    // has to produce a list, since there is nothing yet to type a prefix
+    // from. `onChange` still fires as before -- suggestions are additive.
+    const onInteract = vi.fn()
+    const onChange = vi.fn()
+    render(
+      <ValueInput
+        operator="="
+        value=""
+        onChange={onChange}
+        suggest={{ options: ['free', 'pro'], onInteract }}
+      />,
+    )
+    const box = screen.getByRole('combobox', { name: 'Value' })
+    await userEvent.click(box)
+    expect(onInteract).toHaveBeenCalledWith('')
+
+    await userEvent.type(box, 'p')
+    expect(onInteract).toHaveBeenLastCalledWith('p')
+    expect(onChange).toHaveBeenLastCalledWith('p')
+  })
+
+  it('gives both between bounds the same list, each reporting its own text', async () => {
+    const onInteract = vi.fn()
+    render(
+      <ValueInput
+        operator="between"
+        value={['a', 'b']}
+        onChange={vi.fn()}
+        suggest={{ options: ['free'], onInteract }}
+      />,
+    )
+    const first = screen.getByRole('combobox', { name: 'Value 1' })
+    const second = screen.getByRole('combobox', { name: 'Value 2' })
+    const list = document.querySelector('datalist')?.id
+    expect(list).toBeTruthy()
+    expect(first).toHaveAttribute('list', list)
+    expect(second).toHaveAttribute('list', list)
+
+    // Each box reports ITS OWN text. A shared list does not mean a shared
+    // prefix: seeding the upper bound's lookup with the lower bound's text
+    // would filter against something nobody is editing.
+    await userEvent.click(second)
+    expect(onInteract).toHaveBeenLastCalledWith('b')
+    await userEvent.click(first)
+    expect(onInteract).toHaveBeenLastCalledWith('a')
+  })
 })

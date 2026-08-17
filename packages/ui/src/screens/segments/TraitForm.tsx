@@ -2,8 +2,8 @@ import type { Trait } from '@lyraflow/core/segments/ast.js'
 import type { ApiClient } from '../../api/client.js'
 import { OperatorSelect } from './OperatorSelect.js'
 import { PropertyCombobox } from './PropertyCombobox.js'
+import { TraitValueField } from './TraitValueField.js'
 import type { ConditionValue } from './ValueInput.js'
-import { ValueInput } from './ValueInput.js'
 
 /** The event name the ingest path assigns to an identify payload, whose
  * property bag IS the traits bag (`eventName`/`toEventRow`,
@@ -26,6 +26,15 @@ const IDENTIFY_EVENT = '$identify'
  * shipped as a bare text box labelled "Key", which asks the operator to
  * guess both what the field means and what the project actually records.
  * Suggestions come from the schema; the field still accepts anything.
+ *
+ * The VALUE is suggested too, through `TraitValueField`, and on deliberately
+ * different terms: knowing that a project records `plan` is useless if the
+ * operator then has to guess between `pro`, `Pro` and `tier_2`, and a wrong
+ * guess produces a segment that is silently empty rather than an error. But
+ * those suggestions come from a scan of the trait table rather than a
+ * catalogue, so they are fetched only when the operator touches the value
+ * box -- never on render, unlike the name field directly above it. That
+ * asymmetry is the cost of the two reads, not an inconsistency.
  *
  * `suggestOnEmpty` is on here and off for `where` predicates on purpose: a
  * project's trait namespace is small and its operator's problem is not
@@ -69,10 +78,14 @@ export function TraitForm(props: {
         value={node.operator}
         onChange={(operator) => onChange({ ...node, operator })}
       />
-      <ValueInput
+      <TraitValueField
+        client={client}
+        projectId={projectId}
+        trait={node.key}
         operator={node.operator}
         value={node.value as ConditionValue}
         onChange={(value) => onChange({ ...node, value } as Trait)}
+        onUnauthorized={onUnauthorized}
       />
     </div>
   )

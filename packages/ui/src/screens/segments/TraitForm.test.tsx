@@ -8,10 +8,20 @@ import { TraitForm } from './TraitForm.js'
 
 const traitNode = (): Trait => ({ kind: 'trait', key: 'plan', operator: '>=', value: '3' })
 
-/** Same shape `WherePredicates.test.tsx` uses: only the one method this
- * form's combobox reaches, cast rather than stubbed whole. */
-function fakeClient(properties: string[] = []): ApiClient {
-  return { schemaProperties: vi.fn(async () => properties) } as unknown as ApiClient
+/** Same shape `WherePredicates.test.tsx` uses: only the methods this form
+ * reaches, cast rather than stubbed whole. Both fields suggest now -- the
+ * name from the schema catalogue, the value from the trait table -- so both
+ * lookups have to exist even in the tests that never touch the value box.
+ *
+ * Note the queries below: the value field is a `combobox`, not a `textbox`,
+ * for the same reason the trait field is. An `<input list=...>` IS a
+ * combobox to the accessibility tree, and that is the honest description of
+ * a field that now offers a list. */
+function fakeClient(properties: string[] = [], values: string[] = []): ApiClient {
+  return {
+    schemaProperties: vi.fn(async () => properties),
+    schemaTraitValues: vi.fn(async () => values),
+  } as unknown as ApiClient
 }
 
 /** `TraitForm` is fully controlled -- it never holds its own state, so a
@@ -42,7 +52,7 @@ describe('TraitForm', () => {
     )
     expect(screen.getByRole('combobox', { name: /^trait$/i })).toHaveValue('plan')
     expect(screen.getByRole('combobox', { name: /operator/i })).toHaveValue('>=')
-    expect(screen.getByRole('textbox', { name: /^value$/i })).toHaveValue('3')
+    expect(screen.getByRole('combobox', { name: /^value$/i })).toHaveValue('3')
   })
 
   it('editing the trait updates only key, leaving operator and value untouched', async () => {
@@ -61,7 +71,7 @@ describe('TraitForm', () => {
     await userEvent.type(key, 'plan_id')
     expect(key).toHaveValue('plan_id')
     expect(screen.getByRole('combobox', { name: /operator/i })).toHaveValue('>=')
-    expect(screen.getByRole('textbox', { name: /^value$/i })).toHaveValue('3')
+    expect(screen.getByRole('combobox', { name: /^value$/i })).toHaveValue('3')
   })
 
   it('changing the operator updates only operator, leaving key and value untouched', async () => {
@@ -81,7 +91,7 @@ describe('TraitForm', () => {
 
   it('editing the value through ValueInput updates only value', async () => {
     render(<Harness />)
-    const value = screen.getByRole('textbox', { name: /^value$/i })
+    const value = screen.getByRole('combobox', { name: /^value$/i })
     await userEvent.clear(value)
     await userEvent.type(value, '9')
     expect(value).toHaveValue('9')
@@ -114,8 +124,8 @@ describe('TraitForm', () => {
     // disagreeing.
     render(<Harness />)
     await userEvent.selectOptions(screen.getByRole('combobox', { name: /operator/i }), 'between')
-    expect(screen.getByRole('textbox', { name: 'Value 1' })).toHaveValue('3')
-    expect(screen.getByRole('textbox', { name: 'Value 2' })).toHaveValue('')
+    expect(screen.getByRole('combobox', { name: 'Value 1' })).toHaveValue('3')
+    expect(screen.getByRole('combobox', { name: 'Value 2' })).toHaveValue('')
   })
 })
 
@@ -218,5 +228,74 @@ describe('TraitForm -- knowing what to type', () => {
       />,
     )
     expect(screen.getByText(/identify\(\)/i)).toBeInTheDocument()
+  })
+})
+
+describe('TraitForm -- knowing what to type in the value box', () => {
+  // THE wiring test, and the one place the two fields are checked against
+  // each other. `TraitValueField`'s own suite proves it asks for whatever
+  // trait it is handed; this proves the form hands it the trait the operator
+  // actually chose. A form that passed a constant, the operator, or the
+  // previous key would satisfy every test in that suite and still suggest
+  // the wrong project's vocabulary here -- which is why the trait name below
+  // is nothing like anything else on the form.
+  it('asks for the values of the trait named in this row', async () => {
+    const client = fakeClient([], ['ios', 'web'])
+    render(
+      <TraitForm
+        id="c"
+        node={{ kind: 'trait', key: 'signup_source', operator: '=', value: '' }}
+        onChange={vi.fn()}
+        client={client}
+        projectId={7}
+      />,
+    )
+    await userEvent.click(screen.getByRole('combobox', { name: /^value$/i }))
+    await waitFor(() =>
+      expect(client.schemaTraitValues).toHaveBeenCalledWith(7, 'signup_source', ''),
+    )
+  })
+
+  // The asymmetry, asserted as one fact rather than two: the name field
+  // reads a catalogue and may fetch before anything is typed; the value
+  // field scans a fact table and may not. Both are on this form, so a change
+  // that made them behave alike -- in either direction -- fails here.
+  it('suggests names before a keystroke and values only on demand', async () => {
+    const client = fakeClient(['plan'], ['pro'])
+    render(<TraitForm id="c" node={traitNode()} onChange={vi.fn()} client={client} projectId={7} />)
+    await waitFor(() => expect(client.schemaProperties).toHaveBeenCalled())
+    // Long enough for the value field's own debounce to have fired, had it
+    // scheduled anything on render.
+    await new Promise((r) => setTimeout(r, 400))
+    expect(client.schemaTraitValues).not.toHaveBeenCalled()
+
+    await userEvent.click(screen.getByRole('combobox', { name: /^value$/i }))
+    await waitFor(() => expect(client.schemaTraitValues).toHaveBeenCalled())
+  })
+
+  it('offers the values that came back, and still accepts one that did not', async () => {
+    render(
+      <TraitForm
+        id="c"
+        node={traitNode()}
+        onChange={vi.fn()}
+        client={fakeClient([], ['free', 'pro'])}
+        projectId={7}
+      />,
+    )
+    const box = screen.getByRole('combobox', { name: /^value$/i })
+    await userEvent.click(box)
+    await waitFor(() =>
+      expect(
+        Array.from(document.querySelectorAll('datalist option')).map((o) =>
+          o.getAttribute('value'),
+        ),
+      ).toContain('pro'),
+    )
+    // The suggestions are not a whitelist -- see TraitValueField's own test.
+    // Asserted through the real form too, because this is the rule most
+    // likely to be lost when someone later reaches for a `<select>`.
+    expect(box).not.toBeDisabled()
+    expect(box).toHaveAttribute('list')
   })
 })

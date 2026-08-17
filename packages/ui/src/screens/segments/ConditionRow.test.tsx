@@ -248,7 +248,7 @@ describe('ConditionRow', () => {
     expect(within(row).getByRole('button', { name: /negate/i })).not.toBe(badge)
     // Additive, not a replacement: the trait's own fields still render.
     expect(within(row).getByRole('combobox', { name: /^trait$/i })).toHaveValue('status')
-    expect(within(row).getByRole('textbox', { name: /^value$/i })).toHaveValue('churned')
+    expect(within(row).getByRole('combobox', { name: /^value$/i })).toHaveValue('churned')
   })
 
   it('renders no "Not" badge on the same leaf un-negated', () => {

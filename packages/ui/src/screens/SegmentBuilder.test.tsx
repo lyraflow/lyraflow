@@ -446,7 +446,7 @@ describe('SegmentBuilder -- edit', () => {
     const condition = within(screen.getByTestId('condition-0'))
     expect(condition.getByRole('combobox', { name: /^trait$/i })).toHaveValue('plan')
     expect(condition.getByRole('combobox', { name: /operator/i })).toHaveValue('=')
-    expect(condition.getByRole('textbox', { name: /^value$/i })).toHaveValue('pro')
+    expect(condition.getByRole('combobox', { name: /^value$/i })).toHaveValue('pro')
   })
 
   // An UNCHANGED save sends nothing to the server at all (see
@@ -459,7 +459,7 @@ describe('SegmentBuilder -- edit', () => {
     renderBuilder(client, SEGMENT.id)
     await screen.findByLabelText(/name/i)
     await userEvent.type(
-      within(screen.getByTestId('condition-0')).getByRole('textbox', { name: /^value$/i }),
+      within(screen.getByTestId('condition-0')).getByRole('combobox', { name: /^value$/i }),
       'X',
     )
     await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
@@ -772,6 +772,12 @@ describe('SegmentBuilder -- the three server-side tree caps', () => {
     }
   }
 
+  // 30s, not 15s. These two fixtures render MAX_TREE_NODES - 1 REAL trait
+  // forms, and each of those now carries a value field alongside its name
+  // field. Measured on one machine: 12.4s before that field existed, 12.7s
+  // after -- a 2% difference against a budget that was already 83% spent, so
+  // the same run under a loaded full-suite pass tipped over at 14.8s. The
+  // margin is what was wrong, not the 2%.
   it('disables add-condition at the node cap, says which cap, and never requests a preview or a save', async () => {
     const client = fakeClient({
       segment: vi.fn(async () => ({
@@ -790,7 +796,7 @@ describe('SegmentBuilder -- the three server-side tree caps', () => {
     expect(client.previewSegment).not.toHaveBeenCalled()
     expect(client.createSegment).not.toHaveBeenCalled()
     expect(client.updateSegmentTree).not.toHaveBeenCalled()
-  }, 15000)
+  }, 30000)
 
   it('disables add-condition at the depth cap, and says which cap', async () => {
     // A chain of MAX_TREE_DEPTH - 1 nested single-child groups, bottoming
@@ -850,7 +856,7 @@ describe('SegmentBuilder -- the three server-side tree caps', () => {
     renderBuilder(client, SEGMENT.id)
     const add = await screen.findByRole('button', { name: /^add condition$/i })
     expect(add).toBeEnabled()
-  }, 15000)
+  }, 30000)
 })
 
 // --- Live counts -- cheap automatically, costly on request. Fake
