@@ -28,9 +28,22 @@ const SERVER_KEY_A = 'sk_schema_routes_a'
 const WRITE_KEY_B = 'wk_schema_routes_b'
 const SERVER_KEY_B = 'sk_schema_routes_b'
 
+// A THIRD project, and it exists for one reason: the trait-value fixture is
+// carried by `$identify` events, whose property bag lands in `event_schema`
+// like any other event's. Hanging it on project A would add `plan`,
+// `country` and `seats` to the exact property-key sets two tests above
+// assert, breaking them for a reason that has nothing to do with what they
+// check. Project B, by contrast, already records a `plan` property and is
+// only ever asserted against with `toContain`/`not.toContain`, so it can
+// carry the contending tenant's trait without disturbing anything.
+const SLUG_C = 'schema-routes-test-c'
+const WRITE_KEY_C = 'wk_schema_routes_c'
+const SERVER_KEY_C = 'sk_schema_routes_c'
+
 let app: FastifyInstance
 let projectA: number
 let projectB: number
+let projectC: number
 
 const get = (url: string, key = SERVER_KEY_A) =>
   app.inject({ method: 'GET', url, headers: { 'x-lyraflow-server-key': key } })
@@ -62,8 +75,25 @@ async function schemaHasEvent(projectId: number, eventName: string): Promise<boo
 }
 
 /**
- * Cleans BOTH ClickHouse tables this file writes — `events` and
- * `event_schema` — for its own two projects, looked up by slug rather than
+ * Reads `person_traits` straight back for one (project, trait) pair, the
+ * same way `schemaHasEvent` does for `event_schema` — the identify fixture
+ * below reaches the table through its own materialised views, and that
+ * timing is worth checking rather than assuming.
+ */
+async function traitsHaveKey(projectId: number, traitKey: string): Promise<boolean> {
+  const rs = await ch.query({
+    query: `SELECT count() AS c FROM person_traits
+             WHERE project_id = {projectId:UInt32} AND trait_key = {traitKey:String}`,
+    query_params: { projectId, traitKey },
+    format: 'JSONEachRow',
+  })
+  const [row] = await rs.json<{ c: string }>()
+  return Number(row?.c ?? 0) > 0
+}
+
+/**
+ * Cleans the THREE ClickHouse tables this file writes — `events`,
+ * `event_schema` and `person_traits` — for its own three projects, looked up by slug rather than
  * trusting `projectA`/`projectB` (unset, or stale from a previous run in the
  * same process, the first time this runs at the top of `beforeAll`). Run at
  * the TOP of `beforeAll`, not only in `afterAll`, per the branch's
@@ -89,7 +119,7 @@ async function schemaHasEvent(projectId: number, eventName: string): Promise<boo
  */
 async function cleanup(): Promise<void> {
   const existing = await pg.query<{ id: string }>('SELECT id FROM projects WHERE slug = ANY($1)', [
-    [SLUG_A, SLUG_B],
+    [SLUG_A, SLUG_B, SLUG_C],
   ])
   const ids = existing.rows.map((r) => Number(r.id))
   if (ids.length > 0) {
@@ -97,8 +127,11 @@ async function cleanup(): Promise<void> {
     await ch.command({
       query: `ALTER TABLE event_schema DELETE WHERE project_id IN (${ids.join(',')})`,
     })
+    await ch.command({
+      query: `ALTER TABLE person_traits DELETE WHERE project_id IN (${ids.join(',')})`,
+    })
   }
-  await pg.query('DELETE FROM projects WHERE slug = ANY($1)', [[SLUG_A, SLUG_B]])
+  await pg.query('DELETE FROM projects WHERE slug = ANY($1)', [[SLUG_A, SLUG_B, SLUG_C]])
 }
 
 beforeAll(async () => {
@@ -112,6 +145,7 @@ beforeAll(async () => {
 
   projectA = await makeProject(SLUG_A, 'SchemaRoutesA', WRITE_KEY_A, SERVER_KEY_A)
   projectB = await makeProject(SLUG_B, 'SchemaRoutesB', WRITE_KEY_B, SERVER_KEY_B)
+  projectC = await makeProject(SLUG_C, 'SchemaRoutesC', WRITE_KEY_C, SERVER_KEY_C)
 
   // All rows in one insert: event_schema is fed by event_schema_str_mv /
   // event_schema_num_mv (002_events.sql), materialised views attached
@@ -174,6 +208,102 @@ beforeAll(async () => {
       },
     ],
   })
+
+  // The trait-value fixture. Separate insert from the one above only for
+  // readability — `person_traits` is fed by 004_person_traits.sql's two
+  // materialised views, attached to `events` exactly like the event_schema
+  // ones, so the same synchronous-view guarantee applies and the
+  // traitsHaveKey() checks below verify it landed.
+  //
+  // Every value here is chosen to make a specific wrong implementation
+  // visible rather than to be realistic:
+  //  - `plan` is 'pro' for TWO distinct identities, so a query that forgets
+  //    DISTINCT returns it twice;
+  //  - `country` is a second trait on the same project, so a query that
+  //    forgets the trait_key filter mixes 'DE' into plan's values;
+  //  - `seats` is numeric, so a query that forgets `has_num = 0` returns the
+  //    empty-string default a numeric trait's value_str carries;
+  //  - project B's `plan` is 'enterprise' — a value project C never records
+  //    and, sorting first, one an unscoped query could not hide.
+  await ch.insert({
+    table: 'events',
+    format: 'JSONEachRow',
+    values: [
+      {
+        project_id: projectC,
+        event_id: '78000000-0000-4000-8000-000000000011',
+        anonymous_id: 'c1',
+        user_id: 'cu1',
+        event_name: '$identify',
+        timestamp: '2026-08-01 00:00:00.000',
+        received_at: '2026-08-01 00:00:00.000',
+        trusted: 1,
+        properties: { plan: 'pro', country: 'DE' },
+        properties_num: {},
+      },
+      {
+        project_id: projectC,
+        event_id: '78000000-0000-4000-8000-000000000012',
+        anonymous_id: 'c2',
+        user_id: 'cu2',
+        event_name: '$identify',
+        timestamp: '2026-08-01 00:00:00.000',
+        received_at: '2026-08-01 00:00:00.000',
+        trusted: 1,
+        properties: { plan: 'free' },
+        properties_num: {},
+      },
+      {
+        project_id: projectC,
+        event_id: '78000000-0000-4000-8000-000000000013',
+        anonymous_id: 'c3',
+        user_id: 'cu3',
+        event_name: '$identify',
+        timestamp: '2026-08-01 00:00:00.000',
+        received_at: '2026-08-01 00:00:00.000',
+        trusted: 1,
+        properties: { plan: 'pro' },
+        properties_num: {},
+      },
+      {
+        project_id: projectC,
+        event_id: '78000000-0000-4000-8000-000000000014',
+        anonymous_id: 'c4',
+        user_id: 'cu4',
+        event_name: '$identify',
+        timestamp: '2026-08-01 00:00:00.000',
+        received_at: '2026-08-01 00:00:00.000',
+        trusted: 1,
+        properties: {},
+        properties_num: { seats: 5 },
+      },
+      {
+        project_id: projectB,
+        event_id: '78000000-0000-4000-8000-000000000015',
+        anonymous_id: 'b1',
+        user_id: 'bu1',
+        event_name: '$identify',
+        timestamp: '2026-08-01 00:00:00.000',
+        received_at: '2026-08-01 00:00:00.000',
+        trusted: 1,
+        properties: { plan: 'enterprise' },
+        properties_num: {},
+      },
+    ],
+  })
+
+  for (const [project, key] of [
+    [projectC, 'plan'],
+    [projectC, 'country'],
+    [projectC, 'seats'],
+    [projectB, 'plan'],
+  ] as const) {
+    if (!(await traitsHaveKey(project, key))) {
+      throw new Error(
+        `person_traits has no row for trait '${key}' immediately after insert — the materialised views are not synchronous in this environment; see the comment above this insert.`,
+      )
+    }
+  }
 
   if (!(await schemaHasEvent(projectA, 'import_started'))) {
     throw new Error(
@@ -342,5 +472,93 @@ describe('schema reads', () => {
 
     const unmatched = await get('/v1/schema/properties?q=zzzz')
     expect(unmatched.json().properties).toEqual([])
+  })
+})
+
+describe('trait value suggestions', () => {
+  const values = (res: { json: () => { values: { value: string }[] } }) =>
+    res.json().values.map((v) => v.value)
+
+  // The endpoint's reason to exist: 'pro' is recorded by two of project C's
+  // three string-trait identities, and an operator wants to see it once, not
+  // twice. Exact equality rather than toContain, so a missing DISTINCT is a
+  // failure rather than an unnoticed duplicate.
+  it('lists the distinct values one trait holds', async () => {
+    const res = await get('/v1/schema/trait-values?trait=plan', SERVER_KEY_C)
+    expect(res.statusCode).toBe(200)
+    expect(values(res)).toEqual(['free', 'pro'])
+  })
+
+  // THE test for the trait_key filter, and the one a fixture with a single
+  // trait could not have written. Asking for `country` must answer with
+  // country's values alone: drop the filter and plan's 'free'/'pro' come
+  // back under it, which is precisely the failure mode that makes a value
+  // picker worse than no picker at all.
+  it('answers with the requested trait, not every trait in the project', async () => {
+    const res = await get('/v1/schema/trait-values?trait=country', SERVER_KEY_C)
+    expect(values(res)).toEqual(['DE'])
+  })
+
+  // THE test for project scoping. Project B records `plan` too, with a value
+  // project C has never used — and 'enterprise' sorts ahead of both of C's,
+  // so an unscoped query cannot hide it behind the LIMIT either. What leaks
+  // if this fails is a list of another tenant's customer tiers.
+  it("does not leak another project's trait values", async () => {
+    const res = await get('/v1/schema/trait-values?trait=plan', SERVER_KEY_C)
+    expect(values(res)).not.toContain('enterprise')
+  })
+
+  // THE test for `has_num = 0`. `seats` is numeric, so every one of its rows
+  // carries the empty-string default documented in 004_person_traits.sql.
+  // Without the guard this answers `['']` — a picker offering one blank
+  // option — rather than nothing at all.
+  it('offers nothing for a numeric trait, whose string value is a default', async () => {
+    const res = await get('/v1/schema/trait-values?trait=seats', SERVER_KEY_C)
+    expect(values(res)).toEqual([])
+  })
+
+  // THE test for the `q` prefix filter. 'p' narrows plan's two values to
+  // 'pro' alone, and a prefix matching nothing must answer empty rather than
+  // falling through to the unfiltered list — the same pair the two routes
+  // above are pinned with.
+  it('filters values by prefix', async () => {
+    expect(values(await get('/v1/schema/trait-values?trait=plan&q=p', SERVER_KEY_C))).toEqual([
+      'pro',
+    ])
+    expect(values(await get('/v1/schema/trait-values?trait=plan&q=zzzz', SERVER_KEY_C))).toEqual([])
+  })
+
+  // Without a trait there is nothing to suggest the values OF, and the query
+  // would degrade into a scan of the project's whole trait partition
+  // returning a meaningless mixture. Refused rather than answered.
+  it('refuses a request that names no trait', async () => {
+    expect((await get('/v1/schema/trait-values', SERVER_KEY_C)).statusCode).toBe(400)
+    expect((await get('/v1/schema/trait-values?trait=', SERVER_KEY_C)).statusCode).toBe(400)
+  })
+
+  // THE test for the LIMIT clause itself, as distinct from the cap on what
+  // may be asked for below. It cannot bound what this query READS — that is
+  // the partition scan the route's own comment describes — but it does bound
+  // what comes back, and a route that ignored `limit` entirely would answer
+  // both of project C's plan values here.
+  it('returns no more values than the caller asked for', async () => {
+    const res = await get('/v1/schema/trait-values?trait=plan&limit=1', SERVER_KEY_C)
+    expect(values(res)).toEqual(['free'])
+  })
+
+  // Same bound, and the same 400-rather-than-clamp behaviour, as the events
+  // route — see the long comment on its own version of this test.
+  it('rejects a limit above the cap', async () => {
+    const res = await get('/v1/schema/trait-values?trait=plan&limit=99999', SERVER_KEY_C)
+    expect(res.statusCode).toBe(400)
+  })
+
+  // A genuine key, wrong header — asserting the exact error code for the
+  // same reason the events route's version does: a guard mutated to accept
+  // write keys would still 401 here, just with `missing_server_key`.
+  it('requires the server key', async () => {
+    const res = await get('/v1/schema/trait-values?trait=plan', WRITE_KEY_C)
+    expect(res.statusCode).toBe(401)
+    expect(res.json().error).toBe('invalid_server_key')
   })
 })

@@ -1,3 +1,29 @@
+import type { FunnelStep } from '@lyraflow/core/funnels/ast.js'
+
+/**
+ * `WherePredicate` and `FunnelStep` are RE-EXPORTED from core, never
+ * declared again here.
+ *
+ * A hand-written copy of `WherePredicate` used to spell the operator field
+ * `op`, while core -- and therefore the wire, and therefore every stored
+ * funnel -- spells it `operator`. Nothing failed loudly: the field simply
+ * read `undefined`, so a step's predicate rendered with a blank operator.
+ * The compiler could not catch it, because the copy was internally
+ * consistent; only the two declarations disagreed. The fix that cannot come
+ * back is to stop having a second declaration at all.
+ *
+ * Both are TYPE-ONLY re-exports, erased at build time, so nothing about the
+ * browser bundle changes -- the constraint `build-output.test.ts` guards
+ * (core must stay free of node-only imports and import-time side effects)
+ * applies to the runtime imports elsewhere in this package, not to these.
+ *
+ * `value` is core's scalar union (or a two-element tuple for `between`)
+ * rather than `unknown`, so a control bound to it gets a compile error
+ * instead of a cast.
+ */
+export type { WherePredicate } from '@lyraflow/core/segments/ast.js'
+export type { FunnelStep }
+
 /** `GET /v1/project` -- the identity fields the settings screen needs to build an install snippet. */
 export interface ProjectIdentity {
   name: string
@@ -123,18 +149,9 @@ export interface RejectionsQuery {
   reason?: string
 }
 
-/** One predicate on a step's own event properties. Authored only by the CLI --
- * the UI renders these read-only and refuses to re-save a step carrying them. */
-export interface WherePredicate {
-  property: string
-  op: string
-  value: unknown
-}
-
-export interface FunnelStep {
-  event: string
-  where?: WherePredicate[]
-}
+/** One predicate on a step's own event properties, and the step that carries
+ * them -- both re-exported (at the top of this file) from core rather than
+ * declared again here. See that re-export for why. */
 
 /** `GET /v1/funnels` and `GET /v1/funnels/:id`.
  *
@@ -199,10 +216,49 @@ export interface RangeBody {
   until?: string
 }
 
-/** `GET /v1/segments`. Only the fields the picker needs; the route returns more. */
+/** `GET /v1/segments` and `GET /v1/segments/:id`.
+ *
+ * `last_count` and `last_evaluated_at` are a CACHE, not a fact -- written
+ * after an evaluation and never recomputed. A count must always render beside
+ * its timestamp, and `last_evaluated_at === null` means never evaluated, which
+ * is a different fact from a count of zero.
+ *
+ * `stale` is true when the stored tree no longer parses. Always present. */
 export interface Segment {
   id: number
   name: string
-  /** True when the stored tree no longer parses. Such a segment is not selectable. */
+  ast_version: number
+  filter: unknown
   stale: boolean
+  last_count: number | null
+  last_evaluated_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface MemberRow {
+  person_id: string
+  first_seen: string
+  last_seen: string
+  [field: string]: string | number
+}
+
+/** Both preview routes. `members`, `next_cursor` and `window_exhausted` are
+ * present only when members were requested.
+ *
+ * The two endings of a walk are distinguished by these two fields together:
+ * `next_cursor: null` with `window_exhausted: false` means the population is
+ * exhausted; with `true` it means the walk's budget is spent and more exist. */
+export interface SegmentPreview {
+  person_count: number
+  warnings: { path: string; reason: string }[]
+  as_of: string
+  members?: MemberRow[]
+  next_cursor?: string | null
+  window_exhausted?: boolean
+}
+
+export interface PreviewOptions {
+  include?: ['members']
+  cursor?: string
 }

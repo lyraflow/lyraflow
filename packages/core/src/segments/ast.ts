@@ -33,6 +33,49 @@ export const CONTEXT_FIELDS = [
 ] as const
 export type ContextField = (typeof CONTEXT_FIELDS)[number]
 
+/**
+ * Every name that is a COLUMN on the events table rather than a key in one
+ * of its property maps.
+ *
+ * This exists because a `WherePredicate` compiles to `properties[<key>]` or
+ * `properties_num[<key>]` and nothing else (`predicates.ts`'s
+ * `wherePredicate`). A predicate naming one of these is therefore
+ * well-formed, saveable, and reads an empty map slot: the value the operator
+ * meant is a column two SELECTs away, and no error is ever raised. It is the
+ * first thing a new operator writes — "page_view where path is /changelog" —
+ * and the only signal they get is a zero.
+ *
+ * Spread from `CONTEXT_FIELDS` rather than restated, so this can never be a
+ * subset of it: the same list that names a field as available to a `context`
+ * condition names it as unavailable to a `where` predicate, and adding a
+ * context field cannot leave this one behind.
+ *
+ * The extra four are the columns `ingest/payloads.ts` accepts into
+ * `context` that no `context` CONDITION can read back — `path` and `url`
+ * are stored per event and never folded into `device_index`, and the same
+ * is true of the two UTM fields the device index does not keep. They are
+ * exactly as unmatched by a `where` predicate as the ten above, so leaving
+ * them out would have shipped a warning that misses the case that prompted
+ * it. `packages/db`'s own test pins this whole list against the columns
+ * `002_events.sql` actually declares, so a column added there fails a test
+ * rather than quietly falling out of the list.
+ *
+ * NOT a validation rule, and deliberately not wired into any schema. A
+ * property genuinely named `path` is possible — `properties` comes from the
+ * caller's own bag and `path` from `context`, two disjoint sources — so a
+ * predicate on one of these names may legitimately match. This list is what
+ * a UI reads to SAY so at the point the name is typed; refusing the input
+ * would be a guess dressed as a rule.
+ */
+export const EVENT_COLUMN_FIELDS = [
+  ...CONTEXT_FIELDS,
+  'path',
+  'url',
+  'utm_term',
+  'utm_content',
+] as const
+export type EventColumnField = (typeof EVENT_COLUMN_FIELDS)[number]
+
 const scalar = z.union([z.string(), z.number(), z.boolean(), z.null()])
 
 /**
@@ -70,12 +113,21 @@ export const WherePredicate = z
   .and(valueFor(z.enum(COMPARISON_OPERATORS)))
 export type WherePredicate = z.infer<typeof WherePredicate>
 
+/**
+ * How many predicates one event may carry — a behaviour's, or a funnel
+ * step's. Named rather than repeated as a bare `10` at each `where` array:
+ * an editor that disables its own "add" control has to know the same number
+ * the schema rejects on, and two literals a package apart drift into a form
+ * that lets an operator build a step the server then refuses.
+ */
+export const MAX_WHERE_PREDICATES = 10
+
 export const Behavior = z
   .object({
     kind: z.literal('behavior'),
     /** An event name, or '*' for any event. */
     event: z.string().min(1).max(128),
-    where: z.array(WherePredicate).max(10).optional(),
+    where: z.array(WherePredicate).max(MAX_WHERE_PREDICATES).optional(),
     aggregate: z.enum(AGGREGATES),
     property: z.string().min(1).max(128).optional(),
     window: Window,

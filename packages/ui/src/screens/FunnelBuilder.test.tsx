@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
@@ -60,6 +60,7 @@ const RUN: FunnelRunResult = {
 function fakeBuilderClient(over: Record<string, unknown> = {}) {
   return {
     schemaEvents: vi.fn(async () => []),
+    schemaProperties: vi.fn(async () => []),
     segments: vi.fn(async () => []),
     previewFunnel: vi.fn(async () => RUN),
     createFunnel: vi.fn(async () => ({ ...FUNNEL, id: 42 })),
@@ -120,6 +121,57 @@ describe('FunnelBuilder', () => {
     await userEvent.click(screen.getByRole('button', { name: /add step/i }))
     await userEvent.type(screen.getByLabelText('Step 2'), 'signup_completed')
     expect(screen.getByRole('button', { name: /save/i })).toBeEnabled()
+  })
+
+  it('shows the predicates being edited on the preview chart, and drops them once a step is retyped', async () => {
+    // Two ends of one wiring. First: the form's CURRENT steps reach
+    // `StepBars`, so a preview of a narrowed funnel is not a chart of bare
+    // event names. Second: retyping step 1's event makes the definition and
+    // the result disagree at that position, and `StepBars` then shows
+    // nothing there rather than labelling last preview's numbers with this
+    // edit's predicates.
+    const client = fakeBuilderClient()
+    renderBuilder(client)
+    await fillTwoSteps()
+    await userEvent.click(
+      within(screen.getByTestId('step-1-where')).getByRole('button', { name: /add predicate/i }),
+    )
+    await userEvent.type(
+      within(screen.getByTestId('step-1-where-0')).getByLabelText('Property'),
+      'page',
+    )
+    await userEvent.type(
+      within(screen.getByTestId('step-1-where-0')).getByRole('textbox', { name: /^value$/i }),
+      'changelog',
+    )
+    await userEvent.click(
+      within(screen.getByTestId('step-2-where')).getByRole('button', { name: /add predicate/i }),
+    )
+    await userEvent.type(
+      within(screen.getByTestId('step-2-where-0')).getByLabelText('Property'),
+      'plan',
+    )
+    await userEvent.selectOptions(
+      within(screen.getByTestId('step-2-where-0')).getByRole('combobox', { name: /operator/i }),
+      '!=',
+    )
+    await userEvent.type(
+      within(screen.getByTestId('step-2-where-0')).getByRole('textbox', { name: /^value$/i }),
+      'free',
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: /preview/i }))
+    expect(await screen.findByTestId('funnel-step-1-where')).toHaveTextContent(
+      'where page is changelog',
+    )
+    expect(screen.getByTestId('funnel-step-2-where')).toHaveTextContent('where plan is not free')
+
+    await userEvent.clear(screen.getByLabelText('Step 1'))
+    await userEvent.type(screen.getByLabelText('Step 1'), 'landing_view')
+    expect(screen.queryByTestId('funnel-step-1-where')).toBeNull()
+    // The step that still lines up keeps its clause -- the guard is per
+    // position, not a whole-chart switch.
+    expect(screen.getByTestId('funnel-step-2-where')).toHaveTextContent('where plan is not free')
   })
 
   it('previews without saving', async () => {
@@ -448,61 +500,79 @@ describe('FunnelBuilder — threads onUnauthorized to the segment picker and eve
   })
 })
 
-// Task 6: a controller ruling superseding Task 5's own choice. Task 5
-// disabled only the offending step's event field and left Save enabled --
-// that is wrong, because `PATCH /v1/funnels/:id` accepts a bare `steps`
-// array and the server will happily accept one with the `where` predicate
-// missing, answer 200, and now measure a different population than a
-// moment ago with nothing on screen saying so. The whole save control must
-// be disabled instead.
-describe('FunnelBuilder — predicate-carrying funnels cannot be saved here', () => {
-  it('refuses to save a funnel whose steps carry where predicates, and would not drop them', async () => {
-    const funnel = {
-      ...FUNNEL,
-      steps: [
-        { event: 'page_view', where: [{ property: 'path', op: 'eq', value: '/pricing' }] },
-        { event: 'signup_completed' },
-      ],
-    }
-    const client = fakeBuilderClient({ funnel: vi.fn(async () => funnel) })
+// This screen used to REFUSE to save any funnel whose steps carried a
+// `where` predicate: it could represent only a step's event name, so a save
+// would silently drop the predicate array, and `PATCH /v1/funnels/:id`
+// accepts a bare `steps` array -- the server would answer 200 while the
+// funnel began measuring a different population. Predicates are editable
+// here now, so the refusal is gone; what replaces it is the stronger claim
+// that a save carries every predicate on every step, unchanged.
+describe('FunnelBuilder — steps carry their own where predicates through a save', () => {
+  const PREDICATED_STEPS = [
+    { event: 'page_view', where: [{ property: 'path', operator: '=', value: '/changelog' }] },
+    { event: 'signup_completed', where: [{ property: 'plan', operator: '=', value: 'pro' }] },
+  ]
+
+  it('saves a predicate-carrying funnel, patching every predicate through untouched', async () => {
+    const client = fakeBuilderClient({
+      funnel: vi.fn(async () => ({ ...FUNNEL, steps: PREDICATED_STEPS })),
+    })
     renderBuilder(client, FUNNEL.id)
 
     await screen.findByDisplayValue('page_view')
     const save = screen.getByRole('button', { name: /save/i })
-    expect(save).toBeDisabled()
-    expect(screen.getByText(/authored with the CLI/i)).toBeInTheDocument()
-
-    // Click it anyway. A correctly disabled native button no-ops this --
-    // userEvent respects the `disabled` attribute and never fires the
-    // handler -- which is exactly what makes the assertion below a
-    // guarantee about the REQUEST rather than a check on the control's
-    // own state. A mutation that drops the `disabled` attribute (or the
-    // matching guard inside `handleSave`) and lets the click through would
-    // be invisible to `toBeDisabled()` alone if this click were omitted;
-    // with it, `patchFunnel` is the one thing standing between "the button
-    // looked right" and "the predicate actually survived".
+    expect(save).toBeEnabled()
     await userEvent.click(save)
 
-    // The assertion that matters is not that a button is disabled -- it is
-    // that no PATCH could have been sent that loses the `where` array.
-    // Silently dropping a predicate changes what the funnel measures while
-    // returning 200.
-    expect(client.patchFunnel).not.toHaveBeenCalled()
+    await waitFor(() => expect(client.patchFunnel).toHaveBeenCalled())
+    const call = client.patchFunnel.mock.calls[0]
+    if (!call) throw new Error('patchFunnel was not called')
+    const [, , patch] = call
+    // BOTH steps' predicates, not just the first: a save that carried only
+    // step 1's would pass a one-predicated-step fixture.
+    expect(patch.steps).toStrictEqual(PREDICATED_STEPS)
   })
 
-  it('shows the predicate rather than hiding the step', async () => {
+  it('a predicate added here reaches the request, on the step it was added to', async () => {
     const client = fakeBuilderClient({
-      funnel: vi.fn(async () => ({
-        ...FUNNEL,
-        steps: [
-          { event: 'page_view', where: [{ property: 'path', op: 'eq', value: '/pricing' }] },
-          { event: 'signup_completed' },
-        ],
-      })),
+      funnel: vi.fn(async () => ({ ...FUNNEL, steps: PREDICATED_STEPS })),
     })
     renderBuilder(client, FUNNEL.id)
-    expect(await screen.findByText(/path/)).toBeInTheDocument()
-    expect(screen.getByText('/pricing')).toBeInTheDocument()
+    await screen.findByDisplayValue('page_view')
+
+    await userEvent.click(
+      within(screen.getByTestId('step-2-where')).getByRole('button', { name: /add predicate/i }),
+    )
+    const row = within(screen.getByTestId('step-2-where-1'))
+    await userEvent.type(row.getByLabelText('Property'), 'seats')
+    await userEvent.type(row.getByRole('textbox', { name: /^value$/i }), '5')
+
+    await userEvent.click(screen.getByRole('button', { name: /save/i }))
+    await waitFor(() => expect(client.patchFunnel).toHaveBeenCalled())
+    const call = client.patchFunnel.mock.calls[0]
+    if (!call) throw new Error('patchFunnel was not called')
+    const [, , patch] = call
+    expect(patch.steps).toStrictEqual([
+      PREDICATED_STEPS[0],
+      {
+        event: 'signup_completed',
+        where: [
+          { property: 'plan', operator: '=', value: 'pro' },
+          { property: 'seats', operator: '=', value: '5' },
+        ],
+      },
+    ])
+  })
+
+  it('shows each step its own predicates, with the operator the wire carries', async () => {
+    const client = fakeBuilderClient({
+      funnel: vi.fn(async () => ({ ...FUNNEL, steps: PREDICATED_STEPS })),
+    })
+    renderBuilder(client, FUNNEL.id)
+    const row = within(await screen.findByTestId('step-1-where-0'))
+    expect(row.getByLabelText('Property')).toHaveValue('path')
+    expect(row.getByRole('combobox', { name: /operator/i })).toHaveValue('=')
+    expect(row.getByRole('textbox', { name: /^value$/i })).toHaveValue('/changelog')
   })
 })
 

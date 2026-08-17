@@ -191,8 +191,90 @@ humans and is not a stable interface. Full reference:
 Or watch the same feed in a browser: sign in at `http://localhost:3000` — see
 [Web UI](#web-ui).
 
+Nothing to look at yet? [Demo data](#demo-data) fills a project with
+synthetic history so the screens have something to show.
+
 **That is the whole loop** — instrument, send, read. Everything below is
 detail on each part.
+
+## Demo data
+
+An empty project tells you nothing. The segments screen, the funnels screen
+and the feed are all uninformative until there is history to look at, and
+waiting ninety days for your own traffic to accumulate is not a way to
+evaluate anything. So there is a command that fills a project with synthetic
+people and events:
+
+```sh
+docker compose exec lyraflow node packages/cli/dist/index.js \
+  create-project "Demo"
+
+docker compose exec lyraflow node packages/cli/dist/index.js \
+  seed-demo demo
+```
+
+By default that is 400 people and 5,000 events spread over 90 days: a
+signup-to-purchase funnel with realistic drop-off, identify traits
+(`plan`, `country`, `signup_source`, `seats`, `mrr_usd`, `is_trial`), UTM
+campaigns on first touch, purchase amounts, and visitors who browsed
+anonymously before signing up. `last 7 days`, `last 30 days` and `ever`
+give three different answers, which is the point.
+
+```sh
+seed-demo <project> [--persons N] [--events N] [--days N] [--seed N] [--anchor <instant>]
+```
+
+`<project>` is the project's name or slug. `--help` prints the full list with
+its defaults. Nothing it writes could be mistaken for a real person or
+company: identifiers are prefixed `demo-`, names are "Demo Person 0042",
+there are no email addresses, and URLs use the reserved `.invalid` domain.
+
+**It is reproducible.** At a fixed `--seed` every person, trait, property
+value and the whole sequence of events is identical run to run, so you can
+compare a screen before and after a change and know the data did not move
+underneath you. The one thing that does move is the anchor — "now" for the
+generated history — which defaults to the moment you run the command; pass
+`--anchor` to pin it and two runs become byte-for-byte identical.
+
+**It writes to Postgres and ClickHouse directly, not through the ingest
+API,** so it needs `LYRAFLOW_POSTGRES_URL` and the `LYRAFLOW_CLICKHOUSE_*`
+variables (which are already set inside the container), and it needs
+[`migrate`](#upgrading) to have run. That is not a shortcut: every client
+timestamp sent to `/v1/batch` is clamped to within 24 hours of arrival, on
+purpose, because a wrong device clock would otherwise corrupt every
+time-windowed segment (see [Payload fields](#payload-fields)). Backdated
+events posted over HTTP therefore all land inside a single day, and ninety
+days of history is impossible to create that way. The clamp is not relaxed
+and there is no trusted-backdating flag; the seeder simply does not go
+through it.
+
+**It only ever inserts.** There is no reset, no wipe and no `--force`: it
+cannot delete anything, including its own earlier output. Two consequences
+worth knowing before you run it twice:
+
+* Running it again **adds** another cohort. Counts go up; they are not
+  replaced.
+* Re-running at the **same** seed re-mints the same event ids at new
+  instants, so an accidental double-run is findable rather than silent:
+
+  ```sh
+  docker compose exec clickhouse clickhouse-client \
+    --user "$LYRAFLOW_CLICKHOUSE_USER" --password "$LYRAFLOW_CLICKHOUSE_PASSWORD" \
+    --database "$LYRAFLOW_CLICKHOUSE_DB" \
+    --query "SELECT event_id, count() AS n FROM events GROUP BY event_id HAVING n > 1"
+  ```
+
+  A different `--seed` produces a disjoint population with its own
+  identifiers, which is usually what you want for a second helping.
+
+If you want a clean slate, the honest answer is a fresh project: make one
+with `create-project` and seed that instead. To remove seeded data outright,
+use the ordinary [deletion API](#privacy-deletion-and-export) or drop the
+project — this command deliberately owns no destructive path.
+
+**Do not point it at a project holding real traffic.** Nothing will be lost,
+but the synthetic people will be mixed in with your own and every count on
+every screen will include them.
 
 ## Web UI
 

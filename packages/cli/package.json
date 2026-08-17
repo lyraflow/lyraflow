@@ -9,10 +9,10 @@
   "dependencies": {
     "@lyraflow/core": "workspace:*",
     "@lyraflow/db": "workspace:*",
-    "@lyraflow/sdk-browser": "workspace:*"
+    "@lyraflow/sdk-browser": "workspace:*",
+    "@lyraflow/server": "workspace:*"
   },
   "devDependencies": {
-    "@lyraflow/server": "workspace:*",
     "happy-dom": "^15.11.0"
   }
 }

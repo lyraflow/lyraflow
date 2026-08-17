@@ -1,5 +1,6 @@
 import { render, screen, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
+import type { FunnelStep } from '../../api/types.js'
 import { StepBars } from './StepBars.js'
 
 const RESULT = {
@@ -123,5 +124,91 @@ describe('StepBars', () => {
     // only, per the controller correction. Asserting the unrounded float
     // through jsdom's style serialisation is brittle.
     expect(bar).toHaveStyle({ width: '59.63%' })
+  })
+})
+
+describe('StepBars narrowing', () => {
+  // Two narrowed steps with two predicates each and four different
+  // operators. One narrowed step could not tell "this step's predicates"
+  // from "the first step's"; one predicate per step could not tell a comma
+  // join from none; and an all-`=` fixture could not tell a worded operator
+  // from a raw symbol.
+  const DEFINITION: FunnelStep[] = [
+    {
+      event: 'page_view',
+      where: [
+        { property: 'page', operator: '=', value: 'changelog' },
+        { property: 'duration_ms', operator: '>=', value: 30 },
+      ],
+    },
+    {
+      event: 'signup_started',
+      where: [
+        { property: 'plan', operator: '!=', value: 'free' },
+        { property: 'seats', operator: '<=', value: 10 },
+      ],
+    },
+    { event: 'signup_completed' },
+  ]
+
+  it("renders each step's own predicates, in the operator words", () => {
+    const { container } = render(<StepBars result={RESULT} definition={DEFINITION} />)
+    const one = screen.getByTestId('funnel-step-1-where')
+    expect(one).toHaveTextContent('where page is changelog, duration_ms at least 30')
+    const two = screen.getByTestId('funnel-step-2-where')
+    expect(two).toHaveTextContent('where plan is not free, seats at most 10')
+    // Step 1's clause must not have leaked onto step 2, which is exactly
+    // what a component reading `definition[0]` for every row would do.
+    expect(two).not.toHaveTextContent('changelog')
+    expect(one).not.toHaveTextContent('free')
+    for (const raw of ['>=', '!=', '<=']) {
+      expect(container.textContent ?? '').not.toContain(raw)
+    }
+  })
+
+  it('renders no clause for a step that carries none', () => {
+    render(<StepBars result={RESULT} definition={DEFINITION} />)
+    expect(screen.queryByTestId('funnel-step-3-where')).toBeNull()
+  })
+
+  it('keeps a clause inside its own step block, never beside the next step', () => {
+    render(<StepBars result={RESULT} definition={DEFINITION} />)
+    // Structural, not visual: the clause is a descendant of the step it
+    // describes, so nothing between two steps can be read as narrowing
+    // either one.
+    expect(
+      within(screen.getByTestId('funnel-step-2')).getByTestId('funnel-step-2-where'),
+    ).toHaveTextContent('plan is not free')
+    expect(
+      within(screen.getByTestId('funnel-step-1')).queryByTestId('funnel-step-2-where'),
+    ).toBeNull()
+  })
+
+  it('renders no clause at all without a definition -- numbers alone stay a complete rendering', () => {
+    render(<StepBars result={RESULT} />)
+    expect(screen.queryByTestId('funnel-step-1-where')).toBeNull()
+    expect(screen.getByTestId('funnel-step-1')).toHaveTextContent('page_view')
+  })
+
+  it('shows nothing rather than a clause it cannot place, when the events at a position disagree', () => {
+    // The funnel fetch and the run are independent requests, so a result on
+    // screen can predate the definition beside it. A narrowing shown
+    // against the wrong step would have an operator act on a population
+    // never measured, and nothing on screen would say so.
+    const edited: FunnelStep[] = [
+      { event: 'landing_view', where: [{ property: 'page', operator: '=', value: 'changelog' }] },
+      ...DEFINITION.slice(1),
+    ]
+    render(<StepBars result={RESULT} definition={edited} />)
+    expect(screen.queryByTestId('funnel-step-1-where')).toBeNull()
+    // The steps that DO still line up keep their clauses -- the guard is
+    // per position, not a whole-chart switch.
+    expect(screen.getByTestId('funnel-step-2-where')).toHaveTextContent('plan is not free')
+  })
+
+  it('shows nothing for a position the definition does not reach', () => {
+    render(<StepBars result={RESULT} definition={[DEFINITION[0] as FunnelStep]} />)
+    expect(screen.getByTestId('funnel-step-1-where')).toBeInTheDocument()
+    expect(screen.queryByTestId('funnel-step-2-where')).toBeNull()
   })
 })

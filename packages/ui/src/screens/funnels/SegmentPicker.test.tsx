@@ -17,6 +17,17 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
+// The fields this test doesn't care about, so the one typed
+// `deferred<Segment[]>()` resolution doesn't have to restate them.
+const SEGMENT_DEFAULTS = {
+  ast_version: 1,
+  filter: null,
+  last_count: null,
+  last_evaluated_at: null,
+  created_at: '2026-01-01T00:00:00.000Z',
+  updated_at: '2026-01-01T00:00:00.000Z',
+}
+
 describe('SegmentPicker', () => {
   it('disables a stale segment and says why', async () => {
     const segments = vi.fn(async () => [
@@ -161,7 +172,7 @@ describe('SegmentPicker -- invented mutations', () => {
 
     // Resolving with a list that genuinely lacks id 4 -- NOW it may read
     // unresolvable.
-    pending.resolve([{ id: 1, name: 'Paying', stale: false }])
+    pending.resolve([{ ...SEGMENT_DEFAULTS, id: 1, name: 'Paying', stale: false }])
     await waitFor(() => expect(select).toHaveValue('missing'))
   })
 

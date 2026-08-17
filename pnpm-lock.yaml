@@ -38,10 +38,10 @@ importers:
       '@lyraflow/sdk-browser':
         specifier: workspace:*
         version: link:../sdk-browser
-    devDependencies:
       '@lyraflow/server':
         specifier: workspace:*
         version: link:../server
+    devDependencies:
       happy-dom:
         specifier: ^15.11.0
         version: 15.11.7

@@ -4,6 +4,9 @@ import { Feed } from '../screens/Feed.js'
 import { FunnelBuilder } from '../screens/FunnelBuilder.js'
 import { FunnelDetail } from '../screens/FunnelDetail.js'
 import { Funnels } from '../screens/Funnels.js'
+import { SegmentBuilder } from '../screens/SegmentBuilder.js'
+import { SegmentDetail } from '../screens/SegmentDetail.js'
+import { Segments } from '../screens/Segments.js'
 import { Settings } from '../screens/Settings.js'
 import { Shell } from './Shell.js'
 
@@ -21,12 +24,16 @@ export const ROUTES = {
   settings: '/settings',
   funnels: '/funnels',
   funnelNew: '/funnels/new',
+  segments: '/segments',
+  segmentNew: '/segments/new',
 } as const
 
 /** Path builders for the parameterised routes. Numeric ids only, so no final
  * segment can ever acquire a dot. */
 export const funnelPath = (id: number) => `/funnels/${id}`
 export const funnelEditPath = (id: number) => `/funnels/${id}/edit`
+export const segmentPath = (id: number) => `/segments/${id}`
+export const segmentEditPath = (id: number) => `/segments/${id}/edit`
 
 /**
  * Wraps `Shell` in a `BrowserRouter` so the nav's links are real
@@ -56,6 +63,33 @@ export function AppRouter(props: {
   const funnelNew = <FunnelBuilder client={props.client} onUnauthorized={props.onUnauthorized} />
   const funnelDetail = <FunnelDetail client={props.client} onUnauthorized={props.onUnauthorized} />
   const funnelEdit = <FunnelBuilder client={props.client} onUnauthorized={props.onUnauthorized} />
+  const segments = <Segments client={props.client} onUnauthorized={props.onUnauthorized} />
+  // `<Routes>` renders the matched route's element as a SINGLE child, which
+  // React reconciles by type and key -- with no key, navigating from
+  // `/segments/:id/edit` to `/segments/new` keeps the same `SegmentBuilder`
+  // instance and all of its state. Distinct keys make that navigation a
+  // remount.
+  //
+  // DEFENCE IN DEPTH, deliberately not the fix. `SegmentBuilder`'s own load
+  // effect resets every piece of its state at the start of each identity
+  // change and refuses to save from a state it has not loaded, which is
+  // what actually closes the edit -> new door; these keys are a second
+  // mechanism for the same invariant, and the screen's tests pass with them
+  // removed on purpose, so a future reader who deletes them has not
+  // reopened anything.
+  const segmentNew = (
+    <SegmentBuilder key="segment-new" client={props.client} onUnauthorized={props.onUnauthorized} />
+  )
+  const segmentDetail = (
+    <SegmentDetail client={props.client} onUnauthorized={props.onUnauthorized} />
+  )
+  const segmentEdit = (
+    <SegmentBuilder
+      key="segment-edit"
+      client={props.client}
+      onUnauthorized={props.onUnauthorized}
+    />
+  )
   return (
     <BrowserRouter>
       <Shell email={props.email} onLogout={props.onLogout}>
@@ -77,6 +111,10 @@ export function AppRouter(props: {
           <Route path={ROUTES.funnelNew} element={funnelNew} />
           <Route path="/funnels/:id" element={funnelDetail} />
           <Route path="/funnels/:id/edit" element={funnelEdit} />
+          <Route path={ROUTES.segments} element={segments} />
+          <Route path={ROUTES.segmentNew} element={segmentNew} />
+          <Route path="/segments/:id" element={segmentDetail} />
+          <Route path="/segments/:id/edit" element={segmentEdit} />
           <Route path="*" element={feed} />
         </Routes>
       </Shell>

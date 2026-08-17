@@ -1,4 +1,11 @@
-import { ChevronDown, Filter, LayoutList, LogOut, Settings as SettingsIcon } from 'lucide-react'
+import {
+  ChevronDown,
+  Filter,
+  LayoutList,
+  LogOut,
+  Settings as SettingsIcon,
+  Users,
+} from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Link, NavLink, useLocation } from 'react-router'
 import {
@@ -212,6 +219,19 @@ export function Shell(props: { email: string | null; onLogout(): void; children:
           >
             <Filter className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
             <span className="sr-only sm:not-sr-only">Funnels</span>
+          </NavLink>
+          <NavLink
+            to={ROUTES.segments}
+            className={({ isActive }) =>
+              `flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium ${
+                isActive
+                  ? 'text-foreground'
+                  : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+              }`
+            }
+          >
+            <Users className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
+            <span className="sr-only sm:not-sr-only">Segments</span>
           </NavLink>
           <NavLink
             to={ROUTES.settings}

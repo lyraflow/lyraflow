@@ -6,6 +6,7 @@ import type {
   FunnelDefinition,
   FunnelRunResult,
   FunnelStep,
+  PreviewOptions,
   Project,
   ProjectIdentity,
   ProjectLimits,
@@ -14,6 +15,7 @@ import type {
   RejectionsPage,
   RejectionsQuery,
   Segment,
+  SegmentPreview,
   StatsPage,
   StatsQuery,
   Usage,
@@ -92,7 +94,43 @@ export interface ApiClient {
   ): Promise<FunnelRunResult>
   runFunnel(projectId: number, id: number, range: RangeBody): Promise<FunnelRunResult>
   segments(projectId: number): Promise<Segment[]>
+  segment(projectId: number, id: number): Promise<Segment>
+  createSegment(
+    projectId: number,
+    name: string,
+    query: { ast_version: number; filter: unknown },
+  ): Promise<Segment>
+  // Rename ONLY. Deliberately cannot carry a tree -- see the test.
+  renameSegment(projectId: number, id: number, name: string): Promise<Segment>
+  // Tree update ONLY. Deliberately cannot carry a name.
+  updateSegmentTree(
+    projectId: number,
+    id: number,
+    query: { ast_version: number; filter: unknown },
+  ): Promise<Segment>
+  deleteSegment(projectId: number, id: number): Promise<void>
+  previewSegment(
+    projectId: number,
+    query: { ast_version: number; filter: unknown },
+    options?: PreviewOptions,
+  ): Promise<SegmentPreview>
+  previewSavedSegment(
+    projectId: number,
+    id: number,
+    options?: PreviewOptions,
+  ): Promise<SegmentPreview>
+  // The behaviour form needs property autocomplete as well as event
+  // autocomplete. `schemaEvents` already exists from the funnels work;
+  // this one does not, and adding it here rather than inventing a second
+  // fetch site mid-form.
+  schemaProperties(projectId: number, event: string | undefined, q: string): Promise<string[]>
   schemaEvents(projectId: number, q: string): Promise<string[]>
+  // The values one trait holds. `trait` is required, not optional like
+  // `schemaProperties`' `event`: the endpoint refuses a request without one,
+  // and the type says so here rather than letting a caller discover it as a
+  // 400. Expensive on the server — see the route's own comment — so callers
+  // must reach it on an explicit interaction, never on render.
+  schemaTraitValues(projectId: number, trait: string, q: string): Promise<string[]>
 }
 
 function qs(params: Record<string, string | number | undefined>): string {
@@ -203,6 +241,34 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
       call(`/v1/funnels/${id}/run`, { method: 'POST', body: JSON.stringify(range) }, projectId),
     segments: async (projectId) =>
       (await call<{ segments: Segment[] }>('/v1/segments', {}, projectId)).segments,
+    segment: (projectId, id) => call(`/v1/segments/${id}`, {}, projectId),
+    createSegment: (projectId, name, query) =>
+      call('/v1/segments', { method: 'POST', body: JSON.stringify({ name, ...query }) }, projectId),
+    renameSegment: (projectId, id, name) =>
+      call(`/v1/segments/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }, projectId),
+    updateSegmentTree: (projectId, id, query) =>
+      call(`/v1/segments/${id}`, { method: 'PATCH', body: JSON.stringify(query) }, projectId),
+    deleteSegment: (projectId, id) => call(`/v1/segments/${id}`, { method: 'DELETE' }, projectId),
+    previewSegment: (projectId, query, options) =>
+      call(
+        '/v1/segments/preview',
+        { method: 'POST', body: JSON.stringify({ ...query, ...options }) },
+        projectId,
+      ),
+    previewSavedSegment: (projectId, id, options) =>
+      call(
+        `/v1/segments/${id}/preview`,
+        { method: 'POST', body: JSON.stringify({ ...options }) },
+        projectId,
+      ),
+    schemaProperties: async (projectId, event, q) =>
+      (
+        await call<{ properties: { property_key: string }[] }>(
+          `/v1/schema/properties${qs({ event, q, limit: 50 })}`,
+          {},
+          projectId,
+        )
+      ).properties.map((p) => p.property_key),
     schemaEvents: async (projectId, q) =>
       (
         await call<{ events: { event_name: string }[] }>(
@@ -211,5 +277,13 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
           projectId,
         )
       ).events.map((e) => e.event_name),
+    schemaTraitValues: async (projectId, trait, q) =>
+      (
+        await call<{ values: { value: string }[] }>(
+          `/v1/schema/trait-values${qs({ trait, q, limit: 50 })}`,
+          {},
+          projectId,
+        )
+      ).values.map((v) => v.value),
   }
 }

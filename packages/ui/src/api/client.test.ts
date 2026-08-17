@@ -434,4 +434,237 @@ describe('createClient', () => {
       expect(new Headers(init?.headers).get('x-lyraflow-project')).toBe('3')
     })
   })
+
+  describe('segments', () => {
+    // Invented: `segment` (singular) had zero coverage the way `funnel`
+    // (singular) once did -- mutating it to send
+    // PUT to the wrong path left the whole suite green. Pins verb, path and
+    // project header the same way the funnel equivalent already does.
+    it('segment GETs a single segment by id under the project header', async () => {
+      const fetchImpl = vi.fn(
+        async () => new Response(JSON.stringify({ id: 7, name: 'Power users' }), { status: 200 }),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      const out = await client.segment(3, 7)
+
+      expect(out).toEqual({ id: 7, name: 'Power users' })
+      const [path, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+      expect(path).toBe('/v1/segments/7')
+      expect(init?.method ?? 'GET').toBe('GET')
+      expect(new Headers(init?.headers).get('x-lyraflow-project')).toBe('3')
+    })
+
+    // Invented: same body-shape family as createFunnel/previewSegment --
+    // `/v1/segments` also parses one flat object, so a caller that nests
+    // `{ name, definition: {...} }` gets a 400 this suite would not have
+    // caught. Mutating the spread to a nested body left the whole suite
+    // green, the same as createSegment having zero coverage at all.
+    it('createSegment sends name and the query flattened into ONE object, not nested', async () => {
+      const fetchImpl = vi.fn(
+        async () => new Response(JSON.stringify({ id: 9, name: 'Power users' }), { status: 201 }),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+      const filter = { kind: 'trait', key: 'plan', operator: '=', value: 'pro' }
+
+      await client.createSegment(3, 'Power users', { ast_version: 1, filter })
+
+      const [path, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+      expect(path).toBe('/v1/segments')
+      expect(init.method).toBe('POST')
+      expect(new Headers(init.headers).get('x-lyraflow-project')).toBe('3')
+      expect(JSON.parse(init.body as string)).toEqual({
+        name: 'Power users',
+        ast_version: 1,
+        filter,
+      })
+    })
+
+    it('previews an ad-hoc tree with the tree and the options in one flat body', async () => {
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response(JSON.stringify({ person_count: 3, warnings: [], as_of: 'x' }), {
+            status: 200,
+          }),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+      const filter = { kind: 'trait', key: 'plan', operator: '=', value: 'pro' }
+
+      await client.previewSegment(3, { ast_version: 1, filter }, { include: ['members'] })
+
+      const [path, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+      expect(path).toBe('/v1/segments/preview')
+      expect(init.method).toBe('POST')
+      // The route parses the SAME body twice -- once as SegmentQuery, once as
+      // PreviewOptions. A nested { query, options } shape fails both.
+      expect(JSON.parse(init.body as string)).toEqual({
+        ast_version: 1,
+        filter,
+        include: ['members'],
+      })
+      expect(new Headers(init.headers).get('x-lyraflow-project')).toBe('3')
+    })
+
+    // previewSavedSegment had zero coverage -- a reviewer
+    // stubbed all nine segment methods in turn and this was the only one
+    // where the whole suite (40/40) stayed green against a no-op stub.
+    // Pins verb, path, project header, and that a call with no options
+    // sends `{}` rather than `undefined` -- the route does
+    // `PreviewOptions.safeParse(req.body ?? {})`, and `JSON.stringify(undefined)`
+    // is the string `"undefined"`, not valid JSON, which is a different
+    // failure than an empty-but-valid body.
+    it('previewSavedSegment POSTs to the saved segment path and sends {} with no options', async () => {
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response(JSON.stringify({ person_count: 3, warnings: [], as_of: 'x' }), {
+            status: 200,
+          }),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      await client.previewSavedSegment(3, 7)
+
+      const [path, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+      expect(path).toBe('/v1/segments/7/preview')
+      expect(init.method).toBe('POST')
+      expect(new Headers(init.headers).get('x-lyraflow-project')).toBe('3')
+      expect(JSON.parse(init.body as string)).toEqual({})
+    })
+
+    it('previewSavedSegment sends the given options in the body', async () => {
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response(JSON.stringify({ person_count: 3, warnings: [], as_of: 'x' }), {
+            status: 200,
+          }),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      await client.previewSavedSegment(3, 7, { include: ['members'], cursor: 'abc' })
+
+      const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+      expect(JSON.parse(init.body as string)).toEqual({ include: ['members'], cursor: 'abc' })
+    })
+
+    it('renames without sending a tree', async () => {
+      const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ id: 1 }), { status: 200 }))
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      await client.renameSegment(3, 7, 'New name')
+
+      const [path, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+      expect(path).toBe('/v1/segments/7')
+      expect(init.method).toBe('PATCH')
+      // The server decides whether to touch the filter by whether the body
+      // carries a tree AT ALL. A rename that ships the tree resets the count
+      // snapshot -- the same defect as #92, except here the client owns it.
+      expect(JSON.parse(init.body as string)).toEqual({ name: 'New name' })
+    })
+
+    it('updates a tree by sending it', async () => {
+      const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ id: 1 }), { status: 200 }))
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+      const filter = { kind: 'trait', key: 'plan', operator: '=', value: 'pro' }
+
+      await client.updateSegmentTree(3, 7, { ast_version: 1, filter })
+
+      const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+      const body = JSON.parse(init.body as string)
+      expect(body).toEqual({ ast_version: 1, filter })
+      expect(body.name).toBeUndefined()
+    })
+
+    it('deleteSegment tolerates the 204 with no body', async () => {
+      const fetchImpl = vi.fn(async () => new Response(null, { status: 204 }))
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+      await expect(client.deleteSegment(3, 7)).resolves.toBeUndefined()
+
+      // Invented: `resolves.toBeUndefined()` alone is also true of a stub
+      // that never calls fetch at all -- confirmed by mutating deleteSegment
+      // to `async () => undefined` and watching the suite stay green. Pin
+      // the verb, path and project header the same way deleteFunnel's test
+      // already does, so a no-op stub fails here too.
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+      const [path, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+      expect(path).toBe('/v1/segments/7')
+      expect(init.method).toBe('DELETE')
+      expect(new Headers(init.headers).get('x-lyraflow-project')).toBe('3')
+    })
+
+    it('schemaProperties sends event and q in the query string and maps to property_key', async () => {
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              properties: [
+                { property_key: 'plan', value_kind: 'string' },
+                { property_key: 'plan_price', value_kind: 'number' },
+              ],
+            }),
+            { status: 200 },
+          ),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      const out = await client.schemaProperties(3, 'signed_up', 'pla')
+
+      expect(out).toEqual(['plan', 'plan_price'])
+      const [path, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+      const url = String(path)
+      expect(url).toMatch(/^\/v1\/schema\/properties\?/)
+      expect(url).toMatch(/[?&]event=signed_up(&|$)/)
+      expect(url).toMatch(/[?&]q=pla(&|$)/)
+      expect(new Headers(init.headers).get('x-lyraflow-project')).toBe('3')
+    })
+
+    it('schemaProperties omits event when undefined', async () => {
+      const fetchImpl = vi.fn(
+        async () => new Response(JSON.stringify({ properties: [] }), { status: 200 }),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      await client.schemaProperties(3, undefined, 'pla')
+
+      const [path] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+      expect(String(path)).not.toMatch(/[?&]event=/)
+    })
+
+    it('schemaTraitValues sends trait and q in the query string and maps to value', async () => {
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response(JSON.stringify({ values: [{ value: 'free' }, { value: 'pro' }] }), {
+            status: 200,
+          }),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      const out = await client.schemaTraitValues(3, 'plan', 'p')
+
+      expect(out).toEqual(['free', 'pro'])
+      const [path, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+      const url = String(path)
+      expect(url).toMatch(/^\/v1\/schema\/trait-values\?/)
+      expect(url).toMatch(/[?&]trait=plan(&|$)/)
+      expect(url).toMatch(/[?&]q=p(&|$)/)
+      expect(new Headers(init.headers).get('x-lyraflow-project')).toBe('3')
+    })
+
+    // The empty query means "everything this trait holds", and `qs` drops an
+    // empty string rather than sending `q=` — but `trait` must survive that
+    // same call, since without it the endpoint answers 400 and the field
+    // would be silently suggestion-less on the very interaction that opens
+    // it.
+    it('schemaTraitValues keeps trait when the query is empty', async () => {
+      const fetchImpl = vi.fn(
+        async () => new Response(JSON.stringify({ values: [] }), { status: 200 }),
+      )
+      const client = createClient(fetchImpl as unknown as typeof fetch)
+
+      await client.schemaTraitValues(3, 'plan', '')
+
+      const [path] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+      expect(String(path)).toMatch(/[?&]trait=plan(&|$)/)
+      expect(String(path)).not.toMatch(/[?&]q=/)
+    })
+  })
 })

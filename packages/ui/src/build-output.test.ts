@@ -76,4 +76,29 @@ describe('production bundle', () => {
     await load()
     expect((window as unknown as { lyraflow?: unknown }).lyraflow).toBeUndefined()
   })
+
+  it('the segment modules the UI imports pull in nothing node-only', async () => {
+    // These two are imported by the tree editor and run in the browser.
+    // `validate.ts` imports only a type; `ast.ts` imports only zod. If either
+    // ever gains a node builtin, the admin UI breaks at runtime rather than at
+    // build time -- the same failure that once shipped a white screen with a
+    // fully green suite.
+    const ast = await import('@lyraflow/core/segments/ast.js')
+    const validate = await import('@lyraflow/core/segments/validate.js')
+    expect(ast.COMPARISON_OPERATORS).toContain('between')
+    expect(validate.MAX_TREE_DEPTH).toBe(10)
+    expect(typeof validate.costWarnings).toBe('function')
+  })
+
+  it('the funnel step module the UI types against pulls in nothing node-only', async () => {
+    // `api/types.ts` re-exports `FunnelStep` from here, and
+    // `WherePredicates` reads `MAX_WHERE_PREDICATES` from the segments AST
+    // this module shares. The type re-export is erased, so it cannot break
+    // the bundle on its own -- but the next thing to reach for a value from
+    // this subpath would, and by then the failure is a white screen rather
+    // than a red test. Same guard as the two above, one module earlier.
+    const ast = await import('@lyraflow/core/funnels/ast.js')
+    expect(ast.FUNNEL_DEFINITION_VERSION).toBe(1)
+    expect(typeof ast.FunnelStep.parse).toBe('function')
+  })
 })

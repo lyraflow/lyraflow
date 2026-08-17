@@ -1,17 +1,29 @@
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { ApiError } from '../../api/client.js'
 import type { ApiClient } from '../../api/client.js'
-import { Input } from '../../components/ui/input.js'
+import { Combobox } from '../../components/Combobox.js'
 import { Label } from '../../components/ui/label.js'
 
 /** How long to wait after the last keystroke before asking the server. */
 const DEBOUNCE_MS = 250
 
 /**
- * An event-name field backed by `GET /v1/schema/events`, via a `<datalist>`
- * rather than a closed picker -- a free-typed value the schema has never
- * seen is always accepted, because a funnel written before its own event
- * first fires is legitimate (Task 5 brief).
+ * An event-name field backed by `GET /v1/schema/events`.
+ *
+ * A free-typed value the schema has never seen is always accepted, because a
+ * funnel written before its own event first fires is legitimate. The list is
+ * a help, never a whitelist.
+ *
+ * ## Eager, and it opens on focus
+ *
+ * The lookup runs with an EMPTY query on mount, so the whole catalogue is
+ * there before the operator focuses -- and `Combobox` shows it the moment
+ * they do. An operator who does not yet know their event names is exactly
+ * who this field is for, and a list that appears only after a few correct
+ * characters have been guessed helps only the operator who did not need it.
+ * `event_schema` is a catalogue with one row per event name, which is what
+ * makes asking on render affordable here (the trait VALUE lookup, a
+ * partition scan, is deliberately not -- see `TraitValueField`).
  *
  * The server filters with `startsWith(event_name, q)`, not a fuzzy match --
  * typing `signup` will NOT find `user_signup_completed`. The placeholder
@@ -43,6 +55,10 @@ export function EventCombobox(props: {
   const { client, projectId, value, onChange, label, disabled, onUnauthorized } = props
   const [text, setText] = useState(value)
   const [options, setOptions] = useState<string[]>([])
+  // Separates "no lookup has answered yet" from "a lookup answered with
+  // nothing". Without it the popup asserts an absence on the very first
+  // frame, before anything has been asked.
+  const [fetched, setFetched] = useState(false)
   // I6 (whole-branch review): every schemaEvents failure -- INCLUDING 401 --
   // used to be swallowed into an empty options list, which reads as "your
   // events do not exist" (an expired session, not a real absence). Spec
@@ -54,7 +70,16 @@ export function EventCombobox(props: {
   // themselves failed, rather than silently implying there are none.
   const [loadError, setLoadError] = useState(false)
   const id = useId()
-  const listId = `${id}-events`
+
+  // `onUnauthorized` is re-created inline by most parents on every one of
+  // THEIR renders, so naming it in the lookup effect's dependency list makes
+  // an unrelated render anywhere above this field issue another request for
+  // a query that has not changed. Held in a ref and read only after the
+  // await, exactly as `PropertyCombobox` does.
+  const unauthorizedRef = useRef(onUnauthorized)
+  useEffect(() => {
+    unauthorizedRef.current = onUnauthorized
+  }, [onUnauthorized])
 
   useEffect(() => {
     setText(value)
@@ -62,68 +87,49 @@ export function EventCombobox(props: {
 
   useEffect(() => {
     const q = text.trim()
-    if (q === '') {
-      setOptions([])
-      setLoadError(false)
-      return
-    }
     const timer = window.setTimeout(() => {
       client
         .schemaEvents(projectId, q)
         .then((list) => {
           setOptions(list)
           setLoadError(false)
+          setFetched(true)
         })
         .catch((err: unknown) => {
           if (err instanceof ApiError && err.status === 401) {
-            onUnauthorized?.()
+            unauthorizedRef.current?.()
             return
           }
           setOptions([])
           setLoadError(true)
+          // Deliberately NOT `setFetched(true)`: a failed lookup is no
+          // evidence about whether any events exist, and `loadError` already
+          // says the suggestions themselves failed.
         })
     }, DEBOUNCE_MS)
     return () => window.clearTimeout(timer)
-  }, [text, client, projectId, onUnauthorized])
+  }, [text, client, projectId])
 
   return (
-    <div className="flex flex-col gap-1">
+    <div className="flex min-w-0 flex-col gap-1">
       <Label htmlFor={id}>{label}</Label>
-      <Input
+      <Combobox
         id={id}
-        list={listId}
+        label={label}
         value={text}
+        options={options}
+        loading={!fetched && !loadError}
+        emptyMessage="No events recorded yet -- they appear here once your app sends some."
+        errorMessage={
+          loadError ? 'Could not load suggestions. You can still type the event name.' : undefined
+        }
         disabled={disabled}
-        autoComplete="off"
         placeholder="Event name -- starts with what you type"
-        onChange={(e) => {
-          const next = e.target.value
+        onChange={(next) => {
           setText(next)
           onChange(next)
         }}
       />
-      {/*
-       * No style override here, deliberately. Every browser's UA stylesheet
-       * sets `datalist { display: none }` -- production markup does not
-       * bend to make a test selector tidier (see the fix-round note this
-       * reverted: an inline style here once existed only to satisfy
-       * `getByRole('option', ...)`, and shipped a nonstandard override of a
-       * native element's browser-default rendering to every self-hoster
-       * for that reason alone). The test queries this list with
-       * `{ hidden: true }` instead of asking the markup to change.
-       */}
-      <datalist id={listId}>
-        {options.map((event) => (
-          <option key={event} value={event}>
-            {event}
-          </option>
-        ))}
-      </datalist>
-      {loadError && (
-        <p role="alert" className="text-xs text-destructive">
-          Could not load suggestions. You can still type the event name.
-        </p>
-      )}
     </div>
   )
 }

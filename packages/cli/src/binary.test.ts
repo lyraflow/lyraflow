@@ -39,9 +39,17 @@
  * packages/cli (this repo's own convention — see the root CLAUDE.md), and a
  * real Postgres (5433) + ClickHouse (8123) reachable at the same addresses
  * every other live-database suite in this repo uses. `packages/server` is a
- * devDependency of this package (see packages/cli/package.json) purely so
- * this one file can import `buildApp` and its identity-dictionary setup —
- * nothing shipped in `bin/lyraflow` touches it.
+ * runtime dependency of this package (see packages/cli/package.json), which
+ * is what lets this file import `buildApp` and its identity-dictionary setup.
+ * It used to be a devDependency, on the grounds that nothing shipped in
+ * `bin/lyraflow` touched it; `seed-demo` does — it builds its rows with the
+ * ingest route's own `toEventRow` and writes its bindings through the
+ * server's own `IdentityBindings`, rather than growing a second copy of
+ * either. Every documented way to run this CLI runs it inside the image that
+ * already contains the server (`docker compose exec lyraflow node
+ * packages/cli/dist/index.js …`), so nothing about the packaging changes —
+ * but the dependency has to be declared for `pnpm install --prod` to keep
+ * resolving it.
  */
 
 import { execFileSync, spawn } from 'node:child_process'

@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { formatCount, formatPercent, formatRangeDays, formatRelative } from './format.js'
+import type { FunnelStep } from '../../api/types.js'
+import {
+  formatCount,
+  formatPercent,
+  formatRangeDays,
+  formatRelative,
+  stepChain,
+  stepLabel,
+} from './format.js'
 
 describe('formatPercent', () => {
   it('renders a server rate as one decimal place', () => {
@@ -40,5 +48,88 @@ describe('formatRangeDays', () => {
     expect(formatRangeDays({ since: 'not-a-date', until: '2026-08-15T00:00:00.000Z' })).toBe(
       'unknown range',
     )
+  })
+})
+
+describe('stepLabel', () => {
+  it('is the bare event name when the step is not narrowed', () => {
+    expect(stepLabel({ event: 'signup_started' })).toBe('signup_started')
+    expect(stepLabel({ event: 'signup_started', where: [] })).toBe('signup_started')
+  })
+
+  it('reads a narrowed step in the operator words, bracketed', () => {
+    expect(
+      stepLabel({
+        event: 'page_view',
+        where: [
+          { property: 'page', operator: '=', value: 'changelog' },
+          { property: 'duration_ms', operator: '>=', value: 30 },
+        ],
+      }),
+    ).toBe('page_view (where page is changelog, duration_ms at least 30)')
+  })
+
+  it('spells the operator the way the builder does, never the AST symbol', () => {
+    // Two operators, neither of them `=`: a fixture whose only operator is
+    // `=` cannot tell "is" from a passed-through symbol.
+    const label = stepLabel({
+      event: 'purchase',
+      where: [
+        { property: 'currency', operator: '!=', value: 'USD' },
+        { property: 'amount', operator: '<=', value: 50 },
+      ],
+    })
+    expect(label).toContain('currency is not USD')
+    expect(label).toContain('amount at most 50')
+    expect(label).not.toContain('!=')
+    expect(label).not.toContain('<=')
+  })
+})
+
+describe('stepChain', () => {
+  const STEPS: FunnelStep[] = [
+    {
+      event: 'page_view',
+      where: [
+        { property: 'page', operator: '=', value: 'changelog' },
+        { property: 'duration_ms', operator: '>=', value: 30 },
+      ],
+    },
+    {
+      event: 'signup_started',
+      where: [
+        { property: 'plan', operator: '!=', value: 'free' },
+        { property: 'seats', operator: 'between', value: [2, 10] },
+      ],
+    },
+    { event: 'signup_completed' },
+  ]
+
+  it('renders each step with its OWN predicates, in order', () => {
+    // Two narrowed steps, two predicates each: one narrowed step cannot
+    // tell "each step's own" from "the first step's, everywhere".
+    expect(stepChain(STEPS)).toBe(
+      'page_view (where page is changelog, duration_ms at least 30) → ' +
+        'signup_started (where plan is not free, seats between 2 and 10) → ' +
+        'signup_completed',
+    )
+  })
+
+  it("closes every clause, so no predicate can be read as the next step's", () => {
+    // The hazard the segments summary was already bitten by: a `where` list
+    // is comma-separated with no terminator, so an unbracketed clause
+    // absorbs whatever follows it. Every arrow must sit OUTSIDE a bracket
+    // pair -- checked by counting, not by eye.
+    const chain = stepChain(STEPS)
+    for (const segment of chain.split(' → ')) {
+      const opens = (segment.match(/\(/g) ?? []).length
+      const closes = (segment.match(/\)/g) ?? []).length
+      expect(opens, segment).toBe(closes)
+    }
+    expect(chain).toContain('at least 30) → signup_started')
+  })
+
+  it('renders a chain of un-narrowed steps exactly as it always did', () => {
+    expect(stepChain([{ event: 'a' }, { event: 'b' }])).toBe('a → b')
   })
 })

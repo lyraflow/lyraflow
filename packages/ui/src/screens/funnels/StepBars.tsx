@@ -1,5 +1,36 @@
-import type { FunnelRunResult } from '../../api/types.js'
+import type { FunnelRunResult, FunnelStep } from '../../api/types.js'
+import { wherePhrase } from '../segments/vocabulary.js'
 import { formatCount, formatPercent } from './format.js'
+
+/**
+ * The predicates narrowing the step at position `i`, or `null` when this
+ * component cannot be certain which definition step the result's step at
+ * that position corresponds to.
+ *
+ * `definition` and `result` arrive from two INDEPENDENT requests --
+ * `FunnelDetail` fetches the funnel and runs it concurrently, and either
+ * can land first or fail alone. `levels.ts` numbers a result step `i + 1`
+ * over the definition's own array, so position is the correspondence; the
+ * event-name check is what stops that assumption from being silent when it
+ * stops holding (a result still on screen from before an edit, a definition
+ * that arrived for a different funnel).
+ *
+ * When it cannot be certain it renders NOTHING, which is the same ruling
+ * `summarise` was given for a clause that could absorb its neighbour's join
+ * word: a narrowing shown against the wrong step would have an operator act
+ * on a population the screen never measured, and that failure is invisible.
+ * An omitted clause is merely less information.
+ */
+function whereFor(
+  definition: readonly FunnelStep[] | null | undefined,
+  i: number,
+  event: string,
+): string | null {
+  const step = definition?.[i]
+  if (step == null || step.event !== event) return null
+  if (step.where == null || step.where.length === 0) return null
+  return wherePhrase(step.where)
+}
 
 /**
  * A funnel result as one row per step, bar width proportional to `people`.
@@ -34,12 +65,20 @@ import { formatCount, formatPercent } from './format.js'
  * any individual step's `people` -- a legitimate funnel whose last step
  * happens to convert zero people must still show the drop into that step.
  */
-export function StepBars(props: { result: FunnelRunResult }) {
-  const { result } = props
+export function StepBars(props: {
+  result: FunnelRunResult
+  /** The funnel DEFINITION's steps, so a narrowed step says so instead of
+   * showing a bare event name that a differently-predicated step would show
+   * too. Optional: `result` alone is still a complete rendering, and this
+   * component stays usable by a caller that has numbers and no definition. */
+  definition?: readonly FunnelStep[] | null
+}) {
+  const { result, definition } = props
   return (
     <div className="flex min-w-0 flex-col gap-1">
       {result.steps.map((step, i) => {
         const previous = i === 0 ? null : result.steps[i - 1]
+        const where = whereFor(definition, i, step.event)
         const width =
           result.entered === 0 ? 0 : Math.round((step.people / result.entered) * 10000) / 100
         return (
@@ -62,6 +101,19 @@ export function StepBars(props: { result: FunnelRunResult }) {
                   {formatCount(step.people)} · {formatPercent(step.from_start)}
                 </span>
               </div>
+              {/* Between the step's own name and its own bar, deliberately.
+               * The line below a step block is the NEXT step's drop row, so
+               * a clause placed after the bar would sit against it; here it
+               * is bracketed by two things that already belong to this step
+               * and cannot be read as narrowing another one. */}
+              {where != null && (
+                <p
+                  data-testid={`funnel-step-${step.index}-where`}
+                  className="min-w-0 break-words text-xs text-muted-foreground"
+                >
+                  where {where}
+                </p>
+              )}
               <div className="h-2 w-full overflow-hidden rounded-sm bg-muted">
                 <div
                   data-testid="bar-fill"

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../../api/client.js'
@@ -19,16 +19,41 @@ describe('EventCombobox', () => {
     )
     await userEvent.type(screen.getByLabelText('Step 1'), 'signup')
     await waitFor(() => expect(schemaEvents).toHaveBeenCalledWith(1, 'signup'))
-    // `hidden: true` here is a query concession, not a product one: a
-    // native `<datalist>` is `display: none` in every browser (its options
-    // are read structurally, not painted), so `getByRole` -- which by
-    // default excludes hidden elements the same way a sighted user's
-    // browser does -- needs telling to look inside it. Production markup
-    // stays exactly what a real `<input list>` needs; only the query
-    // adapts to how the DOM actually presents this element.
-    expect(
-      await screen.findByRole('option', { name: 'signup_completed', hidden: true }),
-    ).toBeInTheDocument()
+    // A real, painted `role="option"` -- no `{ hidden: true }` concession
+    // any more. The suggestions used to live in a `<datalist>`, which every
+    // browser's UA stylesheet sets to `display: none`, so the query had to
+    // be told to look inside a hidden subtree. They are now in a popup the
+    // operator can actually see.
+    expect(await screen.findByRole('option', { name: 'signup_completed' })).toBeInTheDocument()
+  })
+
+  // THE reason this field was rebuilt. An operator who does not yet know
+  // their event names is exactly who a picker is for, and the old one showed
+  // nothing until they had guessed the first few letters of the answer.
+  // Both halves are asserted: the catalogue is fetched with an EMPTY query
+  // before anything is typed, AND focusing shows it.
+  it('has the whole catalogue before a keystroke, and shows it on focus', async () => {
+    const schemaEvents = vi.fn(async () => ['checkout_completed', 'page_view', 'signup_started'])
+    render(
+      <EventCombobox
+        client={{ schemaEvents } as unknown as ApiClient}
+        projectId={1}
+        value=""
+        onChange={() => {}}
+        label="Step 1"
+      />,
+    )
+    await waitFor(() => expect(schemaEvents).toHaveBeenCalledWith(1, ''))
+    expect(screen.queryByRole('listbox')).toBeNull()
+
+    await userEvent.click(screen.getByLabelText('Step 1'))
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole('listbox'))
+          .queryAllByRole('option')
+          .map((o) => o.textContent),
+      ).toEqual(['checkout_completed', 'page_view', 'signup_started']),
+    )
   })
 
   it('describes itself as a prefix filter, because the server matches with startsWith', async () => {
@@ -82,7 +107,9 @@ describe('EventCombobox -- invented mutations', () => {
     await userEvent.type(screen.getByLabelText('Step 1'), 'abc')
     // Immediately after typing three characters, a non-debounced
     // implementation would already have called schemaEvents three times
-    // (once per keystroke). The debounced one has not fired yet at all.
+    // (once per keystroke). The debounced one has not fired at all -- not
+    // even the mount lookup, whose timer each keystroke replaced before it
+    // could elapse.
     expect(schemaEvents).not.toHaveBeenCalled()
     await waitFor(() => expect(schemaEvents).toHaveBeenCalledTimes(1))
     expect(schemaEvents).toHaveBeenCalledWith(1, 'abc')

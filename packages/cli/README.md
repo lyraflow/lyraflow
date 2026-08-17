@@ -11,11 +11,16 @@ from a terminal, not for browsing. It wraps `GET /v1/events`,
 [README](../../README.md) for what each of those endpoints actually does;
 this document is about the CLI's own surface on top of them.
 
-`create-project`, `migrate`, and `healthcheck` are separate, operational
-commands this binary also ships — `migrate` and `healthcheck` once per install,
-`create-project` once per *project*, and none of them per query. See *Running
-Lyraflow* in the main README for those, and *Tracking more than one site* for
-why you might run `create-project` more than once. `healthcheck` reads its own
+`create-project`, `migrate`, `seed-demo`, and `healthcheck` are separate,
+operational commands this binary also ships — `migrate` and `healthcheck` once
+per install, `create-project` once per *project*, `seed-demo` only when you
+want a project full of synthetic data to look at, and none of them per query.
+See *Running Lyraflow* in the main README for those, *Tracking more than one
+site* for why you might run `create-project` more than once, and *Demo data*
+for `seed-demo`. Unlike everything below, those four talk to Postgres and
+ClickHouse directly rather than over HTTP, so they read the database
+environment variables and not `LYRAFLOW_HOST`/`LYRAFLOW_SERVER_KEY`.
+`healthcheck` reads its own
 env var, `LYRAFLOW_URL` (defaulting to `http://localhost:3000`), not
 `LYRAFLOW_HOST` — the two are not interchangeable and neither falls back to
 the other:
