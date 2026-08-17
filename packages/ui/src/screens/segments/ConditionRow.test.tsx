@@ -638,6 +638,58 @@ describe('ConditionRow', () => {
     ])
   })
 
+  /**
+   * The chain of ancestors of `el`, innermost first, so two of them can be
+   * compared for where they diverge.
+   */
+  function ancestors(el: Element): Element[] {
+    const out: Element[] = []
+    for (let n: Element | null = el; n != null; n = n.parentElement) out.push(n)
+    return out
+  }
+
+  /** The innermost element containing both -- i.e. the box they share. */
+  function sharedBox(a: Element, b: Element): Element {
+    const chain = new Set(ancestors(a))
+    for (const n of ancestors(b)) if (chain.has(n)) return n
+    throw new Error('the two elements share no ancestor at all')
+  }
+
+  it.each(LEAF_KINDS)(
+    'keeps the kind selector in a box of its own, above a %s condition rather than inside its fields',
+    (_kind, node, role, fieldLabel) => {
+      // The one thing jsdom CAN check about this, and the thing that actually
+      // went wrong. The selector was already first in DOM order and still
+      // rendered 302px BELOW the top of a behaviour condition, level with its
+      // `Where` block: it shared a wrapping flex row with the body form, and
+      // that form's `flex-1` basis of zero meant the row never broke, so
+      // `items-center` parked the selector at the form's vertical middle.
+      //
+      // So what is pinned is the STRUCTURE that made it possible -- the
+      // innermost box holding both the selector and the body's own first field
+      // must be the condition itself, never some row inside it. Put them back
+      // in one flex container and this fails for every kind, at every width,
+      // without needing a stylesheet jsdom does not load.
+      render(
+        <ConditionRow
+          node={node}
+          path={[0]}
+          onChange={vi.fn()}
+          onRemove={vi.fn()}
+          onNegate={vi.fn()}
+          client={fakeClient()}
+          projectId={1}
+        />,
+      )
+      const row = screen.getByTestId('condition-0')
+      const kind = within(row).getByRole('combobox', { name: 'Match on' })
+      const field = within(row).getByRole(role, { name: fieldLabel })
+      expect(sharedBox(kind, field)).toBe(row)
+      // ...and it still READS first, which is the other half of the claim.
+      expect(kind.compareDocumentPosition(field) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    },
+  )
+
   it.each(LEAF_KINDS)(
     'switching to %s leaves exactly the not-filled-in-yet fields blank, and every other field a real choice',
     async (kind, _node, role, fieldLabel, label) => {
@@ -669,6 +721,24 @@ describe('ConditionRow', () => {
       ).toBeInTheDocument()
     },
   )
+
+  it('seeds a fresh lifecycle bound as an instant that names its zone', async () => {
+    // A bound WRITTEN by this screen has to say which instant it means. The
+    // wall-clock reading this used to seed does not: `predicates.ts` resolves
+    // a zone-less value with `new Date()` in the SERVER's zone, so the same
+    // saved segment means different things depending on where it is counted.
+    // Reading such a value back is still supported, and deliberately
+    // unshifted -- see `datetime.ts`. Writing one is what stops here.
+    const onNode = vi.fn()
+    render(<Harness initial={traitNode} onNode={onNode} />)
+    await userEvent.selectOptions(kindSelect(), 'lifecycle')
+
+    const next = onNode.mock.calls.at(-1)?.[0] as Lifecycle
+    expect(next.kind).toBe('lifecycle')
+    expect(String(next.value)).toMatch(/T.*(?:Z|[+-]\d{2}:?\d{2})$/)
+    // And it is still a value the schema accepts, measured against the schema.
+    expect(unfilledFields(next)).toEqual(PLACEHOLDER_FIELDS.lifecycle)
+  })
 
   it('a fresh behaviour carries no cost warning of its own', async () => {
     // Why `event` starts EMPTY rather than at `'*'`, which is legal and

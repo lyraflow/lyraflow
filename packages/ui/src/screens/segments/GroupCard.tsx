@@ -8,7 +8,7 @@ import {
 import type { ApiClient } from '../../api/client.js'
 import { Button } from '../../components/ui/button.js'
 import { Label } from '../../components/ui/label.js'
-import { ConditionRow } from './ConditionRow.js'
+import { ConditionRow, NEGATE_PRESSED } from './ConditionRow.js'
 import {
   countBehaviours,
   countNodes,
@@ -260,7 +260,7 @@ export function GroupCard(props: {
   return (
     <div
       data-testid={testId}
-      className="flex flex-col gap-3 rounded-md border border-border bg-card p-3"
+      className="flex flex-col gap-3 rounded-md border border-border bg-card p-2 sm:p-3"
     >
       <div className="flex flex-wrap items-center gap-2">
         <Label htmlFor={matchId}>Match</Label>
@@ -296,7 +296,7 @@ export function GroupCard(props: {
               variant="outline"
               size="sm"
               aria-pressed={negated}
-              className="aria-pressed:border-foreground aria-pressed:font-semibold"
+              className={NEGATE_PRESSED}
               onClick={() => onChange(negateAt(root, path))}
             >
               Negate
@@ -323,8 +323,25 @@ export function GroupCard(props: {
        * fill. Every surface in this palette sits within ~1.1:1 of its
        * neighbours by design, so tinting nested cards differently would be
        * a change no one can see; indentation has no contrast requirement
-       * and is the only lever that actually reads at depth three. */}
-      <div className="flex flex-col gap-3 border-l-2 border-border pl-5">
+       * and is the only lever that actually reads at depth three.
+       *
+       * **The indent is narrower on a phone, and that is a measured
+       * trade rather than a taste.** Rail plus indent plus card padding cost
+       * 35px per level at `pl-5`, so a depth-three condition started 105px in
+       * -- 27% of a 390px viewport spent before the condition got any width
+       * at all, which is most of why its fields were being clipped. `pl-2`
+       * below `sm` gives 24px of that back per branch. Depth stays legible
+       * because the rail is what carries it; the indent only has to be enough
+       * to separate the rail from the content.
+       *
+       * The card's own `p-2 sm:p-3` above is the same trade for the same
+       * reason, and it is not cosmetic either: card padding is paid twice per
+       * level, and the last of it buys the difference between a native
+       * date-and-time control showing `06/01/2026, 12:00 AM` and showing
+       * `06/01/2026, 12:00 ` with the AM/PM clipped off. Below `sm` the
+       * primitives also render at `text-base` rather than `text-sm`, so the
+       * same string needs more room there than it does on a desktop. */}
+      <div className="flex flex-col gap-3 border-l-2 border-border pl-2 sm:pl-5">
         {group.children.map((child, i) => {
           const childPath = [...path, i]
           const key = childPath.join('-')

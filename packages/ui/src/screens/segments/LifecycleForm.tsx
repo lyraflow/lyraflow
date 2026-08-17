@@ -3,6 +3,7 @@ import { Label } from '../../components/ui/label.js'
 import { OperatorSelect } from './OperatorSelect.js'
 import type { ConditionValue } from './ValueInput.js'
 import { ValueInput } from './ValueInput.js'
+import { valueToPicker, valueToStored } from './datetime.js'
 
 /**
  * `ast.ts` inlines this as `z.enum(['first_seen', 'last_seen'])` rather
@@ -38,6 +39,25 @@ export const LIFECYCLE_FIELDS = ['first_seen', 'last_seen'] as const
  * `type="datetime-local"` through to `ValueInput` gets a native date/time
  * picker instead, so what this control can produce is a subset of what
  * the schema accepts, not merely values the schema also happens to check.
+ *
+ * **The value is CONVERTED in both directions** (`valueToPicker` /
+ * `valueToStored`, `datetime.ts`, which owns the rule and states it in full).
+ * This form used to hand `node.value` straight to the input and write the
+ * input's own text straight back, which is the same defect `WindowPicker`
+ * records as fixed for the `absolute` window -- and it was worse here,
+ * because it was SILENT: a `datetime-local` input renders nothing at all for
+ * a `Z`-suffixed instant, so a saved bound written by the API, the CLI, or
+ * this screen's own kind switcher opened as an EMPTY control, with no "this
+ * condition is not finished" message either, since the node it was rendering
+ * is perfectly valid. An operator saw a lifecycle condition with no date and
+ * nothing to explain it.
+ *
+ * The blind spot that carried it is worth naming, because it is the same one
+ * `WindowPicker`'s comment names: every test in this file built a `Lifecycle`
+ * node directly, and every one of those fixtures happened to hold a zone-less
+ * reading -- the one shape an unconverted read renders correctly. The tests
+ * that pin this now drive a `Z`-suffixed value INTO the control and read the
+ * input back.
  */
 export function LifecycleForm(props: {
   id: string
@@ -49,8 +69,8 @@ export function LifecycleForm(props: {
   const operatorId = `${id}-operator`
 
   return (
-    <div className="flex flex-wrap items-end gap-2">
-      <div className="flex flex-col gap-1">
+    <div className="flex min-w-0 flex-wrap items-end gap-2">
+      <div className="flex min-w-0 flex-col gap-1">
         <Label htmlFor={fieldId}>Field</Label>
         <select
           id={fieldId}
@@ -73,8 +93,8 @@ export function LifecycleForm(props: {
       />
       <ValueInput
         operator={node.operator}
-        value={node.value as ConditionValue}
-        onChange={(value) => onChange({ ...node, value } as Lifecycle)}
+        value={valueToPicker(node.value as ConditionValue)}
+        onChange={(value) => onChange({ ...node, value: valueToStored(value) } as Lifecycle)}
         type="datetime-local"
       />
     </div>

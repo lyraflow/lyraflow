@@ -7,7 +7,7 @@ import { Input } from '../../components/ui/input.js'
  * local `const`, not exported. If a scalar type is ever added there, this
  * must be updated to match; nothing here re-derives it automatically.
  */
-type Scalar = string | number | boolean | null
+export type Scalar = string | number | boolean | null
 export type ConditionValue = Scalar | [Scalar, Scalar]
 
 function toText(v: Scalar): string {
@@ -112,11 +112,26 @@ export function ValueInput(props: {
   if (isBetween) {
     const [first, second] = isTuple ? (value as [Scalar, Scalar]) : [value as Scalar, '' as Scalar]
     return (
-      <div className="flex items-center gap-2">
+      // `flex-wrap`, and `grow basis-24 min-w-0` on each box. Two inputs and
+      // the word between them have a min-content width of ~380px, and this row
+      // used not to wrap at all -- which made it the widest thing inside a
+      // nested condition and therefore the floor everything else was clipped
+      // against. At 390px, inside a depth-three condition, the second bound
+      // was off the edge of a box that did not scroll and said nothing.
+      //
+      // The basis is small (6rem) and `grow` does the rest, on purpose. A large
+      // basis makes the pair wrap between the two boxes at narrow widths, which
+      // looked worse than the clipping did: the second bound and the word `and`
+      // dropped to a line of their own and interleaved with the operator select
+      // beside them. Small basis plus grow keeps both bounds on one line
+      // wherever they fit at all, and still splits the space evenly when there
+      // is plenty.
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
         <Input
           type={type}
           list={list}
           autoComplete={list ? 'off' : undefined}
+          className="min-w-0 grow basis-24"
           aria-label={`${label} 1`}
           value={toText(first)}
           onFocus={() => suggest?.onInteract(toText(first))}
@@ -125,11 +140,12 @@ export function ValueInput(props: {
             onChange([e.target.value, second])
           }}
         />
-        <span className="text-sm text-muted-foreground">and</span>
+        <span className="shrink-0 text-sm text-muted-foreground">and</span>
         <Input
           type={type}
           list={list}
           autoComplete={list ? 'off' : undefined}
+          className="min-w-0 grow basis-24"
           aria-label={`${label} 2`}
           value={toText(second)}
           onFocus={() => suggest?.onInteract(toText(second))}

@@ -51,6 +51,40 @@ function isValidN(n: number): boolean {
 }
 
 /**
+ * What the picker says about the zone it is showing -- one sentence naming
+ * the zone, plus a second one only when the second one is NEWS.
+ *
+ * An unlabelled datetime is ambiguous, and the product's own voice is to
+ * volunteer that kind of limit rather than let someone discover it from a
+ * count that is hours off. So the zone comes from the runtime (`localZone`),
+ * never from a guess, and it is NAMED rather than implied: "your local time"
+ * does not tell an operator on a shared machine, a VPN or a travelling laptop
+ * WHICH local.
+ *
+ * The second sentence used to be unconditional, and on any host whose zone is
+ * UTC -- a container, CI, a server, or any machine with `TZ` unset -- the
+ * result read "Times are in UTC, your browser's timezone. They are stored and
+ * counted in UTC.": the same fact, stated twice, which reads like a bug in the
+ * page rather than a note about it. It is dropped exactly when naming the zone
+ * has already said the word, which is a question about the SENTENCE and is
+ * therefore asked of the sentence -- not a list of zone names to keep in step
+ * with the tz database, and not the runtime offset either, which would make
+ * the note appear and disappear across a daylight-saving boundary in London.
+ *
+ * Takes the zone as an ARGUMENT rather than calling `localZone` itself, and
+ * exported, so that both branches can be pinned against a literal zone name
+ * instead of against whatever zone the test host happens to be in. A test that
+ * could only ask about the runtime's own zone could never check the UTC branch
+ * on a developer's laptop nor the non-UTC branch in CI -- which is exactly the
+ * asymmetry that let the doubled sentence ship.
+ */
+export function zoneNote(zone: string): string {
+  return /utc/i.test(zone)
+    ? `Times are in ${zone}, your browser's timezone.`
+    : `Times are in ${zone}, your browser's timezone. They are stored and counted in UTC.`
+}
+
+/**
  * `Window` is a three-variant discriminated union (`ast.ts`): `last` takes a
  * positive safe integer and a unit, `absolute` takes two datetimes, `ever`
  * takes nothing. This control switches between them with a single select,
@@ -170,35 +204,44 @@ export function WindowPicker(props: {
 
       {value.kind === 'absolute' && (
         <>
-          <div className="flex items-center gap-2">
+          {/* Two bounds side by side above `sm`, STACKED below it, and `min-w-0`
+           * on both. Two `datetime-local` boxes have a min-content width of
+           * roughly 420px between them and this row used not to wrap at all,
+           * which made it the widest thing in a nested condition and therefore
+           * the floor everything else was clipped against: at 390px, inside a
+           * depth-three condition, the `to` bound was simply not on screen and
+           * nothing said so.
+           *
+           * Stacking rather than wrapping, because a native date-and-time
+           * control has a floor of its own that has nothing to do with CSS:
+           * roughly 200px to render `07/01/2026, 12:00 AM` plus its calendar
+           * button, and more below `sm`, where the primitives render at
+           * `text-base`. Sharing a 256px line with the word `to` shaves the
+           * AM/PM indicator off the end of the first box -- narrower than the
+           * defect above, and the same kind. Full width each, one per line, is
+           * the only arrangement that holds at every width. */}
+          <div className="flex flex-col items-start gap-2 sm:flex-row sm:flex-wrap sm:items-center">
             <Input
               type="datetime-local"
               aria-label="From"
+              className="w-full min-w-0 sm:w-auto sm:grow sm:basis-40"
               value={toPickerValue(value.from)}
               onChange={(e) =>
                 onChange({ kind: 'absolute', from: toInstant(e.target.value), to: value.to })
               }
             />
-            <span className="text-sm text-muted-foreground">to</span>
+            <span className="shrink-0 text-sm text-muted-foreground">to</span>
             <Input
               type="datetime-local"
               aria-label="To"
+              className="w-full min-w-0 sm:w-auto sm:grow sm:basis-40"
               value={toPickerValue(value.to)}
               onChange={(e) =>
                 onChange({ kind: 'absolute', from: value.from, to: toInstant(e.target.value) })
               }
             />
           </div>
-          {/* An unlabelled datetime is ambiguous, and the product's own voice
-           * is to volunteer that kind of limit rather than let someone
-           * discover it from a count that is hours off. The zone comes from
-           * the runtime (`localZone`), never from a guess -- and it is named,
-           * not merely implied, because "your local time" does not tell an
-           * operator on a shared machine, a VPN or a travelling laptop WHICH
-           * local. */}
-          <p className="text-xs text-muted-foreground">
-            Times are in {localZone()}, your browser's timezone. They are stored and counted in UTC.
-          </p>
+          <p className="text-xs text-muted-foreground">{zoneNote(localZone())}</p>
         </>
       )}
     </div>

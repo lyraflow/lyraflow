@@ -59,7 +59,7 @@ export function TraitForm(props: {
   const operatorId = `${id}-operator`
 
   return (
-    <div className="flex flex-wrap items-end gap-2">
+    <div className="flex min-w-0 flex-wrap items-end gap-2">
       <PropertyCombobox
         client={client}
         projectId={projectId}

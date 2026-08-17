@@ -4,7 +4,7 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import { WindowPicker } from './WindowPicker.js'
+import { WindowPicker, zoneNote } from './WindowPicker.js'
 
 describe('WindowPicker', () => {
   it('renders the last-variant fields (amount, unit) when given a `last` window', () => {
@@ -257,6 +257,40 @@ describe('WindowPicker -- the absolute window stores UTC and displays local', ()
   it('says nothing about a timezone when no absolute range is being chosen', () => {
     render(<WindowPicker id="beh" value={{ kind: 'ever' }} onChange={vi.fn()} />)
     expect(screen.queryByText(/Times are in/)).toBeNull()
+  })
+
+  /**
+   * Both branches against a literal zone name rather than against the host's
+   * own -- which is the only way either branch can be checked at all. A test
+   * that could ask only about the runtime's zone would exercise the UTC branch
+   * on a container and the named branch on a laptop, and never both, which is
+   * precisely how the doubled sentence shipped.
+   */
+  describe('the zone note', () => {
+    it('names the zone and says where times are stored, when the two differ', () => {
+      expect(zoneNote('Asia/Kolkata')).toBe(
+        "Times are in Asia/Kolkata, your browser's timezone. They are stored and counted in UTC.",
+      )
+    })
+
+    it('says UTC ONCE when the browser is already on UTC, instead of stating it twice', () => {
+      // What rendered before: "Times are in UTC, your browser's timezone. They
+      // are stored and counted in UTC." -- the same fact twice, on any
+      // container, CI runner, server, or host with `TZ` unset, which reads as
+      // a bug in the page rather than a note about it.
+      const note = zoneNote('UTC')
+      expect(note).toBe("Times are in UTC, your browser's timezone.")
+      expect(note).not.toMatch(/stored and counted/)
+      expect(note.match(/UTC/g)).toHaveLength(1)
+    })
+
+    it('treats any UTC-named zone the same way, without a list of names to maintain', () => {
+      // `Etc/UTC` is the same zone under the name a container is most likely
+      // to actually report. The rule is about the SENTENCE -- has naming the
+      // zone already said the word -- so it needs no tz-database list.
+      expect(zoneNote('Etc/UTC')).toBe("Times are in Etc/UTC, your browser's timezone.")
+      expect(zoneNote('Etc/UTC')).not.toMatch(/stored and counted/)
+    })
   })
 
   it('clearing a bound returns it to empty rather than to some invented instant', () => {

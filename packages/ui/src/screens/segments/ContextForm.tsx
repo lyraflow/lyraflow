@@ -29,8 +29,8 @@ export function ContextForm(props: {
   const operatorId = `${id}-operator`
 
   return (
-    <div className="flex flex-wrap items-end gap-2">
-      <div className="flex flex-col gap-1">
+    <div className="flex min-w-0 flex-wrap items-end gap-2">
+      <div className="flex min-w-0 flex-col gap-1">
         <Label htmlFor={fieldId}>Field</Label>
         <select
           id={fieldId}
@@ -46,7 +46,7 @@ export function ContextForm(props: {
           ))}
         </select>
       </div>
-      <div className="flex flex-col gap-1">
+      <div className="flex min-w-0 flex-col gap-1">
         <Label htmlFor={scopeId}>Scope</Label>
         <select
           id={scopeId}

@@ -112,6 +112,19 @@ describe('toPickerValue -- stored instant to picker reading', () => {
     expect(toPickerValue(LOCAL_MIDMORNING)).toBe(LOCAL_MIDMORNING)
   })
 
+  it('passes a BARE DATE through unshifted too -- the one shape where that guard is observable', () => {
+    // The fixture above cannot actually pin the zone-less branch, which is
+    // worth stating rather than discovering later: `new Date` reads a
+    // zone-less date-TIME as local, so rendering it back as local wall-clock
+    // returns the same string, and deleting the guard leaves that assertion
+    // green. A bare date is the shape where the two disagree -- the language
+    // reads `2026-08-01` as UTC midnight, not local midnight -- so removing
+    // the guard shifts it to `2026-08-01T05:30` here. `Lifecycle`'s refine
+    // accepts a bare date (asserted below), so this is a value a
+    // hand-written API call can really store.
+    expect(toPickerValue('2026-08-01')).toBe('2026-08-01')
+  })
+
   it('leaves an empty value empty', () => {
     expect(toPickerValue('')).toBe('')
   })
@@ -173,5 +186,19 @@ describe('why the lifecycle field is not converted the same way', () => {
   it('still refuses a value that is not a datetime at all', () => {
     expect(lifecycle('yesterday').success).toBe(false)
     expect(lifecycle('').success).toBe(false)
+  })
+
+  it('accepts a BARE DATE, which is why the branch above has to be pinned against one', () => {
+    // The shape a hand-written API call is most likely to send for
+    // "first_seen >= 1 Jan". It is zone-less, so it is passed through
+    // unshifted -- and a `datetime-local` control renders nothing for it,
+    // because it is not a valid local date-and-time string. That residual
+    // empty-box case is deliberately NOT closed here: choosing what to
+    // display for it means choosing whether `2026-08-01` meant UTC midnight
+    // (which is what `new Date` and therefore `predicates.ts` decide) or the
+    // operator's own midnight, and that is the same open question as the
+    // server-side resolution of any zone-less bound. It belongs where the SQL
+    // is generated, not in a display helper.
+    expect(lifecycle('2026-08-01').success).toBe(true)
   })
 })

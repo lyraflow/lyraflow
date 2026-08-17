@@ -29,7 +29,50 @@
  * A conversion accidentally applied twice therefore cannot corrupt anything.
  * What that does NOT protect against is applying one of them and not the
  * other, which is what the round-trip tests exist for.
+ *
+ * ## Two encodings live in the `lifecycle` column, and that is deliberate
+ *
+ * `Lifecycle`'s refine (`ast.ts`) is looser than an `absolute` window's
+ * `.datetime()`: it accepts a zone-less wall-clock reading as well as an
+ * instant, so both shapes are already stored in the field today. The rule
+ * this module implements, for every datetime control on the screen:
+ *
+ * - **On read, a zone-less value passes through UNSHIFTED.** Stored
+ *   zone-less values exist -- written by an earlier build of this screen,
+ *   and accepted by the API and the CLI -- and shifting one by the local
+ *   offset would silently change what an operator's saved segment means, by
+ *   an offset nobody recorded.
+ * - **On read, a value that CARRIES a zone (`Z` or an offset) is converted
+ *   to local for display.** This is the half `LifecycleForm` was missing:
+ *   the input renders nothing at all for a `Z`-suffixed string, so a saved
+ *   bound appeared as an empty control on a condition that matched on it.
+ * - **On write, a zone-carrying instant is emitted**, so every bound this
+ *   screen produces from here on is unambiguous.
+ *
+ * The accepted cost is therefore two encodings in one column, read by one
+ * rule. The alternative -- normalising on read -- is the shift described
+ * above, applied to every already-stored bound.
+ *
+ * **The other half of this is still open, and is NOT a UI question.** A
+ * zone-less lifecycle value reaches `packages/core/src/segments/predicates.ts`
+ * and is compiled with `new Date(String(v))`, which resolves it in the
+ * SERVER's zone rather than the operator's. Nothing in this module changes
+ * that, and nothing here should: it is a decision about what a stored
+ * wall-clock reading means, which has to be made where the SQL is generated.
+ *
+ * One residual belongs to that same open question and is left with it, rather
+ * than settled quietly here: a BARE DATE (`2026-08-01`) is zone-less, so it is
+ * passed through unshifted -- and a `datetime-local` control renders nothing
+ * for it, because it is not a valid local date-and-time string. `Lifecycle`'s
+ * refine accepts one, so a hand-written API call can store it. Displaying
+ * anything for it means first deciding whether it meant UTC midnight (which is
+ * what `new Date`, and therefore the compiler, decide) or the operator's own
+ * midnight; picking one here would be answering the server's question in a
+ * display helper. Pinned as behaviour in this module's tests so the choice is
+ * visible rather than implied.
  */
+
+import type { ConditionValue, Scalar } from './ValueInput.js'
 
 /**
  * Whether a stored string names an INSTANT rather than a wall-clock reading
@@ -47,9 +90,9 @@ const CARRIES_A_ZONE = /T.*(?:Z|[+-]\d{2}:?\d{2})$/i
  * from the local getters rather than from `toISOString()`, which would be UTC
  * with a `Z` the input refuses to display at all.
  *
- * Used directly by `ConditionRow` to seed a fresh `lifecycle` node's value
- * (whose schema is a looser refine that accepts a zone-less reading; see this
- * module's tests), and by `toPickerValue` below.
+ * Used by `toPickerValue` below, and exported because it is the only honest
+ * way to spell "the wall-clock reading a `Date` names here" -- see this
+ * module's tests.
  */
 export function datetimeLocal(at: Date): string {
   const pad = (n: number) => String(n).padStart(2, '0')
@@ -94,6 +137,37 @@ export function toPickerValue(stored: string): string {
   const at = new Date(stored)
   if (Number.isNaN(at.getTime())) return stored
   return datetimeLocal(at)
+}
+
+/**
+ * The two conversions above, lifted to a whole condition `value` -- which is
+ * one scalar for every operator except `between`, and a two-slot tuple for
+ * that one (`ValueInput`'s own doc comment).
+ *
+ * `WindowPicker` needs neither of these, because an `absolute` window names
+ * its two bounds as separate fields and converts each one where it renders
+ * it. A `lifecycle` bound is a condition `value`, so it arrives in whichever
+ * of the two shapes the operator's chosen operator implies -- and a form that
+ * converted only the scalar case would leave `between` writing back
+ * unconverted readings, which is the same defect one operator to the left.
+ *
+ * A non-string scalar is passed through untouched. A number, a boolean or a
+ * `null` is not something this picker can produce, and inventing a datetime
+ * for one would be a conversion of something that was never a reading.
+ */
+function acrossValue(value: ConditionValue, convert: (s: string) => string): ConditionValue {
+  const one = (v: Scalar): Scalar => (typeof v === 'string' ? convert(v) : v)
+  return Array.isArray(value) ? [one(value[0]), one(value[1])] : one(value)
+}
+
+/** A stored condition value -> what the picker should DISPLAY. */
+export function valueToPicker(stored: ConditionValue): ConditionValue {
+  return acrossValue(stored, toPickerValue)
+}
+
+/** A condition value read off the picker -> what to STORE. */
+export function valueToStored(picked: ConditionValue): ConditionValue {
+  return acrossValue(picked, toInstant)
 }
 
 /**

@@ -15,7 +15,6 @@ import { BehaviourForm } from './BehaviourForm.js'
 import { ContextForm } from './ContextForm.js'
 import { LIFECYCLE_FIELDS, LifecycleForm } from './LifecycleForm.js'
 import { TraitForm } from './TraitForm.js'
-import { datetimeLocal } from './datetime.js'
 import { summarise } from './summarise.js'
 import { incompleteAt, warningsAt } from './warnings.js'
 
@@ -40,6 +39,35 @@ type LeafKind = (typeof LEAF_KINDS)[number]['kind']
  * so a condition the operator has not finished writing cannot start out
  * scanning all history. */
 const DEFAULT_WINDOW_DAYS = 30
+
+/**
+ * How a Negate toggle shows that it is ON -- shared by this component and by
+ * `GroupCard`, which renders the same control for a whole group, because two
+ * spellings of one affordance is how one of them stops being maintained.
+ *
+ * **It changes the FILL, not the border, and that is measured rather than
+ * chosen.** This used to read `aria-pressed:border-foreground
+ * aria-pressed:font-semibold`, and the border half was a no-op in both
+ * themes: the `outline` variant's own `border` shorthand sets no colour, so
+ * the border already resolves to `currentColor` -- which IS the foreground.
+ * Computed `borderTopColor` was `rgb(18, 17, 16)` pressed and unpressed in
+ * light, `rgb(242, 240, 236)` in both in dark. The whole affordance therefore
+ * rested on a single font-weight step (600 against 500), which is just
+ * perceptible side by side and not at all in isolation. Nobody noticed
+ * because the `Not` badge rescues the leaf case and a sentence rescues the
+ * group case.
+ *
+ * So: a filled button, whose computed `background-color` differs from the
+ * unpressed one by the full distance between the two ends of the palette --
+ * a difference no cascade accident can reduce to nothing, and one that does
+ * not depend on `border` resolving to any particular value. The `hover:`
+ * pair is not decoration either: `outline` carries `hover:bg-accent`, which
+ * has exactly the same specificity as an `aria-pressed:` utility, so without
+ * an `aria-pressed:hover:` of its own a pressed button would drop back to an
+ * unpressed-looking fill the moment the pointer touched it.
+ */
+export const NEGATE_PRESSED =
+  'aria-pressed:bg-foreground aria-pressed:text-background aria-pressed:font-semibold aria-pressed:hover:bg-foreground/90 aria-pressed:hover:text-background'
 
 /**
  * The node a switch to `kind` REPLACES the old one with -- a whole fresh
@@ -110,7 +138,12 @@ function defaultLeaf(kind: LeafKind, now: Date): FilterNode {
         kind: 'lifecycle',
         field: LIFECYCLE_FIELDS[0],
         operator: '>=',
-        value: datetimeLocal(now),
+        // A zone-carrying instant, not the wall-clock reading this used to
+        // seed. `Lifecycle`'s refine accepts either, and the picker now
+        // displays either correctly (`datetime.ts`) -- but a bound WRITTEN by
+        // this screen should say which instant it means, and a wall-clock
+        // reading does not: the compiler resolves it in the server's zone.
+        value: now.toISOString(),
       }
     default:
       return { kind: 'trait', key: '', operator: '=', value: '' }
@@ -319,32 +352,45 @@ export function ConditionRow(props: {
   return (
     <div
       data-testid={testId}
-      className="flex flex-col gap-2 rounded-md border border-border bg-background px-3 py-2"
+      className="flex flex-col gap-2 rounded-md border border-border bg-background px-2 py-2 sm:px-3"
     >
-      {/* Body row, then controls row -- never one wrapping row that relies
-       * on `justify-between` plus a wrap to separate them.
+      {/* THREE stacked rows -- kind, then body, then controls -- and none of
+       * them shares a flex line with another. Never one wrapping row that
+       * relies on `justify-between` plus a wrap to separate them, and never
+       * the kind selector sharing a wrapping row with the body either.
        *
-       * That older shape put the result at the mercy of each per-kind
-       * form's FLEX-BASIS, which is not something this component controls
-       * or should have to know. `BehaviourForm`'s root is the only one
-       * carrying `flex-1` (`flex: 1 1 0%`), so its hypothetical width when
-       * the row decides where to break is 0: it can never push the button
-       * group onto a line of its own. It then absorbed the free space, sat
-       * beside the buttons, and -- being several rows tall against a
-       * one-row button group -- `items-center` parked Negate/Remove at
-       * exactly its vertical middle, level with the Window select and
-       * directly above Where, reading as a control on one of those rather
-       * than on the whole condition. The other three forms have a
-       * content-based `flex-basis: auto` whose max-content exceeds what
-       * the button group leaves, so they broke onto two lines and looked
-       * right by accident.
+       * Both of those shapes put the result at the mercy of each per-kind
+       * form's FLEX-BASIS, which is not something this component controls or
+       * should have to know. `BehaviourForm`'s root used to carry `flex-1`
+       * (`flex: 1 1 0%`), so its hypothetical width when a shared row decided
+       * where to break was 0: it could never push a sibling onto a line of
+       * its own. It absorbed the free space, sat beside whatever shared the
+       * row, and -- being several rows tall against a one-row sibling --
+       * `items-center` parked that sibling at exactly its vertical middle.
+       *
+       * **That is a defect this file has now shipped twice**, which is why
+       * the rows are separated structurally rather than by an alignment
+       * value. The first time it was Negate/Remove, and the fix moved them to
+       * their own row -- but LEFT `items-center` on the body row, and left
+       * this comment claiming the shape was fixed. The kind selector added
+       * later inherited it verbatim: measured at 1180px, it rendered 302px
+       * BELOW the top of its own condition, level with the behaviour's
+       * `Where` block and beside a 200x660px empty column, reading as a label
+       * on one of the condition's sub-parts rather than on the condition. The
+       * width-dependence is what made it survive review: at 390px, or at
+       * depth three, the form's min-content forces the break and the selector
+       * sits correctly at the top.
        *
        * Note the measured trap in the obvious explanation: "the behaviour
        * form is narrower than the row" is true of the trait form too (480
        * of 598px at 1180px wide) and yet the trait's buttons still wrapped.
-       * Width after layout does not predict the break; flex-basis does.
-       * Splitting the rows makes all four kinds identical regardless. */}
-      <div className="flex flex-wrap items-center gap-2">
+       * Width after layout does not predict the break; flex-basis does. So
+       * the guarantee here is not "the alignment is right", it is that
+       * nothing the four forms can do to their own flex-basis can reorder
+       * these three rows -- each is a separate flex container, and the kind
+       * selector is the first thing in the first one at every width and for
+       * every leaf kind. */}
+      <div className="flex flex-wrap items-end gap-2">
         {/* A negated leaf must SAY it is negated. `aria-pressed` on the
          * Negate button alone was invisible: the vendored Button has no
          * pressed styling, so `not (status = churned)` rendered
@@ -353,7 +399,7 @@ export function ConditionRow(props: {
          * already announces its own negation in words; only leaves were
          * silent. */}
         {negated && (
-          <span className="rounded-sm border border-border bg-muted px-1.5 py-0.5 text-xs font-semibold uppercase tracking-wide text-foreground">
+          <span className="mb-1.5 rounded-sm border border-border bg-muted px-1.5 py-0.5 text-xs font-semibold uppercase tracking-wide text-foreground">
             Not
           </span>
         )}
@@ -361,7 +407,7 @@ export function ConditionRow(props: {
          * every control after it means. Its labels are the operator's
          * question ("what they did"), never the AST's noun -- see
          * `LEAF_KINDS`. */}
-        <div className="flex flex-col gap-1">
+        <div className="flex min-w-0 flex-col gap-1">
           <Label htmlFor={kindId}>Match on</Label>
           <select
             id={kindId}
@@ -377,8 +423,8 @@ export function ConditionRow(props: {
             ))}
           </select>
         </div>
-        {body()}
       </div>
+      {body()}
       {/* Said on the row it is about, never in a page-level banner -- the
        * same rule the cost warnings below follow, and for the same reason.
        * An operator who clicks "Add condition" and then Save gets a Save
@@ -402,7 +448,7 @@ export function ConditionRow(props: {
           variant="outline"
           size="sm"
           aria-pressed={negated}
-          className="aria-pressed:border-foreground aria-pressed:font-semibold"
+          className={NEGATE_PRESSED}
           onClick={onNegate}
         >
           Negate

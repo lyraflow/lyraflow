@@ -66,7 +66,7 @@ export function WherePredicates(props: {
         const rowId = `${id}-where-${i}`
         const operatorId = `${rowId}-operator`
         return (
-          <div key={rowId} data-testid={rowId} className="flex flex-wrap items-end gap-2">
+          <div key={rowId} data-testid={rowId} className="flex min-w-0 flex-wrap items-end gap-2">
             <PropertyCombobox
               client={client}
               projectId={projectId}

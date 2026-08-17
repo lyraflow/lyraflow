@@ -55,7 +55,7 @@ export function OperatorSelect(props: {
 }) {
   const { id, value, onChange } = props
   return (
-    <div className="flex flex-col gap-1">
+    <div className="flex min-w-0 flex-col gap-1">
       <Label htmlFor={id}>Operator</Label>
       <select
         id={id}
