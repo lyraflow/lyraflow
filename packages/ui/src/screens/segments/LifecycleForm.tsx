@@ -19,8 +19,15 @@ import { ValueInput } from './ValueInput.js'
  * option, a free-typed fallback) without a matching change to the enum
  * would reopen that identifier to request data. Check predicates.ts before
  * changing either side.
+ *
+ * Exported so that `ConditionRow`'s kind switcher can seed a fresh
+ * `lifecycle` node's `field` FROM THIS LIST rather than from a literal
+ * chosen at the call site -- the same reason `ContextForm` imports
+ * `CONTEXT_FIELDS` from core instead of repeating it. A second hand-written
+ * spelling of a value that becomes a bare SQL identifier is exactly what the
+ * enum above exists to stop.
  */
-const LIFECYCLE_FIELDS = ['first_seen', 'last_seen'] as const
+export const LIFECYCLE_FIELDS = ['first_seen', 'last_seen'] as const
 
 /**
  * The `lifecycle` leaf form. Its value is always an instant (`ast.ts`'s

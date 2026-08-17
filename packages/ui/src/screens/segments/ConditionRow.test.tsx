@@ -1,5 +1,7 @@
+import { FilterNode as FilterNodeSchema } from '@lyraflow/core/segments/ast.js'
 import type { Context, FilterNode, Lifecycle, Trait } from '@lyraflow/core/segments/ast.js'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { MAX_BEHAVIOR_NODES } from '@lyraflow/core/segments/validate.js'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
@@ -53,6 +55,11 @@ function fakeClient(): ApiClient {
  * EXCEPT trait left the whole suite green while a negated behaviour
  * condition, the one whose misreading changes which population you email,
  * rendered pixel-identical to a non-negated one.
+ *
+ * The fifth column is the label the KIND SWITCHER offers that kind under --
+ * the operator's vocabulary, not the AST's -- so the switcher's own tables
+ * below drive off exactly the same list as everything else here, and a kind
+ * added to the AST is still added in one place.
  */
 const LEAF_KINDS = [
   // Trait is a "combobox" for the same reason `behavior` is, below: its
@@ -60,13 +67,13 @@ const LEAF_KINDS = [
   // text box it shipped as. That change is the point -- a free text box
   // labelled "Key" asked the operator to guess both what the field meant
   // and which names their project actually records.
-  ['trait', traitNode, 'combobox', /^trait$/i],
-  ['context', contextNode, 'combobox', /field/i],
-  ['lifecycle', lifecycleNode, 'combobox', /^field$/i],
+  ['trait', traitNode, 'combobox', /^trait$/i, 'who they are'],
+  ['context', contextNode, 'combobox', /field/i, 'where they came from'],
+  ['lifecycle', lifecycleNode, 'combobox', /^field$/i, 'lifecycle'],
   // `EventCombobox`'s own `<input list=...>` computes an ARIA role of
   // "combobox", not "textbox" -- the `list` attribute is itself what flips
   // the accessible role, same as `ContextForm`'s native `<select>`.
-  ['behavior', behaviorNode, 'combobox', /event/i],
+  ['behavior', behaviorNode, 'combobox', /event/i, 'what they did'],
 ] as const
 
 describe('ConditionRow', () => {
@@ -327,17 +334,27 @@ describe('ConditionRow', () => {
    * DOM glued to the ORIGINAL value between keystrokes, which is what
    * makes multi-key `userEvent.type` come out garbled for reasons that
    * have nothing to do with the negation logic under test here. */
-  function Harness(props: { initial: FilterNode }) {
+  function Harness(props: {
+    initial: FilterNode
+    /** Every node the row hands back, in order -- the switcher's tests
+     * assert against the NODE, not only against what re-renders from it. */
+    onNode?: (next: FilterNode) => void
+    behaviorCap?: { blocked: boolean; message: string }
+  }) {
     const [node, setNode] = useState<FilterNode>(props.initial)
     return (
       <ConditionRow
         node={node}
         path={[0]}
-        onChange={setNode}
+        onChange={(next) => {
+          props.onNode?.(next)
+          setNode(next)
+        }}
         onRemove={vi.fn()}
         onNegate={vi.fn()}
         client={fakeClient()}
         projectId={1}
+        behaviorCap={props.behaviorCap}
       />
     )
   }
@@ -483,5 +500,183 @@ describe('ConditionRow', () => {
     // `AlertTriangle` (lucide) renders no visible text of its own -- if a
     // warning list rendered at all, it would carry at least the reason text.
     expect(screen.queryByText(/scans all history/i)).toBeNull()
+  })
+
+  // --- The kind switcher. --------------------------------------------------
+  // Until it existed, `GroupCard`'s `newCondition()` hardcoded a `trait` and
+  // NOTHING anywhere could change a condition's kind, so three of the four
+  // leaf forms -- including the behaviour form, the most valuable thing this
+  // screen can express -- rendered only for nodes authored through the CLI or
+  // the API.
+
+  const kindSelect = () =>
+    within(screen.getByTestId('condition-0')).getByRole('combobox', { name: 'Match on' })
+
+  /** The message `GroupCard` computes from `capBlock` and hands down. Built
+   * from `MAX_BEHAVIOR_NODES` rather than typed out, so the assertions below
+   * are about the cap the server actually enforces. */
+  const CAP_MESSAGE = `Adding here would bring this segment to ${MAX_BEHAVIOR_NODES + 1} behavioural conditions; the maximum is ${MAX_BEHAVIOR_NODES}.`
+  const atCap = { blocked: true, message: CAP_MESSAGE }
+
+  it('offers every leaf kind under the operator-facing label, as the first control of the row', () => {
+    render(<Harness initial={traitNode} />)
+    const select = kindSelect()
+    expect(select).toHaveValue('trait')
+    // The full option list, in order, by LABEL -- so renaming one to the
+    // AST's own noun ("behavior") is a failure here rather than a silent
+    // vocabulary change on the one screen an operator reads.
+    expect(
+      Array.from(select.querySelectorAll('option')).map((o) => [o.value, o.textContent]),
+    ).toEqual([
+      ['trait', 'who they are'],
+      ['behavior', 'what they did'],
+      ['context', 'where they came from'],
+      ['lifecycle', 'lifecycle'],
+    ])
+  })
+
+  it.each(LEAF_KINDS)(
+    'switching to %s replaces the node with one the AST itself accepts',
+    async (kind, _node, role, fieldLabel, label) => {
+      // The starting node is always of a DIFFERENT kind, so every row of
+      // this table is a real switch rather than a no-op.
+      const onNode = vi.fn()
+      render(<Harness initial={kind === 'trait' ? behaviorNode : traitNode} onNode={onNode} />)
+      await userEvent.selectOptions(kindSelect(), label)
+
+      const next = onNode.mock.calls.at(-1)?.[0] as FilterNode
+      expect(next.kind).toBe(kind)
+      // Against the REAL schema from core, never a shape written out here:
+      // a test that asserts what the code produces cannot catch the code
+      // producing something the AST refuses. `ast.ts`'s refines are the
+      // point -- `count` must carry no property, a lifecycle value must
+      // parse as a datetime, a trait key cannot be empty.
+      const parsed = FilterNodeSchema.safeParse(next)
+      expect(parsed.success ? [] : parsed.error.issues).toEqual([])
+      // ...and the row now renders that kind's own first field, so the
+      // switch is visible to the operator and not merely to the tree.
+      expect(
+        within(screen.getByTestId('condition-0')).getByRole(role, { name: fieldLabel }),
+      ).toBeInTheDocument()
+    },
+  )
+
+  it("switching away from a kind and back does not resurrect the old node's fields", async () => {
+    // `WindowPicker`'s own rule, one level up: a switch REPLACES the node
+    // wholesale. A spread would leave `field`/`scope` from the context node
+    // sitting on the trait it became -- a shape the AST's union refuses to
+    // parse back, produced by this UI rather than by a hand-built request.
+    const onNode = vi.fn()
+    render(
+      <Harness
+        initial={{ kind: 'trait', key: 'status', operator: '!=', value: 'churned' }}
+        onNode={onNode}
+      />,
+    )
+    await userEvent.selectOptions(kindSelect(), 'where they came from')
+    await userEvent.selectOptions(kindSelect(), 'who they are')
+
+    const next = onNode.mock.calls.at(-1)?.[0] as Trait
+    expect(next.kind).toBe('trait')
+    // None of the original trait survived the round trip...
+    expect(next.value).toBe('')
+    expect(next.operator).toBe('=')
+    expect(next.key).not.toBe('status')
+    // ...and nothing of the context node it passed through did either.
+    expect(next).not.toHaveProperty('field')
+    expect(next).not.toHaveProperty('scope')
+    const parsed = FilterNodeSchema.safeParse(next)
+    expect(parsed.success ? [] : parsed.error.issues).toEqual([])
+  })
+
+  it('keeps a negated condition negated across a kind switch', async () => {
+    // A `not` WRAPS a node rather than belonging to it (`wrapLike`), so
+    // changing what is negated must never change whether it is. Dropping
+    // the wrap here would silently widen the segment to the exact people it
+    // was written to exclude.
+    const onNode = vi.fn()
+    render(<Harness initial={{ kind: 'not', child: traitNode }} onNode={onNode} />)
+    await userEvent.selectOptions(kindSelect(), 'what they did')
+
+    const next = onNode.mock.calls.at(-1)?.[0] as FilterNode
+    expect(next.kind).toBe('not')
+    if (next.kind !== 'not') throw new Error('unreachable')
+    expect(next.child.kind).toBe('behavior')
+    const parsed = FilterNodeSchema.safeParse(next)
+    expect(parsed.success ? [] : parsed.error.issues).toEqual([])
+    // And the row still SAYS so, both ways it says it.
+    const row = screen.getByTestId('condition-0')
+    expect(within(row).getByText('Not', { selector: ':not(button)' })).toBeInTheDocument()
+    expect(within(row).getByRole('button', { name: /negate/i })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+  })
+
+  it('refuses a switch to "what they did" at the behaviour cap even when the change event arrives anyway', () => {
+    // The refusal has to live where the node would be REPLACED, not only in
+    // the `disabled` attribute below: an attribute is a hint to a pointer,
+    // and a `change` event can arrive without one.
+    const onNode = vi.fn()
+    render(<Harness initial={traitNode} onNode={onNode} behaviorCap={atCap} />)
+    fireEvent.change(kindSelect(), { target: { value: 'behavior' } })
+    expect(onNode).not.toHaveBeenCalled()
+    expect(kindSelect()).toHaveValue('trait')
+  })
+
+  it('disables the "what they did" option at the behaviour cap', () => {
+    render(<Harness initial={traitNode} behaviorCap={atCap} />)
+    const row = screen.getByTestId('condition-0')
+    expect(within(row).getByRole('option', { name: 'what they did' })).toBeDisabled()
+  })
+
+  it('says WHICH cap refused the switch, rather than merely refusing', () => {
+    // Same treatment "Add condition" gives a cap it is blocked by: a
+    // disabled control with no sentence beside it is indistinguishable from
+    // a broken one.
+    render(<Harness initial={traitNode} behaviorCap={atCap} />)
+    expect(
+      within(screen.getByTestId('condition-0')).getByText(new RegExp(String(MAX_BEHAVIOR_NODES))),
+    ).toHaveTextContent(CAP_MESSAGE)
+  })
+
+  it('still allows a behaviour condition to be switched to "who they are" at the cap', async () => {
+    // The direction that matters. A gate that reads the tree's behaviour
+    // count in isolation refuses this too -- and then the operator cannot
+    // edit the tree towards being legal at all, which is the inverted cap
+    // this screen has already shipped once, for the two "Add" controls.
+    const onNode = vi.fn()
+    render(<Harness initial={behaviorNode} onNode={onNode} behaviorCap={atCap} />)
+    await userEvent.selectOptions(kindSelect(), 'who they are')
+
+    const next = onNode.mock.calls.at(-1)?.[0] as FilterNode
+    expect(next.kind).toBe('trait')
+    const parsed = FilterNodeSchema.safeParse(next)
+    expect(parsed.success ? [] : parsed.error.issues).toEqual([])
+  })
+
+  it('still allows a trait condition to be switched to a NON-behaviour kind at the cap', async () => {
+    // The cap is about `behavior` nodes only. Consulting it for every
+    // switch would freeze a capped tree's rows into whatever kind they
+    // happen to hold.
+    const onNode = vi.fn()
+    render(<Harness initial={traitNode} onNode={onNode} behaviorCap={atCap} />)
+    await userEvent.selectOptions(kindSelect(), 'lifecycle')
+
+    const next = onNode.mock.calls.at(-1)?.[0] as FilterNode
+    expect(next.kind).toBe('lifecycle')
+    const parsed = FilterNodeSchema.safeParse(next)
+    expect(parsed.success ? [] : parsed.error.issues).toEqual([])
+  })
+
+  it("does not disable a behaviour row's OWN option at the cap, nor tell it about a cap it is not blocked by", () => {
+    // Switching a behaviour to a behaviour adds nothing, so the cap has
+    // nothing to say here -- and an option rendered disabled on the value
+    // the control currently holds tells the operator their current state is
+    // forbidden.
+    render(<Harness initial={behaviorNode} behaviorCap={atCap} />)
+    const row = screen.getByTestId('condition-0')
+    expect(within(row).getByRole('option', { name: 'what they did' })).toBeEnabled()
+    expect(within(row).queryByText(new RegExp(String(MAX_BEHAVIOR_NODES)))).toBeNull()
   })
 })

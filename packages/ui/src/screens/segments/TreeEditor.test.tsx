@@ -38,7 +38,10 @@ describe('TreeEditor', () => {
       />,
     )
     const card = screen.getByTestId('group-')
-    expect(within(card).getByRole('combobox', { name: /match/i })).toHaveValue('and')
+    // `name: 'Match'` exactly, not `/match/i`: every condition row inside
+    // this card now carries its own kind switcher named "Match on", which a
+    // loose pattern matches too.
+    expect(within(card).getByRole('combobox', { name: 'Match' })).toHaveValue('and')
   })
 
   it('nests a child group inside its parent card', () => {
@@ -415,7 +418,7 @@ describe('TreeEditor', () => {
         projectId={projectId}
       />,
     )
-    await userEvent.selectOptions(screen.getByRole('combobox', { name: /match/i }), 'or')
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Match' }), 'or')
     const next = lastRoot(onChange)
     expect(next.op).toBe('or')
     expect(next.children).toEqual([trait('a'), trait('b')])

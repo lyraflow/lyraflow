@@ -296,8 +296,10 @@ describe('GroupCard -- the three server-side caps', () => {
   // --- MAX_BEHAVIOR_NODES. -----------------------------------------------
   // Gating on the tree's EXISTING behaviour count alone blocked a control
   // that could never itself add one -- `newCondition()`/`newGroup()` both
-  // hardcode a `trait`, and there is no kind-switcher anywhere in this
-  // plan. The server would accept a trait added to a 25-behaviour tree;
+  // hardcode a `trait`, so neither is a route to a behaviour even now that
+  // a kind switcher exists on each row (its own tests are below, and in
+  // `ConditionRow.test.tsx`). The server would accept a trait added to a
+  // 25-behaviour tree;
   // the earlier version of this UI refused it anyway, with no route
   // around it short of the CLI -- the exact failure the caps exist to
   // prevent, inverted. `capBlock` now gates on how many behaviours THIS
@@ -327,6 +329,61 @@ describe('GroupCard -- the three server-side caps', () => {
     const next = onChange.mock.calls[0]?.[0] as Group
     expect(next.children).toHaveLength(MAX_BEHAVIOR_NODES + 1)
     expect(next.children.at(-1)?.kind).toBe('trait')
+  })
+
+  // --- The behaviour cap reaches the kind switcher on each child row. -----
+  // `ConditionRow` has no tree and cannot count anything (its own doc
+  // comment); this component has `root` and computes the answer. These pin
+  // the WIRING -- without the prop, `ConditionRow`'s own cap tests still
+  // pass while nothing on a real screen is ever capped.
+
+  /** `MAX_BEHAVIOR_NODES` behaviours plus one trait, so the same tree holds
+   * both a row the cap blocks and a row it must not. */
+  function cappedRootWithTrait(): Group {
+    return {
+      kind: 'group',
+      op: 'and',
+      children: [...flatBehaviorRoot(MAX_BEHAVIOR_NODES).children, trait('t')],
+    }
+  }
+
+  it('refuses a trait row a switch to "what they did" when the tree is at the behaviour cap, naming the cap', () => {
+    render(
+      <GroupCard
+        root={cappedRootWithTrait()}
+        path={[]}
+        onChange={vi.fn()}
+        client={client}
+        projectId={projectId}
+      />,
+    )
+    const traitRow = within(screen.getByTestId(`condition-${MAX_BEHAVIOR_NODES}`))
+    expect(traitRow.getByRole('option', { name: 'what they did' })).toBeDisabled()
+    expect(traitRow.getByText(new RegExp(String(MAX_BEHAVIOR_NODES)))).toBeInTheDocument()
+  })
+
+  it('still lets a behaviour row in that same capped tree be switched to "who they are"', async () => {
+    // The inverted-cap failure one level down: a tree at the cap that
+    // cannot be edited back under it is a tree the server would accept,
+    // refused by its own editor.
+    const onChange = vi.fn()
+    render(
+      <GroupCard
+        root={cappedRootWithTrait()}
+        path={[]}
+        onChange={onChange}
+        client={client}
+        projectId={projectId}
+      />,
+    )
+    const behaviourRow = within(screen.getByTestId('condition-0'))
+    await userEvent.selectOptions(
+      behaviourRow.getByRole('combobox', { name: 'Match on' }),
+      'who they are',
+    )
+    const next = onChange.mock.calls.at(-1)?.[0] as Group
+    expect(next.children[0]?.kind).toBe('trait')
+    expect(next.children).toHaveLength(MAX_BEHAVIOR_NODES + 1)
   })
 
   // --- None of this interferes with the pre-existing negated-group disable

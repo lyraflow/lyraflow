@@ -73,21 +73,27 @@ function newGroup(): FilterNode {
  * checked against `depth` (this group's own `path.length`), not
  * `maxDepth(root)`.
  *
- * `extraBehaviors` is ALWAYS 0 from both call sites below, and that is
- * deliberate, not an oversight: `newCondition()` and `newGroup()` both
- * hardcode a `trait` leaf -- there is no kind-switcher anywhere in this
- * plan, so neither control here can ever itself create a
+ * `extraBehaviors` is still 0 from the two "Add" call sites below, and that
+ * is deliberate, not an oversight: `newCondition()` and `newGroup()` both
+ * hardcode a `trait` leaf, so neither control can ever itself create a
  * `behavior` node. Gating on the tree's EXISTING `behaviorCount` alone
- * (replacing an earlier version of this function that did
- * exactly that) would block "Add condition"/"Add group" on a tree the
- * server would happily accept the trait into -- the caps exist to stop the
- * server rejecting a tree the operator built, not the other way round.
- * Parameterising on `extraBehaviors` instead means this check is currently
- * always a no-op (an operator's existing tree can never itself exceed the
- * cap it was saved under) while staying ready for the day a kind-switcher
- * exists and can pass `1` for a leaf the operator chose to make a
- * behaviour -- the same gate starts doing real work without being
- * rewritten.
+ * (replacing an earlier version of this function that did exactly that)
+ * would block "Add condition"/"Add group" on a tree the server would
+ * happily accept the trait into -- the caps exist to stop the server
+ * rejecting a tree the operator built, not the other way round.
+ *
+ * The THIRD call site is the one that finally passes `1`: the kind switcher
+ * on each child `ConditionRow`, for the single switch that can create a
+ * behaviour where there was none. It passes `0` extra nodes and `0` extra
+ * depth because a switch replaces one leaf with one leaf, in place -- it
+ * costs neither. Which switches consult the answer at all is
+ * `ConditionRow`'s own decision (its `switchRefusal`), and has to be: this
+ * component knows how many behaviours the tree holds, and only the row
+ * knows whether the leaf being switched is one of them. Handing the row a
+ * blanket "the cap is reached" instead would recreate the inverted gate
+ * described above one level down -- a behaviour condition at the cap that
+ * cannot be switched to a trait is a tree the server would accept, refused
+ * by its own editor.
  */
 function capBlock(
   nodeCount: number,
@@ -175,7 +181,8 @@ function capBlock(
  * fresh on every render from `root` -- see `capBlock`'s own doc comment for
  * why node/behaviour counts are global but depth is local to this group,
  * and why the behaviour cap is parameterised on how many behaviours THIS
- * insert would add (always 0 today) rather than the tree's existing count.
+ * control would add (0 for both "Add" buttons, 1 for the kind switcher on a
+ * child row) rather than on the tree's existing count.
  */
 export function GroupCard(props: {
   root: FilterNode
@@ -214,6 +221,11 @@ export function GroupCard(props: {
   // `behavior` node today.
   const conditionCap = capBlock(nodeCount, behaviorCount, depth, 1, 1, 0)
   const groupCap = capBlock(nodeCount, behaviorCount, depth, 2, 2, 0)
+  // What a child row's kind switcher would cost if the operator chose
+  // "what they did" on a leaf that is not already one: one more behaviour,
+  // no more nodes, no more depth. Whether a given row consults this at all
+  // is that row's own call -- see `capBlock`'s doc comment.
+  const behaviorSwitchCap = capBlock(nodeCount, behaviorCount, depth, 0, 0, 1)
 
   function setOp(op: 'and' | 'or') {
     const nextGroup: Group = { ...group, op }
@@ -318,6 +330,7 @@ export function GroupCard(props: {
               projectId={projectId}
               onUnauthorized={onUnauthorized}
               warnings={warnings}
+              behaviorCap={behaviorSwitchCap}
             />
           )
         })}
