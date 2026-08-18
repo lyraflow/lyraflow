@@ -1942,13 +1942,22 @@ after that is not a special case; it is the same situation as forgetting any
 other password, and the fix is the same one:
 
 ```sh
-echo 'a new password' | docker compose exec -T lyraflow \
+read -rsp 'password: ' P; echo
+printf '%s' "$P" | docker compose exec -T lyraflow \
   node packages/cli/dist/index.js set-admin-password admin@localhost
+unset P
 ```
 
 `set-admin-password` takes the password on stdin, never as an argument — an
 argument lands in shell history and in `ps` output for every user on the
-box.
+box. `read -rs` is there for the same reason and is not merely tidier: an
+`echo 'a new password' | ...` keeps the argument off `ps` but writes the
+credential straight into your shell history, which is most of the problem
+back again.
+
+`-T` matters too. `docker compose exec` allocates a TTY by default and then
+ignores piped stdin, so without it the password never arrives and the failure
+is silent.
 
 **If you are upgrading an install that predates the admin account,** its
 `.env` has no `LYRAFLOW_ADMIN_PASSWORD` — the installer only ever writes it

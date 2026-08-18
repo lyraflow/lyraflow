@@ -24,6 +24,37 @@ function messageFor(err: unknown): string {
   return 'Could not sign in.'
 }
 
+/** The command this screen tells an operator to run.
+ *
+ * IT MUST BE RUNNABLE ON THE INSTALL PATH THE README RECOMMENDS, which is
+ * `install.sh` -- and that brings up containers without putting a `lyraflow`
+ * binary anywhere on the host's PATH. This screen used to print
+ * `lyraflow set-admin-password <email>`, which on a real deployment answered
+ * `lyraflow: command not found` (#129). It is the first screen a new install
+ * shows, so it was the first thing a new operator could not do.
+ *
+ * Three details here are load-bearing, and all three are easy to lose to a
+ * later tidy-up:
+ *
+ *   `-T`   -- `docker compose exec` allocates a TTY by default, which
+ *             silently discards piped stdin. Without it the obvious
+ *             `printf ... | docker compose exec` delivers nothing and the
+ *             command hangs or fails with no useful message.
+ *   `read -rs` rather than putting the password in the command -- the whole
+ *             point of the exercise is a credential, and an argument or an
+ *             `echo` lands it in shell history and in `ps` output for every
+ *             user on the box.
+ *   `unset P` -- so it does not sit in the shell's environment afterwards.
+ *
+ * The screen cannot know how it was installed, so it shows the Docker form
+ * (what `install.sh` produces) and names the other one in a single line
+ * rather than guessing or printing two blocks of equal weight.
+ */
+const SET_PASSWORD_DOCKER = `read -rsp 'password: ' P; echo
+printf '%s' "$P" | docker compose exec -T lyraflow \\
+  node packages/cli/dist/index.js set-admin-password you@example.com
+unset P`
+
 /**
  * The upgrade path for an install that predates the admin account: no
  * password is set in `.env`, so there is nothing a login form could check
@@ -32,15 +63,28 @@ function messageFor(err: unknown): string {
  */
 function Unconfigured() {
   return (
-    <Card className="w-full max-w-sm">
+    <Card className="w-full max-w-lg">
       <CardHeader>
         <CardTitle>Set up the admin account</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3 text-sm text-muted-foreground">
-        <p>No admin password is set yet. From the server, run:</p>
+        <p>
+          No admin password is set yet. From the server, in the directory holding your{' '}
+          <code className="text-foreground">docker-compose.yml</code>, run:
+        </p>
         <pre className="overflow-x-auto rounded-md border border-border bg-muted px-3 py-2 text-foreground">
-          lyraflow set-admin-password &lt;email&gt;
+          {SET_PASSWORD_DOCKER}
         </pre>
+        <p>
+          Replace <code className="text-foreground">you@example.com</code> with the address you want
+          to sign in as. The password is typed rather than passed as an argument, so it stays out of
+          your shell history.
+        </p>
+        <p>
+          Not running under Docker? Run{' '}
+          <code className="text-foreground">lyraflow set-admin-password &lt;email&gt;</code>{' '}
+          instead, with the password on stdin.
+        </p>
         <p>Then reload this page and sign in.</p>
       </CardContent>
     </Card>

@@ -19,7 +19,9 @@ export interface AdminEnv {
  * log in, and an attacker gains a live account) or writing an empty hash
  * (which `verifyPassword` would refuse, leaving a permanently unusable row
  * that `exists` then protects from ever being replaced). The UI renders
- * `not_configured` as instructions to run `lyraflow set-admin-password`.
+ * `not_configured` as a runnable `set-admin-password` invocation -- the
+ * containerised one, since that is what the documented install produces
+ * (#129).
  *
  * `exists` deliberately ignores the environment entirely, including a
  * DIFFERENT email. Reconciling from `.env` on every boot would look helpful
