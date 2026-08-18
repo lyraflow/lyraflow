@@ -181,6 +181,28 @@ describe('postgres schema', () => {
     expect(await deleteRuleFor('funnels', 'project_id')).toBe('CASCADE')
   })
 
+  it('refuses a second admin whose email differs only in case', async () => {
+    await pg.query('DELETE FROM admin_user')
+    await pg.query("INSERT INTO admin_user (email, password_hash) VALUES ('admin@x', 'h')")
+
+    // The plain UNIQUE on `email` does NOT catch this -- the two strings are
+    // different bytes -- so a pass here is the functional index doing the work
+    // and nothing else. `23505` is unique_violation.
+    await expect(
+      pg.query("INSERT INTO admin_user (email, password_hash) VALUES ('Admin@x', 'h')"),
+    ).rejects.toMatchObject({ code: '23505' })
+
+    // And the case-sensitive constraint still holds, so 014 added a rule
+    // rather than replacing one. ensureAdminUser's
+    // `ON CONFLICT (email) DO NOTHING` names that constraint by column, and
+    // would break if this migration had dropped it.
+    await expect(
+      pg.query("INSERT INTO admin_user (email, password_hash) VALUES ('admin@x', 'h')"),
+    ).rejects.toMatchObject({ code: '23505' })
+
+    await pg.query('DELETE FROM admin_user')
+  })
+
   it('sessions carries created_at and an index for the expiry sweep', async () => {
     const col = await pg.query<{ column_name: string; is_nullable: string }>(
       `SELECT column_name, is_nullable FROM information_schema.columns

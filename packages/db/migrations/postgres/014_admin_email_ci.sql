@@ -1,0 +1,36 @@
+-- 014_admin_email_ci: make the case collision login already tolerates
+-- structurally impossible.
+--
+-- `admin_user.email` is UNIQUE case-SENSITIVELY, so `admin@x` and `Admin@x`
+-- can coexist as separate rows. Login does not agree: it resolves the account
+-- with `WHERE lower(email) = lower($1)` (auth/routes.ts), deliberately, because
+-- without it a case mismatch is indistinguishable from a wrong password -- the
+-- two responses are identical by design, so the operator gets no signal at all.
+--
+-- That lookup takes rows[0] with no ORDER BY. With two such rows it would
+-- authenticate an unspecified one of them, and which one could change between
+-- reads.
+--
+-- Not reachable through any code path today: ensureAdminUser inserts only into
+-- an empty table, and set-admin-password updates the single existing row. So
+-- this closes a hole nothing can currently fall into, which is the cheapest
+-- moment to close it -- before some later feature (a second admin, an invite
+-- flow, an import) makes it reachable and inherits the ambiguity.
+--
+-- A FUNCTIONAL INDEX, ALONGSIDE THE EXISTING CONSTRAINT, NOT INSTEAD OF IT.
+-- `ensureAdminUser` inserts with `ON CONFLICT (email) DO NOTHING`, which names
+-- the column's own unique constraint; dropping it to replace it with this one
+-- would turn a crash-loop's second insert into a fatal. Both now hold, and the
+-- stricter one simply wins first.
+--
+-- If an install somehow already holds two case-variant rows -- only possible
+-- via manual SQL -- this migration FAILS rather than picking a winner, with
+-- Postgres naming the duplicated key. That is the intended outcome: which of
+-- two admin accounts is the real one is not a question a migration should
+-- answer on its own.
+--
+-- Additive only, and it drops nothing: a later migration must never make an
+-- earlier one unrunnable.
+
+CREATE UNIQUE INDEX IF NOT EXISTS admin_user_email_lower_key
+  ON admin_user (lower(email));
