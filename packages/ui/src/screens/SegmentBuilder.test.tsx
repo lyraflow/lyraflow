@@ -2135,18 +2135,69 @@ describe('SegmentBuilder -- a create abandoned by leaving the form', () => {
     expect(screen.queryByText(/nothing was changed on the server/i)).toBeNull()
   })
 
-  // The one continuation in `SegmentBuilder` deliberately left UNGUARDED,
-  // pinned so a later tidy-up cannot wrap it in silence. The segment list
-  // names no segment and no project, and this navigation is the only
-  // acknowledgement a create ever gets: guarded, a create that lands after
-  // the operator moved on would commit with nothing anywhere saying so.
-  it('a create that lands after the operator moved to another form still reports itself on the list', async () => {
+  // THIS PIN WAS DELIBERATELY INVERTED (#122). It previously asserted the
+  // navigation fired here, pinning the create continuation as unguarded so a
+  // later tidy-up could not wrap it in silence. That was the right thing to
+  // pin and the wrong shape to pin it in: the case it locked down is the one
+  // where the navigation does harm.
+  //
+  // The operator is editing segment 7 when a create issued from the create
+  // route lands. Firing the navigation takes them to the list and discards
+  // whatever they had typed into segment 7 -- the same harm every other
+  // continuation in this file is guarded against.
+  //
+  // The exception itself is NOT removed; see the test below, which is the
+  // case it exists for and which still navigates. What is given up here is
+  // the acknowledgement: this create commits with nothing on screen saying
+  // so. Accepted as the lesser harm -- the segment is on the list the moment
+  // they look, and the work they were typing is not recoverable once yanked.
+  it('a create that lands after the operator moved to another form leaves that form alone', async () => {
     const { client, creates } = gatedCreateClient()
     renderLiveBuilder(client, ROUTES.segmentNew)
     await composeAndSaveANewSegment(client)
 
     await userEvent.click(screen.getByRole('button', { name: /go to segment 7/i }))
     await waitFor(() => expect(screen.getByLabelText(/name/i)).toHaveValue('Paying customers'))
+
+    await act(async () => {
+      creates[0]?.resolve({ ...SEGMENT, id: 42 })
+    })
+
+    expect(screen.queryByText('segments list')).toBeNull()
+    // Still on segment 7's form, with its contents intact -- which is the
+    // whole point. Asserting only "did not navigate" would pass against a
+    // screen that had been cleared instead.
+    expect(screen.getByLabelText(/name/i)).toHaveValue('Paying customers')
+  })
+
+  // The other half, and the reason the exception is narrowed rather than
+  // deleted. An operator who waits on the create form is taken to the list,
+  // because that navigation is the only acknowledgement a create ever gets --
+  // without it they are left looking at a form whose contents are already
+  // saved.
+  it('a create that lands while the operator is still on the create form navigates to the list', async () => {
+    const { client, creates } = gatedCreateClient()
+    renderLiveBuilder(client, ROUTES.segmentNew)
+    await composeAndSaveANewSegment(client)
+
+    await act(async () => {
+      creates[0]?.resolve({ ...SEGMENT, id: 42 })
+    })
+    expect(await screen.findByText('segments list')).toBeInTheDocument()
+  })
+
+  // A project switch is NOT a form change on the create route: `formIdentity`
+  // is 'new' whatever the project, so the generation does not bump and this
+  // navigation still fires. Pinned because it is the case most likely to be
+  // broken by someone "tightening" the guard to compare identities rather
+  // than form identities -- which would silently swallow the acknowledgement
+  // for every create made either side of a switch.
+  it('a create that lands after a project switch still navigates, the form never having changed', async () => {
+    const { client, creates } = gatedCreateClient()
+    renderLiveBuilder(client, ROUTES.segmentNew)
+    await composeAndSaveANewSegment(client)
+
+    await userEvent.click(screen.getByRole('button', { name: 'switch project' }))
 
     await act(async () => {
       creates[0]?.resolve({ ...SEGMENT, id: 42 })
@@ -2229,10 +2280,18 @@ describe('SegmentBuilder -- what the reset clears, and what stays unguarded', ()
     expect(screen.queryByTestId('segment-preview-count')).toBeNull()
   })
 
-  // The second continuation deliberately left unguarded, pinned so a later
-  // tidy-up cannot wrap it in silence: a 401 reports a DEAD SESSION, which
-  // is true whichever segment is on screen. Dropped, it would leave the
-  // operator typing into a form whose every request will 401.
+  // The ONLY continuation now deliberately left unguarded, pinned so a later
+  // tidy-up cannot wrap it in silence: a 401 reports a DEAD SESSION, which is
+  // true whichever segment is on screen. Dropped, it would leave the operator
+  // typing into a form whose every request will 401.
+  //
+  // It was the second of two until #122 narrowed the create navigation. That
+  // change prompted re-checking this one rather than assuming it: the
+  // distinction that survives is between a fact about the SESSION, which must
+  // reach the operator wherever they are, and a fact about a FORM, which must
+  // not outlive the form it is about. This is the former, and this test is on
+  // an EDIT route, where the form generation genuinely does bump -- so it
+  // pins unguardedness rather than passing because nothing changed.
   it('a 401 from a save abandoned by a project switch still reports the dead session', async () => {
     const onUnauthorized = vi.fn()
     const { client, renames } = gatedSaveClient()
