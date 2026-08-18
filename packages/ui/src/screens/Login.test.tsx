@@ -59,8 +59,55 @@ describe('Login', () => {
   it('shows the CLI instruction instead of a form when unconfigured', async () => {
     const c = client({ authState: vi.fn(async () => ({ configured: false })) })
     render(<Login client={c} onSignedIn={vi.fn()} />)
-    expect(await screen.findByText(/set-admin-password/)).toBeInTheDocument()
+    // findAllByText, not findByText: the screen now names the command twice on
+    // purpose -- the runnable Docker form in the copyable block, and the bare
+    // form for a non-Docker install. This test is about "an instruction rather
+    // than a dead-end form"; which instruction is the job of the three below.
+    expect(await screen.findAllByText(/set-admin-password/)).not.toHaveLength(0)
     expect(screen.queryByLabelText(/password/i)).not.toBeInTheDocument()
+  })
+
+  // The three below assert on the <pre> block specifically rather than on the
+  // card, because the card also NAMES the bare `lyraflow` form as the
+  // non-Docker alternative. A whole-card assertion could not tell the two
+  // apart, which is how the original test above stayed green against a screen
+  // printing a command that does not exist on the documented install path.
+  const unconfiguredBlock = async () => {
+    const c = client({ authState: vi.fn(async () => ({ configured: false })) })
+    const { container } = render(<Login client={c} onSignedIn={vi.fn()} />)
+    await screen.findByText(/Set up the admin account/i)
+    return container.querySelector('pre')?.textContent ?? ''
+  }
+
+  it('gives a command that exists on the install path the README recommends', async () => {
+    // install.sh brings up containers and puts no `lyraflow` binary on the
+    // host's PATH, so a bare `lyraflow ...` here answers "command not found"
+    // -- on the first screen a new install shows (#129).
+    const block = await unconfiguredBlock()
+    expect(block).toContain('docker compose exec')
+    expect(block).toContain('set-admin-password')
+  })
+
+  it('passes -T, without which the piped password is silently discarded', async () => {
+    // `docker compose exec` allocates a TTY by default and then ignores stdin.
+    // The failure is silent, so nothing else on this screen would reveal it.
+    expect(await unconfiguredBlock()).toMatch(/docker compose exec\s+-T\b/)
+  })
+
+  it('reads the password off the terminal rather than embedding it', async () => {
+    // The whole subject is a credential: an argument or an `echo 'pw' |` lands
+    // it in shell history and in `ps` output for every user on the box.
+    const block = await unconfiguredBlock()
+    expect(block).toContain('read -rs')
+    expect(block).not.toMatch(/echo\s+['"][^'"]*['"]\s*\|/)
+  })
+
+  it('still names the bare form, for an install that does have the binary', async () => {
+    const c = client({ authState: vi.fn(async () => ({ configured: false })) })
+    render(<Login client={c} onSignedIn={vi.fn()} />)
+    // Adjacent, so this cannot be satisfied by the service name inside the
+    // `docker compose exec -T lyraflow node ...` line.
+    expect(await screen.findByText(/lyraflow set-admin-password/)).toBeInTheDocument()
   })
 
   it('shows a rate-limit message on 429', async () => {

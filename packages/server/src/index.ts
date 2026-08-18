@@ -102,8 +102,14 @@ const adminOutcome = await ensureAdminUser(pg, {
 if (adminOutcome === 'created') {
   app.log.info('admin account created from LYRAFLOW_ADMIN_EMAIL/LYRAFLOW_ADMIN_PASSWORD')
 } else if (adminOutcome === 'not_configured') {
+  // Names the containerised invocation, not a bare `lyraflow`: the documented
+  // install path puts no such binary on the host's PATH, so the old wording
+  // sent an operator to a command that does not exist (#129). Kept to one line
+  // because it is a log record rather than the instruction itself -- the full
+  // form, with `-T` and a password read off the terminal, is on the sign-in
+  // screen and in the README.
   app.log.warn(
-    'no admin account and none configured — the web UI cannot be signed into until `lyraflow set-admin-password <email>` is run',
+    'no admin account and none configured — the web UI cannot be signed into until `docker compose exec -T lyraflow node packages/cli/dist/index.js set-admin-password <email>` is run (or `lyraflow set-admin-password <email>` if not running under Docker)',
   )
 }
 

@@ -188,6 +188,12 @@ if [ -n "$ADMIN_PASSWORD" ]; then
 else
   echo "This install predates the admin account, so .env has no"
   echo "LYRAFLOW_ADMIN_PASSWORD and there is nothing to log in with yet. Set one:"
-  echo "  echo 'your-new-password' | docker compose exec -T lyraflow \\"
+  # `read -rs` rather than an inline `echo 'pw' | ...`: the argument stays off
+  # `ps` either way, but an echoed literal writes the credential into the
+  # operator's shell history, which is most of the problem back again. Matches
+  # the sign-in screen and the README exactly (#129).
+  echo "  read -rsp 'password: ' P; echo"
+  echo "  printf '%s' \"\$P\" | docker compose exec -T lyraflow \\"
   echo "    node packages/cli/dist/index.js set-admin-password admin@localhost"
+  echo "  unset P"
 fi
