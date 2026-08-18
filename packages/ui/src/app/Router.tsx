@@ -60,9 +60,27 @@ export function AppRouter(props: {
   // its own now that both destinations get one.
   const settings = <Settings client={props.client} onUnauthorized={props.onUnauthorized} />
   const funnels = <Funnels client={props.client} onUnauthorized={props.onUnauthorized} />
-  const funnelNew = <FunnelBuilder client={props.client} onUnauthorized={props.onUnauthorized} />
+  // Distinct `key`s for the same reason the segment builders carry them:
+  // <Routes> reconciles its single child by TYPE AND POSITION, so navigating
+  // /funnels/7/edit -> /funnels/new hands the same component instance a new
+  // route without remounting it, and the create form opens carrying the
+  // funnel just being edited (#119).
+  //
+  // DEFENCE IN DEPTH, AND DELIBERATELY UNPINNED. `FunnelBuilder` now resets
+  // its own form whenever the address changes, so remounting produces exactly
+  // the same observable result and removing these keys leaves the whole suite
+  // green -- verified rather than assumed. A test here could only assert an
+  // implementation detail (that the instance changed), and the builder's own
+  // tests deliberately run WITHOUT keys so they hold the screen to the harder
+  // case. The keys stay because a remount is the cheaper guarantee of the two
+  // and costs nothing; they are not what makes the behaviour correct.
+  const funnelNew = (
+    <FunnelBuilder key="funnel-new" client={props.client} onUnauthorized={props.onUnauthorized} />
+  )
   const funnelDetail = <FunnelDetail client={props.client} onUnauthorized={props.onUnauthorized} />
-  const funnelEdit = <FunnelBuilder client={props.client} onUnauthorized={props.onUnauthorized} />
+  const funnelEdit = (
+    <FunnelBuilder key="funnel-edit" client={props.client} onUnauthorized={props.onUnauthorized} />
+  )
   const segments = <Segments client={props.client} onUnauthorized={props.onUnauthorized} />
   // `<Routes>` renders the matched route's element as a SINGLE child, which
   // React reconciles by type and key -- with no key, navigating from

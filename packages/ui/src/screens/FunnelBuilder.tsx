@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
@@ -75,6 +75,27 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
   const [windowUnit, setWindowUnit] = useState<WindowUnit>(DEFAULT_WINDOW_UNIT)
   const [segmentId, setSegmentId] = useState<number | null>(null)
 
+  // The (project, funnel) pair this form is FOR. Project 1's funnel 7 and
+  // project 2's funnel 7 are different funnels, so the id alone is not an
+  // identity -- that is precisely the confusion this exists to prevent.
+  //
+  // `loadedIdentity` is compared against the CURRENT identity during render,
+  // so the instant the header project switcher moves, `loaded` is false in
+  // that same render -- before the effect has run, and with no window in
+  // which the previous funnel's definition is saveable under the new
+  // project's id. Set ONLY by a load that succeeded, so a 404 or a 500
+  // leaves it false and `canSave` refuses.
+  //
+  // Mirrors `SegmentBuilder`, where this shape was reproduced end to end:
+  // switching project while on an edit route, with the id absent from the
+  // new project, left the old project's definition editable with Save
+  // enabled, and saving issued a PATCH carrying it against the id in the URL
+  // (#119).
+  const identity = `${activeId ?? 'none'}:${editId ?? 'new'}`
+  const [loadedIdentity, setLoadedIdentity] = useState<string | null>(null)
+  // Create mode has nothing to load; an empty form IS its loaded state.
+  const loaded = !isEditing || loadedIdentity === identity
+
   const [loading, setLoading] = useState(isEditing)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
@@ -91,6 +112,56 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
   // alongside its result, is the one honest reference point: it changes
   // only when a NEW preview is accepted, never when a field is edited.
   const [previewedDefinition, setPreviewedDefinition] = useState<FunnelDefinition | null>(null)
+
+  // The address the FORM belongs to, which is not the same as `identity`.
+  // An existing funnel is addressed by project AND id; a funnel that does not
+  // exist yet is addressed by the ROUTE alone, because `createFunnel` takes
+  // the project as an argument at save time.
+  //
+  // This distinction is what makes `/funnels/7/edit` -> `/funnels/new` a
+  // change: `isEditing` goes false there, so the fetch effect below returns
+  // early and would never reset anything. <Routes> reconciles its single
+  // child by type and position, so that navigation hands the SAME component
+  // instance a new route without remounting it, and the create form opened
+  // carrying the funnel just being edited (#119).
+  const formIdentity = isEditing ? identity : 'new'
+  const resetFormIdentityRef = useRef<string | null>(formIdentity)
+
+  // RESET EVERY DERIVED FIELD WHENEVER THE FORM'S ADDRESS CHANGES, not only
+  // when a load succeeds. The fetch effect's `.catch` sets `loadError` and
+  // nothing else, so without this a failed load for a new identity left the
+  // PREVIOUS funnel's name, steps, window and segment on screen and editable
+  // -- one funnel's definition under another funnel's URL.
+  //
+  // Independent of the `loaded` gate, deliberately, and both are needed: this
+  // decides what an operator SEES after a failure, `loaded` decides what they
+  // can DO. Either alone leaves a hole -- a reset form with Save live still
+  // writes an empty definition over a real funnel, and a gated form still
+  // shows someone another project's data.
+  //
+  // Guarded by a ref rather than left to the dependency array: this must fire
+  // when the ADDRESS changes, not merely when the effect re-runs, so an
+  // unrelated parent re-render cannot wipe a form the operator is typing in.
+  // Declared before the fetch effect so its updates are queued first.
+  useEffect(() => {
+    if (resetFormIdentityRef.current === formIdentity) return
+    resetFormIdentityRef.current = formIdentity
+    setName('')
+    setSteps(NEW_STEPS)
+    setWindowValue(DEFAULT_WINDOW_VALUE)
+    setWindowUnit(DEFAULT_WINDOW_UNIT)
+    setSegmentId(null)
+    // A preview answers the definition that was on screen a moment ago. It is
+    // not about this funnel and must not survive into it.
+    setPreviewResult(null)
+    setPreviewedDefinition(null)
+    setPreviewing(false)
+    // Both banners belong to the form being replaced. Left standing, each
+    // reports on a funnel that is no longer on screen.
+    setLoadError(null)
+    setSaveError(null)
+    setSaving(false)
+  }, [formIdentity])
 
   // Fetch-and-seed for edit mode only. Deliberately NOT depending on
   // `steps`/`name`/etc: this must run exactly once per (project, id) pair,
@@ -111,6 +182,9 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
         setWindowValue(win.value)
         setWindowUnit(win.unit)
         setSegmentId(f.segment_id)
+        // Last, and only here: this is what opens the save gate, so it must
+        // never be set by a path that did not actually populate the form.
+        setLoadedIdentity(identity)
       })
       .catch((err: unknown) => {
         if (cancelled) return
@@ -126,7 +200,7 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
     return () => {
       cancelled = true
     }
-  }, [client, activeId, editId, isEditing, onUnauthorized])
+  }, [client, activeId, editId, isEditing, identity, onUnauthorized])
 
   const windowSeconds = toWindowSeconds(windowValue, windowUnit)
   const stepsValid = steps.length >= 2 && steps.every((s) => s.event.trim() !== '')
@@ -141,7 +215,12 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
   // would silently start requiring one there as well. Save alone needs
   // `canSave`; `handleSave` repeats this same check below.
   const trimmedName = name.trim()
-  const canSave = canSubmit && trimmedName !== ''
+  // `loaded` is the third term and it is not redundant with `loading`:
+  // `loading` is false again the moment a failed fetch settles, while
+  // `loaded` stays false until a fetch for THIS identity has actually
+  // populated the form. A single `!loading` gate would re-enable Save on
+  // exactly the failure this is about.
+  const canSave = canSubmit && trimmedName !== '' && loaded
   // There is deliberately no further gate about `where` predicates. Save used
   // to refuse any funnel whose steps carried one, because this screen could
   // represent only a step's event name and a save from here would silently

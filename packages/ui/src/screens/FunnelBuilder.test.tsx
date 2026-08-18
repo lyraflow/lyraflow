@@ -1,12 +1,12 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter, Route, Routes } from 'react-router'
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import type { Funnel, FunnelRunResult } from '../api/types.js'
-import { ProjectProvider } from '../app/ProjectContext.js'
+import { ProjectProvider, useProject } from '../app/ProjectContext.js'
 import { ROUTES, funnelEditPath } from '../app/Router.js'
 import { FunnelBuilder } from './FunnelBuilder.js'
 import { FunnelDetail } from './FunnelDetail.js'
@@ -649,5 +649,161 @@ describe('FunnelBuilder — a successful edit lands on the detail page, not the 
     // `runFunnel` at all), and not run twice by arriving at the detail
     // page -- a single fresh mount runs it a single time.
     await waitFor(() => expect(client.runFunnel).toHaveBeenCalledTimes(1))
+  })
+})
+
+// --- The identity this screen's state describes -------------------------
+//
+// Every test above mounts ONE builder, against one id, in one project, and
+// never changes either while mounted -- so the load effect never runs twice
+// and none of them can see this class of defect at all. That is the shape
+// these break (#119).
+//
+// The routes below carry NO `key`, deliberately. `AppRouter` gives its two
+// `FunnelBuilder` routes distinct keys as defence in depth, but a key is one
+// edit away from being removed; these hold the screen to the harder case,
+// where the instance survives every navigation. Same reasoning, and the same
+// harness, as `SegmentBuilder`'s equivalent block.
+
+const PROJECTS_TWO = [
+  ...PROJECTS,
+  {
+    id: 2,
+    name: 'Beta',
+    slug: 'beta',
+    created_at: '',
+    retention_months: 24,
+    monthly_event_quota: null,
+  },
+]
+
+function SwitchProject(props: { to: number; label: string }) {
+  const { setActiveId } = useProject()
+  return (
+    <button type="button" onClick={() => setActiveId(props.to)}>
+      {props.label}
+    </button>
+  )
+}
+
+function GoTo(props: { to: string; label: string }) {
+  const navigate = useNavigate()
+  return (
+    <button type="button" onClick={() => navigate(props.to)}>
+      {props.label}
+    </button>
+  )
+}
+
+/** Like `renderBuilder`, but the project and the route can both change while
+ * the builder stays mounted. */
+function renderLiveBuilder(client: ApiClient, initialPath: string) {
+  render(
+    <MemoryRouter initialEntries={[initialPath]}>
+      <ProjectProvider projects={PROJECTS_TWO} initialId={1}>
+        <SwitchProject to={2} label="switch project" />
+        <GoTo to={funnelEditPath(8)} label="go to funnel 8" />
+        <GoTo to={ROUTES.funnelNew} label="go to create" />
+        <Routes>
+          <Route path={ROUTES.funnelNew} element={<FunnelBuilder client={client} />} />
+          <Route path="/funnels/:id/edit" element={<FunnelBuilder client={client} />} />
+          <Route path={ROUTES.funnels} element={<p>saved to list</p>} />
+          <Route path="/funnels/:id" element={<p>saved to detail</p>} />
+        </Routes>
+      </ProjectProvider>
+    </MemoryRouter>,
+  )
+}
+
+/** Loads funnel 7 for project 1 and nothing else -- every other
+ * (project, id) pair 404s, which is the case that matters: an id that does
+ * not exist in the project just switched to. */
+function onlyProject1Funnel7() {
+  return fakeBuilderClient({
+    funnel: vi.fn(async (projectId: number, id: number) => {
+      if (projectId === 1 && id === 7) return FUNNEL
+      throw new ApiError(404, 'not_found')
+    }),
+  })
+}
+
+describe('FunnelBuilder -- the identity its state describes', () => {
+  it('a project switch whose fetch 404s leaves nothing of the previous project on screen', async () => {
+    renderLiveBuilder(onlyProject1Funnel7(), funnelEditPath(7))
+    expect(await screen.findByDisplayValue('Signup flow')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'switch project' }))
+
+    await waitFor(() => {
+      expect(screen.queryByDisplayValue('Signup flow')).not.toBeInTheDocument()
+    })
+    // Not merely the name: the steps are the definition, and they are what a
+    // save would have carried across.
+    expect(screen.queryByDisplayValue('page_view')).not.toBeInTheDocument()
+    expect(screen.queryByDisplayValue('signup_completed')).not.toBeInTheDocument()
+  })
+
+  it('edit -> a different funnel whose fetch fails leaves nothing of the first', async () => {
+    renderLiveBuilder(onlyProject1Funnel7(), funnelEditPath(7))
+    expect(await screen.findByDisplayValue('Signup flow')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'go to funnel 8' }))
+
+    await waitFor(() => {
+      expect(screen.queryByDisplayValue('Signup flow')).not.toBeInTheDocument()
+    })
+    expect(screen.queryByDisplayValue('page_view')).not.toBeInTheDocument()
+  })
+
+  it('edit -> the create route opens an empty form, never the previous funnel pre-filled', async () => {
+    renderLiveBuilder(onlyProject1Funnel7(), funnelEditPath(7))
+    expect(await screen.findByDisplayValue('Signup flow')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'go to create' }))
+
+    await waitFor(() => {
+      expect(screen.queryByDisplayValue('Signup flow')).not.toBeInTheDocument()
+    })
+    expect(screen.queryByDisplayValue('page_view')).not.toBeInTheDocument()
+  })
+
+  // THE SECOND MECHANISM, on its own. Resetting the form decides what the
+  // operator SEES; this decides what they can DO, and a reset alone does not
+  // cover it -- an operator who types a complete, valid funnel into the blank
+  // editor left by a failed load would otherwise have Save enabled, and that
+  // save is a PATCH of the id still in the URL, under the project just
+  // switched to. Enabling it writes a definition nobody opened over a funnel
+  // nobody chose.
+  it('refuses to save after a failed load, even once the form looks complete', async () => {
+    const client = onlyProject1Funnel7()
+    renderLiveBuilder(client, funnelEditPath(7))
+    expect(await screen.findByDisplayValue('Signup flow')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'switch project' }))
+    await waitFor(() => {
+      expect(screen.queryByDisplayValue('Signup flow')).not.toBeInTheDocument()
+    })
+
+    await userEvent.type(screen.getByLabelText(/name/i), 'Typed after the failure')
+    await fillTwoSteps()
+
+    // Everything `canSubmit` asks for is satisfied; only `loaded` is not.
+    expect(screen.getByRole('button', { name: /save/i })).toBeDisabled()
+    await userEvent.click(screen.getByRole('button', { name: /save/i }))
+    expect(client.patchFunnel).not.toHaveBeenCalled()
+  })
+
+  // The reverse, so the gate is not just "Save is always off". A load that
+  // SUCCEEDS for the new identity must open it again.
+  it('allows saving again once a load for the new identity succeeds', async () => {
+    const client = fakeBuilderClient()
+    renderLiveBuilder(client, funnelEditPath(7))
+    expect(await screen.findByDisplayValue('Signup flow')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'switch project' }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /save/i })).toBeEnabled()
+    })
   })
 })
