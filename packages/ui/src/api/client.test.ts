@@ -668,3 +668,76 @@ describe('createClient', () => {
     })
   })
 })
+
+// --- The suggestion catalogue reads share an in-flight request (#127) -----
+//
+// `dedupe.test.ts` proves the mechanism; these prove it is actually WIRED to
+// the two methods that burst, and not to the one that must not change.
+
+describe('createClient -- catalogue dedupe', () => {
+  it('issues one request when sibling fields ask for the same property list at once', async () => {
+    const f = fakeFetch(200, { properties: [{ property_key: 'plan' }] })
+    const client = createClient(f as unknown as typeof fetch)
+
+    // Three fields mounting in the same instant under one behaviour, all
+    // wanting `(1, 'purchase', undefined)` -- the exact shape a segment tree
+    // produces on load.
+    const [a, b, c] = await Promise.all([
+      client.schemaProperties(1, 'purchase', ''),
+      client.schemaProperties(1, 'purchase', ''),
+      client.schemaProperties(1, 'purchase', ''),
+    ])
+
+    expect(f).toHaveBeenCalledTimes(1)
+    expect(a).toEqual(['plan'])
+    expect(b).toEqual(['plan'])
+    expect(c).toEqual(['plan'])
+  })
+
+  it('does not collapse fields scoped to different events', async () => {
+    const f = fakeFetch(200, { properties: [] })
+    const client = createClient(f as unknown as typeof fetch)
+
+    await Promise.all([
+      client.schemaProperties(1, 'purchase', ''),
+      client.schemaProperties(1, 'signup', ''),
+    ])
+    expect(f).toHaveBeenCalledTimes(2)
+  })
+
+  // Tenancy, which a key that forgot the project would break silently and in
+  // the worst possible way: one project's taxonomy served to another.
+  it('does not collapse the same event across different projects', async () => {
+    const f = fakeFetch(200, { properties: [] })
+    const client = createClient(f as unknown as typeof fetch)
+
+    await Promise.all([
+      client.schemaProperties(1, 'purchase', ''),
+      client.schemaProperties(2, 'purchase', ''),
+    ])
+    expect(f).toHaveBeenCalledTimes(2)
+  })
+
+  it('shares an in-flight event-name lookup too', async () => {
+    const f = fakeFetch(200, { events: [{ event_name: 'purchase', last_seen: '' }] })
+    const client = createClient(f as unknown as typeof fetch)
+
+    await Promise.all([client.schemaEvents(1, ''), client.schemaEvents(1, '')])
+    expect(f).toHaveBeenCalledTimes(1)
+  })
+
+  // Deliberately NOT deduped. This one fetches on focus rather than on mount
+  // -- it scans the trait partition rather than reading a catalogue -- so it
+  // never produces the simultaneous burst, and leaving it alone keeps that
+  // documented asymmetry intact rather than making every field uniform.
+  it('leaves trait-value lookups alone', async () => {
+    const f = fakeFetch(200, { values: [] })
+    const client = createClient(f as unknown as typeof fetch)
+
+    await Promise.all([
+      client.schemaTraitValues(1, 'plan', ''),
+      client.schemaTraitValues(1, 'plan', ''),
+    ])
+    expect(f).toHaveBeenCalledTimes(2)
+  })
+})
