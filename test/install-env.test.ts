@@ -69,14 +69,14 @@ const runInstallRaw = (args: string[], opts: InstallOpts = {}): InstallResult =>
       '    fi',
       '    exit 0',
       '    ;;',
-          // `compose ps -q caddy` is how install.sh asks whether THIS project's
+      // `compose ps -q caddy` is how install.sh asks whether THIS project's
       // Caddy is the thing holding 80/443. Empty unless a case says otherwise,
       // which is the "not ours" answer (#65).
       '  "compose ps -q caddy")',
       '    [ -n "${OUR_CADDY_RUNNING:-}" ] && echo "c0ffee0caddy"',
       '    exit 0',
       '    ;;',
-  '  "compose ps caddy --format {{.Status}}")',
+      '  "compose ps caddy --format {{.Status}}")',
       '    [ -n "${CADDY_STATUS:-}" ] && printf \'%s\\n\' "$CADDY_STATUS"',
       '    exit 0',
       '    ;;',
