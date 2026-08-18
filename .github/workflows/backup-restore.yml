@@ -72,6 +72,12 @@ concurrency:
 jobs:
   backup-restore:
     runs-on: ubuntu-latest
+    # Sized against observed runtime, not guessed: this job has been running
+    # about fifteen minutes. The point is not to be tight, it is to be FINITE -- with no
+    # `timeout-minutes` a job inherits GitHub's 360-minute default, and a hung
+    # `apt-get` in the e2e job ran for 71 minutes before a human killed it
+    # (#137). Raise this if the job legitimately grows; do not remove it.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       # No `version:` here on purpose. package.json pins `packageManager`, and

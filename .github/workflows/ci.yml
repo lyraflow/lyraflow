@@ -23,6 +23,12 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Sized against observed runtime, not guessed: this job has been running
+    # about four minutes. The point is not to be tight, it is to be FINITE -- with no
+    # `timeout-minutes` a job inherits GitHub's 360-minute default, and a hung
+    # `apt-get` in the e2e job ran for 71 minutes before a human killed it
+    # (#137). Raise this if the job legitimately grows; do not remove it.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       # No `version:` here on purpose. package.json pins `packageManager`,
@@ -66,6 +72,12 @@ jobs:
 
   durability:
     runs-on: ubuntu-latest
+    # Sized against observed runtime, not guessed: this job has been running
+    # about two minutes. The point is not to be tight, it is to be FINITE -- with no
+    # `timeout-minutes` a job inherits GitHub's 360-minute default, and a hung
+    # `apt-get` in the e2e job ran for 71 minutes before a human killed it
+    # (#137). Raise this if the job legitimately grows; do not remove it.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       # No `version:` here on purpose. package.json pins `packageManager`,
@@ -87,6 +99,12 @@ jobs:
   # push the way `test` does.
   e2e:
     runs-on: ubuntu-latest
+    # Sized against observed runtime, not guessed: this job has been running
+    # three to seven minutes, most of it the image build. The point is not to be tight, it is to be FINITE -- with no
+    # `timeout-minutes` a job inherits GitHub's 360-minute default, and a hung
+    # `apt-get` in the e2e job ran for 71 minutes before a human killed it
+    # (#137). Raise this if the job legitimately grows; do not remove it.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       # No `version:` here on purpose. package.json pins `packageManager`,
@@ -103,7 +121,27 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ hashFiles('pnpm-lock.yaml') }}
-      - run: pnpm --filter @lyraflow/ui exec playwright install chromium --with-deps
+      # `--with-deps` is an apt install, and the cache above does not and cannot
+      # cover it: a fresh runner has no apt state, so this reaches Ubuntu's
+      # mirrors on EVERY run even when the browser itself was restored. That is
+      # the step that hung for 71 minutes on #136 -- `azure.archive.ubuntu.com`
+      # returning Ign:, apt falling back to `archive.ubuntu.com` and stalling
+      # there, with no Playwright test ever starting.
+      #
+      # Its own timeout on top of the job's: this bounds the known-flaky step
+      # and, more usefully, NAMES it in the failure. A job-level timeout alone
+      # reports "the job took too long", which is where this cost an hour of
+      # someone watching a tab.
+      #
+      # Dropping `--with-deps` to rely on the runner image's preinstalled
+      # libraries would remove the dependency rather than bound it. Deliberately
+      # not done here: `ubuntu-latest` ships most of what headless Chromium
+      # needs, and "most" is doing real work in that sentence -- getting it
+      # wrong is a browser that will not launch. That belongs in its own change
+      # where it can be judged on its own evidence (#137).
+      - name: Install the Playwright browser and its system dependencies
+        timeout-minutes: 10
+        run: pnpm --filter @lyraflow/ui exec playwright install chromium --with-deps
       - run: pnpm build
       # An EMPTY database, deliberately: the wizard only appears when there
       # are no projects, and it is the whole point of this test.
