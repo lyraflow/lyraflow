@@ -1,11 +1,28 @@
 services:
   lyraflow:
-    image: ghcr.io/lyraflow/lyraflow:0
+    image: ${LYRAFLOW_IMAGE:-ghcr.io/lyraflow/lyraflow:0}
     # `image:` and `build:` together: Compose uses the named image when it is
     # available and builds from this checkout (tagging the result with that
     # same name) when it is not. Until the image is published, `install.sh`'s
     # `docker compose pull || docker compose build` is what makes a fresh clone
     # work; once it is published, the pull wins and nothing here changes.
+    #
+    # THE IMAGE TAG IS A SHARED NAMESPACE, and `LYRAFLOW_IMAGE` is how a second
+    # stack stays out of it. Isolating a Compose project by `-p` and by host
+    # ports is not isolation: a second project built from this same checkout
+    # gets its own containers, volumes and ports but retags this same image.
+    # Nothing breaks at the time -- the running dev container keeps serving the
+    # image ID it was created from -- so it surfaces later, on an ordinary
+    # `docker compose up -d`, as a dev stack running code nobody deployed and no
+    # command in the shell history that looks wrong.
+    #
+    # So for a scratch stack (a walkthrough, a screenshot run, a manual test):
+    #
+    #   LYRAFLOW_IMAGE=lyraflow-scratch:0 docker compose -p lyraflow-scratch up --build
+    #
+    # The default keeps `pull || build` behaving exactly as it did.
+    # `docker-compose.ci.yml` needs none of this: its `build:` carries no
+    # `image:`, so Compose names that one after the project already.
     build: .
     restart: unless-stopped
     # Without an init process reaping PID 1, the kernel *ignores* an
