@@ -44,6 +44,9 @@ permissions:
 jobs:
   cla:
     runs-on: ubuntu-latest
+    # Every job in this repo carries a timeout, including the inert one -- an
+    # exception is a thing someone has to remember (#137).
+    timeout-minutes: 10
     # Two entry points reach this workflow: a PR event, and any issue comment
     # anywhere in the repo. The comment filter keeps ordinary discussion from
     # starting a run — only the signature sentence itself does.
