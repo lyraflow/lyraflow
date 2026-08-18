@@ -186,10 +186,59 @@ describe('Funnels list', () => {
     expect(row.textContent ?? '').not.toContain('where')
   })
 
+  // This test asserts almost nothing, and is kept only because deleting it
+  // would read as a coverage decision. `Create funnel` renders in the header,
+  // outside every conditional branch, so it is present whether the list is
+  // empty, populated or errored -- it would stay green against a component
+  // whose empty branch had been deleted outright. The three tests below are
+  // what actually pin the empty state (#115).
   it('offers the builder when there are no funnels', async () => {
     renderList([])
     expect(await screen.findByRole('link', { name: /create.*funnel/i })).toBeInTheDocument()
   })
+
+  it('says there are no funnels yet, and renders no rows', async () => {
+    renderList([])
+    expect(await screen.findByText(/No funnels yet/i)).toBeInTheDocument()
+    expect(screen.queryAllByRole('listitem')).toHaveLength(0)
+  })
+
+  it('does not also claim there are none when there are', async () => {
+    renderList([RUN_ONCE])
+    await screen.findByRole('link', { name: /Signup flow/ })
+    expect(screen.queryByText(/No funnels yet/i)).not.toBeInTheDocument()
+  })
+
+  // Pins `funnels != null` specifically, which is what keeps "No funnels yet"
+  // off the screen for the frame between mount and the fetch resolving. A list
+  // that flashes the empty state on every load is the failure this prevents,
+  // and it is invisible to any test that awaits the resolved state first.
+  it('does not flash the empty state before the fetch resolves', async () => {
+    const client = { funnels: vi.fn(() => new Promise<never>(() => {})) } as unknown as ApiClient
+    render(
+      <MemoryRouter>
+        <ProjectProvider projects={PROJECTS} initialId={1}>
+          <Funnels client={client} />
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    // The header link is unconditional, so its presence proves the component
+    // mounted and this is not a vacuous assertion against an empty document.
+    expect(screen.getByRole('link', { name: /create.*funnel/i })).toBeInTheDocument()
+    expect(screen.queryByText(/No funnels yet/i)).not.toBeInTheDocument()
+  })
+
+  // The empty branch carries a fourth guard, `!error`, and it is deliberately
+  // NOT pinned: it is unreachable. The load effect calls `setFunnels(null)`
+  // before every fetch and never sets a list on the error path, so `error`
+  // cannot be true while `funnels` is non-null, and `funnels != null` has
+  // already excluded the branch. Removing `!error` leaves all 21 tests green,
+  // which was verified rather than assumed.
+  //
+  // Written down because the alternative is a test that passes with the guard
+  // present or absent -- exactly the shape this file is closing (#115). If the
+  // effect ever keeps a previous list on failure, that guard becomes live and
+  // needs its own test in the same change.
 })
 
 // Defect 2 from the Task 8 visual pass: the binding spec requires every row
