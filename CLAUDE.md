@@ -156,6 +156,19 @@ stack back up before the next `pnpm test`, which needs it. Do not run the two co
 concurrently on one machine either: both call `down -v` and would destroy each other's
 stack. In CI they are separate runners, which is why they can share the compose file.
 
+**Run one suite at a time — including two ordinary `pnpm test` runs.** Two terminals, or a
+background run beside a foreground one, produce dozens of failures spread across unrelated
+server test files; one instance produced 75. The cause is not the code under test: every
+live-database suite runs its own migrations and clears its own fixtures against **one**
+shared Postgres and ClickHouse, so each run keeps deleting rows the other is mid-way
+through asserting on. `vitest.config.ts` sets `fileParallelism: false`, which orders files
+*within* a run — nothing coordinates two separate runs.
+
+Worth knowing before you start debugging, because the symptom is indistinguishable from a
+real regression and has been misdiagnosed as one: two earlier branches reported
+"intermittent cross-file database flakiness" that was never reproduced or explained. **A
+mass failure across files you did not touch is a second test run until proven otherwise.**
+
 ## Writing tests here
 
 A test counts only once it has been shown to fail against the broken implementation. That
