@@ -21,9 +21,44 @@ here as it happened rather than tagged retroactively, for the same reason 0.1.0
 is: a tag created after the fact names a moment nobody could have fetched. Its
 one fix is contained in 0.3.0.
 
-## Unreleased
+## 0.4.0 — 2026-08-18
 
 ### Added
+
+- **Segments: a visual builder for the people a query describes.** Nested
+  boolean groups to the full depth the query language allows, with four kinds of
+  condition — who someone is (a trait set by `identify()`), what they did (an
+  event, counted or aggregated, inside a window, optionally narrowed by event
+  properties), where they came from (campaign, referrer, device, geography), and
+  where they are in their lifecycle. Conditions can be negated individually.
+
+  Counts are live where that is affordable and explicit where it is not: a tree
+  the engine can answer cheaply re-counts itself as you edit, while one carrying
+  an expensive condition waits for you to press Run and says, against the
+  condition responsible, why it is expensive. The three limits the server
+  enforces — total conditions, nesting depth, behavioural conditions — disable
+  the controls that would exceed them and name the limit, rather than letting a
+  save fail after the work is done.
+
+  A saved segment can be previewed as a list of the people it matches. That list
+  pages, and it distinguishes "that is everyone" from "this preview stops here"
+  — they are different facts, and conflating them makes a segment look smaller
+  than it is.
+
+- **Funnel steps take their own criteria.** A step is no longer just an event
+  name: it can be narrowed by that event's properties, so *page views of the
+  changelog* is a step rather than *all page views*. The query engine already
+  supported this; only the builder could not express it, and a funnel authored
+  elsewhere would render with its criteria visible but locked. The list and
+  detail screens now show what each step is narrowed by, so two funnels that
+  differ only in their criteria are no longer indistinguishable.
+
+- **Suggestion fields show their options the moment you focus them.** Event
+  names, event properties and trait names are all read from what a project has
+  actually recorded. Previously they waited for you to type, which is no help if
+  you do not already know how the name begins. They remain free text — a
+  definition may legitimately be written before the data that fills it — so the
+  list suggests and never restricts.
 
 - **`lyraflow seed-demo <project>` fills a project with reproducible demo
   data.** 400 synthetic people and 5,000 events over 90 days by default, with a
@@ -46,7 +81,45 @@ one fix is contained in 0.3.0.
   earlier output. Running it again adds another cohort rather than replacing
   one.
 
+### Fixed
+
+- **A funnel step's criteria displayed with a blank operator.** The web
+  interface declared its own copy of the predicate type and spelled the operator
+  field differently from the rest of the system, so the value read as undefined.
+  Nothing failed loudly: each declaration was coherent on its own terms, so
+  there was no disagreement for the compiler to see. The type is now shared
+  rather than duplicated.
+
+- **An absolute date range on a behavioural condition could never be saved.**
+  The date control writes a local wall-clock value with no timezone, and the
+  query language requires an unambiguous instant, so every such window was
+  rejected. Times are now stored as UTC, displayed in your own timezone, and the
+  screen says which timezone you are looking at.
+
+- **A saved segment could show a lifecycle condition with no date in it.** The
+  control did not convert the stored instant for display, so it rendered empty
+  while the condition itself was intact — a segment that matches on a date,
+  showing no date.
+
+- **Adding a condition and saving immediately was rejected by the server.** An
+  unfilled condition is not a valid stored one, and nothing stopped you saving
+  it. The builder now holds an unfinished condition quite happily, refuses to
+  save while one exists, and says on the condition itself what is missing.
+
+- **Editing a segment, then switching project, could write the first project's
+  definition into the second.** The editor kept the previous segment's state
+  when a load failed, and the save used whichever segment the address then named.
+
+- **A segment whose top-level condition was not a group showed no cost warning**,
+  while still saying it carried one.
+
 ### Changed
+
+- **Comparison operators read as words.** `>=` is *at least*, `!=` is *is not*,
+  and an unbounded window is *at any time* rather than *ever*. A behavioural
+  condition reads as a sentence — *purchase at least 3 times in the last 90 days
+  where currency is USD*. The stored form is unchanged, and the CLI keeps the
+  symbols, which are the right register there.
 
 - **`@lyraflow/sdk-browser`'s `autoPageView` now defaults to `true`.** A
   pasted install snippet with nothing else written now sends one page view on
@@ -56,6 +129,38 @@ one fix is contained in 0.3.0.
   remove that call, or set `autoPageView: false`, whichever is less work. The
   automatic call still fires only once per hard load and never on a
   client-side route change; see the README's *Single-page apps* section.
+
+### Known limitations
+
+- **Step and behavioural criteria filter event *properties* only.** Fields
+  recorded on the event itself — page path, URL, referrer, and the device and
+  geography fields — are not reachable this way, so a criterion naming one is
+  accepted and matches nothing. The interface now says so where you type it, and
+  points at the segment condition that does match those fields. Making them
+  filterable directly is not done.
+
+- **A lifecycle bound without a timezone is resolved in the server's timezone**,
+  so the same stored segment can mean a different instant on a differently
+  configured deployment. Bounds written before this release carry no timezone,
+  and converting them on read would silently change which people those segments
+  match — so this needs a decision about existing data rather than a patch, and
+  is tracked rather than quietly fixed. A bound that is a bare date with no time
+  renders as an empty field for the same reason.
+
+- **Opening a large segment for editing asks the schema catalogue once per
+  suggestion field**, with no sharing between fields that want the same list.
+  These are cheap reads, but they scale with the size of the tree.
+
+- **Saving a rename and a definition change together can half-apply.** The two
+  are sent separately, on purpose, because sending the definition resets the
+  cached count. If one fails the screen says so without saying which, and no
+  longer claims that nothing was saved. Pressing Save again re-sends only what
+  still differs.
+
+- **The funnel builder keeps the previous funnel on screen when a load fails**,
+  which is the shape that caused the cross-project overwrite fixed above in the
+  segment builder. It has not been reproduced there and is not known to be
+  exploitable in the same way.
 
 ## 0.3.0 — 2026-08-16
 
