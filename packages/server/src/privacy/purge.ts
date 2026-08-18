@@ -189,7 +189,11 @@ export async function purgePerson(opts: {
   // Finding those requires unrolling every surviving event's property maps
   // for the whole project, which is a full scan of `events` on every
   // deletion. Out of scope here rather than overlooked; the event-name case
-  // is the one #66 reproduced and the one that is cheap to answer.
+  // is the one #66 reproduced and the one that is cheap to answer. Tracked as
+  // #144, which also records the most promising narrowing: capture the erased
+  // person's own (event_name, property_key) pairs BEFORE step 1 deletes their
+  // events, and check only those against the survivors rather than the whole
+  // project's catalogue.
   //
   // suppressed_persons is deliberately NOT deleted, here or ever — see
   // 008_deletion_requests.sql. The row is what stops a restored backup of
