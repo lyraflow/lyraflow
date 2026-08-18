@@ -21,6 +21,115 @@ here as it happened rather than tagged retroactively, for the same reason 0.1.0
 is: a tag created after the fact names a moment nobody could have fetched. Its
 one fix is contained in 0.3.0.
 
+## 0.5.0 — 2026-08-18
+
+### Added
+
+- **`GET /v1/schema/events` carries `last_seen`** — the latest instant each
+  event name was recorded, as an ISO-8601 timestamp. Enough to rank an
+  autocomplete by recency rather than alphabetically, which is what stops the
+  list becoming useless once a project has a year of history. There is still no
+  frequency signal; `event_schema` carries no counts.
+
+### Fixed
+
+- **The first screen a new install shows told you to run a command that does not
+  exist.** With no admin password set, the sign-in screen said to run `lyraflow
+  set-admin-password <email>`. On the install path the README recommends, there
+  is no `lyraflow` binary on the host at all — `install.sh` brings up
+  containers — so following the instruction exactly gave `command not found`.
+  It now prints the invocation that works, reads the password from the terminal
+  rather than from an argument or the shell history, and names the non-Docker
+  form for installs that do have the binary.
+
+- **A deletion left the erased person's event names in the autocomplete
+  forever.** After `DELETE /v1/persons/:id` the person's events were gone, but
+  `GET /v1/schema/events` kept offering the names of events only they had ever
+  sent. An event name can identify on its own — a name a single customer fired
+  once, or one that describes what was viewed — so this was a residue of the
+  person's data surviving an erasure that reported success, as well as an
+  autocomplete offering names that could never match anything. A purge now
+  removes event names it has left with no events behind them. Names anyone else
+  still sends are untouched. See *Known limitations* for the property-key half,
+  which is not yet swept.
+
+- **The funnel builder kept the previous funnel on screen, and saveable, when a
+  load failed.** Named as a known limitation in 0.4.0 and left unreproduced
+  there; all three of its cases reproduce. Switching project while
+  editing a funnel absent from the new project, moving between two funnels where
+  the second fails to load, and going from an edit route to the create route all
+  left one funnel's definition under another funnel's address — and a save then
+  wrote it against whichever funnel the address named. The editor now clears
+  itself whenever its address changes, and refuses to save until a load for the
+  funnel actually on screen has succeeded.
+
+- **A second stack built from the same checkout silently replaced the first
+  one's image.** Running a second Compose project from one checkout — the
+  natural way to get an isolated stack for a manual test — gave it its own
+  containers, volumes and ports, but not its own image name, so its build
+  retagged the shared one. Nothing failed at the time; the running container
+  kept serving what it had started from. It surfaced on the next ordinary
+  `docker compose up -d`, as a stack running code nobody deployed. The image
+  name is now `LYRAFLOW_IMAGE`, defaulting to exactly what it was before.
+
+### Changed
+
+- **Schema version 14.** One migration, additive: a case-insensitive unique
+  index on the admin account's email. Sign-in already compared addresses
+  case-insensitively while the constraint was case-sensitive, so two accounts
+  differing only in case could in principle coexist and sign-in would resolve to
+  an unspecified one of them. Nothing in the product could create that state —
+  it needed hand-written SQL — and it is now impossible rather than merely
+  unreached. **An install that somehow already holds two such rows will see the
+  migration refuse rather than pick a winner**, which is deliberate: which of two
+  admin accounts is the real one is not a question a migration should answer.
+
+### Known limitations
+
+- **A purge does not remove property keys only the erased person ever sent.**
+  Event *names* left with nothing behind them are now swept, but a property key
+  hanging off an event other people still send is not — if only the erased
+  person sent `patient_id` on a `checkout` everyone fires, that key survives in
+  `GET /v1/schema/properties`. Answering it means re-unrolling every surviving
+  event's property maps for the whole project on every deletion, which is a
+  materially different cost, so it is tracked rather than done quietly. Trait
+  keys are unaffected: those are read from the person's own rows, which a purge
+  deletes outright.
+
+- **`GET /v1/schema/events` is name-ordered, and `limit` applies after that
+  ordering.** So a project with more event names than the cap gets the
+  alphabetically first ones, and `last_seen` only lets you re-rank within those
+  — it does not yet let you ask for the most recently seen 50 names out of 500.
+  Ordering by recency server-side would change which rows every existing caller
+  receives, so it is a decision rather than a field addition.
+
+- **Events carrying no properties are invisible to both schema endpoints.** They
+  are fed by views that unroll each event's property map, so an event with an
+  empty map produces no rows and never appears — not merely in the property
+  list, but in the event-name list too.
+
+- **A lifecycle bound without a timezone is resolved in the server's timezone**,
+  so the same stored segment can mean a different instant on a differently
+  configured deployment. Unchanged from 0.4.0: bounds written before that
+  release carry no timezone, and converting them on read would silently change
+  which people those segments match, so this needs a decision about existing
+  data rather than a patch. A bound that is a bare date with no time renders as
+  an empty field for the same reason.
+
+- **Step and behavioural criteria filter event *properties* only.** Unchanged
+  from 0.4.0. Fields recorded on the event itself — page path, URL, referrer,
+  device and geography — are not reachable this way; the interface says so where
+  you type it and points at the segment condition that does match them.
+
+- **Saving a segment rename and a definition change together can half-apply.**
+  Unchanged from 0.4.0. The two are sent separately on purpose, because sending
+  the definition resets the cached count. If one fails the screen says so
+  without saying which. Pressing Save again re-sends only what still differs.
+
+- **Opening a large segment for editing asks the schema catalogue once per
+  suggestion field**, with no sharing between fields wanting the same list.
+  Unchanged from 0.4.0; cheap reads, but they scale with the size of the tree.
+
 ## 0.4.0 — 2026-08-18
 
 ### Added
