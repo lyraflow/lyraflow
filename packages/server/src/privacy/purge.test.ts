@@ -333,6 +333,10 @@ describe('purgePerson', () => {
         seenSettings.push(params.clickhouse_settings)
         return ch.command(params)
       },
+      // Delegated unchanged: purgePerson also READS now, to find the event
+      // names a purge left with nothing behind them (#66). This fake only
+      // exists to observe `command`, so the read passes straight through.
+      query: (params: Parameters<ClickHouseClient['query']>[0]) => ch.query(params),
     } as unknown as ClickHouseClient
 
     const scope = await resolvePersonScope({ bindings, aliases }, projectA, person)
@@ -712,20 +716,13 @@ describe('purgePerson', () => {
   // restored backup resurrecting the person (008_deletion_requests.sql);
   // event_schema has no identity column at all, and deleting from it would
   // corrupt autocomplete for the whole project, not just this person.
-  it('leaves suppressed_persons and event_schema untouched', async () => {
+  it('leaves suppressed_persons untouched', async () => {
     const person = `untouched-person-${randomUUID()}`
 
     await pg.query(
       'INSERT INTO suppressed_persons (project_id, person_id, suppressed_at) VALUES ($1, $2, now())',
       [projectA, person],
     )
-    await insertEvent({
-      projectId: projectA,
-      userId: person,
-      timestamp: chAt(10),
-      eventName: 'untouched_schema_event',
-      properties: { untouched_key: 'x' },
-    })
 
     const scope = await resolvePersonScope({ bindings, aliases }, projectA, person)
     await purgePerson({ ch, pg, projectId: projectA, scope })
@@ -735,14 +732,97 @@ describe('purgePerson', () => {
       [projectA, person],
     )
     expect(suppression.rowCount).toBe(1)
+  })
 
-    const schemaRow = await rowCount(
-      'event_schema',
-      projectA,
-      "event_name = 'untouched_schema_event' AND property_key = 'untouched_key'",
-      {},
+  // This test used to assert the OPPOSITE, in the same case, and passed --
+  // it pinned the defect. `purgePerson` deliberately left event_schema alone
+  // on the reasoning that it holds no personal data; an event name a person
+  // fired once is personal data, and the endpoint kept offering it forever
+  // (#66). Inverting that pin is the point of the change, not an obstacle to
+  // route around.
+  it('removes an event name the purge left with nothing behind it', async () => {
+    const person = `stale-schema-person-${randomUUID()}`
+    await insertEvent({
+      projectId: projectA,
+      userId: person,
+      timestamp: chAt(10),
+      eventName: 'viewed_patient_record',
+      properties: { untouched_key: 'x' },
+    })
+
+    // Present before, or the assertion after proves nothing about the purge.
+    expect(
+      await rowCount('event_schema', projectA, "event_name = 'viewed_patient_record'", {}),
+    ).toBeGreaterThan(0)
+
+    const scope = await resolvePersonScope({ bindings, aliases }, projectA, person)
+    await purgePerson({ ch, pg, projectId: projectA, scope })
+
+    expect(
+      await rowCount('event_schema', projectA, "event_name = 'viewed_patient_record'", {}),
+    ).toBe(0)
+  })
+
+  // The constraint the old behaviour existed to protect, now asserted rather
+  // than assumed. A name with zero remaining events cannot corrupt an
+  // autocomplete because it can never match; a name someone else still fires
+  // absolutely can, and must survive.
+  it('keeps an event name another person is still sending', async () => {
+    const erased = `shared-name-erased-${randomUUID()}`
+    const other = `shared-name-other-${randomUUID()}`
+    await insertEvent({
+      projectId: projectA,
+      userId: erased,
+      timestamp: chAt(10),
+      eventName: 'shared_event_name',
+      properties: { shared_key: 'x' },
+    })
+    await insertEvent({
+      projectId: projectA,
+      userId: other,
+      timestamp: chAt(9),
+      eventName: 'shared_event_name',
+      properties: { shared_key: 'y' },
+    })
+
+    const scope = await resolvePersonScope({ bindings, aliases }, projectA, erased)
+    await purgePerson({ ch, pg, projectId: projectA, scope })
+
+    expect(
+      await rowCount('event_schema', projectA, "event_name = 'shared_event_name'", {}),
+    ).toBeGreaterThan(0)
+  })
+
+  // Tenancy, for the new step specifically. The sweep is driven by a NOT IN
+  // over this project's own events, so a name that is stale here but busy in
+  // another project must not be swept there -- and the reverse.
+  it("does not sweep another project's identically named event", async () => {
+    const erased = `tenancy-schema-${randomUUID()}`
+    const elsewhere = `tenancy-schema-other-${randomUUID()}`
+    await insertEvent({
+      projectId: projectA,
+      userId: erased,
+      timestamp: chAt(10),
+      eventName: 'cross_project_event',
+      properties: { k: 'x' },
+    })
+    await insertEvent({
+      projectId: projectB,
+      userId: elsewhere,
+      timestamp: chAt(10),
+      eventName: 'cross_project_event',
+      properties: { k: 'y' },
+    })
+
+    const scope = await resolvePersonScope({ bindings, aliases }, projectA, erased)
+    await purgePerson({ ch, pg, projectId: projectA, scope })
+
+    expect(await rowCount('event_schema', projectA, "event_name = 'cross_project_event'", {})).toBe(
+      0,
     )
-    expect(schemaRow).toBe(1)
+    expect(
+      await rowCount('event_schema', projectB, "event_name = 'cross_project_event'", {}),
+    ).toBeGreaterThan(0)
   })
 
   // Named on its own, separately from "waits for each mutation" (which also
@@ -804,6 +884,10 @@ describe('purgePerson', () => {
         }
         return ch.command(params)
       },
+      // Delegated unchanged: purgePerson also READS now, to find the event
+      // names a purge left with nothing behind them (#66). This fake only
+      // exists to observe `command`, so the read passes straight through.
+      query: (params: Parameters<ClickHouseClient['query']>[0]) => ch.query(params),
     } as unknown as ClickHouseClient
 
     await purgePerson({ ch: capturingCh, pg, projectId: projectA, scope })
