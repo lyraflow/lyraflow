@@ -146,6 +146,15 @@ async function track(body: Record<string, unknown>) {
   return res
 }
 
+async function schemaEvents(): Promise<string[]> {
+  const res = await app.inject({
+    method: 'GET',
+    url: '/v1/schema/events?limit=100',
+    headers: { 'x-lyraflow-server-key': SERVER_KEY, 'user-agent': UA },
+  })
+  return (res.json().events as { event_name: string }[]).map((e) => e.event_name)
+}
+
 async function identify(body: Record<string, unknown>) {
   const res = await app.inject({
     method: 'POST',
@@ -255,14 +264,38 @@ describe('privacy: a person, end to end from ingest to erasure', () => {
       timestamp: isoAt(0),
     })
     expect(anon1.statusCode).toBe(202)
+    // BOTH of the next two carry a property, and that is not decoration.
+    // `event_schema` is fed by materialised views that ARRAY JOIN each
+    // event's property maps, so an event with no properties produces no rows
+    // there at all (#22) -- it never reaches `/v1/schema/events` in the first
+    // place. Without a property here, step 9's "the erased name is no longer
+    // offered" would pass against a name that was never offered, which is the
+    // vacuous version of exactly the assertion #66 is about. Found by writing
+    // it without one and getting an empty catalogue back.
     const anon2 = await track({
       message_id: randomUUID(),
       anonymous_id: anonId,
       type: 'track',
       event: markerEvent,
+      properties: { marker_key: 'x' },
       timestamp: isoAt(5),
     })
     expect(anon2.statusCode).toBe(202)
+
+    // A BYSTANDER, from a device that is never part of the deletion scope.
+    // Step 9 needs a name that survives the purge, both to prove the sweep is
+    // narrow (it removes the erased name, not the catalogue) and to keep that
+    // step's negative assertion from passing against an endpoint that had
+    // simply stopped returning anything.
+    const bystander = await track({
+      message_id: randomUUID(),
+      anonymous_id: `e2e-bystander-${randomUUID()}`,
+      type: 'track',
+      event: 'e2e_survivor_event',
+      properties: { survivor_key: 'x' },
+      timestamp: isoAt(1),
+    })
+    expect(bystander.statusCode).toBe(202)
 
     const idRes = await identify({
       message_id: randomUUID(),
@@ -317,6 +350,10 @@ describe('privacy: a person, end to end from ingest to erasure', () => {
     expect(beforeMembers[0]?.os).toBe('macos')
     expect(beforeMembers[0]?.browser).toBe('chrome')
     expect(beforeMembers[0]?.device_type).toBe('desktop')
+
+    // Captured BEFORE the deletion, so step 9's negative assertion is a
+    // change this purge caused rather than a name that was never there.
+    const offeredBeforeDeletion = await schemaEvents()
 
     // 4. DELETE /v1/persons/:id → 202.
     const del = await deletePerson(userId)
@@ -397,6 +434,30 @@ describe('privacy: a person, end to end from ingest to erasure', () => {
     expect(status.statusCode).toBe(200)
     expect(status.json().status).toBe('completed')
     expect(typeof status.json().completed_at).toBe('string')
+
+    // 9. The autocomplete no longer offers this person's event name.
+    //
+    // This is the user-visible half of #66, and the reason it is asserted
+    // here rather than only against purgePerson: the complaint was never
+    // "event_schema holds a row", it was that `/v1/schema/events` kept
+    // OFFERING a name whose every event had been erased. `markerEvent` is
+    // unique per run and only ever sent by this person, so after the purge
+    // nothing in `events` carries it.
+    //
+    // A custom event name is identifying in its own right -- the live
+    // observation behind #66 included names a single customer fired once --
+    // which is why this belongs in the erasure test rather than in a
+    // reporting one.
+    const names = await schemaEvents()
+    expect(names).not.toContain(markerEvent)
+    // And it WAS offered before the deletion -- captured at step 6 below the
+    // ingest, so this is a change caused by the purge rather than a name that
+    // never appeared. See `offeredBeforeDeletion`.
+    expect(offeredBeforeDeletion).toContain(markerEvent)
+    // Not vacuous: the endpoint is answering, and still offers a name this
+    // project genuinely still has events for. Without this, a route that had
+    // started returning nothing at all would satisfy the line above.
+    expect(names).toContain('e2e_survivor_event')
   })
 
   // The whole argument for time-scoping: a person who returns after being

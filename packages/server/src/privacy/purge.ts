@@ -23,7 +23,7 @@ async function mutate(
  * STEP ORDER IS LOAD-BEARING, and identity goes LAST:
  *
  *   events -> device_index -> person_traits -> events_dead_letter
- *          -> identity_bindings / person_aliases
+ *          -> identity_bindings / person_aliases -> event_schema
  *
  * The event delete predicate identifies this person's events THROUGH the
  * bindings — the per-device windows that say which anonymous events were
@@ -135,12 +135,63 @@ export async function purgePerson(opts: {
     [projectId, scope.group],
   )
 
+  // 6. event_schema, but ONLY the event names that no longer have a single
+  // event behind them.
+  //
+  // This step used to not exist, on the reasoning that event_schema "has no
+  // identity column and no per-person row, so nothing in it is personal
+  // data". The first half is true and the conclusion does not follow. An
+  // event NAME can identify on its own -- `viewed_patient_record`, or a name
+  // a customer fired exactly once -- and it survived the purge indefinitely
+  // while the endpoint kept offering it (#66, observed on a live install).
+  //
+  // The other half of the old reasoning was that deleting from event_schema
+  // "would corrupt autocomplete for the whole project". That is the real
+  // constraint and it is why this is scoped the way it is: a name with zero
+  // remaining events cannot corrupt an autocomplete, because it can never
+  // match anything. It is already a lie. A name still carried by anyone
+  // else's events is untouched.
+  //
+  // Two statements, not one mutation with a subquery, and deliberately:
+  // ClickHouse mutations are expensive, and the overwhelmingly common case
+  // after a purge is that nothing went stale. The SELECT is cheap and lets
+  // the mutation be skipped entirely.
+  const stale = await ch.query({
+    query: `SELECT DISTINCT event_name FROM event_schema
+             WHERE project_id = {projectId:UInt32}
+               AND event_name NOT IN (
+                 SELECT event_name FROM events WHERE project_id = {projectId:UInt32}
+               )`,
+    query_params: { projectId },
+    format: 'JSONEachRow',
+  })
+  const staleNames = (await stale.json<{ event_name: string }>()).map((r) => r.event_name)
+  if (staleNames.length > 0) {
+    // A NARROW RACE, stated rather than left to be discovered. Ingest is
+    // buffered, so an event name whose rows were all just purged could have
+    // new events sitting in the buffer, unflushed and therefore invisible to
+    // the SELECT above -- and this delete would then remove a row that is
+    // about to become true again. It self-heals: the materialised views feed
+    // event_schema on insert, so the next flush re-creates the row. The cost
+    // is a brief gap in autocomplete for that one name, which is strictly
+    // better than the alternative of never removing a purged name at all.
+    await mutate(
+      ch,
+      `ALTER TABLE event_schema DELETE
+        WHERE project_id = {projectId:UInt32} AND event_name IN {names:Array(String)}`,
+      { projectId, names: staleNames },
+    )
+  }
+
+  // NOT swept: property keys under an event name that still has events. If
+  // only the erased person ever sent `patient_id` on an event everyone
+  // fires, that key survives -- the same concern as above, one level down.
+  // Finding those requires unrolling every surviving event's property maps
+  // for the whole project, which is a full scan of `events` on every
+  // deletion. Out of scope here rather than overlooked; the event-name case
+  // is the one #66 reproduced and the one that is cheap to answer.
+  //
   // suppressed_persons is deliberately NOT deleted, here or ever — see
   // 008_deletion_requests.sql. The row is what stops a restored backup of
   // the event store from resurrecting this person.
-  //
-  // event_schema is deliberately NOT touched: it records which event names
-  // and property keys a project has ever used, with no identity column and
-  // no per-person row. Nothing in it is personal data, and deleting from it
-  // would corrupt autocomplete for the whole project.
 }
