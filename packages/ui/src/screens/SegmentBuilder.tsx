@@ -657,10 +657,15 @@ export function SegmentBuilder(props: {
     const savedRoot = root
     const treeChanged =
       originalRoot == null || JSON.stringify(savedRoot) !== JSON.stringify(originalRoot)
-    const requests: Promise<unknown>[] = []
+    // LABELLED, because the message below has to name which half landed.
+    // `Promise.all` could only report that *something* failed, so the banner
+    // asked the operator to retry blind over a server state it could describe
+    // and did not (#118).
+    const requests: { part: 'name' | 'tree'; run: Promise<unknown> }[] = []
     if (nameChanged) {
-      requests.push(
-        client.renameSegment(activeId, editId, trimmedName).then(
+      requests.push({
+        part: 'name',
+        run: client.renameSegment(activeId, editId, trimmedName).then(
           // The baseline advances the instant THIS request commits, not
           // when the save as a whole succeeds. An edit save can fire two
           // PATCHes and `Promise.all` rejects on the first failure, with
@@ -682,51 +687,78 @@ export function SegmentBuilder(props: {
             setOriginalName(trimmedName)
           }),
         ),
-      )
+      })
     }
     if (treeChanged) {
-      requests.push(
-        client
+      requests.push({
+        part: 'tree',
+        run: client
           .updateSegmentTree(activeId, editId, { ast_version: AST_VERSION, filter: savedRoot })
           .then(
             stillCurrent(() => {
               setOriginalRoot(savedRoot)
             }),
           ),
-      )
+      })
     }
 
-    Promise.all(requests)
-      // Guarded: unlike the create branch above, this destination NAMES a
-      // segment, and under a project the operator has since switched to it
-      // names a different one -- presented as the result of a save that was
-      // not made to it.
-      .then(
-        stillCurrent(() => {
-          navigate(segmentPath(editId))
-        }),
-      )
-      .catch((err: unknown) => {
-        if (err instanceof ApiError && err.status === 401) {
+    // `allSettled`, not `all`. `all` rejects the instant either request does
+    // and discards the other's outcome, so the screen could not tell "nothing
+    // was saved" from "half of it was" -- and said the vaguer thing, which is
+    // the one that leaves the operator unable to act (#118).
+    Promise.allSettled(requests.map((r) => r.run))
+      .then((results) => {
+        const failed = requests.filter((_, i) => results[i]?.status === 'rejected')
+        const landed = requests.filter((_, i) => results[i]?.status === 'fulfilled')
+
+        // A dead session first, and UNGUARDED, for the same reason as
+        // everywhere else here: a 401 is a fact about the session, not about
+        // which form is on screen. Checked across every rejection rather than
+        // only the first, which is what `Promise.all` happened to surface.
+        const unauthorized = results.some(
+          (r) => r.status === 'rejected' && r.reason instanceof ApiError && r.reason.status === 401,
+        )
+        if (unauthorized) {
           onUnauthorized?.()
           return
         }
-        // Deliberately NOT "nothing was changed on the server" (the create
-        // branch's own message, true there because one request is
-        // atomic) -- when both fields changed this fires two PATCHes, and
-        // `Promise.all` rejects the instant either one does, which can be
-        // AFTER the other has already committed. Claiming nothing changed
-        // here would be false in exactly that case, with no way for the
-        // operator to check it. Retry is honest advice because each
-        // request advances its OWN baseline above the moment it commits,
-        // so a second Save -- whether a verbatim retry or one the operator
-        // has edited further -- re-sends exactly what still differs from
-        // what the server now holds.
+
+        if (failed.length === 0) {
+          // Guarded: unlike the create branch above, this destination NAMES a
+          // segment, and under a project the operator has since switched to
+          // it names a different one -- presented as the result of a save
+          // that was not made to it.
+          stillCurrent(() => {
+            navigate(segmentPath(editId))
+          })()
+          return
+        }
+        // The message names what actually happened. Every branch here is
+        // something the screen can now prove rather than guess:
+        //
+        //   nothing landed  -> "nothing was changed" is TRUE, and saying so
+        //                      spares the operator checking. This is the
+        //                      claim the old copy could not safely make and
+        //                      therefore never made, even when it held.
+        //   half landed     -> name which half. "Try again" alone left them
+        //                      to discover a rename they did not know had
+        //                      committed.
+        //
+        // Retry stays honest advice in both: each request advances its OWN
+        // baseline the moment it commits, so a second Save -- verbatim or
+        // further edited -- re-sends exactly what still differs from what
+        // the server now holds.
         //
         // Guarded for the same reason the delete confirmation on
-        // `SegmentDetail` is: an error naming "this segment" rendered over
-        // a segment that was never saved is a claim about the wrong thing.
-        stillCurrent(setSaveError)('Could not save this segment. Try again.')
+        // `SegmentDetail` is: an error naming "this segment" rendered over a
+        // segment that was never saved is a claim about the wrong thing.
+        const message =
+          landed.length === 0
+            ? 'Could not save this segment. Nothing was changed on the server. Try again.'
+            : landed[0]?.part === 'name'
+              ? 'The name was saved, but the conditions were not. Try again.'
+              : 'The conditions were saved, but the name was not. Try again.'
+        stillCurrent(setSaveError)(message)
       })
       .finally(stillCurrent(() => setSaving(false)))
   }

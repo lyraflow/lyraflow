@@ -87,13 +87,23 @@ function fakeClient(over: Record<string, unknown> = {}) {
   }
 }
 
-function renderBuilder(client: ApiClient = fakeClient(), editId?: number) {
+function renderBuilder(
+  client: ApiClient = fakeClient(),
+  editId?: number,
+  onUnauthorized?: () => void,
+) {
   render(
     <MemoryRouter initialEntries={[editId != null ? segmentEditPath(editId) : ROUTES.segmentNew]}>
       <ProjectProvider projects={PROJECTS} initialId={1}>
         <Routes>
-          <Route path={ROUTES.segmentNew} element={<SegmentBuilder client={client} />} />
-          <Route path="/segments/:id/edit" element={<SegmentBuilder client={client} />} />
+          <Route
+            path={ROUTES.segmentNew}
+            element={<SegmentBuilder client={client} onUnauthorized={onUnauthorized} />}
+          />
+          <Route
+            path="/segments/:id/edit"
+            element={<SegmentBuilder client={client} onUnauthorized={onUnauthorized} />}
+          />
           {/* Placeholders so a successful save's navigation has somewhere
            * to land, matching FunnelBuilder.test.tsx's own harness. */}
           <Route path={ROUTES.segments} element={<p>segments list</p>} />
@@ -135,9 +145,10 @@ async function addAFilledCondition(key = 'plan') {
 function renderEdit(
   client: ApiClient & { segment: Mock },
   overrides: Partial<Segment> & { id: number },
+  onUnauthorized?: () => void,
 ) {
   client.segment.mockResolvedValue({ ...SEGMENT, ...overrides })
-  renderBuilder(client, overrides.id)
+  renderBuilder(client, overrides.id, onUnauthorized)
 }
 
 describe('SegmentBuilder -- create', () => {
@@ -620,13 +631,16 @@ describe('SegmentBuilder -- the rename rule', () => {
     expect(client.updateSegmentTree).not.toHaveBeenCalled()
   })
 
-  // An edit save can issue TWO PATCHes (rename + tree update),
-  // and `Promise.all` rejects the instant either one does -- possibly AFTER
-  // the other has already committed. The error copy used to say "nothing
-  // was changed on the server", which is false in exactly this shape. This
-  // fixture forces that shape (the rename succeeds, the tree update fails)
-  // and pins that the banner never claims it.
-  it('a failed edit save (rename succeeds, tree update fails) says to retry, and never claims nothing was changed on the server', async () => {
+  // An edit save can issue TWO PATCHes (rename + tree update), and either can
+  // fail after the other committed. The copy used to say "nothing was changed
+  // on the server", which is false in exactly this shape; then it said only
+  // "could not save this segment. Try again", which is true but leaves the
+  // operator to discover a rename they did not know had landed.
+  //
+  // `Promise.allSettled` means the screen can now name which half landed, so
+  // this pins the specific claim rather than only the absence of a wrong one
+  // (#118).
+  it('a failed edit save (rename succeeds, tree update fails) says the name was saved and the conditions were not', async () => {
     const client = fakeClient({
       updateSegmentTree: vi.fn(async () => {
         throw new ApiError(500, 'server_error')
@@ -641,7 +655,9 @@ describe('SegmentBuilder -- the rename rule', () => {
 
     await waitFor(() => expect(client.renameSegment).toHaveBeenCalledWith(1, 7, 'New'))
     const alert = await screen.findByRole('alert')
-    expect(alert).toHaveTextContent(/could not save this segment/i)
+    expect(alert).toHaveTextContent(/the name was saved, but the conditions were not/i)
+    // The original claim this test was written against, still excluded: the
+    // rename DID commit, so any form of "nothing changed" is false here.
     expect(alert).not.toHaveTextContent(/nothing was changed/i)
     expect(alert).not.toHaveTextContent(/nothing changed/i)
   })
@@ -653,6 +669,60 @@ describe('SegmentBuilder -- the rename rule', () => {
   // save again, and against a stale baseline that second save silently
   // drops whichever field they reverted. Two tests, one per side, because
   // either baseline can be the one that committed.
+
+  // The claim the old copy could not safely make, and therefore never made
+  // even when it held. With both requests failing, "nothing was changed" is
+  // simply true, and saying it spares the operator going to check.
+  it('a failed edit save where BOTH requests fail says nothing was changed', async () => {
+    const client = fakeClient({
+      renameSegment: vi.fn(async () => {
+        throw new ApiError(500, 'server_error')
+      }),
+      updateSegmentTree: vi.fn(async () => {
+        throw new ApiError(500, 'server_error')
+      }),
+    })
+    renderEdit(client, { id: 7, name: 'Old', filter: TREE })
+    await screen.findByTestId('condition-0')
+    await userEvent.clear(screen.getByLabelText(/name/i))
+    await userEvent.type(screen.getByLabelText(/name/i), 'New')
+    await negateTheFirstCondition()
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(/nothing was changed on the server/i)
+    // And it must NOT name a half, since neither landed.
+    expect(alert).not.toHaveTextContent(/but the conditions were not/i)
+    expect(alert).not.toHaveTextContent(/but the name was not/i)
+  })
+
+  // `Promise.all` surfaced only the FIRST rejection, so a 401 arriving on the
+  // second request could be missed while the first request's ordinary failure
+  // was reported instead -- leaving the operator with a retry prompt on a
+  // session that is already dead. `allSettled` sees every rejection, and this
+  // pins that the dead session still wins over the error banner.
+  it('reports a dead session even when the 401 is not the first request to fail', async () => {
+    const onUnauthorized = vi.fn()
+    const client = fakeClient({
+      renameSegment: vi.fn(async () => {
+        throw new ApiError(500, 'server_error')
+      }),
+      updateSegmentTree: vi.fn(async () => {
+        throw new ApiError(401, 'unauthorized')
+      }),
+    })
+    renderEdit(client, { id: 7, name: 'Old', filter: TREE }, onUnauthorized)
+    await screen.findByTestId('condition-0')
+    await userEvent.clear(screen.getByLabelText(/name/i))
+    await userEvent.type(screen.getByLabelText(/name/i), 'New')
+    await negateTheFirstCondition()
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalled())
+    // A dead session is the whole story; a retry prompt beside it is noise
+    // that sends the operator round a loop every request will fail.
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
 
   it('after a partial save, reverting the name still sends the rename -- the committed side is the new baseline', async () => {
     const client = fakeClient({
@@ -671,7 +741,9 @@ describe('SegmentBuilder -- the rename rule', () => {
     // The rename committed; the tree update did not. The server now holds
     // `New`, which is not what `originalName` was fetched as.
     await waitFor(() => expect(client.renameSegment).toHaveBeenCalledWith(1, 7, 'New'))
-    expect(await screen.findByRole('alert')).toHaveTextContent(/could not save this segment/i)
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      /the name was saved, but the conditions were not/i,
+    )
 
     // The operator abandons the rename and saves again.
     await userEvent.clear(screen.getByLabelText(/name/i))
@@ -702,7 +774,10 @@ describe('SegmentBuilder -- the rename rule', () => {
     await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
 
     await waitFor(() => expect(client.updateSegmentTree).toHaveBeenCalledTimes(1))
-    expect(await screen.findByRole('alert')).toHaveTextContent(/could not save this segment/i)
+    // The mirror message: this time the TREE is the side that landed.
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      /the conditions were saved, but the name was not/i,
+    )
 
     // The operator un-negates, restoring the tree the segment was FETCHED
     // with -- which the successful first request means is no longer the
