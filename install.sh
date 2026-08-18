@@ -25,13 +25,33 @@ fi
 # later and attributed to the wrong thing. Best-effort: `ss` is Linux-only, and
 # no check at all is better than refusing to install on a machine that lacks it.
 #
-# Skipped when .env already names this same domain, because then the listener
-# on 80 is this install's own Caddy and refusing is wrong: `./install.sh
-# <domain>` is the only command the README gives for enabling TLS, and re-running
-# it -- to pick up a new image, or after editing tls.d -- must not be an error.
-# A *different* domain still checks, and so does a first install: those are the
-# case the guard was written for, some other service already holding the port.
-if [ -n "$DOMAIN" ] && [ "$DOMAIN" != "$CONFIGURED_DOMAIN" ] && command -v ss >/dev/null 2>&1; then
+# Skipped when .env already names this same domain AND this project's own Caddy
+# is the thing running, because then the listener on 80 is ours and refusing is
+# wrong: `./install.sh <domain>` is the only command the README gives for
+# enabling TLS, and re-running it -- to pick up a new image, or after editing
+# tls.d -- must not be an error.
+#
+# BOTH HALVES, not the domain alone. The domain string says what this install
+# is FOR; it says nothing about what is holding the port right now. On an
+# install whose .env names analytics.example.com but whose port 80 is held by
+# some unrelated web server, matching on the domain alone skipped the check,
+# wrote .env, and then failed at `docker compose up` with a bind error --
+# a worse failure than the clear one this exists to give, arriving after the
+# file was written (#65).
+#
+# `compose ps -q` lists RUNNING containers for the service (stopped ones need
+# `-a`), so a non-empty answer means ours is up. Every way of not knowing --
+# no docker, an older Compose, a stack that is down -- returns false and the
+# check runs, which is the safe direction: at worst it refuses an install
+# whose ports are genuinely occupied.
+our_caddy_running() {
+  command -v docker >/dev/null 2>&1 || return 1
+  [ -n "$(docker compose ps -q caddy 2>/dev/null)" ]
+}
+
+if [ -n "$DOMAIN" ] &&
+  ! { [ "$DOMAIN" = "$CONFIGURED_DOMAIN" ] && our_caddy_running; } &&
+  command -v ss >/dev/null 2>&1; then
   for port in 80 443; do
     if ss -ltnH "sport = :$port" 2>/dev/null | grep -q .; then
       echo "Port $port is already in use, and serving $DOMAIN needs it." >&2
