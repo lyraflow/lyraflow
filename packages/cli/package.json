@@ -1,11 +1,17 @@
 {
   "name": "@lyraflow/cli",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
-  "bin": { "lyraflow": "./dist/index.js" },
-  "engines": { "node": ">=22 <23" },
-  "scripts": { "build": "tsc -b" },
+  "bin": {
+    "lyraflow": "./dist/index.js"
+  },
+  "engines": {
+    "node": ">=22 <23"
+  },
+  "scripts": {
+    "build": "tsc -b"
+  },
   "dependencies": {
     "@lyraflow/core": "workspace:*",
     "@lyraflow/db": "workspace:*",
