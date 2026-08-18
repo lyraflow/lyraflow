@@ -5,6 +5,7 @@ import { CONTEXT_FIELDS } from './ast.js'
 import { CONTEXT_COLUMNS, baseCte } from './base.js'
 import { behaviourCte } from './behaviour.js'
 import type { Cursor } from './cursor.js'
+import { MEMBER_PAGE_SIZE } from './limits.js'
 import { Params } from './params.js'
 import { treeExpr } from './predicates.js'
 import { type CostWarning, costWarnings, validateTree } from './validate.js'
@@ -22,15 +23,10 @@ function collectBehaviors(node: FilterNode, out: Behavior[]): void {
   else if (node.kind === 'behavior') out.push(node)
 }
 
-/** One page. Bounded because this endpoint is reachable by any key holder. */
-export const MEMBER_PAGE_SIZE = 100
-
-/**
- * The furthest a caller may paginate. This endpoint is a preview of a
- * population, not an export of it — the export API is a later plan. Past this
- * many rows the response says so rather than truncating quietly.
- */
-export const MEMBER_WINDOW_MAX = 1000
+// Defined in `./limits.js` so the web UI can import them without reaching
+// through this module; re-exported here so every existing importer of
+// `compile.js` is unchanged and there is exactly one definition (#120).
+export { MEMBER_PAGE_SIZE, MEMBER_WINDOW_MAX } from './limits.js'
 
 /**
  * The member projection.
