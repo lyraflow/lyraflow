@@ -1248,7 +1248,7 @@ you want to filter or discover this way, give them at least one property.
 ```sh
 curl -s http://localhost:3000/v1/schema/events?q=import \
   -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY"
-# {"events":[{"event_name":"import_started"}]}
+# {"events":[{"event_name":"import_started","last_seen":"2026-08-01T00:00:00.000Z"}]}
 
 curl -s http://localhost:3000/v1/schema/properties?event=import_started \
   -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY"
@@ -1261,12 +1261,25 @@ curl -s http://localhost:3000/v1/schema/properties?event=import_started \
 | `event` | properties only | restrict to one event's properties |
 | `limit` | both | max rows to return, default 50, capped at 100 |
 
-`limit` above 100 is rejected with `400`, not silently truncated. Results are
-**name-ordered and unranked** — no frequency or recency signal, because
-`event_schema` carries no counts. Deliberately thin: prefix vs. fuzzy
-matching, and ranking by frequency, recency, or name, are questions for
-whichever builder UI ends up consuming this: this ships the raw read any of
-those can be built on top of, rather than a guess at one of them.
+`limit` above 100 is rejected with `400`, not silently truncated.
+
+Each event carries **`last_seen`**, the latest instant that event name was
+recorded, as an ISO-8601 timestamp — enough to rank an autocomplete by recency
+rather than alphabetically, which is what stops the list becoming useless once
+a project is a year old. There is still **no frequency signal**, because
+`event_schema` carries no counts.
+
+**Results are name-ordered, and `limit` is applied after that ordering.** So a
+project with more event names than the cap gets the alphabetically first `N`,
+and can only re-rank *within* those — `last_seen` does not currently let you
+ask for the most recent 50 event names out of 500. Ordering server-side by
+recency would, and is the obvious next step; it is not the default today
+because it changes which rows every existing caller receives.
+
+Otherwise deliberately thin: prefix vs. fuzzy matching, and ranking by
+frequency or name, are questions for whichever builder UI ends up consuming
+this — this ships the raw read those can be built on top of, rather than a
+guess at one of them.
 
 ### What this does not do yet
 
