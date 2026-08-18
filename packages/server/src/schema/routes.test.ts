@@ -182,6 +182,49 @@ beforeAll(async () => {
         properties: { source: 'csv' },
         properties_num: { rows: 10 },
       },
+      // A dedicated pair for the recency read: ONE event name recorded twice,
+      // at different instants, carrying a DIFFERENT property key each time.
+      //
+      // Its own event name rather than a second import_started, because the
+      // properties tests below assert import_started's key list with
+      // `toEqual` -- adding a key there fails two unrelated tests.
+      //
+      // Different keys, because event_schema is a ReplacingMergeTree ordered on
+      // (project_id, event_name, property_key, value_kind) with `last_seen` as
+      // the version: repeating a key at a later instant REPLACES that row
+      // rather than adding to it, leaving every surviving row for the name
+      // holding the same timestamp -- against which `min` and `max` return the
+      // same answer. Verified rather than reasoned about: with both events
+      // carrying the same keys, mutating the route to `min(last_seen)` left
+      // all 19 tests green.
+      //
+      // As written, `reason` stays pinned at the earlier instant and `queue`
+      // holds the later one, so the two aggregates diverge -- and diverge
+      // whether or not a merge has run, since no key here holds two versions.
+      {
+        project_id: projectA,
+        event_id: '78000000-0000-4000-8000-000000000004',
+        anonymous_id: 'dev',
+        user_id: 'u',
+        event_name: 'retry_scheduled',
+        timestamp: '2026-08-01 00:00:00.000',
+        received_at: '2026-08-01 00:00:00.000',
+        trusted: 1,
+        properties: { reason: 'timeout' },
+        properties_num: {},
+      },
+      {
+        project_id: projectA,
+        event_id: '78000000-0000-4000-8000-000000000005',
+        anonymous_id: 'dev',
+        user_id: 'u',
+        event_name: 'retry_scheduled',
+        timestamp: '2026-08-02 03:04:05.678',
+        received_at: '2026-08-02 03:04:05.678',
+        trusted: 1,
+        properties: { queue: 'slow' },
+        properties_num: {},
+      },
       {
         project_id: projectA,
         event_id: '78000000-0000-4000-8000-000000000003',
@@ -358,6 +401,19 @@ describe('schema reads', () => {
     )
   })
 
+  it('carries last_seen, as the latest instant that event was recorded', async () => {
+    const events: { event_name: string; last_seen: string }[] = (
+      await get('/v1/schema/events')
+    ).json().events
+    const seen = Object.fromEntries(events.map((e) => [e.event_name, e.last_seen]))
+    // retry_scheduled was recorded twice; the LATER instant is the answer.
+    // `max`, not `min` or whichever row came back first.
+    expect(seen.retry_scheduled).toBe('2026-08-02T03:04:05.678Z')
+    // And it is per event name, not one global maximum for the project --
+    // import_finished is older and must say so.
+    expect(seen.import_finished).toBe('2026-08-01T00:05:00.000Z')
+  })
+
   it('filters by prefix', async () => {
     expect((await get('/v1/schema/events?q=import')).json().events.length).toBeGreaterThan(0)
     expect((await get('/v1/schema/events?q=zzzz')).json().events).toEqual([])
@@ -436,8 +492,14 @@ describe('schema reads', () => {
   it("does not leak another project's property keys", async () => {
     const res = await get('/v1/schema/properties')
     expect(res.statusCode).toBe(200)
+    // `queue` and `reason` are retry_scheduled's, added to the fixture for the
+    // last_seen read above. They belong to project A, so they belong here --
+    // what this test is actually about is that project B's `plan` is NOT here,
+    // and that still holds.
     expect(res.json().properties).toEqual([
       { property_key: 'duration', value_kind: 'number' },
+      { property_key: 'queue', value_kind: 'string' },
+      { property_key: 'reason', value_kind: 'string' },
       { property_key: 'rows', value_kind: 'number' },
       { property_key: 'source', value_kind: 'string' },
     ])

@@ -270,8 +270,11 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
         )
       ).properties.map((p) => p.property_key),
     schemaEvents: async (projectId, q) =>
+      // `last_seen` is in the response and deliberately dropped here: this
+      // client returns names for a datalist, and nothing on screen ranks or
+      // shows recency yet. Typed anyway so the wire shape is not a lie.
       (
-        await call<{ events: { event_name: string }[] }>(
+        await call<{ events: { event_name: string; last_seen: string }[] }>(
           `/v1/schema/events${qs({ q, limit: 50 })}`,
           {},
           projectId,

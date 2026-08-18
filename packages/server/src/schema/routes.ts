@@ -2,6 +2,7 @@ import type { ClickHouseClient } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { Authenticate } from '../auth/bridge.js'
+import { parseChDateTime } from '../ingest/row.js'
 
 export interface SchemaDeps {
   authenticate: Authenticate
@@ -38,6 +39,15 @@ const TraitValueQuery = z.object({
  * frequency ranking: event_schema carries no counts, and adding them is a
  * different feature.
  *
+ * `/v1/schema/events` carries `last_seen` so a caller CAN rank by recency;
+ * the ordering here stays alphabetical, which is a deliberate half-measure
+ * worth being honest about. `LIMIT` is applied after `ORDER BY event_name`,
+ * so a project with more event names than the cap returns the alphabetically
+ * first N and the caller can only re-rank within those. Ordering by
+ * `last_seen DESC` server-side would fix that and is the obvious next step --
+ * it is not taken here because it changes which rows every existing caller
+ * receives, which is a decision rather than a field addition (#20).
+ *
  * Server-key gated: a project's event taxonomy is a description of its
  * product, not something the browser-shipped write key should reach.
  */
@@ -50,16 +60,33 @@ export function registerSchemaRoutes(app: FastifyInstance, deps: SchemaDeps): vo
     const q = Query.safeParse(req.query)
     if (!q.success) return reply.code(400).send({ error: 'invalid query' })
 
+    // `max(last_seen)` rather than `DISTINCT event_name`: `event_schema` is a
+    // ReplacingMergeTree keyed on (project_id, event_name, property_key, ...)
+    // with `last_seen` as the version, so one event name holds a row per
+    // property key -- and unmerged parts can hold several rows for the same
+    // key. `max` is the right aggregate over both, and unlike a `FINAL` read
+    // it does not depend on whether a merge has happened yet.
     const rs = await ch.query({
-      query: `SELECT DISTINCT event_name FROM event_schema
+      query: `SELECT event_name, max(last_seen) AS last_seen FROM event_schema
                WHERE project_id = {projectId:UInt32}
                  AND ({q:String} = '' OR startsWith(event_name, {q:String}))
+               GROUP BY event_name
                ORDER BY event_name ASC
                LIMIT {limit:UInt32}`,
       query_params: { projectId: project.id, q: q.data.q ?? '', limit: q.data.limit },
       format: 'JSONEachRow',
     })
-    return reply.code(200).send({ events: await rs.json<{ event_name: string }>() })
+    const rows = await rs.json<{ event_name: string; last_seen: string }>()
+    return reply.code(200).send({
+      events: rows.map((r) => ({
+        event_name: r.event_name,
+        // ISO-8601, matching `/v1/events`. ClickHouse hands back
+        // "2026-08-18 09:12:33.123", which is neither what a JS `Date`
+        // parses reliably nor what every other timestamp on this API looks
+        // like.
+        last_seen: parseChDateTime(r.last_seen).toISOString(),
+      })),
+    })
   })
 
   app.get('/v1/schema/properties', async (req, reply) => {
