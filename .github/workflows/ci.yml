@@ -6,6 +6,20 @@ on:
   # re-verified without pushing a throwaway commit.
   workflow_dispatch:
 
+# Cancel a superseded run rather than paying for it. PR #121 -- a UI branch --
+# ran this workflow nine times, and eight of those were obsolete before they
+# finished (see #130).
+#
+# The group is deliberately asymmetric, for the same reason the triggers below
+# are. A pull request groups by PR number, so a new push cancels the run for the
+# commit it replaced. Everything else -- `push` to main, `workflow_dispatch` --
+# falls back to `run_id`, which is unique per run, so those runs are never
+# cancelled and never queued behind one another. A cancelled `main` run would be
+# a hole in exactly the place these workflows refuse to have one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest

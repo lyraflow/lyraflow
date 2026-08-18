@@ -36,15 +36,38 @@ on:
       # database has to satisfy, and the migrator owns `schema_migrations` —
       # which `pg_dump` carries and `restore.sh` compares against.
       - 'packages/db/**'
+      # ...but not its tests. A test file inside packages/db cannot change what
+      # backup.sh writes or what restore.sh accepts, and
+      # packages/db/src/event-columns.test.ts is one of the two files that put
+      # this job on a UI branch nine times (#130). The negation must come AFTER
+      # the pattern it narrows -- later patterns win.
+      - '!packages/db/**/*.test.ts'
       # SCHEMA_VERSION lives here, and restore.sh's guard reads it out of the
       # running image to refuse a backup newer than the code.
       - 'packages/core/src/index.ts'
-      # A dependency bump can move vitest or shellcheck under us.
-      - 'package.json'
-      - 'pnpm-lock.yaml'
+      # NOT package.json or pnpm-lock.yaml, though a dependency bump genuinely
+      # can move vitest or shellcheck under us. They matched on every branch
+      # that touched any dependency, which is most of them, for a risk the
+      # unconditional `main` run below already catches within a quarter of an
+      # hour of merging. That is the trade this file already makes everywhere
+      # else; this is the same trade, applied consistently (#130).
       - '.github/workflows/backup-restore.yml'
   push: { branches: [main] }
   workflow_dispatch:
+
+# Cancel a superseded run rather than paying for it. PR #121 -- a UI branch --
+# ran this workflow nine times, and eight of those were obsolete before they
+# finished (see #130).
+#
+# The group is deliberately asymmetric, for the same reason the triggers below
+# are. A pull request groups by PR number, so a new push cancels the run for the
+# commit it replaced. Everything else -- `push` to main, `workflow_dispatch` --
+# falls back to `run_id`, which is unique per run, so those runs are never
+# cancelled and never queued behind one another. A cancelled `main` run would be
+# a hole in exactly the place these workflows refuse to have one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   backup-restore:
