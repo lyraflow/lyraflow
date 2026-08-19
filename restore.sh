@@ -848,6 +848,43 @@ fi
 # decision with its own review.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Can this role actually do what the restore is about to ask of it?
+# ---------------------------------------------------------------------------
+#
+# The restore runs `DROP SCHEMA public CASCADE`, which requires the connecting
+# role to OWN the schema (or to be a superuser, or a member of the owning
+# role). That is true of the stack this repository ships, where the app's role
+# is the database owner. It is not true of a hardened deployment where the
+# application role deliberately is not an owner, nor of some managed Postgres.
+#
+# Without this the failure is still safe -- `ERROR: must be owner of schema
+# public`, exit 1, schema intact, run repeatable -- but the operator meets it
+# in the MIDDLE of a restore, after ClickHouse has already been replaced. This
+# asks before anything is destroyed, which is what the checksum and
+# schema-version guards above already do (#47).
+#
+# Refuses only on a definite "no". A query that errors, returns nothing, or
+# returns anything unexpected proceeds exactly as before: this guard exists to
+# convert a late failure into an early one, and must never turn a restore that
+# would have worked into one that is refused.
+PG_CAN_DROP="$(
+  docker compose exec -T "$PG_SERVICE" sh -c \
+    'PGPASSWORD="$POSTGRES_PASSWORD" psql -U "$0" -d "$1" -tAq -c "$2" 2>/dev/null' \
+    "$PG_USER" "$PG_DATABASE" \
+    "SELECT pg_has_role(current_user, nspowner, 'USAGE')
+         OR COALESCE((SELECT usesuper FROM pg_user WHERE usename = current_user), false)
+       FROM pg_namespace WHERE nspname = 'public'" \
+    < /dev/null | tr -d '[:space:]'
+)" || PG_CAN_DROP=''
+
+if [ "$PG_CAN_DROP" = "f" ]; then
+  refuse "The Postgres role '$PG_USER' does not own the public schema." \
+    "A restore drops and recreates that schema, which needs ownership." \
+    "Check with:  SELECT nspowner::regrole FROM pg_namespace WHERE nspname = 'public';" \
+    "Nothing was restored."
+fi
+
 note ""
 note "About to REPLACE the contents of both data stores from:"
 note "  $SRC"
