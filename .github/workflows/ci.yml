@@ -121,27 +121,34 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ hashFiles('pnpm-lock.yaml') }}
-      # `--with-deps` is an apt install, and the cache above does not and cannot
-      # cover it: a fresh runner has no apt state, so this reaches Ubuntu's
-      # mirrors on EVERY run even when the browser itself was restored. That is
-      # the step that hung for 71 minutes on #136 -- `azure.archive.ubuntu.com`
-      # returning Ign:, apt falling back to `archive.ubuntu.com` and stalling
-      # there, with no Playwright test ever starting.
+      # NO `--with-deps`, and that is the point of this step's existence.
       #
-      # Its own timeout on top of the job's: this bounds the known-flaky step
-      # and, more usefully, NAMES it in the failure. A job-level timeout alone
-      # reports "the job took too long", which is where this cost an hour of
-      # someone watching a tab.
+      # `--with-deps` is an apt install. The cache above does not and cannot
+      # cover it -- a fresh runner has no apt state -- so it reached Ubuntu's
+      # mirrors on EVERY run even when the browser itself was restored. It hung
+      # three times: 71 minutes on #136 before a human killed it, then twice on
+      # one commit in #153, each bounded at 10 minutes by the timeout below.
+      # Same signature every time: `azure.archive.ubuntu.com` answering `Ign:`,
+      # apt falling back to `archive.ubuntu.com`, and stalling. No Playwright
+      # test ran in any of the three, and a deliberate re-run did not clear it,
+      # so it is a sustained mirror problem rather than a transient (#154).
       #
-      # Dropping `--with-deps` to rely on the runner image's preinstalled
-      # libraries would remove the dependency rather than bound it. Deliberately
-      # not done here: `ubuntu-latest` ships most of what headless Chromium
-      # needs, and "most" is doing real work in that sentence -- getting it
-      # wrong is a browser that will not launch. That belongs in its own change
-      # where it can be judged on its own evidence (#137).
-      - name: Install the Playwright browser and its system dependencies
+      # `ubuntu-latest` ships the shared libraries headless Chromium needs, so
+      # the browser download alone -- which IS cached -- is enough. This removes
+      # the network dependency rather than bounding it.
+      #
+      # If a future runner image drops a library, the failure is a launch error
+      # naming the missing `.so`, at the first test, in seconds. That is a
+      # better failure than a ten-minute stall in a step that has not yet run
+      # anything: it says what is missing, and the remedy is to install that
+      # one package rather than whatever `--with-deps` resolves to.
+      #
+      # The timeout stays. It is what turned a 71-minute silent hang into a
+      # failure that NAMES the step, and it costs nothing when the step takes
+      # seconds.
+      - name: Install the Playwright browser
         timeout-minutes: 10
-        run: pnpm --filter @lyraflow/ui exec playwright install chromium --with-deps
+        run: pnpm --filter @lyraflow/ui exec playwright install chromium
       - run: pnpm build
       # An EMPTY database, deliberately: the wizard only appears when there
       # are no projects, and it is the whole point of this test.
