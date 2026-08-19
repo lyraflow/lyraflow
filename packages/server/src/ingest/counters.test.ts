@@ -180,6 +180,39 @@ describe('IngestCounters persisted/pending reads', () => {
     expect(row.events_throttled).toBe('2')
   })
 
+  // Not in the brief. `events_bot` arrived with migration 015 and the
+  // fixtures had to learn about it in THREE places -- the CounterRow type,
+  // readCounterRow's SELECT, and seedCounterRow's DO UPDATE. Missing the
+  // last is silent and nasty: the INSERT path writes the new value, so a
+  // first seed looks correct, and only a RE-seed of an existing row leaves
+  // the previous bot count standing while every other column is replaced.
+  // That breaks the helper's documented "overwrites, not adds to" contract
+  // for exactly one column, which is how a later test pins a total it never
+  // actually established.
+  it('seeds and reads events_bot, and a re-seed overwrites it rather than leaving it', async () => {
+    await seedCounterRow(pg, projectId, monthStart(0), { accepted: 1, bot: 9 })
+    expect((await readCounterRow(pg, projectId)).events_bot).toBe('9')
+
+    // Second seed of the SAME row -- the ON CONFLICT path. Omitting `bot`
+    // means zero, not "leave whatever was there".
+    await seedCounterRow(pg, projectId, monthStart(0), { accepted: 2 })
+    const row = await readCounterRow(pg, projectId)
+    expect(row.events_bot).toBe('0')
+    expect(row.events_accepted).toBe('2')
+  })
+
+  it('records bot separately from rejected', async () => {
+    // The whole point of migration 015: a crawler drop and a malformed
+    // payload are different answers to "is my integration broken".
+    const counters = new IngestCounters(pg)
+    counters.record(projectId, 'bot', 6)
+    counters.record(projectId, 'rejected', 2)
+    await counters.flush()
+    const row = await readCounterRow(pg, projectId)
+    expect(row.events_bot).toBe('6')
+    expect(row.events_rejected).toBe('2')
+  })
+
   it('reads the persisted accepted total for the current month only', async () => {
     const counters = new IngestCounters(pg)
     await seedCounterRow(pg, projectId, monthStart(0), { accepted: 40 })
