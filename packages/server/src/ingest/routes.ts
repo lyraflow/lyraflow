@@ -1,5 +1,11 @@
 import cors from '@fastify/cors'
-import { BatchPayload, IngestPayload, isBot, parseUserAgent } from '@lyraflow/core'
+import {
+  BatchPayload,
+  IngestPayload,
+  isBot,
+  isServerSideLibrary,
+  parseUserAgent,
+} from '@lyraflow/core'
 import type { ClickHouseClient } from '@lyraflow/db'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import type { Project, ProjectCache } from '../auth/project-cache.js'
@@ -243,7 +249,7 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
   )
 
   interface AcceptResult {
-    outcome: 'accepted' | 'rejected' | 'overloaded' | 'over_quota'
+    outcome: 'accepted' | 'rejected' | 'bot' | 'overloaded' | 'over_quota'
     deadLetter?: DeadLetterRow
   }
 
@@ -402,12 +408,18 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
     raw: unknown,
   ): Promise<AcceptResult> {
     const projectId = project.id
-    const ua = req.headers['user-agent']
-    if (isBot(ua)) {
-      counters.record(projectId, 'rejected')
-      return { outcome: 'rejected' }
-    }
 
+    // PARSE BEFORE THE BOT CHECK, which is the reverse of the original order
+    // and is forced: the signal that a server-side SDK is not a crawler
+    // lives in `context.library`, and that cannot be read before the payload
+    // is parsed (#29).
+    //
+    // The cost is real and was accepted deliberately: crawler traffic is now
+    // Zod-parsed before being dropped, where it used to be refused on a
+    // header comparison. The payload is a small object and the request has
+    // already paid for HTTP handling and a project-cache lookup, so this is
+    // judged affordable -- but it is the first thing to revisit if ingest
+    // CPU ever becomes a problem.
     const parsed = IngestPayload.safeParse(raw)
     if (!parsed.success) {
       counters.record(projectId, 'rejected')
@@ -415,6 +427,27 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
         outcome: 'rejected',
         deadLetter: buildDeadLetterRow(projectId, 'validation_failed', parsed.error.message, raw),
       }
+    }
+
+    // A declared server-side SDK is never a bot, whatever its HTTP client
+    // announces -- `python-requests`, `okhttp` and `curl/` are all in
+    // BOT_TOKENS, so without this every server-side SDK is swallowed on its
+    // first request.
+    //
+    // Keyed on server-side names specifically, NOT on "declares a library at
+    // all": a crawler executing JS on an instrumented page sends exactly
+    // what the browser SDK sends, so exempting the browser library would
+    // defeat the filter outright.
+    //
+    // Not a security control, and not meant to be. The write key is public,
+    // so a hostile client can already send `Mozilla/5.0` and be
+    // indistinguishable from a visitor. This filter removes incidental
+    // traffic -- crawlers, uptime monitors, link previews -- and none of
+    // those declare a library.
+    const ua = req.headers['user-agent']
+    if (!isServerSideLibrary(parsed.data.context.library?.name) && isBot(ua)) {
+      counters.record(projectId, 'rejected')
+      return { outcome: 'bot' }
     }
 
     const limit = checkLimits(parsed.data, cardinality, projectId)

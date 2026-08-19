@@ -119,6 +119,23 @@ function track(body: Record<string, unknown>, key = 'wk_routes') {
   })
 }
 
+async function countEvents(where: string): Promise<number> {
+  const rs = await ch.query({
+    query: `SELECT count() AS c FROM events WHERE project_id = ${routesTestProjectId} AND ${where}`,
+    format: 'JSONEachRow',
+  })
+  return Number((await rs.json<{ c: string }>())[0]?.c ?? 0)
+}
+
+async function countDeadLetters(): Promise<number> {
+  const rs = await ch.query({
+    query: `SELECT count() AS c FROM events_dead_letter
+             WHERE project_id = ${routesTestProjectId} AND reason = 'validation_failed'`,
+    format: 'JSONEachRow',
+  })
+  return Number((await rs.json<{ c: string }>())[0]?.c ?? 0)
+}
+
 // This is deliberate, not an oversight: Task 9 wired the admin-session
 // bridge (auth/bridge.ts) into every OTHER project-scoped route, but
 // /v1/alias stayed on its own server-key-only authenticator
@@ -272,6 +289,81 @@ describe('ingest routes', () => {
     })
     const rows = await rs.json<{ c: string }>()
     expect(Number(rows[0]?.c)).toBe(0)
+  })
+
+  // #29: a PHP SDK on ext/curl or a Python SDK on requests announces a
+  // transport User-Agent that is in BOT_TOKENS, so its first event was
+  // dropped and answered 202 with nothing anywhere to explain it.
+  it('accepts an event from a declared server-side SDK despite a bot-looking User-Agent', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': 'wk_routes', 'user-agent': 'python-requests/2.31.0' },
+      payload: {
+        message_id: randomUUID(),
+        anonymous_id: 'server-side-caller',
+        type: 'track',
+        event: 'server_side_event',
+        context: { library: { name: 'lyraflow-python', version: '0.1.0' } },
+      },
+    })
+    expect(res.statusCode).toBe(202)
+    await app.deps.buffer.flush()
+    expect(await countEvents("event_name = 'server_side_event'")).toBe(1)
+  })
+
+  // The same request WITHOUT the declaration is still dropped. Without this,
+  // the test above passes against a filter that was simply deleted.
+  it('still drops the same event when it declares no library', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': 'wk_routes', 'user-agent': 'python-requests/2.31.0' },
+      payload: {
+        message_id: randomUUID(),
+        anonymous_id: 'server-side-caller',
+        type: 'track',
+        event: 'undeclared_event',
+      },
+    })
+    expect(res.statusCode).toBe(202)
+    await app.deps.buffer.flush()
+    expect(await countEvents("event_name = 'undeclared_event'")).toBe(0)
+  })
+
+  // The rule keys on SERVER-SIDE names. A crawler executing JS on an
+  // instrumented page sends whatever the page sends, so exempting the
+  // browser library would defeat the filter entirely.
+  it('still drops a crawler that declares the browser library', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': 'wk_routes', 'user-agent': 'Googlebot/2.1' },
+      payload: {
+        message_id: randomUUID(),
+        anonymous_id: 'crawler',
+        type: 'track',
+        event: 'crawler_event',
+        context: { library: { name: 'lyraflow-browser', version: '0.5.0' } },
+      },
+    })
+    expect(res.statusCode).toBe(202)
+    await app.deps.buffer.flush()
+    expect(await countEvents("event_name = 'crawler_event'")).toBe(0)
+  })
+
+  // The reorder's consequence, asserted so it is a decision rather than a
+  // surprise: malformed input from a crawler is now a validation rejection
+  // with a dead-letter row, where before it was dropped as a bot with none.
+  it('dead-letters malformed input from a crawler, rather than dropping it as a bot', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': 'wk_routes', 'user-agent': 'Googlebot/2.1' },
+      payload: { message_id: 'not-a-uuid', type: 'track', event: 'x' },
+    })
+    expect(res.statusCode).toBe(202)
+    expect(await countDeadLetters()).toBeGreaterThan(0)
   })
 
   it('accepts a batch and reports per-item outcomes', async () => {
