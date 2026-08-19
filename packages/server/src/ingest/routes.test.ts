@@ -352,6 +352,134 @@ describe('ingest routes', () => {
     expect(await countEvents("event_name = 'crawler_event'")).toBe(0)
   })
 
+  // #152: a declared server-side SDK is exempt from the TRANSPORT header, and
+  // judged on the visitor agent it forwards instead. Before this, a backend
+  // honestly passing a crawler's user agent had that crawler stored as a
+  // person -- the cooperative case, which is the one the filter exists for.
+  it('drops a declared server SDK forwarding a crawler as the visitor', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': 'wk_routes', 'user-agent': 'python-requests/2.31.0' },
+      payload: {
+        message_id: randomUUID(),
+        anonymous_id: 'forwarded-crawler',
+        type: 'track',
+        event: 'forwarded_crawler_event',
+        context: {
+          library: { name: 'lyraflow-python', version: '0.1.0' },
+          user_agent: 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+        },
+      },
+    })
+    expect(res.statusCode).toBe(202)
+    await app.deps.buffer.flush()
+    expect(await countEvents("event_name = 'forwarded_crawler_event'")).toBe(0)
+  })
+
+  // The other side of the same rule: a real visitor forwarded by the same SDK,
+  // over the same bot-looking transport, is kept. Without this the test above
+  // passes against a filter that simply stopped exempting server SDKs at all.
+  it('keeps a declared server SDK forwarding a real visitor', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': 'wk_routes', 'user-agent': 'python-requests/2.31.0' },
+      payload: {
+        message_id: randomUUID(),
+        anonymous_id: 'forwarded-human',
+        type: 'track',
+        event: 'forwarded_human_event',
+        context: {
+          library: { name: 'lyraflow-python', version: '0.1.0' },
+          user_agent:
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+        },
+      },
+    })
+    expect(res.statusCode).toBe(202)
+    await app.deps.buffer.flush()
+    expect(await countEvents("event_name = 'forwarded_human_event'")).toBe(1)
+  })
+
+  // A declared SDK that forwards NOTHING must stay exempt, or #29 regresses
+  // for every SDK that does not bother to pass the visitor agent through.
+  it('keeps a declared server SDK that forwards no visitor agent at all', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': 'wk_routes', 'user-agent': 'python-requests/2.31.0' },
+      payload: {
+        message_id: randomUUID(),
+        anonymous_id: 'forwarded-nothing',
+        type: 'track',
+        event: 'forwarded_nothing_event',
+        context: { library: { name: 'lyraflow-python', version: '0.1.0' } },
+      },
+    })
+    expect(res.statusCode).toBe(202)
+    await app.deps.buffer.flush()
+    expect(await countEvents("event_name = 'forwarded_nothing_event'")).toBe(1)
+  })
+
+  // Enrichment reads the forwarded agent too, so these events stop recording
+  // `unknown` for device/os/browser -- which is what `python-requests` parses
+  // to. Asserted on a stored column rather than on the parse, because the
+  // column is what a segment or funnel actually reads.
+  it('enriches a declared server SDK from the visitor agent, not the transport', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': 'wk_routes', 'user-agent': 'python-requests/2.31.0' },
+      payload: {
+        message_id: randomUUID(),
+        anonymous_id: 'forwarded-enrich',
+        type: 'track',
+        event: 'forwarded_enrich_event',
+        context: {
+          library: { name: 'lyraflow-python', version: '0.1.0' },
+          user_agent:
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+        },
+      },
+    })
+    expect(res.statusCode).toBe(202)
+    await app.deps.buffer.flush()
+    // Lowercase: `parseUserAgent`'s tables return `chrome`, not `Chrome`.
+    // Asserting os too, because `browser` alone would also match a bot UA
+    // that happens to carry a Chrome token -- Googlebot's does.
+    expect(
+      await countEvents(
+        "event_name = 'forwarded_enrich_event' AND browser = 'chrome' AND os = 'macos'",
+      ),
+    ).toBe(1)
+  })
+
+  // A BROWSER payload's own context.user_agent stays ignored. Preferring it
+  // there would let any page choose its own device/os/browser and its own bot
+  // verdict, which is a change to what the filter means for the traffic it was
+  // built for. The transport header still decides.
+  it('ignores context.user_agent on a payload declaring no server library', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': 'wk_routes', 'user-agent': 'Googlebot/2.1' },
+      payload: {
+        message_id: randomUUID(),
+        anonymous_id: 'browser-claiming-human',
+        type: 'track',
+        event: 'browser_claiming_human_event',
+        context: {
+          user_agent:
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+        },
+      },
+    })
+    expect(res.statusCode).toBe(202)
+    await app.deps.buffer.flush()
+    expect(await countEvents("event_name = 'browser_claiming_human_event'")).toBe(0)
+  })
+
   // The reorder's consequence, asserted so it is a decision rather than a
   // surprise: malformed input from a crawler is now a validation rejection
   // with a dead-letter row, where before it was dropped as a bot with none.

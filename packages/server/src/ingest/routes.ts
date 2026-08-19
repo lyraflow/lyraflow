@@ -460,8 +460,54 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
     // indistinguishable from a visitor. This filter removes incidental
     // traffic -- crawlers, uptime monitors, link previews -- and none of
     // those declare a library.
-    const ua = req.headers['user-agent']
-    if (!isServerSideLibrary(parsed.data.context.library?.name) && isBot(ua)) {
+    // WHICH user agent describes the visitor, which is not always the one on
+    // the request. For a browser they are the same string by construction. For
+    // a server-side SDK the transport header is its HTTP client's own name and
+    // says nothing about anyone; the visitor's is in `context.user_agent`, if
+    // the caller forwards it.
+    //
+    // Only consulted for a DECLARED server-side library. A browser payload
+    // also carries `context.user_agent`, and preferring it there would let any
+    // page choose its own device/os/browser and its own bot verdict -- which
+    // is a change to what the filter means for the traffic it was built for.
+    // A server-side caller is already exempt from the transport check, so
+    // reading its forwarded value can only ever filter MORE, never less
+    // (#152).
+    const transportUa = req.headers['user-agent']
+    const declaredServerSdk = isServerSideLibrary(parsed.data.context.library?.name)
+    const visitorUa = declaredServerSdk
+      ? (parsed.data.context.user_agent ?? transportUa)
+      : transportUa
+
+    // A declared server-side SDK is never judged on what its HTTP client
+    // announces -- `python-requests`, `okhttp` and `curl/` are all in
+    // BOT_TOKENS, so without that exemption every server-side SDK is swallowed
+    // on its first request (#29).
+    //
+    // But it IS judged on the visitor agent it forwards. A backend honestly
+    // passing `Googlebot/2.1` used to have that crawler stored as a person,
+    // counted in every segment and funnel. That is the cooperative case, not
+    // the forgery the design knowingly waives, and it is the one the filter
+    // exists to catch.
+    //
+    // A declared SDK that forwards NOTHING stays exempt: `visitorUa` falls
+    // back to the transport header, but the guard below only reaches `isBot`
+    // for a declared SDK when it actually supplied a value. Nothing regresses
+    // for an SDK that does not forward.
+    //
+    // Keyed on server-side names specifically, NOT on "declares a library at
+    // all": a crawler executing JS on an instrumented page sends exactly what
+    // the browser SDK sends, so exempting the browser library would defeat the
+    // filter outright.
+    //
+    // Not a security control, and not meant to be. The write key is public, so
+    // a hostile client can already send `Mozilla/5.0` and be indistinguishable
+    // from a visitor. This removes incidental traffic -- crawlers, uptime
+    // monitors, link previews -- and none of those declare a library.
+    const botVerdict = declaredServerSdk
+      ? parsed.data.context.user_agent != null && isBot(parsed.data.context.user_agent)
+      : isBot(transportUa)
+    if (botVerdict) {
       counters.record(projectId, 'bot')
       return { outcome: 'bot' }
     }
@@ -526,7 +572,10 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
       now: new Date(),
       trusted: false,
       geo: geo.resolve(req.ip),
-      ua: parseUserAgent(ua),
+      // The visitor's agent, not the transport's -- so a server-side SDK that
+      // forwards it stops recording `unknown` for device, os and browser
+      // (#152). Identical to the transport header for every browser payload.
+      ua: parseUserAgent(visitorUa),
     })
 
     const outcome = buffer.add(row)

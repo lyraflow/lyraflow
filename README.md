@@ -587,11 +587,28 @@ bot. That matters because the HTTP clients those SDKs use announce themselves as
 dropped as one before this field existed. The browser SDK does not send this field;
 an absent library is filtered exactly as before.
 
+**A server-side SDK is judged on the visitor agent it forwards.** If a payload
+declares a server-side library *and* carries `context.user_agent`, that value is
+what the bot filter reads, and what `device_type`, `os` and `browser` are parsed
+from. So a backend passing through `Googlebot/2.1` has that crawler filtered
+rather than recorded as a person — and a backend passing through a real
+visitor's agent stops recording an unknown device. A declared SDK that forwards
+nothing is exempt exactly as before.
+
+`context.user_agent` is only consulted for a declared server-side library.
+Everything else — every browser payload — is judged and enriched from the
+request's own `User-Agent` header, as it always has been.
+
 **Bot filtering is data hygiene, not a security boundary.** The write key ships
 inside the browser bundle, so any client can claim to be a server-side SDK — or
 simply send a browser's User-Agent, which has always been possible. What the filter
 removes is incidental traffic: crawlers, uptime monitors, link-preview fetchers.
 None of those declare a library.
+
+Reading a forwarded agent does not widen that. It is consulted only for callers
+already exempt, so it can only ever cause **more** filtering, never less: there
+is no payload it lets through that could not already get through by declaring a
+library and forwarding nothing.
 
 Property and trait values may be strings, numbers, booleans, or null. Numbers
 are stored in a numeric column and everything else as text, so `3` and `"3"` are
