@@ -36,7 +36,8 @@ const Context = z
     // existed, rather than being fatal. The rule that a half-filled library
     // is not a declaration survives -- an ignored value is `undefined`, and
     // `undefined` exempts nothing from the bot filter -- but it costs the
-    // sender the events they already had, instead of all of them.
+    // sender only the events sent under a bot-looking user agent, instead of
+    // every event they send.
     library: z
       .object({
         name: z.string().min(1).max(MAX_ID_LENGTH),

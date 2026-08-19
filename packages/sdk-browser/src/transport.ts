@@ -377,12 +377,12 @@ export class Transport {
   }
 
   /**
-   * Used ONLY by `#reportBody`, which delivers two independent reports about
+   * Used ONLY by `#reportBody`, which delivers three independent reports about
    * one response. Elsewhere a throwing `warn` may legitimately abort the
    * branch it sits in — the outer catch in `#run` turns it into `'retry'`, and
-   * tests pin that. Here it must not: the rejection report and the quota
-   * report are about different events, and a host whose console handler throws
-   * on the first would otherwise never hear about the second.
+   * tests pin that. Here it must not: the rejection report, the quota report,
+   * and the bot report are about different events, and a host whose console
+   * handler throws on the first would otherwise never hear about the rest.
    */
   #warnGuarded(message: string): void {
     try {
