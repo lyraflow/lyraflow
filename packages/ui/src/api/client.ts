@@ -1,3 +1,4 @@
+import { dedupeInFlight } from './dedupe.js'
 import type {
   CreatedProject,
   EventsPage,
@@ -261,25 +262,41 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
         { method: 'POST', body: JSON.stringify({ ...options }) },
         projectId,
       ),
-    schemaProperties: async (projectId, event, q) =>
-      (
-        await call<{ properties: { property_key: string }[] }>(
-          `/v1/schema/properties${qs({ event, q, limit: 50 })}`,
-          {},
-          projectId,
-        )
-      ).properties.map((p) => p.property_key),
-    schemaEvents: async (projectId, q) =>
-      // `last_seen` is in the response and deliberately dropped here: this
-      // client returns names for a datalist, and nothing on screen ranks or
-      // shows recency yet. Typed anyway so the wire shape is not a lie.
-      (
-        await call<{ events: { event_name: string; last_seen: string }[] }>(
-          `/v1/schema/events${qs({ q, limit: 50 })}`,
-          {},
-          projectId,
-        )
-      ).events.map((e) => e.event_name),
+    // DEDUPED: opening a segment mounts every condition at once, and sibling
+    // `where` predicates under one behaviour ask for the identical list. See
+    // `dedupeInFlight` -- nothing is retained once a request settles, so this
+    // adds no staleness rules (#127).
+    schemaProperties: dedupeInFlight(
+      async (projectId: number, event: string | undefined, q: string) =>
+        (
+          await call<{ properties: { property_key: string }[] }>(
+            `/v1/schema/properties${qs({ event, q, limit: 50 })}`,
+            {},
+            projectId,
+          )
+        ).properties.map((p) => p.property_key),
+      (projectId: number, event: string | undefined, q: string) =>
+        `${projectId}\u0000${event ?? ''}\u0000${q}`,
+    ),
+    schemaEvents: dedupeInFlight(
+      async (projectId: number, q: string) =>
+        // `last_seen` is in the response and deliberately dropped here: this
+        // client returns names for a datalist, and nothing on screen ranks or
+        // shows recency yet. Typed anyway so the wire shape is not a lie.
+        (
+          await call<{ events: { event_name: string; last_seen: string }[] }>(
+            `/v1/schema/events${qs({ q, limit: 50 })}`,
+            {},
+            projectId,
+          )
+        ).events.map((e) => e.event_name),
+      (projectId: number, q: string) => `${projectId}\u0000${q}`,
+    ),
+    // NOT deduped, and that asymmetry is deliberate. This one fetches on
+    // FOCUS rather than on mount, because it scans the project's trait
+    // partition rather than reading a purpose-built catalogue -- so it never
+    // produces the simultaneous burst the two above do, and there is nothing
+    // for a dedupe to collapse. Documented at the call site too (#127).
     schemaTraitValues: async (projectId, trait, q) =>
       (
         await call<{ values: { value: string }[] }>(
