@@ -21,6 +21,116 @@ here as it happened rather than tagged retroactively, for the same reason 0.1.0
 is: a tag created after the fact names a moment nobody could have fetched. Its
 one fix is contained in 0.3.0.
 
+## 0.6.0 — 2026-08-19
+
+### Added
+
+- **A server-side SDK can say what it is, and stops being mistaken for a bot.**
+  The ingest payload takes an optional `context.library` — `{ name, version }`,
+  both required when present — and a payload declaring one of Lyraflow's
+  server-side SDKs is never filtered as a crawler.
+
+  This is not cosmetic. `isBot()` matches the HTTP `User-Agent`, and the
+  clients those SDKs use announce themselves as `python-requests`, `okhttp` or
+  `curl/` — all of which are bot tokens. A PHP or Python integration was
+  therefore discarded entirely on its first request, answered `202`, with no
+  dead-letter row and a counter it shared with malformed data. The field is the
+  convention Segment, PostHog and Amplitude already use, so it also survives
+  proxies and serverless platforms that rewrite the transport header.
+
+  **Stated plainly, because it is the honest limit:** bot filtering is data
+  hygiene, not a security boundary. The write key ships inside the browser
+  bundle, so any client can claim to be a server-side SDK — or simply send a
+  browser's `User-Agent`, which has always been possible. What the filter
+  removes is incidental traffic: crawlers, uptime monitors, link-preview
+  fetchers. None of those declare a library.
+
+- **Bot drops are visible instead of anonymous.** They had shared the
+  `rejected` counter with validation failures and limit rejections, so an
+  operator could see events were refused but not that they were refused *as
+  bots* — "is my integration broken, or is that just crawler traffic" had no
+  answer in the data. There is now a `bot` count in the batch response, a `bot`
+  outcome on `/metrics`, a Bot tile on Settings → Usage, and a column behind
+  all three.
+
+- **The browser SDK warns when a batch comes back dropped as bot traffic.**
+  Headless Chrome's user agent contains `headless`, so a Playwright or
+  Lighthouse CI run against an instrumented site is filtered — correctly, but
+  silently. The SDK now says so in the console, naming bot traffic rather than
+  bad data.
+
+### Fixed
+
+- **A create that landed after you moved on could yank you off the form you
+  were editing.** The segment builder guards every async continuation of a save
+  against the form it was issued for; the navigation after a successful create
+  was deliberately exempt, so it would still acknowledge the create. That
+  exemption was unconditional, and an operator who left the create route for a
+  different segment while the save was in flight was dragged to the list,
+  discarding whatever they had typed. The acknowledgement is kept for the case
+  it exists for; only the case that does harm is suppressed.
+
+- **A segment save that half-applied would not say which half.** Renames and
+  definition changes are sent as two requests on purpose, because a body
+  carrying a tree resets the cached count. If one failed the screen said only
+  "try again". It now says which landed — and, when neither did, says so, which
+  is a claim it previously could not safely make.
+
+- **The member preview can say exactly how many people it showed.** A walk that
+  ended on a full page at the window limit could not tell "exactly this many"
+  from "many more". The response's own count settles it.
+
+- **Opening a large segment no longer issues a burst of identical lookups.**
+  Sibling conditions asking for the same catalogue list now share one in-flight
+  request. Nothing is retained once it settles, so no cached answer can go
+  stale.
+
+- **The installer's port check asks what is holding the port**, rather than
+  trusting that a matching domain in `.env` means the listener is ours. An
+  install whose port 80 was held by an unrelated web server used to skip the
+  check, write `.env`, and then fail at `docker compose up` with a bind error.
+
+### Changed
+
+- **Schema version 15.** One migration, additive: a counter column for bot
+  drops. Existing rows get `0` — the drops that already happened were never
+  distinguished, and inventing a number for them would be worse than an honest
+  zero.
+
+- **`POST /v1/batch` responses carry a fifth count, `bot`.** Additive; a client
+  ignoring it is unaffected. The single-event routes are unchanged and still
+  answer `{"status":"accepted"}` whatever happened, because a tracking endpoint
+  that reports failure breaks the site it is measuring.
+
+### Known limitations
+
+- **`context.user_agent` is accepted, documented, and read nowhere.** A
+  server-side SDK forwarding the real visitor's user agent in the payload has
+  it ignored: enrichment reads the transport header, so those events record an
+  unknown device and browser. More importantly, once a server-side library is
+  declared there is no route by which crawler traffic is filtered at all — a
+  backend honestly forwarding `Googlebot/2.1` would have that crawler stored as
+  a person. Nothing produces such traffic yet, since no server-side SDK ships,
+  but it wants deciding before one does.
+
+- **A purge does not remove property keys only the erased person ever sent.**
+  Unchanged from 0.5.0. Event *names* left with nothing behind them are swept;
+  a property key hanging off an event other people still send is not.
+
+- **`GET /v1/schema/events` is name-ordered, and `limit` applies after that
+  ordering.** Unchanged from 0.5.0, so `last_seen` re-ranks only within the
+  first page.
+
+- **Events carrying no properties are invisible to both schema endpoints.**
+  Unchanged from 0.5.0.
+
+- **A lifecycle bound without a timezone is resolved in the server's
+  timezone.** Unchanged from 0.5.0 and still awaiting a decision about the
+  bounds already stored.
+
+- **Step and behavioural criteria filter event *properties* only.** Unchanged
+  from 0.5.0.
+
 ## 0.5.0 — 2026-08-18
 
 ### Added
