@@ -26,6 +26,13 @@
  */
 
 import type { ClickHouseClient, Pool } from '@lyraflow/db'
+// The ONE remaining reason packages/cli depends on packages/server. The row
+// builder moved to core (#125), but this is a Postgres-backed class with a
+// cache, not a pure function, and it cannot follow: core is in the browser
+// bundle. Used rather than reimplemented because it owns the millisecond
+// truncation and the deterministic tie-break described below -- a second copy
+// of those would make demo data stop resembling production data, which is the
+// only reason the seeder exists.
 import { IdentityBindings } from '@lyraflow/server/dist/identity/bindings.js'
 import type { DemoData } from './generate.js'
 import { toDemoRow } from './rows.js'
