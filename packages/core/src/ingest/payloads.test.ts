@@ -115,27 +115,58 @@ describe('context.library', () => {
     if (r.success) expect(r.data.context.library).toBeUndefined()
   })
 
-  // Both fields required WHEN PRESENT. An SDK that cannot state its own
-  // version is a bug, and a half-filled object is worse than an absent one
-  // -- it looks like a declaration while carrying nothing to support.
-  it('rejects a library missing its version', () => {
+  // Both fields required WHEN PRESENT -- an SDK that cannot state its own
+  // version is a bug, and a half-filled object is worse than an absent one:
+  // it looks like a declaration while carrying nothing to support it. But
+  // an unusable value is IGNORED, never fatal.
+  //
+  // `Context` runs in Zod's strip mode, so before `library` was a known key
+  // any value under it was discarded and the event stored. Naming the key
+  // would otherwise invert that in silence -- a client already sending a
+  // Segment-shaped `context.library` would go from "that field is dropped"
+  // to "every one of your events is destroyed", answered 202, with the only
+  // trace in a dead-letter table they cannot see. `.catch(undefined)`
+  // restores the old outcome for the value while keeping the rule for the
+  // declaration.
+  it('ignores a library missing its version rather than destroying the event', () => {
     const r = IngestPayload.safeParse({
       ...base,
       context: { library: { name: 'lyraflow-python' } },
     })
-    expect(r.success).toBe(false)
+    expect(r.success).toBe(true)
+    // Not a declaration: `undefined` exempts nothing from the bot filter.
+    if (r.success) expect(r.data.context.library).toBeUndefined()
   })
 
-  it('rejects a library missing its name', () => {
+  it('ignores a library missing its name rather than destroying the event', () => {
     const r = IngestPayload.safeParse({ ...base, context: { library: { version: '0.1.0' } } })
-    expect(r.success).toBe(false)
+    expect(r.success).toBe(true)
+    if (r.success) expect(r.data.context.library).toBeUndefined()
   })
 
-  it('rejects a name longer than MAX_ID_LENGTH', () => {
+  // Segment's own wire format spells `context.library` as an object, but
+  // libraries in the wild send the bare name string. That is the shape most
+  // likely to arrive from a client that predates this field entirely.
+  it('ignores a library sent as a string rather than destroying the event', () => {
+    const r = IngestPayload.safeParse({ ...base, context: { library: 'analytics-node/4.0.1' } })
+    expect(r.success).toBe(true)
+    if (r.success) expect(r.data.context.library).toBeUndefined()
+  })
+
+  it('ignores an over-long name rather than destroying the event', () => {
     const r = IngestPayload.safeParse({
       ...base,
       context: { library: { name: 'x'.repeat(MAX_ID_LENGTH + 1), version: '0.1.0' } },
     })
+    expect(r.success).toBe(true)
+    if (r.success) expect(r.data.context.library).toBeUndefined()
+  })
+
+  // The tolerance is scoped to `library` alone, and nothing wider. A
+  // `.catch()` placed on `Context` itself would swallow a bad `url` or
+  // `user_agent` too and silently blank the whole context object.
+  it('still fails the event on an unusable value in another context field', () => {
+    const r = IngestPayload.safeParse({ ...base, context: { url: 12345 } })
     expect(r.success).toBe(false)
   })
 })
