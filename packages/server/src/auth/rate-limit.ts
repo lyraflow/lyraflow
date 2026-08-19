@@ -44,6 +44,19 @@ export const LOGIN_WINDOW_MS = 15 * 60_000
 export const LOGIN_MAX_KEYS = 4096
 
 /**
+ * How many key NAMESPACES one limiter will hold. The login route mints
+ * exactly two (`ip` and `email`), so this is slack of three orders of
+ * magnitude and nothing today can approach it.
+ *
+ * It exists because the inner maps are bounded and the outer one was not, and
+ * the asymmetry is only safe while every namespace is a literal chosen in
+ * code. The day a caller derives one from anything a client influences -- a
+ * tenant, a header, a path segment -- the outer map becomes the unbounded
+ * one, and that caller would have no reason to look here first (#79).
+ */
+export const LOGIN_MAX_NAMESPACES = 32
+
+/**
  * Everything up to (not including) the first `:` -- `ip:1.2.3.4` and
  * `email:a@b.test` land in separate namespaces, `ip` and `email`. A key
  * with no `:` at all is its own one-key namespace; nothing in this codebase
@@ -75,7 +88,13 @@ export class AttemptLimiter {
     private readonly maxAttempts: number = LOGIN_MAX_ATTEMPTS,
     private readonly windowMs: number = LOGIN_WINDOW_MS,
     private readonly maxKeys: number = LOGIN_MAX_KEYS,
+    private readonly maxNamespaces: number = LOGIN_MAX_NAMESPACES,
   ) {}
+
+  /** How many namespaces are held -- for tests and diagnostics (#79). */
+  get namespaceCount(): number {
+    return this.#hits.size
+  }
 
   /** Total entries across every namespace -- for tests and diagnostics. */
   get size(): number {
@@ -90,6 +109,25 @@ export class AttemptLimiter {
     if (!ns) {
       ns = new Map()
       this.#hits.set(name, ns)
+      // The outer map gets the same treatment the inner ones already had.
+      // Evicting the least recently CREATED namespace rather than the least
+      // recently used is deliberate and is the conservative choice: tracking
+      // use would mean touching this map on every check(), and a namespace
+      // that stops being used stops mattering anyway. With two namespaces in
+      // the product this never runs; it exists so that the day a third
+      // arrives from somewhere less trustworthy, the ceiling is already
+      // there (#79).
+      if (this.#hits.size > this.maxNamespaces) {
+        const oldest = this.#hits.keys().next()
+        // `oldest.value !== name` mirrors the inner map's "never evict what
+        // record() just inserted" rule, and is DELIBERATELY UNPINNED: the
+        // namespace just created was appended last, so it can only also be
+        // the first in iteration order when `maxNamespaces` is 0. Removing
+        // the clause leaves every test green -- verified, not assumed. It
+        // stays as the invariant applied without exception rather than as a
+        // second mechanism, and a test for it would pass with or without it.
+        if (!oldest.done && oldest.value !== name) this.#hits.delete(oldest.value)
+      }
     }
     return ns
   }
@@ -195,7 +233,13 @@ export class AttemptLimiter {
     }
   }
 
+  /**
+   * Looks the namespace up rather than creating it. `reset` is called on a
+   * SUCCESSFUL login, so it runs for keys that may never have been recorded
+   * -- and creating a namespace in order to delete nothing from it is how an
+   * outer map fills with entries no failure ever put there (#79).
+   */
   reset(keys: readonly string[]): void {
-    for (const key of keys) this.#namespace(key).delete(key)
+    for (const key of keys) this.#hits.get(namespaceOf(key))?.delete(key)
   }
 }
