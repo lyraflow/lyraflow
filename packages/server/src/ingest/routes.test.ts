@@ -420,6 +420,74 @@ describe('ingest routes', () => {
     expect(app.deps.counters.totals().bot - botBefore).toBe(1)
   })
 
+  // Every other filter test on this branch sends a batch with ONE outcome in
+  // it. That shape cannot catch a pipeline that reaches the right verdict for
+  // each item but loses one on the way out -- a counter incremented under the
+  // wrong key, a `continue` that skips the tally, a response field that
+  // shadows another. The conservation invariant is the assertion that makes
+  // it structural: whatever the ingest decides, every item of the batch must
+  // land in exactly one bucket, so the five counts sum to the batch length.
+  //
+  // Baselines throughout, never absolutes: `app` is shared across this whole
+  // describe block and earlier tests have already moved the dead-letter table
+  // and the bot counter.
+  it('splits one batch across accepted, rejected and bot, and conserves the count', async () => {
+    const deadLettersBefore = await countDeadLetters()
+    const botBefore = app.deps.counters.totals().bot
+    const batch = [
+      // Declared server-side SDK: exempt from the filter despite the UA.
+      {
+        message_id: randomUUID(),
+        anonymous_id: 'mixed-sdk',
+        type: 'track',
+        event: 'mixed_declared',
+        context: { library: { name: 'lyraflow-node', version: '0.1.0' } },
+      },
+      // Valid, but undeclared -- so the bot UA drops it.
+      {
+        message_id: randomUUID(),
+        anonymous_id: 'mixed-undeclared',
+        type: 'track',
+        event: 'mixed_undeclared',
+      },
+      // Malformed: parse runs BEFORE the bot check, so this is a rejection
+      // with a dead letter rather than a silent bot drop.
+      { message_id: 'not-a-uuid', anonymous_id: 'mixed-bad', type: 'track', event: 'mixed_bad' },
+    ]
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/batch',
+      headers: { 'x-lyraflow-write-key': 'wk_routes', 'user-agent': 'Googlebot/2.1' },
+      payload: { batch },
+    })
+    expect(res.statusCode).toBe(202)
+    const body = res.json() as {
+      accepted: number
+      rejected: number
+      throttled: number
+      over_quota: number
+      bot: number
+    }
+    expect(body).toEqual({ accepted: 1, rejected: 1, throttled: 0, over_quota: 0, bot: 1 })
+
+    // Exactly one dead letter: the malformed item and nothing else. A bot
+    // drop that also wrote one would make this 2.
+    expect(await countDeadLetters()).toBe(deadLettersBefore + 1)
+    // And exactly one bot drop, so the response's `bot: 1` is backed by the
+    // counter the operator's usage card and the Prometheus label read from.
+    expect(app.deps.counters.totals().bot - botBefore).toBe(1)
+
+    // The invariant: nothing was double-counted and nothing vanished.
+    expect(body.accepted + body.rejected + body.throttled + body.over_quota + body.bot).toBe(
+      batch.length,
+    )
+
+    // The accepted one really was stored, and the dropped one really was not.
+    await app.deps.buffer.flush()
+    expect(await countEvents("event_name = 'mixed_declared'")).toBe(1)
+    expect(await countEvents("event_name = 'mixed_undeclared'")).toBe(0)
+  })
+
   it('refuses new events with 503 once draining', async () => {
     // A dedicated app + Readiness, not the shared fixture: Readiness has no
     // "un-drain" (draining is meant to be one-directional, same as

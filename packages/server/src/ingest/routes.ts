@@ -422,11 +422,14 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
     // CPU ever becomes a problem.
     //
     // The bigger cost: a MALFORMED payload from a crawler now writes a row
-    // to `events_dead_letter` on every request, where before it cost one
-    // header comparison and zero writes -- unauthenticated junk traffic can
-    // now put load on the table whose signal value the rest of this file
-    // defends. Kept anyway, for two reasons. The growth is bounded, not
-    // unbounded: `events_dead_letter` carries a 30-day TTL (see
+    // to `events_dead_letter`, where before it cost one header comparison
+    // and zero writes. Per REQUEST rather than per row is the wrong unit to
+    // cost it in: `BatchPayload` allows up to 500 items and each malformed
+    // one dead-letters on its own, so ONE `/v1/batch` request can write up
+    // to 500 rows. Unauthenticated junk traffic can now put load on the
+    // table whose signal value the rest of this file defends. Kept anyway,
+    // for two reasons. The growth is bounded, not unbounded:
+    // `events_dead_letter` carries a 30-day TTL (see
     // `received_at` in `002_events.sql`), so it self-cleans rather than
     // accumulating forever. And the obvious suppression -- skip the dead
     // letter when the UA looks like a bot -- cannot work here: a parse
@@ -576,6 +579,12 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
 
       const body = { ...(req.body as Record<string, unknown>), type }
       const result = await accept(req, project, body)
+      // Written BEFORE the outcome is examined, which is safe only while
+      // every result carrying a dead letter has outcome 'rejected' --
+      // 'over_quota' and 'overloaded' both return without one. A future
+      // outcome that carries a dead letter would make a 429 or a 503 pay for
+      // a ClickHouse write first, which is the opposite of what a refusal
+      // under load should cost; move this below the outcome checks then.
       if (result.deadLetter) await writeDeadLetters(ch, [result.deadLetter], onDeadLetterError)
 
       if (result.outcome === 'overloaded') {
