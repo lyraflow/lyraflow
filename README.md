@@ -615,6 +615,25 @@ are stored in a numeric column and everything else as text, so `3` and `"3"` are
 not interchangeable. Nested objects and arrays are not supported. An event may
 carry up to 250 properties.
 
+**A boolean is stored as the text `true` or `false`, and there is no boolean
+type.** That is more than a storage detail, because it means `true` and the
+string `"true"` are the same value once ingested — indistinguishable, with no
+way to tell them apart afterwards. Three consequences worth knowing before you
+instrument anything:
+
+- `/v1/schema/properties` reports `string` for such a property, never
+  `boolean`, so autocomplete cannot tell a caller the underlying value is
+  two-valued.
+- **A segment filter must use the string form**: `is_subscribed = "true"`, not
+  `is_subscribed = true`.
+- `"True"`, `"1"` and `"yes"` are three *different* values in that same column,
+  from callers who each reasonably believed they were sending a boolean.
+  Nothing rejects, warns, or reports the coercion, so an integration looks
+  correct and the divergence only surfaces when someone builds a segment months
+  later.
+
+If you send booleans, send them consistently and expect to filter on `"true"`.
+
 **A context field over its limit costs the whole event**, not just that field:
 the event fails validation, is dead-lettered, and the response still says
 `202` — with `rejected` counting it. This is easier to hit than it looks; an
