@@ -1,3 +1,5 @@
+import { z } from 'zod'
+
 /**
  * Parses a path/query param into a positive, safe-integer database id, or
  * `null` if it is not one. The single implementation every route's own
@@ -31,4 +33,27 @@ export function parseNumericId(raw: string): number | null {
   if (!/^\d+$/.test(raw)) return null
   const id = Number(raw)
   return Number.isSafeInteger(id) && id > 0 ? id : null
+}
+
+/**
+ * The same convention as `parseNumericId`, for a QUERY param that is a count
+ * rather than an id -- `limit`, `offset`.
+ *
+ * Those were coerced with `z.coerce.number()`, which accepts exactly the
+ * shapes the id parser above exists to refuse: `'0x10'`, `' 1 '`, `'+5'`,
+ * `'1e3'`. Both are bounded before they reach a query, so neither could
+ * produce the failure a loose id parser could -- but "which convention
+ * applies here" was answerable only by reading whichever file you opened
+ * first, and that is exactly how the duplicated id parsers propagated (#95).
+ *
+ * `/^\d+$/` first, so `Number()` never sees anything it could coerce. An
+ * absent param takes the default; anything present must be all digits.
+ * Deliberately NOT accepting a negative sign even where `min` is 0: `-0`
+ * coerces to 0 and would silently succeed, and no caller means it.
+ */
+export function countParam(opts: { min: number; max: number; fallback: number }) {
+  return z
+    .union([z.undefined(), z.string().regex(/^\d+$/)])
+    .transform((raw) => (raw === undefined ? opts.fallback : Number(raw)))
+    .pipe(z.number().int().min(opts.min).max(opts.max))
 }

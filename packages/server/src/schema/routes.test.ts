@@ -444,6 +444,24 @@ describe('schema reads', () => {
     expect(res.statusCode).toBe(400)
   })
 
+  // #95: `limit` was coerced with `z.coerce.number()`, which accepts exactly
+  // the shapes `parseNumericId` exists to refuse. Neither could produce the
+  // failure a loose id parser could -- both are bounded before they reach a
+  // query -- but "which convention applies here" was answerable only by
+  // reading whichever file you happened to open, and that is how the
+  // duplicated id parsers propagated in the first place.
+  it.each(['0x10', '%201%20', '+5', '1e3', '5.0', '-1', ''])(
+    'refuses a non-canonical limit: %s',
+    async (raw) => {
+      expect((await get(`/v1/schema/events?limit=${raw}`)).statusCode).toBe(400)
+    },
+  )
+
+  it('still accepts a plain decimal limit, and still defaults when absent', async () => {
+    expect((await get('/v1/schema/events?limit=5')).statusCode).toBe(200)
+    expect((await get('/v1/schema/events')).statusCode).toBe(200)
+  })
+
   it('requires the server key', async () => {
     // A genuine, issued key — just the wrong one for this header. Sent as
     // `x-lyraflow-server-key`, it cannot match any project's
