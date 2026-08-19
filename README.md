@@ -2344,6 +2344,38 @@ retention sweep drops them again, harmlessly. And `restore.sh` drops and
 recreates the `public` schema, which assumes the role Lyraflow connects with
 owns it — true of the stack this repository ships.
 
+
+### Behind a CDN: recording the visitor's IP
+
+Caddy will not read a forwarded header from a peer it has not been told to
+trust, and that refusal is the right default — any client can send
+`X-Forwarded-For`, so believing it unconditionally would let a visitor choose
+their own apparent address.
+
+So behind Cloudflare or any other intermediary, the address Lyraflow sees is
+the intermediary's. Name the ranges you actually sit behind by dropping a file
+into `docker/caddy/proxy.d/`:
+
+```
+trusted_proxies static 173.245.48.0/20 103.21.244.0/22
+```
+
+Those directives land inside the `reverse_proxy` block, which is why they go in
+`proxy.d/` rather than `tls.d/` — `trusted_proxies` is a sub-directive of the
+proxy, not of the site.
+
+The ranges are your CDN's published egress list and they change; Cloudflare
+publishes theirs at <https://www.cloudflare.com/ips/>. A stale list fails
+quietly rather than loudly: an unlisted range is simply untrusted, and visitors
+arriving through it record the CDN's address instead of their own.
+
+**Do not use `0.0.0.0/0`.** Trusting everyone is the same as having no check at
+all — it lets any client claim any IP by setting a header.
+
+This has no visible effect today: GeoIP returns an empty country, region and
+city for every event, so nothing currently reads the client address. It matters
+from the moment that changes.
+
 ## Upgrading
 
 **Take a backup first.** Migrations run automatically on boot and some of them

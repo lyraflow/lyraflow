@@ -124,6 +124,7 @@ services:
     volumes:
       - "./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro"
       - "./docker/caddy/tls.d:/etc/caddy/tls.d:ro"
+      - "./docker/caddy/proxy.d:/etc/caddy/proxy.d:ro"
       # A named volume, and it must survive `down`: it holds the ACME account
       # key and the issued certificates. Re-issuing on every restart walks
       # into Let's Encrypt's duplicate-certificate rate limit, and the failure
