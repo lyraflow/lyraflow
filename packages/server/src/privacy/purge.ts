@@ -6,6 +6,11 @@ import {
   personEventsPredicate,
 } from '../identity/scope.js'
 
+/** `event_schema`'s key, joined with a separator no identifier can contain. */
+function triple(eventName: string, propertyKey: string, kind: string): string {
+  return `${eventName}\u0000${propertyKey}\u0000${kind}`
+}
+
 async function mutate(
   ch: ClickHouseClient,
   query: string,
@@ -59,6 +64,38 @@ export async function purgePerson(opts: {
   scope: PersonScope
 }): Promise<void> {
   const { ch, pg, projectId, scope } = opts
+
+  // 0. What property keys did THIS person use, and on which event names?
+  //
+  // Captured BEFORE step 1 deletes their events, because afterwards the
+  // question is unanswerable -- the rows carrying the answer are gone. That
+  // ordering is the whole reason this is affordable: the alternative is
+  // unrolling every surviving event's property maps for the entire project on
+  // every deletion, and this unrolls one person's instead (#144).
+  //
+  // The two maps are read separately and tagged, because `event_schema` keys
+  // on `value_kind` and one key name can legitimately exist as both a string
+  // and a number.
+  const ownedKeys = new Set<string>()
+  for (const [i, chunk] of chunkWindows(scope.windows, MAX_PERSON_RANGE_CLAUSES).entries()) {
+    const params: Record<string, unknown> = { projectId }
+    const identity = personEventsPredicate({ group: scope.group, windows: chunk }, params, `p${i}_`)
+    for (const [column, kind] of [
+      ['properties', 'string'],
+      ['properties_num', 'number'],
+    ] as const) {
+      const rs = await ch.query({
+        query: `SELECT DISTINCT event_name, key AS property_key
+                  FROM events ARRAY JOIN mapKeys(${column}) AS key
+                 WHERE project_id = {projectId:UInt32} AND ${identity}`,
+        query_params: params,
+        format: 'JSONEachRow',
+      })
+      for (const r of await rs.json<{ event_name: string; property_key: string }>()) {
+        ownedKeys.add(triple(r.event_name, r.property_key, kind))
+      }
+    }
+  }
 
   // 1. events. Chunked, because a person's windows are devices x rebinds and
   // this must never refuse: the person read caps at MAX_PERSON_RANGE_CLAUSES
@@ -183,13 +220,56 @@ export async function purgePerson(opts: {
     )
   }
 
-  // NOT swept: property keys under an event name that still has events. If
-  // only the erased person ever sent `patient_id` on an event everyone
-  // fires, that key survives -- the same concern as above, one level down.
-  // Finding those requires unrolling every surviving event's property maps
-  // for the whole project, which is a full scan of `events` on every
-  // deletion. Out of scope here rather than overlooked; the event-name case
-  // is the one #66 reproduced and the one that is cheap to answer.
+  // 7. Property keys only this person ever sent.
+  //
+  // Step 6 removes an event NAME with nothing behind it, and every
+  // `event_schema` row for that name goes with it. What survives step 6 is a
+  // name other people still send -- and under it, a key only the erased person
+  // ever supplied. If they alone sent `patient_id` on a `checkout` everyone
+  // fires, `checkout` correctly stays and `patient_id` should not (#144).
+  //
+  // Only the pairs captured in step 0 are considered, so this asks a question
+  // about one person's keys rather than scanning the project's whole
+  // catalogue. A key that survives here is one some other event still carries.
+  if (ownedKeys.size > 0) {
+    const names = [...new Set([...ownedKeys].map((t) => t.split('\u0000')[0] as string))]
+    const surviving = new Set<string>()
+    for (const [column, kind] of [
+      ['properties', 'string'],
+      ['properties_num', 'number'],
+    ] as const) {
+      const rs = await ch.query({
+        query: `SELECT DISTINCT event_name, key AS property_key
+                  FROM events ARRAY JOIN mapKeys(${column}) AS key
+                 WHERE project_id = {projectId:UInt32} AND event_name IN {names:Array(String)}`,
+        query_params: { projectId, names },
+        format: 'JSONEachRow',
+      })
+      for (const r of await rs.json<{ event_name: string; property_key: string }>()) {
+        surviving.add(triple(r.event_name, r.property_key, kind))
+      }
+    }
+
+    const stale = [...ownedKeys].filter((t) => !surviving.has(t))
+    if (stale.length > 0) {
+      // One mutation for all of them rather than one each: ClickHouse
+      // mutations are expensive and this is already the slowest path here.
+      // Matched on the JOINED key rather than an `(a, b, c) IN` tuple list:
+      // the client serialises a JS array of arrays as `[[...]]`, which
+      // ClickHouse refuses for `Array(Tuple(...))`. Concatenating with the
+      // same NUL separator `triple()` uses sidesteps tuple parameter
+      // encoding entirely, and NUL cannot occur in an event name or a
+      // property key.
+      await mutate(
+        ch,
+        `ALTER TABLE event_schema DELETE
+          WHERE project_id = {projectId:UInt32}
+            AND concat(event_name, '\\0', property_key, '\\0', value_kind) IN {keys:Array(String)}`,
+        { projectId, keys: stale },
+      )
+    }
+  }
+
   //
   // suppressed_persons is deliberately NOT deleted, here or ever — see
   // 008_deletion_requests.sql. The row is what stops a restored backup of
