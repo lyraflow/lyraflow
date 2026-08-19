@@ -382,7 +382,42 @@ describe('ingest routes', () => {
     expect(res.statusCode).toBe(202)
     // throttled is always present (even at 0) so an SDK parsing a stable
     // shape never has to special-case its absence.
-    expect(res.json()).toEqual({ accepted: 1, rejected: 1, throttled: 0, over_quota: 0 })
+    expect(res.json()).toEqual({ accepted: 1, rejected: 1, throttled: 0, over_quota: 0, bot: 0 })
+  })
+
+  // Without this an SDK author whose first batch vanishes has nothing to
+  // look at -- which is the exact experience #29 was filed about.
+  it('reports bot drops in the batch response, apart from rejections', async () => {
+    // `app` is shared across this whole describe block, and earlier tests
+    // above already recorded bot outcomes on its counters -- so the pin
+    // reads the delta this request adds, not an absolute total.
+    const botBefore = app.deps.counters.totals().bot
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/batch',
+      headers: { 'x-lyraflow-write-key': 'wk_routes', 'user-agent': 'Googlebot/2.1' },
+      payload: {
+        batch: [
+          { message_id: randomUUID(), anonymous_id: 'a', type: 'track', event: 'crawled' },
+          {
+            message_id: randomUUID(),
+            anonymous_id: 'b',
+            type: 'track',
+            event: 'from_sdk',
+            context: { library: { name: 'lyraflow-node', version: '0.1.0' } },
+          },
+        ],
+      },
+    })
+    expect(res.statusCode).toBe(202)
+    expect(res.json()).toEqual({
+      accepted: 1,
+      rejected: 0,
+      throttled: 0,
+      over_quota: 0,
+      bot: 1,
+    })
+    expect(app.deps.counters.totals().bot - botBefore).toBe(1)
   })
 
   it('refuses new events with 503 once draining', async () => {
@@ -624,7 +659,7 @@ describe('ingest routes (mocked deps)', () => {
     })
 
     expect(res.statusCode).toBe(202)
-    expect(res.json()).toEqual({ accepted: 0, rejected: 3, throttled: 0, over_quota: 0 })
+    expect(res.json()).toEqual({ accepted: 0, rejected: 3, throttled: 0, over_quota: 0, bot: 0 })
     expect(insertCalls).toHaveLength(1)
     expect(insertCalls[0]?.values).toHaveLength(3)
     await mockedApp.close()
@@ -653,7 +688,7 @@ describe('ingest routes (mocked deps)', () => {
     })
 
     expect(res.statusCode).toBe(202)
-    expect(res.json()).toEqual({ accepted: 0, rejected: 1, throttled: 0, over_quota: 0 })
+    expect(res.json()).toEqual({ accepted: 0, rejected: 1, throttled: 0, over_quota: 0, bot: 0 })
     expect(insertCalls).toHaveLength(1)
     expect(insertCalls[0]?.values).toHaveLength(1)
     await mockedApp.close()
@@ -686,7 +721,7 @@ describe('ingest routes (mocked deps)', () => {
     // Item 1 was accepted before saturation hit; items 2 and 3 were never
     // attempted (throttled), and none is folded into `rejected` — a
     // retry-able condition must stay distinguishable from bad data.
-    expect(res.json()).toEqual({ accepted: 1, rejected: 0, throttled: 2, over_quota: 0 })
+    expect(res.json()).toEqual({ accepted: 1, rejected: 0, throttled: 2, over_quota: 0, bot: 0 })
     await mockedApp.close()
   })
 
@@ -949,7 +984,7 @@ describe('ingest quota enforcement', () => {
     // Not folded into `rejected`: these events are well-formed, and an SDK
     // told they were rejected would warn the developer about bad data that
     // does not exist.
-    expect(res.json()).toEqual({ accepted: 0, rejected: 0, throttled: 0, over_quota: 2 })
+    expect(res.json()).toEqual({ accepted: 0, rejected: 0, throttled: 0, over_quota: 2, bot: 0 })
   })
 
   // --- Not in the brief. ---

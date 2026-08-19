@@ -459,7 +459,7 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
     // those declare a library.
     const ua = req.headers['user-agent']
     if (!isServerSideLibrary(parsed.data.context.library?.name) && isBot(ua)) {
-      counters.record(projectId, 'rejected')
+      counters.record(projectId, 'bot')
       return { outcome: 'bot' }
     }
 
@@ -693,13 +693,14 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
         [buildDeadLetterRow(project.id, 'validation_failed', parsed.error.message, req.body)],
         onDeadLetterError,
       )
-      return reply.code(202).send({ accepted: 0, rejected: 1, throttled: 0, over_quota: 0 })
+      return reply.code(202).send({ accepted: 0, rejected: 1, throttled: 0, over_quota: 0, bot: 0 })
     }
 
     const batch = parsed.data.batch
     let accepted = 0
     let rejected = 0
     let overQuota = 0
+    let bot = 0
     const deadLetters: DeadLetterRow[] = []
 
     for (let i = 0; i < batch.length; i++) {
@@ -741,7 +742,7 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
         return reply
           .code(503)
           .header('retry-after', '5')
-          .send({ accepted, rejected, throttled, over_quota: overQuota })
+          .send({ accepted, rejected, throttled, over_quota: overQuota, bot })
       }
 
       if (result.outcome === 'accepted') accepted++
@@ -752,14 +753,15 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
       // — unlike the `overloaded` branch above, which stops because the
       // server is saturated and the remaining items are worth retrying.
       else if (result.outcome === 'over_quota') overQuota++
+      else if (result.outcome === 'bot') bot++
       else rejected++
     }
 
     await writeDeadLetters(ch, deadLetters, onDeadLetterError)
-    // throttled and over_quota are always present, even at 0: an SDK parsing
-    // a stable shape shouldn't need to special-case a field's absence versus
-    // its value.
-    return reply.code(202).send({ accepted, rejected, throttled: 0, over_quota: overQuota })
+    // throttled, over_quota and bot are always present, even at 0: an SDK
+    // parsing a stable shape shouldn't need to special-case a field's absence
+    // versus its value.
+    return reply.code(202).send({ accepted, rejected, throttled: 0, over_quota: overQuota, bot })
   })
 
   interface AliasBody {
