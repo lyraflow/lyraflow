@@ -55,7 +55,24 @@ jobs:
       # developer machine running 0.11 and failed here on SC2015, which is a
       # lint you cannot reproduce locally and therefore cannot fix with
       # confidence. Pinning it in devDependencies makes the two identical.
+      #
+      # GITHUB_TOKEN, because this step has a network dependency that is not
+      # obvious from reading it. The `shellcheck` npm package ships no binary:
+      # it fetches one from GitHub releases the first time it runs, so every
+      # cold `node_modules` makes a request that, unauthenticated, shares a
+      # per-IP rate limit with every other job on the runner pool. That limit
+      # was hit on the v0.6.0 release commit and failed `test` with
+      # `RequestError: Status code '403' and message 'rate limit exceeded'` --
+      # which reads exactly like a real lint failure on the scripts guarding
+      # backup and restore (#157).
+      #
+      # The package honours `process.env.GITHUB_TOKEN` (shellcheck.js:19) and
+      # sends it as a bearer token, and the workflow's own token lifts the
+      # limit from the shared per-IP one to a per-token one. No code change,
+      # and the version pin below is untouched.
       - name: Lint shell scripts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: pnpm exec shellcheck backup.sh backup-lib.sh restore.sh install.sh
       - run: pnpm lint
       - run: pnpm typecheck
