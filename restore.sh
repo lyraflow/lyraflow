@@ -868,14 +868,19 @@ fi
 # returns anything unexpected proceeds exactly as before: this guard exists to
 # convert a late failure into an early one, and must never turn a restore that
 # would have worked into one that is refused.
+# Goes through `pg_query`, the one Postgres path both scripts share, rather
+# than a bespoke `docker compose exec`. A second spelling of the same thing
+# would have to repeat how the password reaches psql, and it is exactly the
+# kind of drift the command audit below exists to notice -- as it did: a
+# hand-rolled version of this query was rejected for reaching outside the
+# allow-list, which is the audit working rather than the audit in the way.
+#
+# stderr is dropped because this query is allowed to fail. `-At` emits the
+# bare value with no padding, so the comparison needs no trimming.
 PG_CAN_DROP="$(
-  docker compose exec -T "$PG_SERVICE" sh -c \
-    'PGPASSWORD="$POSTGRES_PASSWORD" psql -U "$0" -d "$1" -tAq -c "$2" 2>/dev/null' \
-    "$PG_USER" "$PG_DATABASE" \
-    "SELECT pg_has_role(current_user, nspowner, 'USAGE')
-         OR COALESCE((SELECT usesuper FROM pg_user WHERE usename = current_user), false)
-       FROM pg_namespace WHERE nspname = 'public'" \
-    < /dev/null | tr -d '[:space:]'
+  pg_query "SELECT pg_has_role(current_user, nspowner, 'USAGE')
+                 OR COALESCE((SELECT usesuper FROM pg_user WHERE usename = current_user), false)
+              FROM pg_namespace WHERE nspname = 'public'" 2>/dev/null
 )" || PG_CAN_DROP=''
 
 if [ "$PG_CAN_DROP" = "f" ]; then
