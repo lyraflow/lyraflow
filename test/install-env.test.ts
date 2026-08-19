@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -68,6 +69,13 @@ const runInstallRaw = (args: string[], opts: InstallOpts = {}): InstallResult =>
       '    fi',
       '    exit 0',
       '    ;;',
+      // `compose ps -q caddy` is how install.sh asks whether THIS project's
+      // Caddy is the thing holding 80/443. Empty unless a case says otherwise,
+      // which is the "not ours" answer (#65).
+      '  "compose ps -q caddy")',
+      '    [ -n "${OUR_CADDY_RUNNING:-}" ] && echo "c0ffee0caddy"',
+      '    exit 0',
+      '    ;;',
       '  "compose ps caddy --format {{.Status}}")',
       '    [ -n "${CADDY_STATUS:-}" ] && printf \'%s\\n\' "$CADDY_STATUS"',
       '    exit 0',
@@ -82,7 +90,13 @@ const runInstallRaw = (args: string[], opts: InstallOpts = {}): InstallResult =>
       'esac',
     ].join('\n'),
   )
-  chmodSync(join(bin, 'docker'), 0o755)
+  // HIDE_DOCKER removes the stub entirely, so `command -v docker` fails --
+  // the "cannot tell whether Caddy is ours" case (#65).
+  if (opts.env?.HIDE_DOCKER == null) {
+    chmodSync(join(bin, 'docker'), 0o755)
+  } else {
+    rmSync(join(bin, 'docker'))
+  }
 
   // install.sh calls `ss -ltnH "sport = :$port"` and treats any output at all
   // as "taken". The stub reproduces that shape: one LISTEN line for a port
@@ -223,11 +237,43 @@ describe('re-running on an install that already serves this domain', () => {
     const { env, stdout } = runInstall(['analytics.example.com'], {
       existingEnv: tlsEnv('analytics.example.com'),
       ssListening: [80, 443],
+      // The second half of the skip: this project's own Caddy is up, so the
+      // listener on 80 IS ours. Without this the check fires, which is the
+      // whole point of #65 -- see the test below.
+      env: { OUR_CADDY_RUNNING: '1' },
     })
     // Got past the port check and all the way to the end.
     expect(stdout).toContain('Lyraflow is running.')
     // ...without touching a single value the running stack depends on.
     expect(env).toBe(tlsEnv('analytics.example.com'))
+  })
+
+  // #65: the domain string says what this install is FOR. It says nothing
+  // about what is holding the port right now. Matching on it alone skipped
+  // the check, wrote .env, and then failed at `docker compose up` with a bind
+  // error -- a worse failure than the clear one, and after the file existed.
+  it('still refuses when the domain matches but our Caddy is NOT the listener', () => {
+    const r = runInstallRaw(['analytics.example.com'], {
+      existingEnv: tlsEnv('analytics.example.com'),
+      ssListening: [80],
+      // OUR_CADDY_RUNNING deliberately unset: `compose ps -q caddy` answers
+      // empty, so whatever holds port 80 belongs to something else.
+    })
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('Port 80 is already in use')
+  })
+
+  // The safe-direction default, asserted rather than assumed. Every way of not
+  // knowing whether Caddy is ours -- no docker, an older Compose, a stack that
+  // is down -- must run the check rather than skip it.
+  it('runs the check when docker is not available to answer at all', () => {
+    const r = runInstallRaw(['analytics.example.com'], {
+      existingEnv: tlsEnv('analytics.example.com'),
+      ssListening: [80],
+      env: { OUR_CADDY_RUNNING: '1', HIDE_DOCKER: '1' },
+    })
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('Port 80 is already in use')
   })
 })
 
