@@ -1,8 +1,9 @@
-import type { FunnelStep } from '@lyraflow/core/funnels/ast.js'
+import type { FunnelDefinition, FunnelStep } from '@lyraflow/core/funnels/ast.js'
+import type { FunnelResult, StepResult } from '@lyraflow/core/funnels/levels.js'
 
 /**
- * `WherePredicate` and `FunnelStep` are RE-EXPORTED from core, never
- * declared again here.
+ * `WherePredicate`, `FunnelStep`, `FunnelDefinition` and `StepResult` are
+ * RE-EXPORTED from core, never declared again here.
  *
  * A hand-written copy of `WherePredicate` used to spell the operator field
  * `op`, while core -- and therefore the wire, and therefore every stored
@@ -20,9 +21,17 @@ import type { FunnelStep } from '@lyraflow/core/funnels/ast.js'
  * `value` is core's scalar union (or a two-element tuple for `between`)
  * rather than `unknown`, so a control bound to it gets a compile error
  * instead of a cast.
+ *
+ * `Funnel` below is the one funnel shape still declared here, and that is not
+ * an oversight: it is a STORED ROW -- id, timestamps, the cached run summary,
+ * the `stale` flag -- and core has no such type to import, because core knows
+ * about funnel definitions and results, not about rows. Composing it from
+ * `FunnelDefinition` would also be wrong rather than merely awkward: that type
+ * makes `segment_id` optional, while a row always carries the column. When a
+ * canonical row type exists, this should import it.
  */
 export type { WherePredicate } from '@lyraflow/core/segments/ast.js'
-export type { FunnelStep }
+export type { FunnelDefinition, FunnelStep, StepResult }
 
 /** `GET /v1/project` -- the identity fields the settings screen needs to build an install snippet. */
 export interface ProjectIdentity {
@@ -185,34 +194,23 @@ export interface Funnel {
   updated_at: string
 }
 
-export interface FunnelDefinition {
-  steps: FunnelStep[]
-  window_seconds: number
-  segment_id?: number | null
-}
-
-export interface StepResult {
-  index: number
-  event: string
-  people: number
-  /** Server-computed. NEVER derive this from `from_start`. */
-  from_previous: number
-  /** Server-computed. NEVER derive this from a chain of `from_previous`. */
-  from_start: number
-}
-
 export interface CostWarning {
   path: string
   reason: string
 }
 
-/** The body of `POST /v1/funnels/preview` and `POST /v1/funnels/:id/run`. */
-export interface FunnelRunResult {
-  entered: number
-  converted: number
-  conversion_rate: number
-  steps: StepResult[]
-  partial_window_entrants: number
+/**
+ * The body of `POST /v1/funnels/preview` and `POST /v1/funnels/:id/run`.
+ *
+ * EXTENDS core's `FunnelResult` rather than restating its five fields. Those
+ * are what the engine computes; the three below are what the HTTP layer adds
+ * about the request that produced them. Redeclaring the first five is how the
+ * UI and the engine drift apart while both remain internally coherent -- which
+ * is exactly what happened to a step's predicate field name (#117), where each
+ * declaration was correct on its own terms so nothing disagreed for the
+ * compiler to catch.
+ */
+export interface FunnelRunResult extends FunnelResult {
   range: { since: string; until: string }
   as_of: string
   warnings: CostWarning[]

@@ -34,6 +34,10 @@
     "./segments/limits.js": {
       "types": "./dist/segments/limits.d.ts",
       "default": "./dist/segments/limits.js"
+    },
+    "./funnels/levels.js": {
+      "types": "./dist/funnels/levels.d.ts",
+      "default": "./dist/funnels/levels.js"
     }
   },
   "engines": {
