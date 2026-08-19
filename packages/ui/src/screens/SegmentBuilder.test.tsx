@@ -847,12 +847,39 @@ describe('SegmentBuilder -- the three server-side tree caps', () => {
     }
   }
 
-  // 30s, not 15s. These two fixtures render MAX_TREE_NODES - 1 REAL trait
-  // forms, and each of those now carries a value field alongside its name
-  // field. Measured on one machine: 12.4s before that field existed, 12.7s
-  // after -- a 2% difference against a budget that was already 83% spent, so
-  // the same run under a loaded full-suite pass tipped over at 14.8s. The
-  // margin is what was wrong, not the 2%.
+  // 60s, not 30s, and the reason is measured rather than guessed (#150).
+  //
+  // These two fixtures render MAX_TREE_NODES - 1 real trait forms, and that
+  // render is SUPERLINEAR in row count. Measured on one machine, same test,
+  // only the fixture size changed:
+  //
+  //     99 rows   13687ms
+  //     49 rows    1612ms
+  //     24 rows     234ms
+  //
+  // Halving the rows is roughly an 8x saving, which is cubic-ish -- so the
+  // cost is not "99 rows at 140ms each", it is the tree re-rendering as it
+  // mounts. That is why raising the number is the honest fix here and
+  // trimming the fixture is not: the test needs a tree AT the cap, and the
+  // cap is where the cost lives.
+  //
+  // Two cheaper explanations were tested and RULED OUT, so nobody re-tests
+  // them:
+  //   - the ~99 suggestion effects resolving and setting state. Making those
+  //     promises never settle changed nothing (13.7s -> 13.9s).
+  //   - Testing Library's `getByRole`/`getByText` computing accessible names
+  //     across a large DOM on every poll. Replacing both with raw DOM queries
+  //     changed nothing (13.7s -> 15.0s).
+  //
+  // 30s was already a raised number and CI crossed it anyway -- a runner is
+  // slower than this machine, and 14s of a 30s budget is not margin. 60s is
+  // budgeting a cost we have measured, not hiding one we have not.
+  //
+  // What is NOT concluded: that the product is slow. jsdom is far slower than
+  // a browser and these numbers do not transfer; the cap bounds the worst
+  // case at 100 nodes, and nobody has reported a slow builder. The scaling
+  // EXPONENT would transfer, so it is worth a browser profile someday -- but
+  // that is a separate question from this file's runtime.
   it('disables add-condition at the node cap, says which cap, and never requests a preview or a save', async () => {
     const client = fakeClient({
       segment: vi.fn(async () => ({
@@ -871,7 +898,7 @@ describe('SegmentBuilder -- the three server-side tree caps', () => {
     expect(client.previewSegment).not.toHaveBeenCalled()
     expect(client.createSegment).not.toHaveBeenCalled()
     expect(client.updateSegmentTree).not.toHaveBeenCalled()
-  }, 30000)
+  }, 60000)
 
   it('disables add-condition at the depth cap, and says which cap', async () => {
     // A chain of MAX_TREE_DEPTH - 1 nested single-child groups, bottoming
@@ -931,7 +958,7 @@ describe('SegmentBuilder -- the three server-side tree caps', () => {
     renderBuilder(client, SEGMENT.id)
     const add = await screen.findByRole('button', { name: /^add condition$/i })
     expect(add).toBeEnabled()
-  }, 30000)
+  }, 60000)
 })
 
 // --- Live counts -- cheap automatically, costly on request. Fake
