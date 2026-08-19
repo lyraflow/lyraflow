@@ -529,9 +529,12 @@ than up to a minute later.
 
 Server-key authenticated. Returns the active project's counters for the
 current calendar month — `{"month", "events_accepted", "events_rejected",
-"events_throttled", "monthly_event_quota"}` — all zero for a project with no
-row yet this month, which is the ordinary state for a brand-new one. This is
-what the Settings screen's usage card reads.
+"events_throttled", "events_bot", "monthly_event_quota"}` — all zero for a
+project with no row yet this month, which is the ordinary state for a
+brand-new one. `events_bot` counts events dropped as crawler traffic and is
+reported apart from `events_rejected` (malformed input), because a large
+rejection count means the integration is broken and a large bot count does
+not. This is what the Settings screen's usage card reads.
 
 ### `GET /v1/projects` and `POST /v1/projects`
 

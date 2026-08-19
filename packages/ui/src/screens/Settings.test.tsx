@@ -70,6 +70,7 @@ function fakeClient(over: Record<string, unknown> = {}) {
       events_accepted: 42180,
       events_rejected: 17,
       events_throttled: 0,
+      events_bot: 3906,
       monthly_event_quota: 50000000,
     })),
     projects: vi.fn(async () => PROJECTS),
@@ -165,12 +166,28 @@ describe('Settings — usage', () => {
           events_accepted: 10,
           events_rejected: 0,
           events_throttled: 0,
+          events_bot: 0,
           monthly_event_quota: null,
         })),
       }),
     )
     expect(await screen.findByText(/unlimited/i)).toBeInTheDocument()
     expect(screen.queryByText(/NaN/)).not.toBeInTheDocument()
+  })
+
+  // The bot counter is a SEPARATE tile, not folded into "Rejected". Before
+  // bot drops had their own column they were counted as rejections -- a
+  // wrong label, but a visible number. Splitting the column without adding
+  // this tile made the same crawler traffic vanish from the screen
+  // altogether, which is strictly worse than the wrong label was.
+  it('shows bot drops as their own figure, not folded into rejections', async () => {
+    renderSettings()
+    const bot = await screen.findByText('Bot')
+    // Read through the <dt>'s own <div>, so this cannot pass by matching
+    // some other 3,906 elsewhere on the page.
+    expect(bot.parentElement).toHaveTextContent('3,906')
+    // And the rejections tile still reports only rejections.
+    expect(screen.getByText('Rejected').parentElement).toHaveTextContent('17')
   })
 
   it('requests the active project', async () => {
@@ -393,6 +410,7 @@ describe('Settings — usage stays in sync with a saved limit', () => {
         events_accepted: 5000,
         events_rejected: 0,
         events_throttled: 0,
+        events_bot: 0,
         monthly_event_quota: null,
       })),
     })
@@ -440,6 +458,7 @@ describe('Settings — usage stays in sync with a saved limit', () => {
         events_accepted: 5000,
         events_rejected: 0,
         events_throttled: 0,
+        events_bot: 0,
         monthly_event_quota: 50_000_000,
       })),
     })

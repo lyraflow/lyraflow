@@ -472,10 +472,11 @@ describe('PATCH /v1/project', () => {
 describe('GET /v1/project/usage', () => {
   it('reports this month against the quota', async () => {
     await pg.query(
-      `INSERT INTO ingest_counters (project_id, month, events_accepted, events_rejected, events_throttled)
-       VALUES ($1, date_trunc('month', now())::date, 42, 3, 1)
+      `INSERT INTO ingest_counters
+         (project_id, month, events_accepted, events_rejected, events_throttled, events_bot)
+       VALUES ($1, date_trunc('month', now())::date, 42, 3, 1, 7)
        ON CONFLICT (project_id, month) DO UPDATE
-         SET events_accepted = 42, events_rejected = 3, events_throttled = 1`,
+         SET events_accepted = 42, events_rejected = 3, events_throttled = 1, events_bot = 7`,
       [PROJECT_ID_A],
     )
     await app.inject({
@@ -495,6 +496,9 @@ describe('GET /v1/project/usage', () => {
       events_accepted: 42,
       events_rejected: 3,
       events_throttled: 1,
+      // Distinct from every other seeded value, so a handler that reported
+      // the wrong column would fail rather than coincide.
+      events_bot: 7,
       monthly_event_quota: 100,
     })
   })
@@ -513,6 +517,7 @@ describe('GET /v1/project/usage', () => {
       events_accepted: 0,
       events_rejected: 0,
       events_throttled: 0,
+      events_bot: 0,
     })
   })
 

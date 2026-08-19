@@ -44,7 +44,7 @@ export function UsageSection(props: { usage: Usage | null; quota: number | null 
     )
   }
 
-  const { month, events_accepted, events_rejected, events_throttled } = usage
+  const { month, events_accepted, events_rejected, events_throttled, events_bot } = usage
   const quotaLabel = quota == null ? 'Unlimited' : formatNumber(quota)
   const pct = quota == null ? null : Math.min(100, (events_accepted / quota) * 100)
 
@@ -55,7 +55,7 @@ export function UsageSection(props: { usage: Usage | null; quota: number | null 
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
         <p className="text-sm text-muted-foreground">{month}</p>
-        <dl className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
+        <dl className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-5">
           <div>
             <dt className="text-muted-foreground">Accepted</dt>
             <dd className="text-base font-semibold text-foreground">
@@ -73,6 +73,18 @@ export function UsageSection(props: { usage: Usage | null; quota: number | null 
             <dd className="text-base font-semibold text-warning">
               {formatNumber(events_throttled)}
             </dd>
+          </div>
+          <div>
+            {/*
+              Deliberately NOT styled as a fault. A bot drop is the filter
+              working, not the integration failing -- these events used to be
+              counted as "Rejected" in red, which read as an error on traffic
+              nobody needs to act on. Its value is that it is VISIBLE: with
+              the column split out and this tile missing, the same crawler
+              traffic showed up nowhere at all.
+            */}
+            <dt className="text-muted-foreground">Bot</dt>
+            <dd className="text-base font-semibold text-foreground">{formatNumber(events_bot)}</dd>
           </div>
           <div>
             <dt className="text-muted-foreground">Quota</dt>
