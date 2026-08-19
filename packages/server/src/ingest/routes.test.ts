@@ -356,6 +356,7 @@ describe('ingest routes', () => {
   // surprise: malformed input from a crawler is now a validation rejection
   // with a dead-letter row, where before it was dropped as a bot with none.
   it('dead-letters malformed input from a crawler, rather than dropping it as a bot', async () => {
+    const before = await countDeadLetters()
     const res = await app.inject({
       method: 'POST',
       url: '/v1/track',
@@ -363,7 +364,7 @@ describe('ingest routes', () => {
       payload: { message_id: 'not-a-uuid', type: 'track', event: 'x' },
     })
     expect(res.statusCode).toBe(202)
-    expect(await countDeadLetters()).toBeGreaterThan(0)
+    expect(await countDeadLetters()).toBe(before + 1)
   })
 
   it('accepts a batch and reports per-item outcomes', async () => {

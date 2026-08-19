@@ -420,6 +420,19 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
     // already paid for HTTP handling and a project-cache lookup, so this is
     // judged affordable -- but it is the first thing to revisit if ingest
     // CPU ever becomes a problem.
+    //
+    // The bigger cost: a MALFORMED payload from a crawler now writes a row
+    // to `events_dead_letter` on every request, where before it cost one
+    // header comparison and zero writes -- unauthenticated junk traffic can
+    // now put load on the table whose signal value the rest of this file
+    // defends. Kept anyway, for two reasons. The growth is bounded, not
+    // unbounded: `events_dead_letter` carries a 30-day TTL (see
+    // `received_at` in `002_events.sql`), so it self-cleans rather than
+    // accumulating forever. And the obvious suppression -- skip the dead
+    // letter when the UA looks like a bot -- cannot work here: a parse
+    // failure means `context.library` was never read, so that check cannot
+    // tell a crawler from the server-side SDK author whose malformed
+    // request is exactly what this dead letter exists to help debug.
     const parsed = IngestPayload.safeParse(raw)
     if (!parsed.success) {
       counters.record(projectId, 'rejected')
