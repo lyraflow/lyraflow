@@ -119,6 +119,14 @@ describe('IngestCounters', () => {
     c.record(projectId, 'accepted', 1)
     await expect(c.flush()).resolves.toBeUndefined()
   })
+
+  it('tallies bot drops apart from rejections', async () => {
+    const counters = new IngestCounters(pg)
+    counters.record(1, 'bot')
+    counters.record(1, 'rejected')
+    expect(counters.totals().bot).toBe(1)
+    expect(counters.totals().rejected).toBe(1)
+  })
 })
 
 describe('IngestCounters persisted/pending reads', () => {

@@ -2,7 +2,13 @@ import type { FastifyInstance } from 'fastify'
 
 export interface MetricsDeps {
   bufferDepth: () => number
-  totals: () => { accepted: number; rejected: number; throttled: number; over_quota: number }
+  totals: () => {
+    accepted: number
+    rejected: number
+    throttled: number
+    over_quota: number
+    bot: number
+  }
   retention: () => { lastRunAt: number | null; partitionsDropped: number }
 }
 
@@ -34,6 +40,13 @@ export function registerMetrics(app: FastifyInstance, deps: MetricsDeps): void {
       // constraint and the sender should retry, over_quota says the
       // configuration is, and retrying is pointless until the month rolls.
       `lyraflow_ingest_events_total{outcome="over_quota"} ${totals.over_quota}`,
+      // A fifth label value on the same series, for the same reason
+      // over_quota is a fourth: the HELP says "individual events by
+      // outcome", and being dropped as a crawler is an outcome. Distinct
+      // from `rejected` because they call for opposite responses -- rejected
+      // means the sender is sending bad data and should fix it, bot means
+      // the sender was never a customer's user in the first place.
+      `lyraflow_ingest_events_total{outcome="bot"} ${totals.bot}`,
       // A retention worker that has silently stopped — crashed, wedged,
       // never started — looks exactly like one that is running fine with
       // nothing left to expire: neither shows up as an error, a failed
