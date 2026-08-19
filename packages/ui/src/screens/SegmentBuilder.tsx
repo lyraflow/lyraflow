@@ -591,7 +591,10 @@ export function SegmentBuilder(props: {
    * What must NOT be wrapped is anything that is true regardless of which
    * segment is on screen: `onUnauthorized` reports a dead session, not a
    * stale screen, and dropping it would leave the operator typing into a
-   * form whose every request will 401.
+   * form whose every request will 401. That remains the ONLY continuation
+   * here left unguarded, and it was re-checked rather than assumed when the
+   * create navigation stopped being the second one (#122): a 401 is a fact
+   * about the session, so it must reach the operator wherever they are.
    */
   function guardedByFormGeneration() {
     const issuedFor = formGenerationRef.current
@@ -614,22 +617,36 @@ export function SegmentBuilder(props: {
       // new, and lands on the LIST.
       client
         .createSegment(activeId, trimmedName, { ast_version: AST_VERSION, filter: root })
-        // The one continuation in this file deliberately left UNGUARDED, and
-        // pinned as such (this file's test `a create that lands after a
-        // project switch still leaves the form...`). Its destination is the
-        // segment list, which names no segment and no project, and it is the
-        // only acknowledgement a create ever gets: guarded, it would leave
-        // the operator looking at a form whose contents have already been
-        // created, with nothing on screen to say so. Unmounting the form is
-        // the safe outcome even when the list on the other side is a
-        // different project's.
+        // GUARDED BY THE FORM GENERATION, which is narrower than it looks and
+        // narrower than this used to be.
         //
-        // What this does NOT rest on any more is "otherwise Save is one
-        // click from a duplicate" -- Save is held disabled for the whole
-        // time the create is open, by the in-flight flag now sitting in the
-        // form bucket of the reset above, whether this navigation happens or
-        // not.
-        .then(() => navigate(ROUTES.segments))
+        // The exception itself is preserved, and the reasoning for it stands:
+        // the segment list names no segment and no project, and this
+        // navigation is the only acknowledgement a create ever gets, so an
+        // operator still sitting on the create form must be taken to the list
+        // rather than left looking at a form whose contents are already
+        // saved. That case is untouched. `formIdentity` is `'new'` for the
+        // create route regardless of project, so a PROJECT SWITCH does not
+        // bump the generation and this still fires -- exactly as it did.
+        //
+        // What the exception was never argued about is the operator who
+        // navigates from the create route to a DIFFERENT form while the
+        // create is in flight. Unguarded, this fires and pulls them off the
+        // segment they are now editing, discarding what they had typed --
+        // the same harm every other continuation here is guarded against,
+        // reached from the one direction left open (#122).
+        //
+        // The cost of the narrowing, stated rather than discovered: in that
+        // case the create commits with nothing on screen saying so. That is
+        // accepted as the lesser harm. The segment exists and is on the list
+        // the moment they look; the work they were typing does not survive
+        // being yanked away from it.
+        //
+        // This does NOT rest on "otherwise Save is one click from a
+        // duplicate" -- Save is held disabled for the whole time the create
+        // is open, by the in-flight flag in the form bucket of the reset
+        // above, whether this navigation happens or not.
+        .then(stillCurrent(() => navigate(ROUTES.segments)))
         .catch((err: unknown) => {
           if (err instanceof ApiError && err.status === 401) {
             onUnauthorized?.()
