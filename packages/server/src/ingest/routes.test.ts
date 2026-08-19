@@ -119,6 +119,23 @@ function track(body: Record<string, unknown>, key = 'wk_routes') {
   })
 }
 
+async function countEvents(where: string): Promise<number> {
+  const rs = await ch.query({
+    query: `SELECT count() AS c FROM events WHERE project_id = ${routesTestProjectId} AND ${where}`,
+    format: 'JSONEachRow',
+  })
+  return Number((await rs.json<{ c: string }>())[0]?.c ?? 0)
+}
+
+async function countDeadLetters(): Promise<number> {
+  const rs = await ch.query({
+    query: `SELECT count() AS c FROM events_dead_letter
+             WHERE project_id = ${routesTestProjectId} AND reason = 'validation_failed'`,
+    format: 'JSONEachRow',
+  })
+  return Number((await rs.json<{ c: string }>())[0]?.c ?? 0)
+}
+
 // This is deliberate, not an oversight: Task 9 wired the admin-session
 // bridge (auth/bridge.ts) into every OTHER project-scoped route, but
 // /v1/alias stayed on its own server-key-only authenticator
@@ -274,6 +291,82 @@ describe('ingest routes', () => {
     expect(Number(rows[0]?.c)).toBe(0)
   })
 
+  // #29: a PHP SDK on ext/curl or a Python SDK on requests announces a
+  // transport User-Agent that is in BOT_TOKENS, so its first event was
+  // dropped and answered 202 with nothing anywhere to explain it.
+  it('accepts an event from a declared server-side SDK despite a bot-looking User-Agent', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': 'wk_routes', 'user-agent': 'python-requests/2.31.0' },
+      payload: {
+        message_id: randomUUID(),
+        anonymous_id: 'server-side-caller',
+        type: 'track',
+        event: 'server_side_event',
+        context: { library: { name: 'lyraflow-python', version: '0.1.0' } },
+      },
+    })
+    expect(res.statusCode).toBe(202)
+    await app.deps.buffer.flush()
+    expect(await countEvents("event_name = 'server_side_event'")).toBe(1)
+  })
+
+  // The same request WITHOUT the declaration is still dropped. Without this,
+  // the test above passes against a filter that was simply deleted.
+  it('still drops the same event when it declares no library', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': 'wk_routes', 'user-agent': 'python-requests/2.31.0' },
+      payload: {
+        message_id: randomUUID(),
+        anonymous_id: 'server-side-caller',
+        type: 'track',
+        event: 'undeclared_event',
+      },
+    })
+    expect(res.statusCode).toBe(202)
+    await app.deps.buffer.flush()
+    expect(await countEvents("event_name = 'undeclared_event'")).toBe(0)
+  })
+
+  // The rule keys on SERVER-SIDE names. A crawler executing JS on an
+  // instrumented page sends whatever the page sends, so exempting the
+  // browser library would defeat the filter entirely.
+  it('still drops a crawler that declares the browser library', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': 'wk_routes', 'user-agent': 'Googlebot/2.1' },
+      payload: {
+        message_id: randomUUID(),
+        anonymous_id: 'crawler',
+        type: 'track',
+        event: 'crawler_event',
+        context: { library: { name: 'lyraflow-browser', version: '0.5.0' } },
+      },
+    })
+    expect(res.statusCode).toBe(202)
+    await app.deps.buffer.flush()
+    expect(await countEvents("event_name = 'crawler_event'")).toBe(0)
+  })
+
+  // The reorder's consequence, asserted so it is a decision rather than a
+  // surprise: malformed input from a crawler is now a validation rejection
+  // with a dead-letter row, where before it was dropped as a bot with none.
+  it('dead-letters malformed input from a crawler, rather than dropping it as a bot', async () => {
+    const before = await countDeadLetters()
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': 'wk_routes', 'user-agent': 'Googlebot/2.1' },
+      payload: { message_id: 'not-a-uuid', type: 'track', event: 'x' },
+    })
+    expect(res.statusCode).toBe(202)
+    expect(await countDeadLetters()).toBe(before + 1)
+  })
+
   it('accepts a batch and reports per-item outcomes', async () => {
     const res = await app.inject({
       method: 'POST',
@@ -289,7 +382,110 @@ describe('ingest routes', () => {
     expect(res.statusCode).toBe(202)
     // throttled is always present (even at 0) so an SDK parsing a stable
     // shape never has to special-case its absence.
-    expect(res.json()).toEqual({ accepted: 1, rejected: 1, throttled: 0, over_quota: 0 })
+    expect(res.json()).toEqual({ accepted: 1, rejected: 1, throttled: 0, over_quota: 0, bot: 0 })
+  })
+
+  // Without this an SDK author whose first batch vanishes has nothing to
+  // look at -- which is the exact experience #29 was filed about.
+  it('reports bot drops in the batch response, apart from rejections', async () => {
+    // `app` is shared across this whole describe block, and earlier tests
+    // above already recorded bot outcomes on its counters -- so the pin
+    // reads the delta this request adds, not an absolute total.
+    const botBefore = app.deps.counters.totals().bot
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/batch',
+      headers: { 'x-lyraflow-write-key': 'wk_routes', 'user-agent': 'Googlebot/2.1' },
+      payload: {
+        batch: [
+          { message_id: randomUUID(), anonymous_id: 'a', type: 'track', event: 'crawled' },
+          {
+            message_id: randomUUID(),
+            anonymous_id: 'b',
+            type: 'track',
+            event: 'from_sdk',
+            context: { library: { name: 'lyraflow-node', version: '0.1.0' } },
+          },
+        ],
+      },
+    })
+    expect(res.statusCode).toBe(202)
+    expect(res.json()).toEqual({
+      accepted: 1,
+      rejected: 0,
+      throttled: 0,
+      over_quota: 0,
+      bot: 1,
+    })
+    expect(app.deps.counters.totals().bot - botBefore).toBe(1)
+  })
+
+  // Every other filter test on this branch sends a batch with ONE outcome in
+  // it. That shape cannot catch a pipeline that reaches the right verdict for
+  // each item but loses one on the way out -- a counter incremented under the
+  // wrong key, a `continue` that skips the tally, a response field that
+  // shadows another. The conservation invariant is the assertion that makes
+  // it structural: whatever the ingest decides, every item of the batch must
+  // land in exactly one bucket, so the five counts sum to the batch length.
+  //
+  // Baselines throughout, never absolutes: `app` is shared across this whole
+  // describe block and earlier tests have already moved the dead-letter table
+  // and the bot counter.
+  it('splits one batch across accepted, rejected and bot, and conserves the count', async () => {
+    const deadLettersBefore = await countDeadLetters()
+    const botBefore = app.deps.counters.totals().bot
+    const batch = [
+      // Declared server-side SDK: exempt from the filter despite the UA.
+      {
+        message_id: randomUUID(),
+        anonymous_id: 'mixed-sdk',
+        type: 'track',
+        event: 'mixed_declared',
+        context: { library: { name: 'lyraflow-node', version: '0.1.0' } },
+      },
+      // Valid, but undeclared -- so the bot UA drops it.
+      {
+        message_id: randomUUID(),
+        anonymous_id: 'mixed-undeclared',
+        type: 'track',
+        event: 'mixed_undeclared',
+      },
+      // Malformed: parse runs BEFORE the bot check, so this is a rejection
+      // with a dead letter rather than a silent bot drop.
+      { message_id: 'not-a-uuid', anonymous_id: 'mixed-bad', type: 'track', event: 'mixed_bad' },
+    ]
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/batch',
+      headers: { 'x-lyraflow-write-key': 'wk_routes', 'user-agent': 'Googlebot/2.1' },
+      payload: { batch },
+    })
+    expect(res.statusCode).toBe(202)
+    const body = res.json() as {
+      accepted: number
+      rejected: number
+      throttled: number
+      over_quota: number
+      bot: number
+    }
+    expect(body).toEqual({ accepted: 1, rejected: 1, throttled: 0, over_quota: 0, bot: 1 })
+
+    // Exactly one dead letter: the malformed item and nothing else. A bot
+    // drop that also wrote one would make this 2.
+    expect(await countDeadLetters()).toBe(deadLettersBefore + 1)
+    // And exactly one bot drop, so the response's `bot: 1` is backed by the
+    // counter the operator's usage card and the Prometheus label read from.
+    expect(app.deps.counters.totals().bot - botBefore).toBe(1)
+
+    // The invariant: nothing was double-counted and nothing vanished.
+    expect(body.accepted + body.rejected + body.throttled + body.over_quota + body.bot).toBe(
+      batch.length,
+    )
+
+    // The accepted one really was stored, and the dropped one really was not.
+    await app.deps.buffer.flush()
+    expect(await countEvents("event_name = 'mixed_declared'")).toBe(1)
+    expect(await countEvents("event_name = 'mixed_undeclared'")).toBe(0)
   })
 
   it('refuses new events with 503 once draining', async () => {
@@ -531,7 +727,7 @@ describe('ingest routes (mocked deps)', () => {
     })
 
     expect(res.statusCode).toBe(202)
-    expect(res.json()).toEqual({ accepted: 0, rejected: 3, throttled: 0, over_quota: 0 })
+    expect(res.json()).toEqual({ accepted: 0, rejected: 3, throttled: 0, over_quota: 0, bot: 0 })
     expect(insertCalls).toHaveLength(1)
     expect(insertCalls[0]?.values).toHaveLength(3)
     await mockedApp.close()
@@ -560,7 +756,7 @@ describe('ingest routes (mocked deps)', () => {
     })
 
     expect(res.statusCode).toBe(202)
-    expect(res.json()).toEqual({ accepted: 0, rejected: 1, throttled: 0, over_quota: 0 })
+    expect(res.json()).toEqual({ accepted: 0, rejected: 1, throttled: 0, over_quota: 0, bot: 0 })
     expect(insertCalls).toHaveLength(1)
     expect(insertCalls[0]?.values).toHaveLength(1)
     await mockedApp.close()
@@ -593,7 +789,7 @@ describe('ingest routes (mocked deps)', () => {
     // Item 1 was accepted before saturation hit; items 2 and 3 were never
     // attempted (throttled), and none is folded into `rejected` — a
     // retry-able condition must stay distinguishable from bad data.
-    expect(res.json()).toEqual({ accepted: 1, rejected: 0, throttled: 2, over_quota: 0 })
+    expect(res.json()).toEqual({ accepted: 1, rejected: 0, throttled: 2, over_quota: 0, bot: 0 })
     await mockedApp.close()
   })
 
@@ -856,7 +1052,7 @@ describe('ingest quota enforcement', () => {
     // Not folded into `rejected`: these events are well-formed, and an SDK
     // told they were rejected would warn the developer about bad data that
     // does not exist.
-    expect(res.json()).toEqual({ accepted: 0, rejected: 0, throttled: 0, over_quota: 2 })
+    expect(res.json()).toEqual({ accepted: 0, rejected: 0, throttled: 0, over_quota: 2, bot: 0 })
   })
 
   // --- Not in the brief. ---

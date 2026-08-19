@@ -1,12 +1,13 @@
 import type { Pool } from '@lyraflow/db'
 
-type Kind = 'accepted' | 'rejected' | 'throttled' | 'over_quota'
+type Kind = 'accepted' | 'rejected' | 'throttled' | 'over_quota' | 'bot'
 
 interface Tally {
   accepted: number
   rejected: number
   throttled: number
   over_quota: number
+  bot: number
 }
 
 /**
@@ -42,7 +43,7 @@ export class IngestCounters {
   // serve as a Prometheus counter — a metric built on it would reset every
   // ~10s instead of only on process restart, which is not what a `_total`
   // counter means. This field is that separate, monotonic record.
-  #totals: Tally = { accepted: 0, rejected: 0, throttled: 0, over_quota: 0 }
+  #totals: Tally = { accepted: 0, rejected: 0, throttled: 0, over_quota: 0, bot: 0 }
 
   constructor(
     private readonly pool: Pool,
@@ -120,14 +121,23 @@ export class IngestCounters {
       try {
         await this.pool.query(
           `INSERT INTO ingest_counters
-             (project_id, month, events_accepted, events_rejected, events_throttled, events_over_quota)
-           VALUES ($1, $2, $3, $4, $5, $6)
+             (project_id, month, events_accepted, events_rejected, events_throttled, events_over_quota, events_bot)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
            ON CONFLICT (project_id, month) DO UPDATE SET
              events_accepted   = ingest_counters.events_accepted   + EXCLUDED.events_accepted,
              events_rejected   = ingest_counters.events_rejected   + EXCLUDED.events_rejected,
              events_throttled  = ingest_counters.events_throttled  + EXCLUDED.events_throttled,
-             events_over_quota = ingest_counters.events_over_quota + EXCLUDED.events_over_quota`,
-          [projectId, month, tally.accepted, tally.rejected, tally.throttled, tally.over_quota],
+             events_over_quota = ingest_counters.events_over_quota + EXCLUDED.events_over_quota,
+             events_bot        = ingest_counters.events_bot        + EXCLUDED.events_bot`,
+          [
+            projectId,
+            month,
+            tally.accepted,
+            tally.rejected,
+            tally.throttled,
+            tally.over_quota,
+            tally.bot,
+          ],
         )
       } catch (err) {
         const target = this.#getOrCreate(projectId, month)
@@ -135,6 +145,7 @@ export class IngestCounters {
         target.rejected += tally.rejected
         target.throttled += tally.throttled
         target.over_quota += tally.over_quota
+        target.bot += tally.bot
         try {
           // A throwing onError must not crash the process via an unhandled
           // rejection from a fire-and-forget flush — that's a bug in the
@@ -152,7 +163,11 @@ export class IngestCounters {
     const key = `${projectId}:${month}`
     let entry = this.#tallies.get(key)
     if (!entry) {
-      entry = { projectId, month, tally: { accepted: 0, rejected: 0, throttled: 0, over_quota: 0 } }
+      entry = {
+        projectId,
+        month,
+        tally: { accepted: 0, rejected: 0, throttled: 0, over_quota: 0, bot: 0 },
+      }
       this.#tallies.set(key, entry)
     }
     return entry.tally

@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 14
+export const SCHEMA_VERSION = 15
 
 export { hashPassword, verifyPassword } from './auth/password.js'
 export { ProjectExistsError, createProject, slugify } from './projects/create.js'
@@ -7,6 +7,7 @@ export * from './ingest/properties.js'
 export * from './ingest/timestamp.js'
 export * from './enrich/user-agent.js'
 export * from './enrich/bots.js'
+export { SERVER_SIDE_LIBRARIES, isServerSideLibrary } from './enrich/libraries.js'
 export * from './identity/ranges.js'
 export * from './identity/resolve.js'
 export * from './segments/ast.js'

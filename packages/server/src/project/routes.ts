@@ -162,8 +162,9 @@ export function registerProjectRoutes(app: FastifyInstance, deps: ProjectDeps): 
       events_accepted: string
       events_rejected: string
       events_throttled: string
+      events_bot: string
     }>(
-      `SELECT events_accepted, events_rejected, events_throttled
+      `SELECT events_accepted, events_rejected, events_throttled, events_bot
          FROM ingest_counters
         WHERE project_id = $1 AND month = date_trunc('month', now())::date`,
       [project.id],
@@ -178,6 +179,14 @@ export function registerProjectRoutes(app: FastifyInstance, deps: ProjectDeps): 
       events_accepted: row ? Number(row.events_accepted) : 0,
       events_rejected: row ? Number(row.events_rejected) : 0,
       events_throttled: row ? Number(row.events_throttled) : 0,
+      // Bot drops are reported SEPARATELY from rejections rather than folded
+      // into them. Before migration 015 a crawler hit counted as `rejected`,
+      // so a project taking real traffic plus crawler traffic showed a large
+      // "Rejected" number that was mostly not a fault at all; splitting the
+      // column without reporting the new one here would have been worse
+      // still -- the rejections would read 0 and the crawler traffic would
+      // appear nowhere, which is the exact question 015 exists to answer.
+      events_bot: row ? Number(row.events_bot) : 0,
       monthly_event_quota: project.monthlyEventQuota,
     })
   })

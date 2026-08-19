@@ -216,4 +216,12 @@ describe('postgres schema', () => {
     )
     expect(idx.rows).toHaveLength(1)
   })
+
+  it('counts bot drops in their own column', async () => {
+    const col = await pg.query<{ column_name: string; is_nullable: string }>(
+      `SELECT column_name, is_nullable FROM information_schema.columns
+       WHERE table_name = 'ingest_counters' AND column_name = 'events_bot'`,
+    )
+    expect(col.rows[0]?.is_nullable).toBe('NO')
+  })
 })

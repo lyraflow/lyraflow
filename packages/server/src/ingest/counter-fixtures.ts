@@ -20,6 +20,7 @@ export interface CounterRow {
   events_rejected: string
   events_throttled: string
   events_over_quota: string
+  events_bot: string
 }
 
 /**
@@ -31,7 +32,7 @@ export interface CounterRow {
 export async function readCounterRow(pg: Pool, projectId: number): Promise<CounterRow> {
   const month = `${new Date().toISOString().slice(0, 7)}-01`
   const r = await pg.query<CounterRow>(
-    `SELECT events_accepted, events_rejected, events_throttled, events_over_quota
+    `SELECT events_accepted, events_rejected, events_throttled, events_over_quota, events_bot
        FROM ingest_counters WHERE project_id = $1 AND month = $2`,
     [projectId, month],
   )
@@ -48,17 +49,25 @@ export async function seedCounterRow(
   pg: Pool,
   projectId: number,
   month: string,
-  counts: { accepted?: number; rejected?: number; throttled?: number; over_quota?: number },
+  counts: {
+    accepted?: number
+    rejected?: number
+    throttled?: number
+    over_quota?: number
+    bot?: number
+  },
 ): Promise<void> {
   await pg.query(
     `INSERT INTO ingest_counters
-         (project_id, month, events_accepted, events_rejected, events_throttled, events_over_quota)
-       VALUES ($1, $2, $3, $4, $5, $6)
+         (project_id, month, events_accepted, events_rejected, events_throttled,
+          events_over_quota, events_bot)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT (project_id, month) DO UPDATE SET
          events_accepted   = EXCLUDED.events_accepted,
          events_rejected   = EXCLUDED.events_rejected,
          events_throttled  = EXCLUDED.events_throttled,
-         events_over_quota = EXCLUDED.events_over_quota`,
+         events_over_quota = EXCLUDED.events_over_quota,
+         events_bot        = EXCLUDED.events_bot`,
     [
       projectId,
       month,
@@ -66,6 +75,7 @@ export async function seedCounterRow(
       counts.rejected ?? 0,
       counts.throttled ?? 0,
       counts.over_quota ?? 0,
+      counts.bot ?? 0,
     ],
   )
 }

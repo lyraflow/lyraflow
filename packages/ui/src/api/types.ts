@@ -37,6 +37,13 @@ export interface Usage {
   events_accepted: number
   events_rejected: number
   events_throttled: number
+  /**
+   * Events dropped because the request looked like crawler traffic. Counted
+   * apart from `events_rejected` (which means malformed): the two answer
+   * different questions, and folding them together is what made "is my
+   * integration broken, or is that just crawler traffic" unanswerable.
+   */
+  events_bot: number
   /** null means unlimited, and is what every project carries by default. */
   monthly_event_quota: number | null
 }

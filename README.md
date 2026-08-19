@@ -529,9 +529,12 @@ than up to a minute later.
 
 Server-key authenticated. Returns the active project's counters for the
 current calendar month — `{"month", "events_accepted", "events_rejected",
-"events_throttled", "monthly_event_quota"}` — all zero for a project with no
-row yet this month, which is the ordinary state for a brand-new one. This is
-what the Settings screen's usage card reads.
+"events_throttled", "events_bot", "monthly_event_quota"}` — all zero for a
+project with no row yet this month, which is the ordinary state for a
+brand-new one. `events_bot` counts events dropped as crawler traffic and is
+reported apart from `events_rejected` (malformed input), because a large
+rejection count means the integration is broken and a large bot count does
+not. This is what the Settings screen's usage card reads.
 
 ### `GET /v1/projects` and `POST /v1/projects`
 
@@ -576,7 +579,19 @@ works on first paste with no configuration.
 | `properties` | no | Flat object. `track` and `page` only. |
 | `traits` | no | Flat object. `identify` only. |
 | `timestamp` | no | ISO-8601. Defaults to server time at receipt; see *Retries*. |
-| `context` | no | `url`, `path` and `referrer`, up to 2048 characters each; `user_agent`, up to 1024; and the five `utm_*` fields, up to 128 each. |
+| `context` | no | `url`, `path` and `referrer`, up to 2048 characters each; `user_agent`, up to 1024; `library` (`{name, version}`, both required when present, up to 128 characters each); and the five `utm_*` fields, up to 128 each. |
+
+A payload that declares one of Lyraflow's server-side SDKs is never filtered as a
+bot. That matters because the HTTP clients those SDKs use announce themselves as
+`python-requests`, `okhttp` or `curl/` — indistinguishable from a scraper, and
+dropped as one before this field existed. The browser SDK does not send this field;
+an absent library is filtered exactly as before.
+
+**Bot filtering is data hygiene, not a security boundary.** The write key ships
+inside the browser bundle, so any client can claim to be a server-side SDK — or
+simply send a browser's User-Agent, which has always been possible. What the filter
+removes is incidental traffic: crawlers, uptime monitors, link-preview fetchers.
+None of those declare a library.
 
 Property and trait values may be strings, numbers, booleans, or null. Numbers
 are stored in a numeric column and everything else as text, so `3` and `"3"` are
@@ -600,8 +615,8 @@ within 24 hours of server time.
   as bot traffic**, deliberately: a tracking endpoint that returns an error
   breaks the customer's site. Malformed events are recorded in the
   `events_dead_letter` table with the reason; bot traffic is simply counted and
-  discarded. `/metrics` reports the accepted, rejected, throttled and
-  over-quota totals, so a `202` that stored nothing is still visible there.
+  discarded. `/metrics` reports the accepted, rejected, throttled, over-quota
+  and bot totals, so a `202` that stored nothing is still visible there.
 - `401` — missing or unknown write key.
 - `429` with `{"error":"quota_exceeded"}` — the project has used its monthly
   event quota. **No `retry-after`, deliberately**: unlike a `503`, this does not
@@ -612,13 +627,17 @@ within 24 hours of server time.
 - `400` / `413` — malformed JSON, or a body over 1 MiB. Retrying will not help.
 
 `/v1/batch` always answers with counts:
-`{"accepted":n,"rejected":n,"throttled":n,"over_quota":n}`. It returns `503` if
-the buffer saturates part-way through, with the counts describing how far it
-got; retry the whole batch. It never returns `429`: a batch answers `202` with
-`over_quota` counting the events refused, because its contract is a body
-carrying the tally rather than a wholesale failure over one event. Those events
-are not worth retrying either. **Read `over_quota` even when the status is
-`202`** — for a batch, it is the only signal that events were refused.
+`{"accepted":n,"rejected":n,"throttled":n,"over_quota":n,"bot":n}`. It returns
+`503` if the buffer saturates part-way through, with the counts describing how
+far it got; retry the whole batch. It never returns `429`: a batch answers
+`202` with `over_quota` counting the events refused, because its contract is a
+body carrying the tally rather than a wholesale failure over one event. Those
+events are not worth retrying either. **Read `over_quota` even when the status
+is `202`** — for a batch, it is the only signal that events were refused.
+`bot` counts items dropped as bot traffic, the same outcome `/metrics` reports
+above. Single-event routes (`/v1/track`, `/v1/page`, `/v1/identify`) are
+unchanged: they still answer `{"status":"accepted"}` regardless of outcome and
+carry no such count.
 
 ### Retries
 

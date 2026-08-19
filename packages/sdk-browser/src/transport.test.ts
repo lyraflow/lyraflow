@@ -374,6 +374,103 @@ describe('Transport', () => {
     expect(warn).not.toHaveBeenCalled()
   })
 
+  // The bot counter is the third field, and reading only the first two
+  // recreates the original silence one layer up. `HeadlessChrome` is a bot
+  // token, so a Playwright or Lighthouse CI run against an instrumented page
+  // has every event dropped; before the server counted those apart they came
+  // back as `rejected` and at least produced a warning.
+  it('warns when a 202 body says events were dropped as bot traffic, and still drains them', async () => {
+    const body = JSON.stringify({
+      accepted: 0,
+      rejected: 0,
+      throttled: 0,
+      over_quota: 0,
+      bot: 20,
+    })
+    const { queue, transport, warn } = make(
+      vi.fn(async () => new Response(body, { status: 202 })) as unknown as typeof fetch,
+    )
+    for (let i = 0; i < 20; i += 1) queue.add(event(`m${i}`))
+    expect(await transport.flush()).toBe('sent')
+    expect(warn).toHaveBeenCalledTimes(1)
+    const said = warn.mock.calls.join(' ')
+    // The count, so "20 of 20" is distinguishable from "2 of 20".
+    expect(said).toContain('20 event(s)')
+    // And the DIAGNOSIS, which is the whole point: bot traffic calls for a
+    // different fix from malformed data, and a message that only said
+    // "dropped" would send the developer hunting a payload bug they do not
+    // have.
+    expect(said).toMatch(/bot traffic/i)
+    expect(said).not.toMatch(/rejected/i)
+    // Removed, like every other 202 outcome: a retry sends the same
+    // User-Agent and gets the same answer.
+    expect(queue.size()).toBe(0)
+  })
+
+  it('says nothing when a 202 reports bot: 0', async () => {
+    // The field is always present, even at zero, so a presence check would
+    // warn about crawlers on every healthy flush.
+    const body = JSON.stringify({ accepted: 1, rejected: 0, throttled: 0, over_quota: 0, bot: 0 })
+    const { queue, transport, warn } = make(
+      vi.fn(async () => new Response(body, { status: 202 })) as unknown as typeof fetch,
+    )
+    queue.add(event('m1'))
+    expect(await transport.flush()).toBe('sent')
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('ignores a non-numeric bot instead of warning about it', async () => {
+    // An older server predates the field entirely and a proxy can inject
+    // anything; neither may produce a crawler warning on a delivered batch.
+    const body = JSON.stringify({ accepted: 1, rejected: 0, throttled: 0, bot: 'some' })
+    const { queue, transport, warn } = make(
+      vi.fn(async () => new Response(body, { status: 202 })) as unknown as typeof fetch,
+    )
+    queue.add(event('m1'))
+    expect(await transport.flush()).toBe('sent')
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('reports all three of rejected, over_quota and bot from one response', async () => {
+    // The ingest walks a batch item by item, so one response can carry all
+    // three non-zero. An if/else chain, or a shared try, reports the first
+    // and loses the rest -- and the one lost would be whichever the
+    // developer happened to need.
+    const body = JSON.stringify({ accepted: 1, rejected: 1, throttled: 0, over_quota: 1, bot: 1 })
+    const { queue, transport, warn } = make(
+      vi.fn(async () => new Response(body, { status: 202 })) as unknown as typeof fetch,
+    )
+    for (let i = 0; i < 4; i += 1) queue.add(event(`m${i}`))
+    expect(await transport.flush()).toBe('sent')
+    expect(warn).toHaveBeenCalledTimes(3)
+    const said = warn.mock.calls.join(' ')
+    expect(said).toContain('rejected 1')
+    expect(said).toContain(QUOTA_NOTICE)
+    expect(said).toMatch(/bot traffic/i)
+    expect(queue.size()).toBe(0)
+  })
+
+  it('still reports bot when the host warn throws on both earlier reports', async () => {
+    // The bot report is LAST, so it is the one a throwing host console can
+    // most easily swallow. Each warn goes through `#warnGuarded`
+    // individually; a single try around all three would lose it here.
+    const body = JSON.stringify({ accepted: 0, rejected: 1, throttled: 0, over_quota: 1, bot: 1 })
+    const seen: string[] = []
+    const throwsOnEveryOther = vi.fn((message: string) => {
+      seen.push(message)
+      if (seen.length < 3) throw new Error('console handler blew up')
+    })
+    const { queue, transport } = make(
+      vi.fn(async () => new Response(body, { status: 202 })) as unknown as typeof fetch,
+      throwsOnEveryOther,
+    )
+    for (let i = 0; i < 3; i += 1) queue.add(event(`m${i}`))
+    expect(await transport.flush()).toBe('sent')
+    expect(seen).toHaveLength(3)
+    expect(seen.join(' ')).toMatch(/bot traffic/i)
+    expect(queue.size()).toBe(0)
+  })
+
   it('reports both halves of a partly-rejected, partly-over-quota batch', async () => {
     // Invented beyond the brief: a batch can carry malformed events AND cross
     // the quota, and the two are counted separately by the ingest for exactly

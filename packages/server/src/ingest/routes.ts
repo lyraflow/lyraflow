@@ -1,5 +1,11 @@
 import cors from '@fastify/cors'
-import { BatchPayload, IngestPayload, isBot, parseUserAgent } from '@lyraflow/core'
+import {
+  BatchPayload,
+  IngestPayload,
+  isBot,
+  isServerSideLibrary,
+  parseUserAgent,
+} from '@lyraflow/core'
 import type { ClickHouseClient } from '@lyraflow/db'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import type { Project, ProjectCache } from '../auth/project-cache.js'
@@ -243,7 +249,7 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
   )
 
   interface AcceptResult {
-    outcome: 'accepted' | 'rejected' | 'overloaded' | 'over_quota'
+    outcome: 'accepted' | 'rejected' | 'bot' | 'overloaded' | 'over_quota'
     deadLetter?: DeadLetterRow
   }
 
@@ -402,12 +408,34 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
     raw: unknown,
   ): Promise<AcceptResult> {
     const projectId = project.id
-    const ua = req.headers['user-agent']
-    if (isBot(ua)) {
-      counters.record(projectId, 'rejected')
-      return { outcome: 'rejected' }
-    }
 
+    // PARSE BEFORE THE BOT CHECK, which is the reverse of the original order
+    // and is forced: the signal that a server-side SDK is not a crawler
+    // lives in `context.library`, and that cannot be read before the payload
+    // is parsed (#29).
+    //
+    // The cost is real and was accepted deliberately: crawler traffic is now
+    // Zod-parsed before being dropped, where it used to be refused on a
+    // header comparison. The payload is a small object and the request has
+    // already paid for HTTP handling and a project-cache lookup, so this is
+    // judged affordable -- but it is the first thing to revisit if ingest
+    // CPU ever becomes a problem.
+    //
+    // The bigger cost: a MALFORMED payload from a crawler now writes a row
+    // to `events_dead_letter`, where before it cost one header comparison
+    // and zero writes. Per REQUEST rather than per row is the wrong unit to
+    // cost it in: `BatchPayload` allows up to 500 items and each malformed
+    // one dead-letters on its own, so ONE `/v1/batch` request can write up
+    // to 500 rows. Unauthenticated junk traffic can now put load on the
+    // table whose signal value the rest of this file defends. Kept anyway,
+    // for two reasons. The growth is bounded, not unbounded:
+    // `events_dead_letter` carries a 30-day TTL (see
+    // `received_at` in `002_events.sql`), so it self-cleans rather than
+    // accumulating forever. And the obvious suppression -- skip the dead
+    // letter when the UA looks like a bot -- cannot work here: a parse
+    // failure means `context.library` was never read, so that check cannot
+    // tell a crawler from the server-side SDK author whose malformed
+    // request is exactly what this dead letter exists to help debug.
     const parsed = IngestPayload.safeParse(raw)
     if (!parsed.success) {
       counters.record(projectId, 'rejected')
@@ -415,6 +443,27 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
         outcome: 'rejected',
         deadLetter: buildDeadLetterRow(projectId, 'validation_failed', parsed.error.message, raw),
       }
+    }
+
+    // A declared server-side SDK is never a bot, whatever its HTTP client
+    // announces -- `python-requests`, `okhttp` and `curl/` are all in
+    // BOT_TOKENS, so without this every server-side SDK is swallowed on its
+    // first request.
+    //
+    // Keyed on server-side names specifically, NOT on "declares a library at
+    // all": a crawler executing JS on an instrumented page sends exactly
+    // what the browser SDK sends, so exempting the browser library would
+    // defeat the filter outright.
+    //
+    // Not a security control, and not meant to be. The write key is public,
+    // so a hostile client can already send `Mozilla/5.0` and be
+    // indistinguishable from a visitor. This filter removes incidental
+    // traffic -- crawlers, uptime monitors, link previews -- and none of
+    // those declare a library.
+    const ua = req.headers['user-agent']
+    if (!isServerSideLibrary(parsed.data.context.library?.name) && isBot(ua)) {
+      counters.record(projectId, 'bot')
+      return { outcome: 'bot' }
     }
 
     const limit = checkLimits(parsed.data, cardinality, projectId)
@@ -530,6 +579,12 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
 
       const body = { ...(req.body as Record<string, unknown>), type }
       const result = await accept(req, project, body)
+      // Written BEFORE the outcome is examined, which is safe only while
+      // every result carrying a dead letter has outcome 'rejected' --
+      // 'over_quota' and 'overloaded' both return without one. A future
+      // outcome that carries a dead letter would make a 429 or a 503 pay for
+      // a ClickHouse write first, which is the opposite of what a refusal
+      // under load should cost; move this below the outcome checks then.
       if (result.deadLetter) await writeDeadLetters(ch, [result.deadLetter], onDeadLetterError)
 
       if (result.outcome === 'overloaded') {
@@ -647,13 +702,14 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
         [buildDeadLetterRow(project.id, 'validation_failed', parsed.error.message, req.body)],
         onDeadLetterError,
       )
-      return reply.code(202).send({ accepted: 0, rejected: 1, throttled: 0, over_quota: 0 })
+      return reply.code(202).send({ accepted: 0, rejected: 1, throttled: 0, over_quota: 0, bot: 0 })
     }
 
     const batch = parsed.data.batch
     let accepted = 0
     let rejected = 0
     let overQuota = 0
+    let bot = 0
     const deadLetters: DeadLetterRow[] = []
 
     for (let i = 0; i < batch.length; i++) {
@@ -695,7 +751,7 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
         return reply
           .code(503)
           .header('retry-after', '5')
-          .send({ accepted, rejected, throttled, over_quota: overQuota })
+          .send({ accepted, rejected, throttled, over_quota: overQuota, bot })
       }
 
       if (result.outcome === 'accepted') accepted++
@@ -706,14 +762,15 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
       // — unlike the `overloaded` branch above, which stops because the
       // server is saturated and the remaining items are worth retrying.
       else if (result.outcome === 'over_quota') overQuota++
+      else if (result.outcome === 'bot') bot++
       else rejected++
     }
 
     await writeDeadLetters(ch, deadLetters, onDeadLetterError)
-    // throttled and over_quota are always present, even at 0: an SDK parsing
-    // a stable shape shouldn't need to special-case a field's absence versus
-    // its value.
-    return reply.code(202).send({ accepted, rejected, throttled: 0, over_quota: overQuota })
+    // throttled, over_quota and bot are always present, even at 0: an SDK
+    // parsing a stable shape shouldn't need to special-case a field's absence
+    // versus its value.
+    return reply.code(202).send({ accepted, rejected, throttled: 0, over_quota: overQuota, bot })
   })
 
   interface AliasBody {

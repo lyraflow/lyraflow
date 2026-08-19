@@ -328,6 +328,7 @@ describe('the SDK against the real app and ClickHouse', () => {
       rejected: 0,
       throttled: 0,
       over_quota: 0,
+      bot: 0,
     })
 
     // A retry or a two-tab race sends this unchanged, a second time. The
@@ -346,7 +347,7 @@ describe('the SDK against the real app and ClickHouse', () => {
       },
       payload: body,
     })
-    expect(replay.json()).toEqual({ accepted: 1, rejected: 0, throttled: 0, over_quota: 0 })
+    expect(replay.json()).toEqual({ accepted: 1, rejected: 0, throttled: 0, over_quota: 0, bot: 0 })
     await app.deps.buffer.flush()
 
     const rs = await ch.query({

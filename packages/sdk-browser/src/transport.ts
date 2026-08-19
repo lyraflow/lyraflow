@@ -299,11 +299,12 @@ export class Transport {
   }
 
   /**
-   * `/v1/batch` answers `202` with `{accepted, rejected, throttled, over_quota}`
-   * even when it stored nothing — the ingest never fails a batch over one bad
-   * event. This body is the SDK's ONLY feedback channel, and it was being
-   * thrown away: a batch that came back `{accepted: 0, rejected: 1}` was
-   * treated as fully delivered and every event in it removed, in silence.
+   * `/v1/batch` answers `202` with
+   * `{accepted, rejected, throttled, over_quota, bot}` even when it stored
+   * nothing — the ingest never fails a batch over one bad event. This body is
+   * the SDK's ONLY feedback channel, and it was being thrown away: a batch
+   * that came back `{accepted: 0, rejected: 1}` was treated as fully
+   * delivered and every event in it removed, in silence.
    *
    * `over_quota` is the same bug one field over, and it is the one the server
    * actually produces for a refused batch. `/v1/batch` never answers `429` —
@@ -313,19 +314,30 @@ export class Transport {
    * was removed. Its own operator has to act (raise the quota, or wait for the
    * month), and nothing else in the browser can tell them to.
    *
-   * A batch can be BOTH partly rejected and partly over quota — the ingest
-   * counts each item as it walks the batch, so the batch that crosses the
-   * limit comes back with `accepted`, `over_quota` and possibly `rejected` all
-   * non-zero. Each is reported on its own terms, and neither report may cost
-   * the other: they are separate `if`s (not an `if/else`), and each `warn`
-   * goes through `#warnGuarded` so a host callback that throws on the first
-   * message cannot silence the second.
+   * `bot` is the third, and it is the same bug a layer up. The ingest's bot
+   * filter reads the User-Agent, and `HeadlessChrome` is one of the tokens it
+   * matches — so a developer running Playwright or Lighthouse CI against an
+   * instrumented page gets every event dropped. Before the server counted
+   * those separately they arrived here as `rejected` and at least produced a
+   * warning; reading `rejected` alone now leaves that run in total silence,
+   * with the queue draining and nothing to suggest the integration is not
+   * working. On a real crawler visit nobody is reading this console, so the
+   * warning costs nothing and is only ever seen by the person who needs it.
+   * It says bot traffic rather than bad data, because the two call for
+   * completely different fixes.
    *
-   * Reported AFTER the removal, never instead of it: neither `rejected` nor
-   * `over_quota` will be taken on a retry either, so keeping them would only
-   * wedge the queue. The developer gets told; the queue drains.
+   * A batch can be partly rejected, partly over quota AND partly dropped as a
+   * bot — the ingest counts each item as it walks the batch, so one response
+   * can carry several of these non-zero at once. Each is reported on its own
+   * terms, and no report may cost another: they are separate `if`s (not an
+   * `if/else` chain), and each `warn` goes through `#warnGuarded` so a host
+   * callback that throws on the first message cannot silence the rest.
    *
-   * The mechanism, rather than a promise: both field reads happen inside one
+   * Reported AFTER the removal, never instead of it: none of `rejected`,
+   * `over_quota` or `bot` will be taken on a retry either, so keeping them
+   * would only wedge the queue. The developer gets told; the queue drains.
+   *
+   * The mechanism, rather than a promise: every field read happens inside one
    * `try`, so a body that is absent, not JSON, already consumed, or hostile on
    * property access ends this method with nothing reported and the send still
    * counted as `'sent'`. What that try CANNOT cover is a `json()` that never
@@ -336,11 +348,16 @@ export class Transport {
    */
   async #reportBody(res: Response): Promise<void> {
     try {
-      const body = (await res.json()) as { rejected?: unknown; over_quota?: unknown } | null
-      // Both read BEFORE either warn: a report must be decided from the body
-      // alone, never from how the host reacted to the previous one.
+      const body = (await res.json()) as {
+        rejected?: unknown
+        over_quota?: unknown
+        bot?: unknown
+      } | null
+      // ALL read BEFORE any warn: a report must be decided from the body
+      // alone, never from how the host reacted to a previous one.
       const rejected = body?.rejected
       const overQuota = body?.over_quota
+      const bot = body?.bot
       if (typeof rejected === 'number' && rejected > 0) {
         this.#warnGuarded(
           `the server rejected ${rejected} event(s) in a batch it accepted; retrying would not help, so they were dropped`,
@@ -349,18 +366,23 @@ export class Transport {
       if (typeof overQuota === 'number' && overQuota > 0) {
         this.#warnGuarded(`${overQuota} event(s) were dropped: ${QUOTA_NOTICE}`)
       }
+      if (typeof bot === 'number' && bot > 0) {
+        this.#warnGuarded(
+          `${bot} event(s) were dropped: the server read them as bot traffic, not bad data (a headless browser looks like a crawler)`,
+        )
+      }
     } catch {
       // No body, not JSON, or already consumed. Nothing to report.
     }
   }
 
   /**
-   * Used ONLY by `#reportBody`, which delivers two independent reports about
+   * Used ONLY by `#reportBody`, which delivers three independent reports about
    * one response. Elsewhere a throwing `warn` may legitimately abort the
    * branch it sits in — the outer catch in `#run` turns it into `'retry'`, and
-   * tests pin that. Here it must not: the rejection report and the quota
-   * report are about different events, and a host whose console handler throws
-   * on the first would otherwise never hear about the second.
+   * tests pin that. Here it must not: the rejection report, the quota report,
+   * and the bot report are about different events, and a host whose console
+   * handler throws on the first would otherwise never hear about the rest.
    */
   #warnGuarded(message: string): void {
     try {
