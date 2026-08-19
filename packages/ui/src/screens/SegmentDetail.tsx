@@ -402,6 +402,12 @@ export function SegmentDetail(props: { client: ApiClient; onUnauthorized?: () =>
                     members: r.members ?? [],
                     next_cursor: r.next_cursor ?? null,
                     window_exhausted: r.window_exhausted ?? false,
+                    // From THIS response, not from the `preview` state above.
+                    // That one can be a cache hit up to the server's TTL old
+                    // (see its own comment); this one shares an `as_of` with
+                    // the members beside it, and the walk's cursor pins both
+                    // to that instant (#120).
+                    person_count: r.person_count,
                   }))
                   .catch((err: unknown) => {
                     // Same 401 routing every other call on this screen does

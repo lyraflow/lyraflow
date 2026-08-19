@@ -30,7 +30,11 @@
       "types": "./dist/segments/validate.d.ts",
       "default": "./dist/segments/validate.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./segments/limits.js": {
+      "types": "./dist/segments/limits.d.ts",
+      "default": "./dist/segments/limits.js"
+    }
   },
   "engines": {
     "node": ">=22 <23"

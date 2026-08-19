@@ -1,3 +1,4 @@
+import { MEMBER_PAGE_SIZE } from '@lyraflow/core/segments/limits.js'
 import { useCallback, useRef, useState } from 'react'
 import type { MemberRow } from '../../api/types.js'
 import { Button } from '../../components/ui/button.js'
@@ -11,11 +12,21 @@ import {
 } from '../../components/ui/table.js'
 
 /** One page of the walk, decoupled from `SegmentPreview`'s optional fields --
- * a caller always has all three once it decides to ask for members at all. */
+ * a caller always has all of these once it decides to ask for members at all.
+ *
+ * `person_count` comes from THE SAME RESPONSE as the members it accompanies,
+ * and that is the whole reason it is here rather than passed down from
+ * `SegmentDetail`. The count on that screen can be a cache hit up to the
+ * server's TTL old -- its own comment says so -- and comparing a stale count
+ * against a page length is exactly how "that is everyone" gets printed over a
+ * truncated preview. The response's count and its members share an `as_of`,
+ * and the cursor pins the whole walk to that instant, so this comparison is
+ * between two facts about one moment (#120). */
 export interface MemberPage {
   members: MemberRow[]
   next_cursor: string | null
   window_exhausted: boolean
+  person_count: number
 }
 
 /** `first_seen`/`last_seen` are ISO instants; only the calendar date matters
@@ -34,27 +45,37 @@ function formatDate(iso: string): string {
 type Ending = 'exhausted' | 'window-short' | 'window-full'
 
 /**
- * Which ending a just-received page represents, given the widest page this
- * walk has seen (including this one).
+ * Which ending a just-received page represents.
  *
- * "Short" is measured against the widest page rather than against a copy of
- * the server's own `MEMBER_PAGE_SIZE`, and that is deliberate. The server
- * offers a cursor only for a page it filled completely, so every page before
- * the last one in a walk is exactly one server page wide -- the widest page
- * seen IS the server's page size, discovered from the walk instead of
- * duplicated here. Duplicating it would be a constant that can silently
- * drift, and it can drift in the dangerous direction: a UI constant LARGER
- * than the server's real page size would read a full page as short and call
- * a truncated preview "everyone", which is the exact lie this function
- * exists to prevent. Measuring cannot fail that way -- a walk whose only
- * page is short and flagged (which the real server cannot produce, since the
- * flag needs the whole page budget spent) is classified `window-full`, whose
- * copy claims nothing either way.
+ * `MEMBER_PAGE_SIZE` is now imported from the compiler that enforces it,
+ * rather than inferred from the widest page this walk happened to serve.
+ * The inference was correct and was a workaround: the constant lived in
+ * `packages/core/src/segments/compile.ts` with no subpath export, and
+ * duplicating the number here risked a UI copy drifting LARGER than the
+ * server's real page size -- which would read a full page as short and call
+ * a truncated preview "everyone". Measuring could only fail conservatively,
+ * so it was the right trade against a constant that was unreachable. It is
+ * reachable now (#120), so the real number is used and the inference is gone
+ * along with the ref that carried it across pages.
+ *
+ * `totalShown` is the length of the whole walk, not of this page -- the
+ * comparison against the population is about everything rendered so far.
  */
-function endingFor(page: MemberPage, widestPage: number): Ending | null {
+function endingFor(page: MemberPage, totalShown: number): Ending | null {
   if (page.next_cursor != null) return null
   if (!page.window_exhausted) return 'exhausted'
-  return page.members.length < widestPage ? 'window-short' : 'window-full'
+  if (page.members.length < MEMBER_PAGE_SIZE) return 'window-short'
+  // The budget ran out on a full page. That used to be the end of what could
+  // be said. The response's own count settles it: if the walk has shown the
+  // whole population, the ambiguity is not ambiguous at all.
+  //
+  // `>=` rather than `===` deliberately. Equality is the case that matters,
+  // but a count SMALLER than what was rendered can only mean the two
+  // disagree, and in that direction everyone matching has still been shown --
+  // whereas a strict equality check would fall through to the hedge and
+  // under-claim. Over-claiming is the direction this file refuses; this is
+  // the other one.
+  return totalShown >= page.person_count ? 'window-short' : 'window-full'
 }
 
 /**
@@ -132,16 +153,6 @@ export function MemberList(props: { fetchPage: (cursor?: string) => Promise<Memb
     cursor: undefined,
     replace: true,
   })
-  // The widest page this walk has served, which is how `endingFor` knows a
-  // short page when it sees one. Reset whenever a page REPLACES the
-  // accumulated list rather than appending to it -- that is a walk starting
-  // over, and carrying a previous walk's widest page into it would measure
-  // against a page this walk never saw. Defensive today rather than load
-  // bearing: the only `replace` after a successful page is a retry of the
-  // first page, where there is nothing yet to carry. It keeps the invariant
-  // ("this is the widest page of THIS walk") true by construction instead of
-  // by that remaining the case.
-  const widestPageRef = useRef(0)
 
   const load = useCallback(
     (nextCursor: string | undefined, replace: boolean) => {
@@ -152,13 +163,16 @@ export function MemberList(props: { fetchPage: (cursor?: string) => Promise<Memb
       fetchPage(nextCursor)
         .then((page) => {
           if (requestId !== requestIdRef.current) return
-          const widest = replace
-            ? page.members.length
-            : Math.max(widestPageRef.current, page.members.length)
-          widestPageRef.current = widest
-          setMembers((prev) => (replace ? page.members : [...prev, ...page.members]))
+          // The ending is decided against the length of the WHOLE walk, so
+          // it is computed here from the same value the state update uses
+          // rather than read back from `members` (which this closure would
+          // see at its stale value).
+          setMembers((prev) => {
+            const next = replace ? page.members : [...prev, ...page.members]
+            setEnding(endingFor(page, next.length))
+            return next
+          })
           setCursor(page.next_cursor ?? undefined)
-          setEnding(endingFor(page, widest))
         })
         .catch(() => {
           if (requestId !== requestIdRef.current) return
