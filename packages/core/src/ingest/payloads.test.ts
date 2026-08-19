@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { IngestPayload } from './payloads.js'
+import { MAX_ID_LENGTH } from './properties.js'
 
 const base = { message_id: '0b2f6a1e-9c4d-4a1f-8f3b-2f1c7d5e6a90', anonymous_id: 'anon-1' }
 
@@ -86,6 +87,55 @@ describe('IngestPayload', () => {
     // because IngestPayload's superRefine re-applies it. Deleting the
     // superRefine makes this the failing test.
     const r = IngestPayload.safeParse({ message_id: base.message_id, type: 'page' })
+    expect(r.success).toBe(false)
+  })
+})
+
+describe('context.library', () => {
+  const base = {
+    message_id: '00000000-0000-4000-8000-000000000001',
+    anonymous_id: 'a',
+    type: 'track' as const,
+    event: 'purchase',
+  }
+
+  it('accepts a declared library', () => {
+    const r = IngestPayload.safeParse({
+      ...base,
+      context: { library: { name: 'lyraflow-python', version: '0.1.0' } },
+    })
+    expect(r.success).toBe(true)
+    if (r.success) expect(r.data.context.library?.name).toBe('lyraflow-python')
+  })
+
+  // Optional, so every client that predates this field is unaffected.
+  it('accepts a payload with no library at all', () => {
+    const r = IngestPayload.safeParse({ ...base, context: {} })
+    expect(r.success).toBe(true)
+    if (r.success) expect(r.data.context.library).toBeUndefined()
+  })
+
+  // Both fields required WHEN PRESENT. An SDK that cannot state its own
+  // version is a bug, and a half-filled object is worse than an absent one
+  // -- it looks like a declaration while carrying nothing to support.
+  it('rejects a library missing its version', () => {
+    const r = IngestPayload.safeParse({
+      ...base,
+      context: { library: { name: 'lyraflow-python' } },
+    })
+    expect(r.success).toBe(false)
+  })
+
+  it('rejects a library missing its name', () => {
+    const r = IngestPayload.safeParse({ ...base, context: { library: { version: '0.1.0' } } })
+    expect(r.success).toBe(false)
+  })
+
+  it('rejects a name longer than MAX_ID_LENGTH', () => {
+    const r = IngestPayload.safeParse({
+      ...base,
+      context: { library: { name: 'x'.repeat(MAX_ID_LENGTH + 1), version: '0.1.0' } },
+    })
     expect(r.success).toBe(false)
   })
 })
