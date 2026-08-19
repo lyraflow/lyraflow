@@ -19,6 +19,7 @@ import { runFunnels } from './api/commands/funnels.js'
 import { runPersons } from './api/commands/persons.js'
 import { runSnippet } from './api/commands/snippet.js'
 import { runStats } from './api/commands/stats.js'
+import { runUsage } from './api/commands/usage.js'
 import type { CommandContext } from './api/context.js'
 import {
   CLI_VERSION,
@@ -680,6 +681,7 @@ async function main(): Promise<void> {
     case 'segments':
     case 'funnels':
     case 'schema':
+    case 'usage':
     case 'snippet': {
       const isTty = process.stdout.isTTY ?? false
       const stdinIsTty = process.stdin.isTTY ?? false
@@ -801,6 +803,9 @@ async function main(): Promise<void> {
         case 'schema':
           process.exitCode = await runSchema(args, ctx)
           break
+        case 'usage':
+          process.exitCode = await runUsage(args, ctx)
+          break
         case 'snippet':
           process.exitCode = await runSnippet(args, ctx)
           break
@@ -810,7 +815,7 @@ async function main(): Promise<void> {
 
     default:
       console.error(
-        'Usage: lyraflow <--version|migrate|create-project|set-admin-password|seed-demo|healthcheck|events|stats|persons|deletions|segments|funnels|schema|snippet>',
+        'Usage: lyraflow <--version|migrate|create-project|set-admin-password|seed-demo|healthcheck|events|stats|persons|deletions|segments|funnels|schema|usage|snippet>',
       )
       process.exit(2)
   }
