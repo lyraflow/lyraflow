@@ -1,6 +1,19 @@
 #!/usr/bin/env sh
 set -eu
 
+# REQUIRES DOCKER COMPOSE v2.21.0 OR NEWER (#114), for one call: the
+# `ps --format '{{.Status}}'` below. Compose accepted only `table` or `json`
+# there until v2.21.0 (docker/compose#10918 swapped in the docker CLI's own
+# container formatter); before that a Go template is answered with
+# `format value "…" could not be parsed`, non-zero.
+#
+# Deliberately NOT enforced with a version check here. That call is on an error
+# path and already falls back to an empty status, so an older Compose gets a
+# less specific message rather than a broken install -- and a hand-rolled
+# semver comparison in POSIX sh that got it wrong would refuse to install on a
+# perfectly good machine, which is a worse failure than the one it prevents.
+# The floor is documented in the README and pinned by test/compose-flags.test.ts.
+
 # Domain resolution, in order: positional argument, then the environment, then
 # an interactive prompt. The prompt is skipped when stdin is not a terminal so
 # that scripted and CI installs proceed in local mode rather than hanging on a
