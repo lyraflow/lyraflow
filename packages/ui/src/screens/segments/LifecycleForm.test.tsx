@@ -1,4 +1,4 @@
-import { Lifecycle as LifecycleSchema } from '@lyraflow/core/segments/ast.js'
+import { LIFECYCLE_FIELDS, Lifecycle as LifecycleSchema } from '@lyraflow/core/segments/ast.js'
 import type { Lifecycle } from '@lyraflow/core/segments/ast.js'
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -83,6 +83,40 @@ describe('LifecycleForm', () => {
         .getAllByRole('option')
         .map((o) => o.textContent),
     ).toEqual(['first_seen', 'last_seen'])
+  })
+
+  // The pin that actually binds this control to the compiler's injection
+  // boundary. The test above asserts the two names the form offers TODAY,
+  // which is a change-detector: it fails when the list grows, but it would
+  // pass just as happily against a hand-written pair that no longer matched
+  // the schema -- which is exactly the state this file used to be in.
+  //
+  // This one asks the SCHEMA what it accepts and requires the offered set to
+  // be that, in both directions. Every option must parse; a name the schema
+  // rejects must not be offered. Widen the form without widening the enum
+  // and the first half fails; widen the enum without the form and the second
+  // half does.
+  it('offers exactly the fields the schema accepts, in both directions', () => {
+    render(<LifecycleForm id="c" node={lifecycleNode()} onChange={vi.fn()} />)
+    const offered = within(screen.getByRole('combobox', { name: /field/i }))
+      .getAllByRole('option')
+      .map((o) => (o as HTMLOptionElement).value)
+
+    expect(offered.length, 'no options rendered — the check would be vacuous').toBeGreaterThan(0)
+
+    for (const field of offered) {
+      const parsed = LifecycleSchema.safeParse({
+        kind: 'lifecycle',
+        field,
+        operator: '>',
+        value: '2026-08-01T00:00:00Z',
+      })
+      expect(parsed.success, `the form offers ${field}, which the schema rejects`).toBe(true)
+    }
+
+    expect([...offered].sort(), 'the schema accepts a field the form never offers').toEqual(
+      [...LIFECYCLE_FIELDS].sort(),
+    )
   })
 
   it('renders the value control as a datetime picker, not a free text box', () => {

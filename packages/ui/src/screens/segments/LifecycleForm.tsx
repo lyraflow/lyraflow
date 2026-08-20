@@ -1,34 +1,9 @@
-import type { Lifecycle } from '@lyraflow/core/segments/ast.js'
+import { LIFECYCLE_FIELDS, type Lifecycle } from '@lyraflow/core/segments/ast.js'
 import { Label } from '../../components/ui/label.js'
 import { OperatorSelect } from './OperatorSelect.js'
 import type { ConditionValue } from './ValueInput.js'
 import { ValueInput } from './ValueInput.js'
 import { valueToPicker, valueToStored } from './datetime.js'
-
-/**
- * `ast.ts` inlines this as `z.enum(['first_seen', 'last_seen'])` rather
- * than exporting a named constant the way `CONTEXT_FIELDS` is exported, but
- * that is a naming difference, not a difference in kind: there IS a
- * compiled-SQL injection boundary here, the same shape as CONTEXT_FIELDS's.
- * packages/core/src/segments/predicates.ts's lifecycleExpr interpolates
- * n.field directly as a bare SQL identifier into the generated WHERE clause
- * -- exactly the pattern CONTEXT_FIELDS/CONTEXT_COLUMNS exists to guard
- * elsewhere. What closes it here is the z.enum in ast.ts -- the ACTUAL
- * boundary -- together with this control being a closed select over
- * exactly its two values, never a free-typed field. This list has to keep
- * matching that enum exactly, not merely for tidiness: widening it (a third
- * option, a free-typed fallback) without a matching change to the enum
- * would reopen that identifier to request data. Check predicates.ts before
- * changing either side.
- *
- * Exported so that `ConditionRow`'s kind switcher can seed a fresh
- * `lifecycle` node's `field` FROM THIS LIST rather than from a literal
- * chosen at the call site -- the same reason `ContextForm` imports
- * `CONTEXT_FIELDS` from core instead of repeating it. A second hand-written
- * spelling of a value that becomes a bare SQL identifier is exactly what the
- * enum above exists to stop.
- */
-export const LIFECYCLE_FIELDS = ['first_seen', 'last_seen'] as const
 
 /**
  * The `lifecycle` leaf form. Its value is always an instant (`ast.ts`'s
