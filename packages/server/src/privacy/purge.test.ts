@@ -198,6 +198,11 @@ function chFailingFirstCommand(real: ClickHouseClient): ClickHouseClient {
       if (calls === 1) throw new Error('injected failure: simulated mid-purge crash')
       return real.command(params)
     },
+    // Delegated: the purge READS before it writes now, to learn which property
+    // keys belong to this person before their events are deleted (#144). This
+    // stub exists to fail the first MUTATION, so the reads pass straight
+    // through -- injecting a failure here would test a different thing.
+    query: (params: Parameters<ClickHouseClient['query']>[0]) => real.query(params),
   } as unknown as ClickHouseClient
 }
 
@@ -790,6 +795,96 @@ describe('purgePerson', () => {
 
     expect(
       await rowCount('event_schema', projectA, "event_name = 'shared_event_name'", {}),
+    ).toBeGreaterThan(0)
+  })
+
+  // #144: step 6 sweeps an event NAME with nothing behind it. This is the
+  // level below -- a name other people still send, carrying a key only the
+  // erased person ever supplied.
+  it('removes a property key only the erased person ever sent', async () => {
+    const erased = `own-key-erased-${randomUUID()}`
+    const other = `own-key-other-${randomUUID()}`
+    await insertEvent({
+      projectId: projectA,
+      userId: erased,
+      timestamp: chAt(10),
+      eventName: 'checkout',
+      properties: { patient_id: 'p-1', currency: 'GBP' },
+    })
+    await insertEvent({
+      projectId: projectA,
+      userId: other,
+      timestamp: chAt(9),
+      eventName: 'checkout',
+      properties: { currency: 'USD' },
+    })
+
+    expect(
+      await rowCount(
+        'event_schema',
+        projectA,
+        "event_name = 'checkout' AND property_key = 'patient_id'",
+        {},
+      ),
+    ).toBeGreaterThan(0)
+
+    const scope = await resolvePersonScope({ bindings, aliases }, projectA, erased)
+    await purgePerson({ ch, pg, projectId: projectA, scope })
+
+    // The key only they sent is gone...
+    expect(
+      await rowCount(
+        'event_schema',
+        projectA,
+        "event_name = 'checkout' AND property_key = 'patient_id'",
+        {},
+      ),
+    ).toBe(0)
+    // ...the event name survives, because someone else still fires it...
+    expect(await rowCount('event_schema', projectA, "event_name = 'checkout'", {})).toBeGreaterThan(
+      0,
+    )
+    // ...and so does the key the co-tenant still sends. Without this the test
+    // above passes against a sweep that deleted the whole event name.
+    expect(
+      await rowCount(
+        'event_schema',
+        projectA,
+        "event_name = 'checkout' AND property_key = 'currency'",
+        {},
+      ),
+    ).toBeGreaterThan(0)
+  })
+
+  // A key the erased person sent AND someone else still sends must stay. The
+  // sweep asks "does any surviving event still carry this", not "did they
+  // touch it".
+  it('keeps a property key the erased person shared with someone else', async () => {
+    const erased = `shared-key-erased-${randomUUID()}`
+    const other = `shared-key-other-${randomUUID()}`
+    for (const [user, ts] of [
+      [erased, chAt(10)],
+      [other, chAt(9)],
+    ] as const) {
+      await insertEvent({
+        projectId: projectA,
+        userId: user,
+        timestamp: ts,
+        eventName: 'shared_key_event',
+        properties: { shared_prop: 'x' },
+      })
+    }
+
+    const scope = await resolvePersonScope({ bindings, aliases }, projectA, erased)
+    await purgePerson({ ch, pg, projectId: projectA, scope })
+
+    expect(
+      await rowCount(
+        'event_schema',
+        projectA,
+        "event_name = 'shared_key_event' AND property_key = 'shared_prop'",
+        {},
+      ),
     ).toBeGreaterThan(0)
   })
 
