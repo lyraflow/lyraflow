@@ -1341,14 +1341,22 @@ autocomplete can be built on. Both are server-key only, for the same reason as
 `/v1/segments/preview`: a project's event taxonomy describes its product, and
 the browser-shipped write key must not be able to read it.
 
-**Only events carrying at least one property are discoverable this way.** Both
-endpoints read from `event_schema`, which is fed by an `ARRAY JOIN` over each
-event's property map — an event with an empty map produces no rows at all, so
-it is invisible to `/v1/schema/events` too, not merely absent from
-`/v1/schema/properties`. A `retry_semantics` event with no properties will
-never show up in an events autocomplete built on this endpoint, even though it
-is sitting in `events` right now. If your product sends property-less events
-you want to filter or discover this way, give them at least one property.
+**Every event name is discoverable, including events that carry no properties
+at all.** That was not always true, and the limitation is worth recording
+because upgrading is what fixes it: both endpoints read from `event_schema`,
+which was fed only by an `ARRAY JOIN` over each event's property maps — and an
+`ARRAY JOIN` over an empty map produces no rows, so an event with no properties
+registered nothing and was invisible to `/v1/schema/events`, not merely absent
+from `/v1/schema/properties`.
+
+A third view now writes one row per event whose only job is to register the
+name. **Existing events are not backfilled**: a property-less name recorded
+before this release appears once the next such event arrives, which for a name
+your product still sends is the next time it fires.
+
+`/v1/schema/properties` for an event with no properties correctly returns an
+empty list — the name is discoverable, and there is genuinely nothing to filter
+on.
 
 ```sh
 curl -s http://localhost:3000/v1/schema/events?q=import \

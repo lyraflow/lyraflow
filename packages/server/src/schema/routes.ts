@@ -97,8 +97,16 @@ export function registerSchemaRoutes(app: FastifyInstance, deps: SchemaDeps): vo
     if (!q.success) return reply.code(400).send({ error: 'invalid query' })
 
     const rs = await ch.query({
+      // `property_key != ''` excludes a SENTINEL, not a property. Migration
+      // 017 writes one row per event with an empty property_key so that an
+      // event carrying NO properties still registers its name -- otherwise
+      // ARRAY JOIN over mapKeys of an empty map produces nothing and the name
+      // is invisible to /v1/schema/events (#22). Those rows must never be
+      // offered here: an empty key renders as a blank, selectable option that
+      // compiles to properties[''] and matches nothing.
       query: `SELECT DISTINCT property_key, value_kind FROM event_schema
                WHERE project_id = {projectId:UInt32}
+                 AND property_key != ''
                  AND ({event:String} = '' OR event_name = {event:String})
                  AND ({q:String} = '' OR startsWith(property_key, {q:String}))
                ORDER BY property_key ASC

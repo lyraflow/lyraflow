@@ -1,0 +1,39 @@
+-- 017_event_schema_names: an event with no properties still has a name.
+--
+-- `event_schema` is fed by two materialised views that unroll the property
+-- maps with `ARRAY JOIN mapKeys(...)`. An ARRAY JOIN over an EMPTY map
+-- produces no rows at all -- so an event carrying no properties wrote nothing,
+-- and its name never appeared in `GET /v1/schema/events` despite being a
+-- perfectly good thing to filter on. Found while checking why a real event
+-- name was missing from the endpoint (#22).
+--
+-- This third view writes one row per event with an EMPTY property_key, whose
+-- only job is to register the name.
+--
+-- Why not source names from `events` in the route instead, which needs no
+-- migration: `events` is `ORDER BY (project_id, timestamp, anonymous_id,
+-- event_id)` and `event_name` is NOT in the sort key, so `SELECT DISTINCT
+-- event_name` is a full column scan over the project's whole history -- on an
+-- autocomplete endpoint, which is typed into. The issue floated it as "at the
+-- cost of a wider scan"; the sort key is what decides how wide.
+--
+-- The cost this DOES pay is one extra row per event on the ingest path. That
+-- is real and bounded: the target is a ReplacingMergeTree keyed on
+-- (project_id, event_name, property_key, value_kind), so after merge there is
+-- exactly one such row per event name per project -- and event names are
+-- already capped at 1000 per project by the cardinality tracker. The two
+-- existing views already write one row per property key per event, so this is
+-- a small addition to a write that was never one row.
+--
+-- The empty `property_key` is a SENTINEL and must never be offered as a
+-- property. `GET /v1/schema/properties` filters it out; that filter is the
+-- other half of this migration and is pinned by its own test.
+--
+-- The purge needs no change, and that was checked rather than assumed: step 6
+-- deletes `WHERE event_name IN {names}`, which takes the sentinel row with
+-- every other row for a stale name, and step 7 only considers the (name, key,
+-- kind) triples an erased person actually sent -- never a triple with an empty
+-- key.
+CREATE MATERIALIZED VIEW IF NOT EXISTS event_schema_name_mv TO event_schema AS
+SELECT project_id, event_name, '' AS property_key, '' AS value_kind, timestamp AS last_seen
+FROM events;
