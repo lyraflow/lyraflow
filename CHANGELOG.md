@@ -63,6 +63,26 @@ one fix is contained in 0.3.0.
   at acquisition, and asking for them at `latest` scope returns the
   first-touch value.
 
+### Fixed
+
+- **A segment condition on a numeric property matched nobody when it was
+  written in the web UI.** Every control in the builder yields text, and a
+  predicate reads `properties` or `properties_num` depending on whether its
+  value is a JSON string or a JSON number — so `results = 21`, typed in the
+  builder, asked the string map for a number and got a confident zero. The
+  same held for a numeric trait. The builder now reads each property's
+  recorded kind from `GET /v1/schema/properties` and sends the matching type.
+
+  **Segments saved before this fix keep the value they were saved with.**
+  Opening one in the builder converts it as soon as the schema answers, and
+  saving persists the corrected value; nothing is rewritten in place until
+  then.
+
+  Where the kind cannot be established — a property the project has never
+  recorded, or one it has recorded both as text and as a number — the
+  condition stays text, as it always was, and the row now says so instead of
+  leaving a zero to be interpreted.
+
 ## 0.7.0
 
 Two changes alter what stored data MEANS, and both are called out first because

@@ -1,5 +1,6 @@
 import { useEffect, useId, useState } from 'react'
 import type { ApiClient } from '../../api/client.js'
+import type { SchemaProperty } from '../../api/types.js'
 import { Combobox } from '../../components/Combobox.js'
 import { Label } from '../../components/ui/label.js'
 import { usePropertyNames } from './usePropertyNames.js'
@@ -66,6 +67,11 @@ export function PropertyCombobox(props: {
    * and the box is empty. Say why it is empty -- "none recorded yet" is
    * actionable, an empty dropdown is not. */
   emptyMessage?: string
+  /** Every name this field's lookup reported, with the kind `event_schema`
+   * recorded for it. A caller whose VALUE control has to know whether the
+   * name holds numbers or text reads it from here rather than fetching the
+   * same list again -- see `propertyKinds.ts` for what depends on it. */
+  onProperties?: (properties: SchemaProperty[]) => void
 }) {
   const {
     client,
@@ -92,13 +98,22 @@ export function PropertyCombobox(props: {
   // sectioned popup. Same reasoning as EventCombobox's own `loadError`: a
   // 401 routes to `onUnauthorized`, any other failure says the suggestions
   // themselves failed rather than silently implying the property has none.
-  const { options, loading, error } = usePropertyNames({
+  const { properties, options, loading, error } = usePropertyNames({
     client,
     projectId,
     event,
     query: text,
     onUnauthorized,
   })
+
+  // From an effect, not the lookup's `then`: a parent that stores this
+  // re-renders this component, and a setState during another component's
+  // render is a React warning. `properties` is a new array only when a
+  // lookup actually landed.
+  const { onProperties } = props
+  useEffect(() => {
+    if (properties.length > 0) onProperties?.(properties)
+  }, [properties, onProperties])
 
   return (
     <div className="flex min-w-0 flex-col gap-1">

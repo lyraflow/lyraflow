@@ -2,6 +2,7 @@ import { EVENT_COLUMN_FIELDS } from '@lyraflow/core/segments/ast.js'
 import type { EventColumnField } from '@lyraflow/core/segments/ast.js'
 import { useEffect, useId, useState } from 'react'
 import type { ApiClient } from '../../api/client.js'
+import type { SchemaProperty } from '../../api/types.js'
 import { Combobox } from '../../components/Combobox.js'
 import { Label } from '../../components/ui/label.js'
 import { usePropertyNames } from './usePropertyNames.js'
@@ -68,6 +69,21 @@ export function FieldCombobox(props: {
   value: FieldChoice
   onChange: (next: FieldChoice) => void
   label?: string
+  /**
+   * Every property this field's own lookup reported, kinds included, each
+   * time one lands.
+   *
+   * The owner needs the KIND of the property a row names -- it decides
+   * whether the predicate's value is a number or a string, and getting that
+   * wrong is a condition that matches nothing (see `propertyKinds.ts`). The
+   * lookup that already runs here is the only place that knows, so it is
+   * reported rather than fetched a second time by the owner.
+   *
+   * The whole list, not just the chosen name: a row's kind must be known
+   * whether the operator picked from the list or typed the name, and the
+   * lookup for either lands the same way.
+   */
+  onProperties?: (properties: SchemaProperty[]) => void
   onUnauthorized?: () => void
 }) {
   const { client, projectId, event, value, onChange, label = 'Property or attribute' } = props
@@ -78,13 +94,23 @@ export function FieldCombobox(props: {
     setText(value.name)
   }, [value.name])
 
-  const { options, loading, error } = usePropertyNames({
+  const { properties, options, loading, error } = usePropertyNames({
     client,
     projectId,
     event,
     query: text,
     onUnauthorized: props.onUnauthorized,
   })
+
+  // Reported from an effect rather than inside the lookup's own `then`,
+  // because a parent that stores this will re-render this component, and a
+  // setState called during another component's render is a React warning
+  // rather than a nuisance. `properties` is a new array only when a lookup
+  // actually landed, so this does not fire on unrelated renders.
+  const { onProperties } = props
+  useEffect(() => {
+    if (properties.length > 0) onProperties?.(properties)
+  }, [properties, onProperties])
 
   const q = text.trim().toLowerCase()
   const attributes = EVENT_COLUMN_FIELDS.filter((f) => f.startsWith(q))

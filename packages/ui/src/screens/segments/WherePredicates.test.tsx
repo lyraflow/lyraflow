@@ -10,7 +10,7 @@ import { WherePredicates } from './WherePredicates.js'
 function fakeClient(properties: string[] = []): ApiClient {
   return {
     schemaProperties: vi.fn(async (_p: number, _e: string | undefined, q: string) =>
-      properties.filter((n) => n.startsWith(q)),
+      properties.filter((n) => n.startsWith(q)).map((name) => ({ name, kind: 'string' as const })),
     ),
   } as unknown as ApiClient
 }
@@ -411,5 +411,150 @@ describe('WherePredicates — attribute rows', () => {
     expect(onChange).toHaveBeenLastCalledWith([
       { source: 'attribute', attribute: 'city', operator: '>', value: '12' },
     ])
+  })
+})
+
+// The defect: `wherePredicate` chooses which of the two property maps to read
+// from the JAVASCRIPT TYPE of the value, and every control in this form
+// yields `e.target.value` -- a string. So a predicate on a numeric property
+// read `properties[...]`, matched nothing, and reported it as a zero. Live,
+// against a real project: `results = "21"` found 0 people and `results = 21`
+// found 31.
+describe("WherePredicates — the value carries the property's kind", () => {
+  const schema = (properties: { name: string; kind: 'string' | 'number' | 'mixed' }[]) =>
+    ({ schemaProperties: vi.fn(async () => properties) }) as unknown as ApiClient
+
+  const NUMERIC = [
+    { name: 'results', kind: 'number' as const },
+    { name: 'query', kind: 'string' as const },
+  ]
+
+  /** The tree as the parent last saw it -- what would be sent to the API. */
+  let current: WherePredicate[] | undefined
+
+  function Harness(props: { client: ApiClient; initial?: WherePredicate[] }) {
+    const [value, setValue] = useState<WherePredicate[] | undefined>(
+      props.initial ?? [{ property: '', operator: '=', value: '' }],
+    )
+    current = value
+    return (
+      <WherePredicates
+        id="beh"
+        event="docs_search"
+        client={props.client}
+        projectId={1}
+        value={value}
+        onChange={setValue}
+      />
+    )
+  }
+
+  const first = () => current?.[0] as { property: string; value: unknown }
+
+  const chooseProperty = async (name: string) => {
+    await userEvent.click(screen.getByLabelText('Property or attribute'))
+    await waitFor(() => expect(screen.getByText('Properties')).toBeInTheDocument())
+    await userEvent.click(screen.getByRole('option', { name }))
+  }
+
+  it('sends a number for a property the schema records as numeric', async () => {
+    render(<Harness client={schema(NUMERIC)} />)
+    await chooseProperty('results')
+    await userEvent.type(screen.getByRole('textbox', { name: /value/i }), '21')
+    // The point of the whole fix: 21, not "21".
+    await waitFor(() => expect(first().value).toBe(21))
+    expect(screen.getByRole('textbox', { name: /value/i })).toHaveValue('21')
+  })
+
+  it('leaves a property the schema records as text alone', async () => {
+    render(<Harness client={schema(NUMERIC)} />)
+    await chooseProperty('query')
+    await userEvent.type(screen.getByRole('textbox', { name: /value/i }), '21')
+    await waitFor(() => expect(first().value).toBe('21'))
+  })
+
+  // Order must not matter: the kind can land after the value was typed, and
+  // typing the value first is the ordinary way an operator fills a row they
+  // are correcting.
+  it('converts a value that was typed before the property was chosen', async () => {
+    render(<Harness client={schema(NUMERIC)} />)
+    await userEvent.type(screen.getByRole('textbox', { name: /value/i }), '21')
+    expect(first().value).toBe('21')
+    await chooseProperty('results')
+    await waitFor(() => expect(first().value).toBe(21))
+  })
+
+  // And back again: switching a row from a numeric property to a text one
+  // must not leave a number reading the string map, which is this same bug
+  // with the maps swapped.
+  it('converts back to text when the row moves to a string property', async () => {
+    render(<Harness client={schema(NUMERIC)} />)
+    await chooseProperty('results')
+    await userEvent.type(screen.getByRole('textbox', { name: /value/i }), '21')
+    await waitFor(() => expect(first().value).toBe(21))
+    await chooseProperty('query')
+    await waitFor(() => expect(first().value).toBe('21'))
+  })
+})
+
+describe('WherePredicates — saying so when the kind is not established', () => {
+  const client = (kind: 'string' | 'number' | 'mixed') =>
+    ({
+      schemaProperties: vi.fn(async () =>
+        kind === 'mixed'
+          ? [{ name: 'results', kind: 'mixed' as const }]
+          : [{ name: 'results', kind }],
+      ),
+    }) as unknown as ApiClient
+
+  const row = (client: ApiClient, predicate: WherePredicate) =>
+    render(
+      <WherePredicates
+        id="beh"
+        event="docs_search"
+        client={client}
+        projectId={1}
+        value={[predicate]}
+        onChange={vi.fn()}
+      />,
+    )
+
+  // The residue of the bug. With no kind to coerce against, the predicate
+  // stays text and will not match events that sent the key as a number --
+  // and before this line the only evidence of that was a count of zero.
+  it('warns about a numeric-looking value on a property nothing has recorded', async () => {
+    row({ schemaProperties: vi.fn(async () => []) } as unknown as ApiClient, {
+      property: 'results',
+      operator: '=',
+      value: '21',
+    })
+    await waitFor(() => expect(screen.getByTestId('beh-where-0-note')).toHaveTextContent('as text'))
+  })
+
+  it('warns when the project has recorded that property both ways', async () => {
+    row(client('mixed'), { property: 'results', operator: '=', value: '21' })
+    await waitFor(() =>
+      expect(screen.getByTestId('beh-where-0-note')).toHaveTextContent(
+        'both as text and as a number',
+      ),
+    )
+  })
+
+  it('says nothing once the kind is known', async () => {
+    row(client('number'), { property: 'results', operator: '=', value: 21 })
+    await waitFor(() => expect(screen.queryByTestId('beh-where-0-note')).toBeNull())
+  })
+
+  // The attribute note wins where both could fire: a name that IS an event
+  // column is the more specific thing to say about it.
+  it('prefers the attribute note over the kind note', async () => {
+    row({ schemaProperties: vi.fn(async () => []) } as unknown as ApiClient, {
+      property: 'utm_campaign',
+      operator: '=',
+      value: '21',
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId('beh-where-0-note')).toHaveTextContent('Attributes'),
+    )
   })
 })

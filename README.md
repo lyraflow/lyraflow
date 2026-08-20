@@ -1227,6 +1227,15 @@ possible — `properties` comes from the caller's own bag and `path` from
 `{ "source": "attribute", "attribute": "path" }` reads the column, whichever
 one your events happen to carry.
 
+**A property predicate's VALUE TYPE chooses which map it reads.** Ingest puts
+a finite number in `properties_num` and everything else in `properties`, and a
+predicate reads one or the other: `{"property": "results", "value": 21}` reads
+the numeric map, `{"property": "results", "value": "21"}` reads the string one.
+They are different questions, and the wrong one matches nothing rather than
+erroring — so send the type you sent at ingest. `GET /v1/schema/properties`
+returns a `value_kind` per key if you need to look it up; the web UI reads it
+and sends the matching type for you.
+
 **An attribute predicate is not a `context` condition**, and the difference is
 the question each answers. A `context` condition is about the PERSON: it
 matches whoever was acquired through a campaign, whatever they later did. A

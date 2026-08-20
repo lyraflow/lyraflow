@@ -1,9 +1,12 @@
 import type { Trait } from '@lyraflow/core/segments/ast.js'
+import { useCallback, useEffect, useState } from 'react'
 import type { ApiClient } from '../../api/client.js'
+import type { PropertyKind, SchemaProperty } from '../../api/types.js'
 import { OperatorSelect } from './OperatorSelect.js'
 import { PropertyCombobox } from './PropertyCombobox.js'
 import { TraitValueField } from './TraitValueField.js'
 import type { ConditionValue } from './ValueInput.js'
+import { coerceForKind, kindNote, learnKinds } from './propertyKinds.js'
 
 /** The event name the ingest path assigns to an identify payload, whose
  * property bag IS the traits bag (`eventName`/`toEventRow`,
@@ -54,34 +57,64 @@ export function TraitForm(props: {
   const { id, node, onChange, client, projectId, onUnauthorized } = props
   const operatorId = `${id}-operator`
 
+  // A trait predicate reads `t_str` or `t_num`, and `traitExpr` chooses from
+  // the JavaScript type of the value exactly as `wherePredicate` does -- so a
+  // numeric trait typed into this form read the string map and matched
+  // nobody. Verified live at the time of the fix: `seats = "12"` found 0
+  // people where `seats = 12` found 20. Same defect, same repair; see
+  // `propertyKinds.ts`, and `WherePredicates` for why this heals from an
+  // effect rather than inside the change handlers.
+  const [kinds, setKinds] = useState<Record<string, PropertyKind>>({})
+  const learn = useCallback((reported: SchemaProperty[]) => {
+    setKinds((known) => learnKinds(known, reported))
+  }, [])
+
+  useEffect(() => {
+    const next = coerceForKind(node.value as ConditionValue, kinds[node.key])
+    if (next !== node.value) onChange({ ...node, value: next } as Trait)
+  }, [kinds, node, onChange])
+
+  const note = kindNote(node.key, kinds[node.key], node.value as ConditionValue)
+
   return (
-    <div className="flex min-w-0 flex-wrap items-end gap-2">
-      <PropertyCombobox
-        client={client}
-        projectId={projectId}
-        event={IDENTIFY_EVENT}
-        value={node.key}
-        onChange={(key) => onChange({ ...node, key })}
-        label="Trait"
-        placeholder="e.g. plan"
-        hint="Set on a person by identify(). Start typing to search."
-        emptyMessage="No traits recorded yet -- they appear here once your app calls identify()."
-        onUnauthorized={onUnauthorized}
-      />
-      <OperatorSelect
-        id={operatorId}
-        value={node.operator}
-        onChange={(operator) => onChange({ ...node, operator })}
-      />
-      <TraitValueField
-        client={client}
-        projectId={projectId}
-        trait={node.key}
-        operator={node.operator}
-        value={node.value as ConditionValue}
-        onChange={(value) => onChange({ ...node, value } as Trait)}
-        onUnauthorized={onUnauthorized}
-      />
+    <div className="flex min-w-0 flex-col gap-1">
+      <div className="flex min-w-0 flex-wrap items-end gap-2">
+        <PropertyCombobox
+          client={client}
+          projectId={projectId}
+          event={IDENTIFY_EVENT}
+          value={node.key}
+          onChange={(key) => onChange({ ...node, key })}
+          label="Trait"
+          placeholder="e.g. plan"
+          hint="Set on a person by identify(). Start typing to search."
+          emptyMessage="No traits recorded yet -- they appear here once your app calls identify()."
+          onProperties={learn}
+          onUnauthorized={onUnauthorized}
+        />
+        <OperatorSelect
+          id={operatorId}
+          value={node.operator}
+          onChange={(operator) => onChange({ ...node, operator })}
+        />
+        <TraitValueField
+          client={client}
+          projectId={projectId}
+          trait={node.key}
+          operator={node.operator}
+          value={node.value as ConditionValue}
+          onChange={(value) => onChange({ ...node, value } as Trait)}
+          onUnauthorized={onUnauthorized}
+        />
+      </div>
+      {/* Muted, not `destructive`: nothing here is refused and the operator
+       * did nothing wrong -- the kind of this trait simply is not established,
+       * so the condition reads it as text. */}
+      {note != null && (
+        <p data-testid={`${id}-kind-note`} className="text-xs text-muted-foreground">
+          {note}
+        </p>
+      )}
     </div>
   )
 }

@@ -7,7 +7,10 @@ import { PropertyCombobox } from './PropertyCombobox.js'
 
 describe('PropertyCombobox', () => {
   it('queries the schema with the typed prefix, scoped to the given event, and lists what comes back', async () => {
-    const schemaProperties = vi.fn(async () => ['amount_cents', 'amount_currency'])
+    const schemaProperties = vi.fn(async () => [
+      { name: 'amount_cents', kind: 'string' as const },
+      { name: 'amount_currency', kind: 'string' as const },
+    ])
     render(
       <PropertyCombobox
         client={{ schemaProperties } as unknown as ApiClient}
@@ -31,7 +34,11 @@ describe('PropertyCombobox', () => {
   // a picker at all. `event_schema` is a catalogue, so asking on render is
   // affordable -- and the popup opens on focus with what came back.
   it('asks with an empty query on mount, and shows the answer on focus', async () => {
-    const schemaProperties = vi.fn(async () => ['amount_cents', 'currency', 'plan_id'])
+    const schemaProperties = vi.fn(async () => [
+      { name: 'amount_cents', kind: 'string' as const },
+      { name: 'currency', kind: 'string' as const },
+      { name: 'plan_id', kind: 'string' as const },
+    ])
     render(
       <PropertyCombobox
         client={{ schemaProperties } as unknown as ApiClient}
@@ -205,7 +212,7 @@ describe('PropertyCombobox', () => {
     // A fresh arrow on every render is the point of this test, not an
     // oversight: a stable `useCallback` would pass whether or not the bug
     // exists, which makes it the coincidence-point version of this test.
-    const schemaProperties = vi.fn(async () => ['amount_cents'])
+    const schemaProperties = vi.fn(async () => [{ name: 'amount_cents', kind: 'string' as const }])
     const client = { schemaProperties } as unknown as ApiClient
     const view = render(
       <PropertyCombobox

@@ -12,7 +12,7 @@ import { FieldCombobox } from './FieldCombobox.js'
 function fakeClient(properties: string[] = ['path', 'plan', 'utm_test_variant']): ApiClient {
   return {
     schemaProperties: vi.fn(async (_p: number, _e: string | undefined, q: string) =>
-      properties.filter((n) => n.startsWith(q)),
+      properties.filter((n) => n.startsWith(q)).map((name) => ({ name, kind: 'string' as const })),
     ),
   } as unknown as ApiClient
 }

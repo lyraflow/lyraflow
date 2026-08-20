@@ -1,6 +1,8 @@
 import { MAX_WHERE_PREDICATES, wherePredicateField } from '@lyraflow/core/segments/ast.js'
 import type { EventColumnField, WherePredicate } from '@lyraflow/core/segments/ast.js'
+import { useCallback, useEffect, useState } from 'react'
 import type { ApiClient } from '../../api/client.js'
+import type { PropertyKind, SchemaProperty } from '../../api/types.js'
 import { Button } from '../../components/ui/button.js'
 import type { FieldChoice } from './FieldCombobox.js'
 import { FieldCombobox } from './FieldCombobox.js'
@@ -8,6 +10,7 @@ import { OperatorSelect } from './OperatorSelect.js'
 import type { ConditionValue, Scalar } from './ValueInput.js'
 import { ValueInput } from './ValueInput.js'
 import { columnFieldNote } from './columnFields.js'
+import { coerceForKind, kindNote, learnKinds } from './propertyKinds.js'
 
 /** A freshly added predicate -- an empty property, `=`, and an empty value,
  * the same starting shape `GroupCard.newCondition` gives a fresh trait leaf.
@@ -89,6 +92,45 @@ export function WherePredicates(props: {
 }) {
   const { id, event, client, projectId, value, onChange, onUnauthorized } = props
   const predicates = value ?? []
+
+  // What the schema has said about each property NAME, accumulated across
+  // every row's own lookup. See `learnKinds` for why it accumulates and why
+  // it is keyed by name rather than by row.
+  const [kinds, setKinds] = useState<Record<string, PropertyKind>>({})
+  const learn = useCallback((reported: SchemaProperty[]) => {
+    setKinds((known) => learnKinds(known, reported))
+  }, [])
+
+  /**
+   * Retypes any value whose property's kind is known and disagrees with it.
+   *
+   * An effect, not a step inside the change handlers, because the two facts
+   * arrive in either order: an operator may choose the property and then type
+   * the value, or type the value into a row they are correcting and choose
+   * the property after. Only one of those orders can be handled at the
+   * keystroke; the other needs the tree revisited once the kind lands.
+   *
+   * This is the same self-healing shape `ValueInput` already uses to keep
+   * `between` and its value in agreement, for the same reason: the form's own
+   * state is the thing being repaired, and repairing it where it is noticed
+   * beats making every handler remember.
+   *
+   * Converges because `coerceForKind` returns its argument by identity when
+   * there is nothing to do, so the write-back happens once per genuine
+   * change and the next run finds nothing.
+   */
+  useEffect(() => {
+    if (value === undefined) return
+    let changed = false
+    const healed = value.map((p) => {
+      if (p.source === 'attribute') return p
+      const next = coerceForKind(p.value as ConditionValue, kinds[p.property])
+      if (next === p.value) return p
+      changed = true
+      return { ...p, value: next } as WherePredicate
+    })
+    if (changed) onChange(healed)
+  }, [kinds, value, onChange])
   // The AST caps a `where` array at `MAX_WHERE_PREDICATES` for a behaviour
   // and for a funnel step alike, and the constant comes from the schema
   // that rejects it rather than being retyped here -- a form that lets an
@@ -123,7 +165,16 @@ export function WherePredicates(props: {
         // problem the row does not have. Said HERE, while the name is being
         // typed, rather than at save time -- the predicate is not invalid,
         // it simply reads a map this name is not in. See `columnFields.ts`.
-        const note = field.source === 'property' ? columnFieldNote(field.name) : null
+        // Two notes, one slot, and they cannot both apply: `columnFieldNote`
+        // fires when a property row names an ATTRIBUTE, `kindNote` when it
+        // names a property whose kind nothing has established. The first is
+        // checked first because a name that is an attribute is the more
+        // specific thing to say about it.
+        const note =
+          field.source === 'property'
+            ? (columnFieldNote(field.name) ??
+              kindNote(field.name, kinds[field.name], p.value as ConditionValue))
+            : null
         return (
           <div key={rowId} data-testid={rowId} className="flex min-w-0 flex-col gap-1">
             <div className="flex min-w-0 flex-wrap items-end gap-2">
@@ -133,6 +184,7 @@ export function WherePredicates(props: {
                 event={event}
                 value={field}
                 onChange={(choice) => updateAt(i, withField(p, choice))}
+                onProperties={learn}
                 onUnauthorized={onUnauthorized}
               />
               <OperatorSelect

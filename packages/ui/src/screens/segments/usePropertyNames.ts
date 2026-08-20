@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { ApiError } from '../../api/client.js'
 import type { ApiClient } from '../../api/client.js'
+import type { SchemaProperty } from '../../api/types.js'
 
 /** How long to wait after the last keystroke before asking the server. */
 export const DEBOUNCE_MS = 250
@@ -34,9 +35,9 @@ export function usePropertyNames(opts: {
   /** The text currently in the field. Trimmed here; the debounce is here too. */
   query: string
   onUnauthorized?: () => void
-}): { options: string[]; loading: boolean; error: boolean } {
+}): { properties: SchemaProperty[]; options: string[]; loading: boolean; error: boolean } {
   const { client, projectId, event, query, onUnauthorized } = opts
-  const [options, setOptions] = useState<string[]>([])
+  const [properties, setProperties] = useState<SchemaProperty[]>([])
   const [fetched, setFetched] = useState(false)
   const [loadError, setLoadError] = useState(false)
 
@@ -62,7 +63,7 @@ export function usePropertyNames(opts: {
       client
         .schemaProperties(projectId, event, q)
         .then((list) => {
-          setOptions(list)
+          setProperties(list)
           setLoadError(false)
           setFetched(true)
         })
@@ -71,7 +72,7 @@ export function usePropertyNames(opts: {
             unauthorizedRef.current?.()
             return
           }
-          setOptions([])
+          setProperties([])
           setLoadError(true)
           // Deliberately NOT `setFetched(true)`: see this hook's own doc.
         })
@@ -83,5 +84,11 @@ export function usePropertyNames(opts: {
     // fetched.
   }, [query, event, client, projectId])
 
-  return { options, loading: !fetched && !loadError, error: loadError }
+  return {
+    properties,
+    // The names alone, for the callers that render a list and nothing else.
+    options: properties.map((p) => p.name),
+    loading: !fetched && !loadError,
+    error: loadError,
+  }
 }
