@@ -29,7 +29,7 @@
  */
 
 import type { IngestPayload, PropertyValue, UserAgentInfo } from '@lyraflow/core'
-import { parseUserAgent } from '@lyraflow/core'
+import { eventNameFor, parseUserAgent } from '@lyraflow/core'
 import type { GeoInfo } from '@lyraflow/server/dist/ingest/geo.js'
 import { UsageError } from '../api/args.js'
 import {
@@ -44,7 +44,10 @@ import {
 
 /** Ordered exactly as a person walks them; index 0 is the funnel's entry. */
 export const FUNNEL_EVENTS = [
-  'page_view',
+  // `$page`, not 'page_view'. A page view is stored under one name with the
+  // page's own name as a property (#53), so the demo funnel's first step is
+  // "viewed any page" -- which is what it always meant and could not say.
+  '$page',
   'signup_started',
   'signup_completed',
   'checkout_started',
@@ -79,7 +82,11 @@ function reservedFor(depth: number): number {
 
 /** Event names that exist purely so the feed and the behavioural predicates
  * have something other than the funnel to match on. */
-const FILLER_EVENTS = ['page_view', 'feature_used', 'docs_search', 'invite_sent'] as const
+// `$page` is a SENTINEL here rather than an event name to send: it selects
+// the page-payload branch below, and the payload's own `name` is the page's,
+// not this. Spelled as the stored name so the two cannot be read as different
+// things.
+const FILLER_EVENTS = ['$page', 'feature_used', 'docs_search', 'invite_sent'] as const
 
 const PLANS = [
   ['free', 6],
@@ -463,7 +470,9 @@ export function generateDemoData(opts: SeedOptions): DemoData {
             step === 0
               ? {
                   type: 'page',
-                  name: 'page_view',
+                  // The PAGE's name, which is what this field always meant.
+                  // It reaches storage as the `$page_name` property.
+                  name: page[1],
                   message_id: id,
                   ...identity,
                   properties,
@@ -542,10 +551,10 @@ export function generateDemoData(opts: SeedOptions): DemoData {
         order: drafts.length,
         build: (id) => ({
           payload:
-            name === 'page_view'
+            name === '$page'
               ? {
                   type: 'page',
-                  name: 'page_view',
+                  name: page[1],
                   message_id: id,
                   ...identity,
                   properties,
@@ -587,7 +596,7 @@ function funnelProperties(
 ): Record<string, PropertyValue> {
   const plan = String(person.traits.plan)
   switch (FUNNEL_EVENTS[step]) {
-    case 'page_view':
+    case '$page':
       return { page: 'landing', duration_ms: intBetween(rng, 400, 22_000) }
     case 'signup_started':
       return { method: pick(rng, SIGNUP_METHODS) }
@@ -618,13 +627,14 @@ function fillerProperties(rng: Rng, name: string, page: string): Record<string, 
   }
 }
 
-/** The name `toEventRow` will give an event — the same three cases its own
- * `eventName` uses, so a summary cannot disagree with what was written. */
-export function eventNameOf(payload: IngestPayload): string {
-  if (payload.type === 'track') return payload.event
-  if (payload.type === 'page') return payload.name ?? '$page'
-  return '$identify'
-}
+/**
+ * Re-exported from core rather than reimplemented, which is what it always
+ * claimed to be: "every event's name, exactly as `toEventRow` will derive it".
+ * It was a THIRD copy of that rule (#53 counted two), and a seeder whose event
+ * names drift from ingest's stops resembling production data, which is the
+ * only reason the seeder exists.
+ */
+export const eventNameOf = eventNameFor
 
 export interface DemoSummary {
   events: number

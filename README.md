@@ -496,7 +496,7 @@ header.
 | Endpoint | Purpose |
 | --- | --- |
 | `POST /v1/track` | A named thing a person did. Requires `event`. |
-| `POST /v1/page` | A page or screen view. Optional `name`; defaults to `$page`. |
+| `POST /v1/page` | A page or screen view. Always stored as `$page`; an optional `name` becomes the `$page_name` property. |
 | `POST /v1/identify` | Attach traits to a known user. Requires `user_id`; stored as `$identify`. |
 | `POST /v1/batch` | `{"batch": [ … ]}` — 1 to 500 items, each with an explicit `"type"` of `track`, `page`, or `identify`. |
 
@@ -569,6 +569,31 @@ exactly as `create-project` prints it once, and never served again by
 anything.
 
 Sent directly from browser JavaScript (as opposed to a server-side SDK),
+### Page views, and the `$` prefix
+
+**Every page view is stored under the event name `$page`**, named or not. A name
+becomes the `$page_name` property rather than the event name, so "how many page
+views" is one query and `page('signup')` cannot be confused with
+`track('signup')`.
+
+It works that way for a storage reason as much as a naming one: `event_name` is
+a `LowCardinality(String)` column and the second key of the schema catalogue's
+sort order, while page names are unbounded by construction — one per URL. Under
+the old behaviour every page name also claimed its own property-key budget
+instead of all page views sharing one.
+
+**`$` is reserved for Lyraflow.** A property key you send that begins with `$`
+is **dropped**, in both the string and the numeric map — dropped rather than
+refused, because ingest degrades rather than failing an otherwise valid event,
+and because the write key is public and refusing here would hand a visitor a way
+to make a site's events disappear. Everything else about the key is untouched:
+`price_$` and `a$b` are ordinary keys and are stored.
+
+Events already stored under a page name stay as they are. This changes what is
+written from now on, not history — so a project that used `page(name)` before
+this release has its old page views under their old names and its new ones under
+`$page`.
+
 `/v1/track`, `/v1/page`, `/v1/identify` and `/v1/batch` are CORS-preflighted
 requests. By default Lyraflow answers that preflight for any origin — set
 `LYRAFLOW_ALLOWED_ORIGINS` (comma-separated) on the server to restrict it.
@@ -587,7 +612,7 @@ works on first paste with no configuration.
 | `anonymous_id` | one of these two | Device/browser identifier, up to 128 characters. |
 | `user_id` | one of these two | Known-user identifier, up to 128 characters. `identify` always requires it. |
 | `event` | `track` only | Event name, up to 128 characters. |
-| `name` | `page` only | Page name, up to 128 characters. Defaults to `$page`. |
+| `name` | `page` only | Page name, up to 128 characters. Stored as the `$page_name` **property**, never as the event name. |
 | `properties` | no | Flat object. `track` and `page` only. |
 | `traits` | no | Flat object. `identify` only. |
 | `timestamp` | no | ISO-8601. Defaults to server time at receipt; see *Retries*. |
@@ -811,8 +836,8 @@ lyraflow.track('signup', { plan: 'trial', seats: 3 })
 ```
 
 ```js
-lyraflow.page()            // name defaults server-side to "$page"
-lyraflow.page('Pricing')   // an explicit name
+lyraflow.page()            // stored as $page, with no $page_name
+lyraflow.page('Pricing')   // stored as $page, with $page_name = "Pricing"
 ```
 
 ```js

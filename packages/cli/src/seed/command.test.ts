@@ -346,7 +346,7 @@ describe('runSeedDemo output', () => {
     expect(summary.additive_only).toBe(true)
     expect(summary.identity_dictionary_reloaded).toBe(true)
     expect(Array.isArray(summary.funnel)).toBe(true)
-    expect((summary.funnel as Array<{ event: string }>)[0]?.event).toBe('page_view')
+    expect((summary.funnel as Array<{ event: string }>)[0]?.event).toBe('$page')
     expect(new Date(summary.earliest as string).getTime()).toBeLessThan(
       new Date(summary.latest as string).getTime(),
     )
@@ -364,7 +364,7 @@ describe('runSeedDemo output', () => {
     const text = ctx.out.join('')
     expect(text).toContain('Seeded demo data into project "Demo Project" (id 3).')
     expect(text).toContain('persons          20')
-    expect(text).toContain('funnel           page_view')
+    expect(text).toContain('funnel           $page')
     expect(text).toContain('This command only inserts.')
   })
 

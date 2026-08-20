@@ -57,3 +57,41 @@ describe('routeProperties', () => {
     expect(Object.keys(out.properties)[0]).toHaveLength(128)
   })
 })
+
+describe('the $ prefix is reserved for Lyraflow (#53)', () => {
+  it('drops a caller-supplied $ key from the STRING map', () => {
+    expect(routeProperties({ $page_name: 'forged', plan: 'pro' })).toEqual({
+      properties: { plan: 'pro' },
+      properties_num: {},
+    })
+  })
+
+  it('drops it from the NUMBER map too, which is the half a naive guard misses', () => {
+    // Routing is per VALUE, not per key. A guard that defended only
+    // `properties` would MOVE the collision into the column no reader of the
+    // page name ever looks in -- the forged value would be unfindable rather
+    // than merely wrong, which is worse than no guard at all.
+    expect(routeProperties({ $page_name: 42, seats: 3 })).toEqual({
+      properties: {},
+      properties_num: { seats: 3 },
+    })
+  })
+
+  it('drops any $ key, not a list of known ones', () => {
+    // A ban-list is the wrong tool the moment it needs a second entry. This is
+    // the difference between reserving a NAMESPACE and reserving a name.
+    expect(routeProperties({ $anything: 'x', $future_key: 1, $: 'bare' })).toEqual({
+      properties: {},
+      properties_num: {},
+    })
+  })
+
+  it('leaves a $ anywhere but the FIRST character alone', () => {
+    // `price_$` and `a$b` are ordinary keys somebody may legitimately send.
+    // Reserving the prefix must not quietly become reserving the character.
+    expect(routeProperties({ price_$: '10', a$b: 2 })).toEqual({
+      properties: { price_$: '10' },
+      properties_num: { a$b: 2 },
+    })
+  })
+})
