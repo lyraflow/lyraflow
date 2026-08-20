@@ -321,6 +321,23 @@ beforeAll(async () => {
         properties_num: { seats: 5 },
       },
       {
+        // NO properties at all, in either map (#22). Before migration 017 this
+        // event wrote nothing to `event_schema`, because both feeding views
+        // ARRAY JOIN over `mapKeys(...)` and an ARRAY JOIN over an empty map
+        // produces no rows -- so a perfectly good event name was invisible to
+        // the autocomplete endpoint.
+        project_id: projectA,
+        event_id: '78000000-0000-4000-8000-000000000016',
+        anonymous_id: 'a9',
+        user_id: 'au9',
+        event_name: 'heartbeat',
+        timestamp: '2026-08-01 00:00:00.000',
+        received_at: '2026-08-01 00:00:00.000',
+        trusted: 1,
+        properties: {},
+        properties_num: {},
+      },
+      {
         project_id: projectB,
         event_id: '78000000-0000-4000-8000-000000000015',
         anonymous_id: 'b1',
@@ -360,6 +377,20 @@ beforeAll(async () => {
       "event_schema has no row for project A's import_finished event immediately " +
         'after insert — the materialised views are not synchronous in this environment; ' +
         'see the comment above this insert.',
+    )
+  }
+  // The pre-flight that proves migration 017's view exists and fired (#22).
+  // `heartbeat` carries no properties at all, so the two ARRAY JOIN views
+  // write NOTHING for it -- the only thing that can put it in `event_schema`
+  // is `event_schema_name_mv`. On a database where that view is missing this
+  // throws here, at setup, naming the cause, rather than surfacing as a
+  // puzzling assertion failure three tests later.
+  if (!(await schemaHasEvent(projectA, 'heartbeat'))) {
+    throw new Error(
+      "event_schema has no row for project A's property-less `heartbeat` event. " +
+        'That row can only come from `event_schema_name_mv` (migration 017): the two ' +
+        'property views ARRAY JOIN over mapKeys(), which yields nothing for an empty map. ' +
+        'Either the view is missing or the materialised views are not synchronous here.',
     )
   }
   if (!(await schemaHasEvent(projectB, 'billing_plan_changed'))) {
@@ -640,5 +671,37 @@ describe('trait value suggestions', () => {
     const res = await get('/v1/schema/trait-values?trait=plan', WRITE_KEY_C)
     expect(res.statusCode).toBe(401)
     expect(res.json().error).toBe('invalid_server_key')
+  })
+
+  it('lists an event that carries NO properties at all (#22)', async () => {
+    // The whole of the issue. `event_schema`'s two feeding views ARRAY JOIN
+    // over the property maps, and an ARRAY JOIN over an EMPTY map produces no
+    // rows -- so an event with no properties registered nothing and its name
+    // never reached this endpoint, despite being a perfectly good thing to
+    // filter a segment or a funnel on.
+    const res = await get('/v1/schema/events')
+    expect(res.statusCode).toBe(200)
+    expect(res.json().events.map((e: { event_name: string }) => e.event_name)).toContain(
+      'heartbeat',
+    )
+  })
+
+  it('never offers the empty sentinel key as a property', async () => {
+    // The other half of migration 017. Registering the name costs a row with
+    // an empty `property_key`, and that row must not turn into an empty entry
+    // in a property picker -- which would render as a blank, selectable option
+    // that compiles to `properties['']` and matches nothing.
+    const res = await get('/v1/schema/properties')
+    expect(res.statusCode).toBe(200)
+    const keys = res.json().properties.map((p: { property_key: string }) => p.property_key)
+    expect(keys).not.toContain('')
+    // Not vacuous: real keys are still there.
+    expect(keys.length).toBeGreaterThan(0)
+  })
+
+  it('offers no properties for an event that has none, while still listing it', async () => {
+    const res = await get('/v1/schema/properties?event=heartbeat')
+    expect(res.statusCode).toBe(200)
+    expect(res.json().properties).toEqual([])
   })
 })
