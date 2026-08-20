@@ -11,8 +11,7 @@
  * point of demo data is that it resembles production data.
  */
 
-import type { EventRow } from '@lyraflow/server/dist/ingest/row.js'
-import { toEventRow } from '@lyraflow/server/dist/ingest/row.js'
+import { type EventRow, toEventRow } from '@lyraflow/core'
 import type { DemoEvent } from './generate.js'
 
 export type { EventRow }

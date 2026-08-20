@@ -1,8 +1,7 @@
-export interface GeoInfo {
-  country: string
-  region: string
-  city: string
-}
+// The SHAPE lives in core with the row it is part of (#125); resolving it --
+// which needs a database and a request IP -- stays here.
+export type { GeoInfo } from '@lyraflow/core'
+import type { GeoInfo } from '@lyraflow/core'
 
 // Frozen: this exact object is returned to every caller of resolve(). A
 // mutable shared instance would let one caller's edit corrupt every

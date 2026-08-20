@@ -8,6 +8,14 @@ export * from './ingest/timestamp.js'
 export * from './enrich/user-agent.js'
 export * from './enrich/bots.js'
 export { SERVER_SIDE_LIBRARIES, isServerSideLibrary } from './enrich/libraries.js'
+export {
+  type EventRow,
+  type GeoInfo,
+  type RowInput,
+  chDateTime,
+  parseChDateTime,
+  toEventRow,
+} from './ingest/row.js'
 export * from './identity/ranges.js'
 export * from './identity/resolve.js'
 export * from './segments/ast.js'

@@ -1,5 +1,5 @@
 import { MAX_CLOCK_SKEW_MS } from '@lyraflow/core'
-import { toEventRow } from '@lyraflow/server/dist/ingest/row.js'
+import { toEventRow } from '@lyraflow/core'
 import { describe, expect, it } from 'vitest'
 import { type DemoEvent, generateDemoData } from './generate.js'
 import { toDemoRow } from './rows.js'
