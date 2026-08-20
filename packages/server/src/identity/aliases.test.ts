@@ -1,4 +1,4 @@
-import { createPgPool } from '@lyraflow/db'
+import { type Pool, createPgPool } from '@lyraflow/db'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { PersonAliases } from './aliases.js'
 
@@ -147,5 +147,132 @@ describe('PersonAliases', () => {
     } finally {
       await pg.query('DELETE FROM projects WHERE slug = $1', ['aliases-contention-resolve'])
     }
+  })
+})
+
+/**
+ * The retry loop (#98), tested two ways because neither way alone is enough.
+ *
+ * A pure stub proves the CONTROL FLOW -- which errors retry, how many times,
+ * that the whole transaction re-runs -- deterministically, with no dependence
+ * on winning a race. What it cannot prove is that a retried transaction works
+ * against a live connection, because the hazard there is a real Postgres
+ * behaviour: a connection left inside a failed transaction answers `25P02` to
+ * every subsequent statement, so a retry that skipped ROLLBACK would be worse
+ * than no retry at all and every stub in the world would pass it.
+ *
+ * So the second group injects a 40001 into a REAL transaction on a REAL
+ * pooled client and lets the loop recover on the live database.
+ */
+class FakeError extends Error {
+  constructor(readonly code: string) {
+    super(`SQLSTATE ${code}`)
+  }
+}
+
+/** A pool whose client fails the Nth occurrence of a given statement. */
+function poolFailing(opts: {
+  on: string
+  times: number
+  code: string
+}): { pool: Pool; queries: string[]; released: number } {
+  const queries: string[] = []
+  let hits = 0
+  const state = { released: 0 }
+  const client = {
+    query: async (text: string) => {
+      queries.push(text)
+      if (text.startsWith(opts.on)) {
+        hits++
+        if (hits <= opts.times) throw new FakeError(opts.code)
+      }
+      return { rows: [], rowCount: 0 }
+    },
+    release: () => {
+      state.released++
+    },
+  }
+  const pool = { connect: async () => client } as unknown as Pool
+  return {
+    pool,
+    queries,
+    get released() {
+      return state.released
+    },
+  } as { pool: Pool; queries: string[]; released: number }
+}
+
+describe('PersonAliases.alias retries a serialization failure (#98)', () => {
+  it('retries the WHOLE transaction, not the failed statement', async () => {
+    // The unit matters. A 40001 invalidates every read the transaction made,
+    // so re-issuing only the failing statement would commit conclusions drawn
+    // from a snapshot Postgres has already rejected -- and both canonical
+    // lookups happen before the writes.
+    const f = poolFailing({ on: 'COMMIT', times: 1, code: '40001' })
+    expect(await new PersonAliases(f.pool).alias(1, 'a', 'b')).toBe('merged')
+
+    expect(f.queries.filter((q) => q.startsWith('BEGIN')).length).toBe(2)
+    expect(f.queries.filter((q) => q.startsWith('ROLLBACK')).length).toBe(1)
+    expect(f.queries.filter((q) => q.startsWith('COMMIT')).length).toBe(2)
+    // ROLLBACK must come BEFORE the second BEGIN. A connection left inside a
+    // failed transaction answers 25P02 to everything that follows.
+    expect(f.queries.indexOf('ROLLBACK')).toBeLessThan(
+      f.queries.lastIndexOf('BEGIN ISOLATION LEVEL SERIALIZABLE'),
+    )
+  })
+
+  it('gives up after MAX_ATTEMPTS rather than looping forever', async () => {
+    const f = poolFailing({ on: 'COMMIT', times: 99, code: '40001' })
+    await expect(new PersonAliases(f.pool).alias(1, 'a', 'b')).rejects.toThrow('SQLSTATE 40001')
+    expect(f.queries.filter((q) => q.startsWith('BEGIN')).length).toBe(PersonAliases.MAX_ATTEMPTS)
+  })
+
+  it('retries a deadlock too, since 40P01 carries the same contract', async () => {
+    const f = poolFailing({ on: 'COMMIT', times: 1, code: '40P01' })
+    expect(await new PersonAliases(f.pool).alias(1, 'a', 'b')).toBe('merged')
+    expect(f.queries.filter((q) => q.startsWith('BEGIN')).length).toBe(2)
+  })
+
+  it('does NOT retry an error that is not retryable', async () => {
+    // A unique violation means the request is wrong, and re-running it just
+    // spends the caller's time arriving at the same answer. Retrying
+    // indiscriminately is how a retry loop turns one bad request into three.
+    const f = poolFailing({ on: 'COMMIT', times: 1, code: '23505' })
+    await expect(new PersonAliases(f.pool).alias(1, 'a', 'b')).rejects.toThrow('SQLSTATE 23505')
+    expect(f.queries.filter((q) => q.startsWith('BEGIN')).length).toBe(1)
+  })
+
+  it('releases the connection exactly once, however many attempts it took', async () => {
+    // The retry lives INSIDE the try/finally that owns the client, so a
+    // second attempt must not acquire or release a second connection.
+    const f = poolFailing({ on: 'COMMIT', times: 2, code: '40001' })
+    expect(await new PersonAliases(f.pool).alias(1, 'a', 'b')).toBe('merged')
+    expect(f.released).toBe(1)
+  })
+
+  it('recovers on the REAL database after a 40001 inside a real transaction', async () => {
+    // The one a stub cannot tell you. The first COMMIT is swallowed and a
+    // 40001 thrown in its place, so an actual open SERIALIZABLE transaction
+    // on an actual pooled client is left dirty -- exactly the state that
+    // answers 25P02 to everything if the loop forgets to roll back. The
+    // second attempt then runs entirely for real.
+    let commits = 0
+    const wrapped = {
+      connect: async () => {
+        const client = await pg.connect()
+        return {
+          query: async (text: string, params?: unknown[]) => {
+            if (text.startsWith('COMMIT') && commits++ === 0) throw new FakeError('40001')
+            return client.query(text, params)
+          },
+          release: () => client.release(),
+        }
+      },
+    } as unknown as Pool
+
+    expect(await new PersonAliases(wrapped).alias(projectId, 'real-a', 'real-b')).toBe('merged')
+    expect(commits, 'the injected failure must actually have fired').toBeGreaterThan(1)
+    // Read back through the ordinary pool: the merge is committed and flat.
+    expect(await aliases.canonicalFor(projectId, 'real-a')).toBe('real-b')
   })
 })
