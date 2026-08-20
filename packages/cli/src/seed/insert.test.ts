@@ -153,7 +153,22 @@ describe('insertDemoData', () => {
 
   it('populates event_schema, so the segment builder has property suggestions', async () => {
     const rs = await ch.query({
-      query: `SELECT property_key, value_kind FROM event_schema
+      // DISTINCT, matching what `schema/routes.ts` does on the same table and
+      // for the reason its own comment gives: event_schema is
+      // ReplacingMergeTree(last_seen), so duplicates collapse AT MERGE TIME
+      // and not before. Until the parts merge, one key legitimately appears
+      // more than once -- and this assertion is exact equality against a
+      // five-element list, so a second `plan` row fails it.
+      //
+      // Not FINAL, deliberately: routes.ts:67-69 already argues that case,
+      // and it applies here identically -- a FINAL read depends on whether a
+      // merge has happened, which is the very thing that is not guaranteed.
+      //
+      // The other three ClickHouse assertions in this file were checked
+      // against the same question and are already safe: person_traits and
+      // device_index are read through argMaxMerge/argMinMerge with a GROUP BY,
+      // and the device count is uniqExact -- all part-agnostic.
+      query: `SELECT DISTINCT property_key, value_kind FROM event_schema
               WHERE project_id = ${projectId} AND event_name = '$identify'
               ORDER BY property_key, value_kind`,
       format: 'JSONEachRow',
@@ -170,6 +185,43 @@ describe('insertDemoData', () => {
       'signup_source',
     ])
     expect(byKind('number')).toEqual(['mrr_usd', 'seats'])
+  })
+
+  it('reads event_schema in a way an UNMERGED duplicate cannot break', async () => {
+    // The test above failed on CI twice in a row before this fix, and it
+    // failed on nothing but timing: a second `plan` row that a merge had not
+    // yet collapsed. Reproducing that by waiting for the right merge state is
+    // not a test, so the duplicate is written DIRECTLY -- ReplacingMergeTree
+    // accepts it happily, which is the whole point of the engine.
+    //
+    // This makes the guarantee deterministic instead of probabilistic: with
+    // DISTINCT the extra row is invisible, without it the key appears twice.
+    await ch.insert({
+      table: 'event_schema',
+      values: [
+        {
+          project_id: projectId,
+          event_name: '$identify',
+          property_key: 'plan',
+          value_kind: 'string',
+          last_seen: '2020-01-01 00:00:00',
+        },
+      ],
+      format: 'JSONEachRow',
+    })
+
+    const rs = await ch.query({
+      query: `SELECT DISTINCT property_key, value_kind FROM event_schema
+              WHERE project_id = ${projectId} AND event_name = '$identify'
+              ORDER BY property_key, value_kind`,
+      format: 'JSONEachRow',
+    })
+    const keys = (await rs.json<{ property_key: string; value_kind: string }>())
+      .filter((r) => r.value_kind === 'string')
+      .map((r) => r.property_key)
+
+    expect(keys.filter((k) => k === 'plan').length, 'a duplicated key must read as one').toBe(1)
+    expect(keys).toEqual(['country', 'display_name', 'is_trial', 'plan', 'signup_source'])
   })
 
   it('populates person_traits with the values the trait picklist reads', async () => {
