@@ -1,4 +1,4 @@
-import { CONTEXT_FIELDS } from '@lyraflow/core/segments/ast.js'
+import { CONTEXT_FIELDS, LIFECYCLE_FIELDS } from '@lyraflow/core/segments/ast.js'
 import type {
   Behavior,
   Context,
@@ -13,7 +13,7 @@ import { Button } from '../../components/ui/button.js'
 import { Label } from '../../components/ui/label.js'
 import { BehaviourForm } from './BehaviourForm.js'
 import { ContextForm } from './ContextForm.js'
-import { LIFECYCLE_FIELDS, LifecycleForm } from './LifecycleForm.js'
+import { LifecycleForm } from './LifecycleForm.js'
 import { TraitForm } from './TraitForm.js'
 import { summarise } from './summarise.js'
 import { incompleteAt, warningsAt } from './warnings.js'
@@ -100,8 +100,8 @@ export const NEGATE_PRESSED =
  *   over a bounded 30-day window -- never `ever`, so a condition the
  *   operator has not finished writing cannot start out scanning all
  *   history. `context`/`lifecycle` take their field from the enum that is
- *   the compiler's injection boundary -- `CONTEXT_FIELDS` from core,
- *   `LIFECYCLE_FIELDS` from `LifecycleForm` -- never a literal chosen here.
+ *   the compiler's injection boundary -- `CONTEXT_FIELDS` and
+ *   `LIFECYCLE_FIELDS`, both from core -- never a literal chosen here.
  *   `lifecycle` values must parse as datetimes, so it starts at `now`.
  * - None of them uses `between`, so the "exactly two values" half of
  *   `valueFor`'s refine is satisfied by construction.

@@ -3,6 +3,8 @@ import {
   AST_VERSION,
   CONTEXT_FIELDS,
   EVENT_COLUMN_FIELDS,
+  LIFECYCLE_FIELDS,
+  Lifecycle,
   SegmentQuery,
   WherePredicate,
 } from './ast.js'
@@ -119,6 +121,58 @@ describe('SegmentQuery', () => {
     let node: unknown = trait
     for (let i = 0; i < 5; i++) node = { kind: 'group', op: 'or', children: [node] }
     expect(SegmentQuery.safeParse({ ast_version: 1, filter: node }).success).toBe(true)
+  })
+})
+
+describe('LIFECYCLE_FIELDS', () => {
+  // What this pins is that the schema is BUILT from the array rather than
+  // written out beside it. It cannot catch a re-inlined enum that happens to
+  // spell the same two values -- nothing can, short of reading the source
+  // text -- but that is not the failure worth defending against. The one
+  // that shipped for two releases was an inline enum and a hand-written copy
+  // in a .tsx file two packages away, both correct, neither able to see the
+  // other change. Any divergence now fails here.
+  it('is exactly the field set the schema accepts', () => {
+    // Read off the REJECTION rather than out of the schema object. zod's
+    // `invalid_enum_value` issue carries the options it checked against,
+    // which is the enum's own answer to "what would you have taken" -- and
+    // it survives the `.and()` and `.refine()` this schema is wrapped in,
+    // where reaching for `.innerType().shape` does not.
+    const r = Lifecycle.safeParse({
+      kind: 'lifecycle',
+      field: 'nope',
+      operator: '>',
+      value: '2026-08-01T00:00:00Z',
+    })
+    expect(r.success).toBe(false)
+    const issue = r.success
+      ? undefined
+      : r.error.issues.find((i) => i.code === 'invalid_enum_value' && i.path[0] === 'field')
+    expect(issue, 'the field is no longer a closed enum').toBeDefined()
+    expect([...(issue as { options: string[] }).options].sort()).toEqual(
+      [...LIFECYCLE_FIELDS].sort(),
+    )
+  })
+
+  it('accepts every field it names, and nothing else', () => {
+    for (const f of LIFECYCLE_FIELDS) {
+      const node = { kind: 'lifecycle', field: f, operator: '>', value: '2026-08-01T00:00:00Z' }
+      expect(Lifecycle.safeParse(node).success, f).toBe(true)
+    }
+    // `created_at` is the name someone reaches for first, and it is not a
+    // column the base CTE produces.
+    expect(
+      Lifecycle.safeParse({
+        kind: 'lifecycle',
+        field: 'created_at',
+        operator: '>',
+        value: '2026-08-01T00:00:00Z',
+      }).success,
+    ).toBe(false)
+  })
+
+  it('lists each name once', () => {
+    expect(new Set(LIFECYCLE_FIELDS).size).toBe(LIFECYCLE_FIELDS.length)
   })
 })
 

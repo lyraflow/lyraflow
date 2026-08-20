@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CONTEXT_FIELDS } from './ast.js'
+import { CONTEXT_FIELDS, LIFECYCLE_FIELDS } from './ast.js'
 import { CONTEXT_COLUMNS, baseCte } from './base.js'
 import { Params } from './params.js'
 
@@ -32,6 +32,23 @@ describe('baseCte', () => {
       for (const scope of ['latest', 'first_touch'] as const) {
         expect(sql).toContain(`AS ${CONTEXT_COLUMNS[field][scope]}`)
       }
+    }
+  })
+
+  // The lifecycle half of the same boundary, and the one thing about
+  // LIFECYCLE_FIELDS that a single source of truth CANNOT make safe.
+  //
+  // `predicates.ts`'s lifecycleExpr interpolates a lifecycle node's `field`
+  // as a bare SQL identifier. Deriving the schema and the UI from one array
+  // stops those three drifting apart -- but the array is still an assertion
+  // about columns that exist, and `baseCte` builds `first_seen`/`last_seen`
+  // into its SQL TEXT rather than reading any list. Nothing else compares
+  // the two. A third field added here would compile, validate, render a
+  // select option, and fail only when ClickHouse rejected the query.
+  it('selects every column a lifecycle condition can name', () => {
+    const { sql } = build()
+    for (const field of LIFECYCLE_FIELDS) {
+      expect(sql).toMatch(new RegExp(`AS\\s+${field}\\b`))
     }
   })
 

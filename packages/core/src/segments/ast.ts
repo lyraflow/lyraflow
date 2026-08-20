@@ -76,6 +76,37 @@ export const EVENT_COLUMN_FIELDS = [
 ] as const
 export type EventColumnField = (typeof EVENT_COLUMN_FIELDS)[number]
 
+/**
+ * The two per-person timestamps a `lifecycle` condition can bound.
+ *
+ * Exported and named for the same reason `CONTEXT_FIELDS` is, and it is not
+ * tidiness: `predicates.ts`'s `lifecycleExpr` interpolates a lifecycle node's
+ * `field` DIRECTLY AS A BARE SQL IDENTIFIER into the generated WHERE clause.
+ * The value is bounded, so nothing arbitrary reaches SQL -- but what bounds it
+ * has to be the same list everything else reads, or the boundary is closed by
+ * two copies agreeing rather than by construction.
+ *
+ * Before this constant existed the enum below was written out inline and the
+ * web UI's lifecycle form declared its own matching pair. Both were correct.
+ * Neither could see the other drift: TypeScript cannot compare a literal here
+ * against a literal in a `.tsx` file two packages away, so a third field added
+ * to one and not the other would have compiled, shipped, and reached the
+ * identifier interpolation before anything noticed.
+ *
+ * Both names below the fold now derive from this array -- the schema through
+ * `z.enum(LIFECYCLE_FIELDS)`, the UI's select by mapping over it -- so adding a
+ * field is one edit and removing one is a compile error at every reader.
+ *
+ * The remaining thing that CAN drift is this list against the columns the base
+ * CTE actually produces, since `base.ts` builds `first_seen` and `last_seen`
+ * into its SQL text rather than from any list. `ast.test.ts` pins that
+ * directly: every entry here must appear as a selected alias in `baseCte`'s
+ * output. A field named here and absent there would compile to a WHERE clause
+ * referencing a column that does not exist.
+ */
+export const LIFECYCLE_FIELDS = ['first_seen', 'last_seen'] as const
+export type LifecycleField = (typeof LIFECYCLE_FIELDS)[number]
+
 const scalar = z.union([z.string(), z.number(), z.boolean(), z.null()])
 
 /**
@@ -160,7 +191,7 @@ export type Context = z.infer<typeof Context>
  * compiler calling `new Date` on it and formatting an Invalid Date into SQL.
  */
 export const Lifecycle = z
-  .object({ kind: z.literal('lifecycle'), field: z.enum(['first_seen', 'last_seen']) })
+  .object({ kind: z.literal('lifecycle'), field: z.enum(LIFECYCLE_FIELDS) })
   .and(valueFor(z.enum(COMPARISON_OPERATORS)))
   .refine(
     (l) =>
