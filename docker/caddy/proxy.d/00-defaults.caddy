@@ -1,0 +1,34 @@
+# Directives here land inside the `reverse_proxy` block, the way tls.d's land
+# inside the site block. Empty by default, which is correct for a server that
+# visitors reach directly.
+#
+# WHAT THIS IS FOR: behind a CDN or any other intermediary in front of Caddy --
+# Cloudflare is the common one -- the address Caddy observes on the incoming
+# connection is the intermediary's, not the visitor's. Caddy will not read a
+# forwarded header from a peer it has not been told to trust, and that refusal
+# is the right default: any client can send `X-Forwarded-For`, so trusting it
+# unconditionally would let a visitor choose their own apparent IP.
+#
+# `trusted_proxies` is how you name the peers whose forwarded header is
+# believable. Drop a file in here:
+#
+#     trusted_proxies static 173.245.48.0/20 103.21.244.0/22 ...
+#
+# The ranges are your CDN's published egress list, and they change -- Cloudflare
+# publishes theirs at https://www.cloudflare.com/ips/. A stale list does not
+# fail loudly: an unlisted range is simply untrusted, and events from visitors
+# arriving through it record the CDN's address instead of theirs.
+#
+# ONLY LIST RANGES YOU ACTUALLY SIT BEHIND. `trusted_proxies static 0.0.0.0/0`
+# trusts everyone, which is the same as having no check at all -- it lets any
+# client claim any IP by setting a header.
+#
+# This has no visible effect yet: GeoIP returns an empty country, region and
+# city for every event, so nothing currently reads the client address. It
+# starts to matter when that changes. Adding it now means the mechanism is
+# there, documented, and not discovered later by someone wondering why every
+# visitor appears to be in the same datacentre.
+#
+# This file is not decoration. With an empty directory Caddy logs
+# "No files matching import glob pattern" on every start, which reads as a
+# misconfiguration to anyone tailing the logs for the first time.

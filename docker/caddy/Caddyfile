@@ -1,4 +1,9 @@
 {$LYRAFLOW_DOMAIN} {
 	import /etc/caddy/tls.d/*.caddy
-	reverse_proxy lyraflow:3000
+	reverse_proxy lyraflow:3000 {
+		# Mirrors the tls.d mechanism above, one level in: `trusted_proxies`
+		# is a reverse_proxy sub-directive, so it cannot be dropped into
+		# tls.d. See proxy.d/00-defaults.caddy for what belongs here.
+		import /etc/caddy/proxy.d/*.caddy
+	}
 }

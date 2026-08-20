@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -122,5 +122,38 @@ describe('the caddy healthcheck', () => {
     const caddy = cfg.slice(cfg.indexOf('caddy:'), cfg.indexOf('clickhouse:'))
     expect(caddy).toContain('healthcheck:')
     expect(caddy).toContain('2019')
+  })
+})
+
+// #62: `trusted_proxies` is a `reverse_proxy` sub-directive, so it cannot be
+// dropped into tls.d the way a `tls` line can -- it needs its own import one
+// level in. These assert the mount and the wiring exist, because the failure
+// mode otherwise is silent: Caddy simply never reads a forwarded header, and
+// every visitor behind a CDN records the CDN's address.
+describe('the reverse-proxy extension point', () => {
+  it('mounts proxy.d into the caddy container', () => {
+    const cfg = composeConfig(`${BASE}COMPOSE_PROFILES=tls\n`, ['config'])
+    expect(cfg).toContain('/etc/caddy/proxy.d')
+  })
+
+  it('imports proxy.d from inside the reverse_proxy block, not the site block', () => {
+    const caddyfile = readFileSync(
+      join(import.meta.dirname, '..', 'docker', 'caddy', 'Caddyfile'),
+      'utf8',
+    )
+    // The import must sit between `reverse_proxy` and its closing brace. A
+    // site-level import would parse and then be rejected by Caddy at load,
+    // which is a failure nobody sees until a restart.
+    const block = /reverse_proxy[^{]*\{([^}]*)\}/s.exec(caddyfile)
+    expect(block).not.toBeNull()
+    expect(block?.[1]).toContain('/etc/caddy/proxy.d/*.caddy')
+  })
+
+  // An empty glob makes Caddy log "No files matching import glob pattern" on
+  // every start, which reads as a misconfiguration to whoever is tailing logs
+  // for the first time. tls.d carries a defaults file for exactly this reason.
+  it('ships a defaults file so the glob is never empty', () => {
+    const dir = join(import.meta.dirname, '..', 'docker', 'caddy', 'proxy.d')
+    expect(readdirSync(dir).filter((f) => f.endsWith('.caddy')).length).toBeGreaterThan(0)
   })
 })
