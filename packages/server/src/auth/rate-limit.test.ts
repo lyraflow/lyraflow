@@ -178,4 +178,23 @@ describe('AttemptLimiter', () => {
     for (let j = 0; j < 3; j++) l.record([fresh])
     expect(l.check([fresh])).toBe(false)
   })
+
+  // #79: the inner maps were bounded and the outer one was not. Unreachable
+  // from the login route, which mints exactly `ip` and `email` -- so this
+  // constructs the case a future caller would create by deriving a namespace
+  // from something a client influences.
+  it('bounds the namespace map, not only the keys inside each namespace', () => {
+    const l = new AttemptLimiter(10, 60_000, 4096, 3)
+    for (let i = 0; i < 20; i++) l.record([`ns${i}:someone`])
+    expect(l.namespaceCount).toBeLessThanOrEqual(3)
+  })
+
+  // `reset` runs on a SUCCESSFUL login, so it is called for keys that may
+  // never have failed. Creating a namespace in order to delete nothing from
+  // it is how an outer map fills with entries no failure ever put there.
+  it('does not mint a namespace for a key it has never seen', () => {
+    const l = new AttemptLimiter()
+    l.reset(['never-seen:someone@example.test'])
+    expect(l.namespaceCount).toBe(0)
+  })
 })
