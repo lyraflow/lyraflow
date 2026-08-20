@@ -217,10 +217,35 @@ export function assertWindowNotInverted(since: Date | undefined, until: Date | u
  * one place that turns it into terminal output.
  */
 export function emitWarnings(
-  warnings: { path: string; reason: string }[],
+  warnings: { path: string; reason: string }[] | undefined,
   ctx: Pick<CommandContext, 'writeErr'>,
 ): void {
-  for (const w of warnings) ctx.writeErr(`warning: ${w.path}: ${w.reason}\n`)
+  // `| undefined` is the whole of #107, and it belongs HERE rather than at
+  // each call site.
+  //
+  // The CLI does not validate responses -- `readJson` parses the body and
+  // CASTS it to the declared interface -- so every field those interfaces
+  // mark as required is a promise the WIRE makes, not one the type system
+  // checks. Against a matching server that is fine. Against an older one it
+  // is not: `warnings` was added to the saved-segment run route after the
+  // route shipped, so a CLI newer than its server iterates a field the
+  // server never sent, and `for...of undefined` throws a TypeError. A
+  // command that should have printed a table dies instead, and the operator
+  // sees a stack trace rather than their funnel.
+  //
+  // Version skew is the normal case for a self-hosted product: the CLI is
+  // installed from npm and the server from a compose file, and nothing makes
+  // an operator move them together.
+  //
+  // The alternative was validating every response against a schema. Rejected:
+  // it makes the CLI refuse a NEWER server's response for the crime of
+  // carrying a field this build has not heard of, which converts a working
+  // setup into a broken one -- the opposite of the failure being fixed. The
+  // rule taken instead is narrower and holds at compile time: a field the
+  // CLI cannot guarantee the server sends is typed OPTIONAL, and the
+  // compiler then requires every reader to handle its absence. This function
+  // is the only reader of this one.
+  for (const w of warnings ?? []) ctx.writeErr(`warning: ${w.path}: ${w.reason}\n`)
 }
 
 /**

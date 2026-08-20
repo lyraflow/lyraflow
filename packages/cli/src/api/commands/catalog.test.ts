@@ -330,6 +330,23 @@ describe('runSegments > run', () => {
     expect(errOut.join('')).toContain('warning: filter: this condition scans all history')
   })
 
+  it('survives a server that sends no `warnings` at all (#107)', async () => {
+    // This route is the one that actually shipped without the field: #21 added
+    // `warnings` to the SAVED-segment run after it was already released, so a
+    // CLI newer than its server gets a body without it. Every other test here
+    // goes through `noWarnings()`, which ADDS `warnings: []` -- so the omitted
+    // case was the one shape none of them covered, and it was the shape that
+    // threw.
+    expect('warnings' in SUMMARY_ONLY, 'the fixture must actually omit it').toBe(false)
+
+    const { client } = makeClient({ post: SUMMARY_ONLY })
+    const { ctx, out, errOut } = makeCtx(client)
+
+    expect(await runSegments(['run', '1'], ctx)).toBe(0)
+    expect(parseJsonLines(out)).toEqual([SUMMARY_ONLY])
+    expect(errOut.join('')).not.toContain('warning:')
+  })
+
   it('sends warnings to stderr on the --members path too, alongside the member rows on stdout', async () => {
     const withWarning = {
       ...WITH_MEMBERS,

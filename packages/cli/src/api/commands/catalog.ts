@@ -143,10 +143,18 @@ interface MemberRecord {
 /** POST /v1/segments/:id/preview's response shape (segments/routes.ts). #21:
  * the saved-segment run used to omit `warnings`, unlike the ad-hoc preview
  * route this CLI does not call; both routes now derive their response from
- * the same `runTree`, so this carries `warnings` too. */
+ * the same `runTree`, so a CURRENT server sends `warnings` here too.
+ *
+ * "A current server" is the whole qualification, and #107 is what it costs:
+ * a server from before #21 does not send it, and the CLI is installed from
+ * npm while the server comes from a compose file, so nothing makes an
+ * operator move the two together. */
 interface SegmentRunResponse {
   person_count: number
-  warnings: { path: string; reason: string }[]
+  /** OPTIONAL because an older server may not send it (#107) -- this route
+   * is the one that actually shipped without it. Read only through
+   * `emitWarnings`, which is where the absence is handled. */
+  warnings?: { path: string; reason: string }[]
   as_of: string
   members?: MemberRecord[]
   next_cursor?: string | null

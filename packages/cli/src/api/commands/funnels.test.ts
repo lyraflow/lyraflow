@@ -127,6 +127,28 @@ describe('runFunnels', () => {
     expect(errOut.join('')).toContain('warning: range:')
   })
 
+  it('survives a server that sends no `warnings` at all (#107)', async () => {
+    // The CLI casts responses rather than validating them, so every required
+    // field on its response interfaces is a promise the WIRE makes. `warnings`
+    // was added after these routes shipped, so a CLI newer than its server --
+    // the normal state of a self-hosted install, where the CLI comes from npm
+    // and the server from a compose file -- receives a body without it.
+    //
+    // Before #107 that was a TypeError from `for...of undefined`: the funnel
+    // ran, the server answered, and the operator saw a stack trace instead of
+    // their step table.
+    const { warnings: _dropped, ...noWarnings } = RUN
+    expect('warnings' in noWarnings, 'the fixture must actually omit it').toBe(false)
+
+    const { client } = makeClient({ get: LIST, post: noWarnings })
+    const { ctx, out, errOut } = makeCtx(client)
+
+    expect(await runFunnels(['run', 'signup'], ctx)).toBe(0)
+    // The table is the point: it is what the throw used to take with it.
+    expect(out.join('')).toContain('signed_up')
+    expect(errOut.join('')).not.toContain('warning:')
+  })
+
   it('keeps stdout parseable as one JSON object per line', async () => {
     const { client } = makeClient({ get: LIST, post: RUN })
     const { ctx, out } = makeCtx(client)
