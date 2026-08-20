@@ -157,12 +157,16 @@ describe('formatBound -- a wall-clock reading', () => {
     expect(formatBound('2026-07-01T09:00:07.250')).toBe('1 Jul 2026, 09:00:07')
   })
 
-  it('renders a bare date as a date, inventing no time for it', () => {
-    // `Lifecycle`'s refine accepts one, so a hand-written API call can store
-    // it. Whether it meant UTC midnight or the operator's own is a question
-    // `datetime.ts` deliberately leaves to the compiler; showing a time here
-    // would answer it in a display helper.
-    expect(formatBound('2026-08-01')).toBe('1 Aug 2026')
+  it('renders a bare date WITH its time, because it names one (#124)', () => {
+    // This used to render the date alone, because whether it meant UTC
+    // midnight or the operator's own had not been decided and answering it in
+    // a display helper would have been a guess. It is UTC midnight, and
+    // printing the date alone would now imply a whole-day meaning it does not
+    // have, and would disagree with the rows the segment selects.
+    //
+    // `00:00` because THIS describe does not stub a zone and so runs in UTC;
+    // the one below stubs Asia/Kolkata and shows the same value as 05:30.
+    expect(formatBound('2026-08-01')).toBe('1 Aug 2026, 00:00')
   })
 
   it('hands back anything that is not a reading, exactly as stored', () => {
@@ -173,7 +177,10 @@ describe('formatBound -- a wall-clock reading', () => {
     expect(formatBound('soon')).toBe('soon')
     expect(formatBound('2026-13-01T09:00')).toBe('2026-13-01T09:00')
     expect(formatBound('2026-07-32T09:00')).toBe('2026-07-32T09:00')
-    expect(formatBound('2026-07-01T24:00')).toBe('2026-07-01T24:00')
+    // `24:00` is deliberately NOT in this list any more. The language reads it
+    // as the following midnight and so does the compiler, so echoing the raw
+    // string here made the summary disagree with the rows the segment selects.
+    // Pinned as what it resolves to, below.
     expect(formatBound('2026-07-01T09:60')).toBe('2026-07-01T09:60')
   })
 })
@@ -232,12 +239,17 @@ describe('formatBound -- a stored instant', () => {
     }
   })
 
-  it('leaves a stored zone-less reading unshifted, as `datetime.ts` requires', () => {
-    // Stored zone-less values exist (an earlier build of this screen, the
-    // API, the CLI). Shifting one by the local offset would change what a
-    // saved segment means by an offset nobody recorded -- so `10:00` stays
-    // `10:00` even though this suite is 5h30 from UTC.
-    expect(formatBound('2026-06-01T10:00')).toBe('1 Jun 2026, 10:00')
+  it('reads a stored zone-less reading as UTC and shows it locally (#124)', () => {
+    // The inverse of what this asserted before. Stored zone-less values exist
+    // -- written by an earlier build of this screen, by the API, by the CLI --
+    // and they are UTC, so `10:00` shows as `15:30` in this suite's zone. That
+    // shift is the accepted, bounded, one-time cost of ending the ambiguity;
+    // what it buys is that this string names the same instant the SQL matches.
+    expect(formatBound('2026-06-01T10:00')).toBe('1 Jun 2026, 15:30')
+  })
+
+  it('resolves `24:00` the way the compiler does, rather than echoing it', () => {
+    expect(formatBound('2026-07-01T24:00')).toBe('2 Jul 2026, 05:30')
   })
 })
 

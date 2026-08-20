@@ -38,6 +38,10 @@
     "./funnels/levels.js": {
       "types": "./dist/funnels/levels.d.ts",
       "default": "./dist/funnels/levels.js"
+    },
+    "./segments/instants.js": {
+      "types": "./dist/segments/instants.d.ts",
+      "default": "./dist/segments/instants.js"
     }
   },
   "engines": {
