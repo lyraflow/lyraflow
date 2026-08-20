@@ -358,3 +358,242 @@ describe('the drain gate is uniform across the session surface', () => {
     await local.close()
   })
 })
+
+/**
+ * The profile surface. Both routes take the CURRENT password, and every test
+ * here is about that check or its consequences: a session cookie is enough
+ * to read this account and deliberately not enough to change what recovers
+ * it.
+ *
+ * Each test restores the credentials it changed, because the suite shares
+ * one admin row and `login()` closes over the original constants.
+ */
+describe('PATCH /v1/auth/email and PATCH /v1/auth/password', () => {
+  const cookieFrom = (res: { headers: Record<string, unknown> }) => {
+    const set = res.headers['set-cookie']
+    return `lf_session=${cookieValue(Array.isArray(set) ? (set[0] ?? '') : ((set as string) ?? ''))}`
+  }
+
+  const asAdmin = async () => cookieFrom(await login())
+
+  const patch = (url: string, cookie: string | null, payload: Record<string, unknown>) =>
+    app.inject({
+      method: 'PATCH',
+      url,
+      headers: cookie === null ? { 'x-lyraflow-ui': '1' } : { 'x-lyraflow-ui': '1', cookie },
+      payload,
+    })
+
+  it('refuses both routes without a session', async () => {
+    expect(
+      (await patch('/v1/auth/email', null, { email: 'x@y.test', current_password: PASSWORD }))
+        .statusCode,
+    ).toBe(401)
+    expect(
+      (
+        await patch('/v1/auth/password', null, {
+          current_password: PASSWORD,
+          new_password: 'a-long-enough-one',
+        })
+      ).statusCode,
+    ).toBe(401)
+  })
+
+  it('refuses both routes without the UI header', async () => {
+    const cookie = await asAdmin()
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/v1/auth/email',
+      headers: { cookie },
+      payload: { email: 'x@y.test', current_password: PASSWORD },
+    })
+    // 403, the same answer `requireUiHeader` gives everywhere else on this
+    // surface -- the header is a CSRF guard, and a missing one is refused
+    // rather than treated as a malformed body.
+    expect(res.statusCode).toBe(403)
+  })
+
+  // The point of requiring it. An unattended browser is a session; without
+  // this check it would also be a full account takeover, because changing
+  // the email changes what recovers the account.
+  it('refuses a wrong current password, and changes nothing', async () => {
+    const cookie = await asAdmin()
+    const res = await patch('/v1/auth/email', cookie, {
+      email: 'moved@example.test',
+      current_password: 'not-the-password',
+    })
+    expect(res.statusCode).toBe(401)
+    const row = await pg.query<{ email: string }>('SELECT email FROM admin_user')
+    expect(row.rows[0]?.email).toBe(EMAIL)
+  })
+
+  it('changes the email and reads it back from the session', async () => {
+    const cookie = await asAdmin()
+    const res = await patch('/v1/auth/email', cookie, {
+      email: 'moved@example.test',
+      current_password: PASSWORD,
+    })
+    expect(res.statusCode).toBe(200)
+
+    const me = await app.inject({
+      method: 'GET',
+      url: '/v1/auth/session',
+      headers: { cookie, 'x-lyraflow-ui': '1' },
+    })
+    expect(me.json()).toEqual({ email: 'moved@example.test' })
+
+    await patch('/v1/auth/email', cookie, { email: EMAIL, current_password: PASSWORD })
+  })
+
+  // An email change is an identity change, not a credential one -- the
+  // password every session was authenticated by is untouched, so ending them
+  // would be theatre.
+  it('leaves sessions alive across an email change', async () => {
+    const cookie = await asAdmin()
+    await patch('/v1/auth/email', cookie, {
+      email: 'moved2@example.test',
+      current_password: PASSWORD,
+    })
+    const me = await app.inject({
+      method: 'GET',
+      url: '/v1/auth/session',
+      headers: { cookie, 'x-lyraflow-ui': '1' },
+    })
+    expect(me.statusCode).toBe(200)
+    await patch('/v1/auth/email', cookie, { email: EMAIL, current_password: PASSWORD })
+  })
+
+  it('rejects an address that is not one', async () => {
+    const cookie = await asAdmin()
+    expect(
+      (await patch('/v1/auth/email', cookie, { email: 'nope', current_password: PASSWORD }))
+        .statusCode,
+    ).toBe(400)
+  })
+
+  // The lower(email) unique index would otherwise turn this into a 23505 and
+  // a 500, which tells the operator nothing about what to do.
+  it('answers 409 for an address another admin already holds, case-insensitively', async () => {
+    const cookie = await asAdmin()
+    await pg.query('INSERT INTO admin_user (email, password_hash) VALUES ($1, $2)', [
+      'someone-else@example.test',
+      'x',
+    ])
+    const res = await patch('/v1/auth/email', cookie, {
+      email: 'SOMEONE-ELSE@example.test',
+      current_password: PASSWORD,
+    })
+    expect(res.statusCode).toBe(409)
+    await pg.query('DELETE FROM admin_user WHERE email = $1', ['someone-else@example.test'])
+  })
+
+  it('lets you re-save your own address in a different case', async () => {
+    const cookie = await asAdmin()
+    const res = await patch('/v1/auth/email', cookie, {
+      email: EMAIL.toUpperCase(),
+      current_password: PASSWORD,
+    })
+    expect(res.statusCode).toBe(200)
+    await patch('/v1/auth/email', cookie, { email: EMAIL, current_password: PASSWORD })
+  })
+
+  it('states the minimum rather than refusing silently', async () => {
+    const cookie = await asAdmin()
+    const res = await patch('/v1/auth/password', cookie, {
+      current_password: PASSWORD,
+      new_password: 'short',
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().detail).toMatch(/at least \d+ characters/)
+  })
+
+  it('refuses a new password identical to the current one', async () => {
+    const cookie = await asAdmin()
+    const res = await patch('/v1/auth/password', cookie, {
+      current_password: PASSWORD,
+      new_password: PASSWORD,
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toBe('password_unchanged')
+  })
+
+  /**
+   * THE point of the route. A password is changed most urgently when the old
+   * one may be known to someone else, so a change that left their session
+   * alive would have revoked nobody.
+   *
+   * Two sessions, deliberately: one makes the change and one stands in for
+   * the stolen cookie. Checking only that the caller survived would pass
+   * against a route that revoked nothing at all.
+   */
+  it('ends every other session and keeps the one that made the change', async () => {
+    const stale = await asAdmin()
+    const mine = await asAdmin()
+    const next = 'a-new-and-long-password'
+
+    const res = await patch('/v1/auth/password', mine, {
+      current_password: PASSWORD,
+      new_password: next,
+    })
+    expect(res.statusCode).toBe(200)
+
+    const staleRes = await app.inject({
+      method: 'GET',
+      url: '/v1/auth/session',
+      headers: { cookie: stale, 'x-lyraflow-ui': '1' },
+    })
+    expect(staleRes.statusCode).toBe(401)
+
+    // The browser that made the change is carried by a FRESH cookie -- its
+    // own was revoked with the rest, so the response has to have set one.
+    const fresh = cookieFrom(res)
+    expect(fresh).not.toBe(mine)
+    const mineRes = await app.inject({
+      method: 'GET',
+      url: '/v1/auth/session',
+      headers: { cookie: fresh, 'x-lyraflow-ui': '1' },
+    })
+    expect(mineRes.statusCode).toBe(200)
+
+    // And the new password is the one that works now.
+    expect((await login(next)).statusCode).toBe(200)
+    expect((await login(PASSWORD)).statusCode).toBe(401)
+
+    await patch('/v1/auth/password', cookieFrom(await login(next)), {
+      current_password: next,
+      new_password: PASSWORD,
+    })
+    expect((await login()).statusCode).toBe(200)
+  })
+
+  /**
+   * Without a limiter these routes are a password oracle behind a session --
+   * a strictly easier target than the login form, because they need no email
+   * and answer with a clean 401/200 split.
+   *
+   * LAST in the file, deliberately. The limiter is shared and one of its
+   * keys is the IP, which every test here shares -- exhausting it leaves
+   * `login()` refused for the rest of the window, so anything added after
+   * this must either come before it or build its own app.
+   */
+  it('rate-limits repeated wrong current passwords', async () => {
+    const cookie = await asAdmin()
+    let last = 0
+    for (let i = 0; i < 12; i++) {
+      const res = await patch('/v1/auth/email', cookie, {
+        email: 'x@example.test',
+        current_password: `wrong-${i}`,
+      })
+      last = res.statusCode
+      if (last === 429) break
+    }
+    expect(last).toBe(429)
+    // And the correct password is refused too while the window is open --
+    // a limiter that let the right answer through would be no limiter.
+    const res = await patch('/v1/auth/email', cookie, {
+      email: 'x@example.test',
+      current_password: PASSWORD,
+    })
+    expect(res.statusCode).toBe(429)
+  })
+})

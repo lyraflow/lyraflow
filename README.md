@@ -323,7 +323,8 @@ screens, reachable from the sidebar:
   you about payloads that reached a real project and were still refused,
   not about a bad or missing write key.
 - **Settings** — the install snippet for the active project (so losing the
-  copy from the wizard is not a trip to the CLI); this month's usage
+  copy from the wizard is not a trip to the CLI); the project list, where each
+  one can be renamed or archived; this month's usage
   (accepted, rejected, throttled, and the quota — reading plainly as
   **Unlimited** rather than a bar or a number when none is set); the
   project's retention and monthly quota, both editable in place; and the
@@ -365,6 +366,26 @@ screens, reachable from the sidebar:
   evaluation is a real ClickHouse scan. And a segment whose stored tree no
   longer parses opens read-only rather than being offered for editing as
   though the builder understood it.
+
+The account menu in the header also has a **Profile** screen, for changing the
+admin's email address and password. Both changes require the current password —
+a session is enough to read everything this install holds and deliberately not
+enough to change what recovers the account — and a password change signs out
+every other browser, which is the point of changing it after a leak. There is no
+confirmation email, because Lyraflow sends no mail; a new address takes effect
+immediately.
+
+**Archiving a project** stops Lyraflow accepting events for it and nothing else.
+Its data is untouched, every report still works, retention still applies, and
+restoring it is one click. Events sent while it is archived are refused, not
+queued, so they do not arrive later. **Renaming never changes the slug** — the
+slug is what `lyraflow` commands address a project by, so a rename would
+otherwise break scripts silently.
+
+**There is no delete.** Removing a project's data means clearing both stores,
+and the ClickHouse half is partition drops for some tables and asynchronous
+mutations for others; getting that ordering wrong leaves data nothing will ever
+sweep again. Archiving is the reversible answer until that exists.
 
 **Volunteering the limit:** that is the whole UI. People and person profiles
 have **no** screens at all yet; reach them the way the rest of this document
@@ -705,7 +726,11 @@ within 24 hours of server time.
   `events_dead_letter` table with the reason; bot traffic is simply counted and
   discarded. `/metrics` reports the accepted, rejected, throttled, over-quota
   and bot totals, so a `202` that stored nothing is still visible there.
-- `401` — missing or unknown write key.
+- `401` — missing or unknown write key, **or a project that has been
+  archived**, which answers `{"error":"project_archived"}`. Archiving stops
+  collection deliberately; the status is `401` rather than `403` because the
+  browser SDK treats `401` as final and stops, while any other status is
+  retried indefinitely by every bundle already deployed on a page.
 - `429` with `{"error":"quota_exceeded"}` — the project has used its monthly
   event quota. **No `retry-after`, deliberately**: unlike a `503`, this does not
   clear on its own shortly. It holds until the month rolls over or an operator

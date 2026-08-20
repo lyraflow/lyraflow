@@ -4,6 +4,7 @@ import { Feed } from '../screens/Feed.js'
 import { FunnelBuilder } from '../screens/FunnelBuilder.js'
 import { FunnelDetail } from '../screens/FunnelDetail.js'
 import { Funnels } from '../screens/Funnels.js'
+import { Profile } from '../screens/Profile.js'
 import { SegmentBuilder } from '../screens/SegmentBuilder.js'
 import { SegmentDetail } from '../screens/SegmentDetail.js'
 import { Segments } from '../screens/Segments.js'
@@ -22,6 +23,7 @@ import { Shell } from './Shell.js'
 export const ROUTES = {
   feed: '/feed',
   settings: '/settings',
+  profile: '/profile',
   funnels: '/funnels',
   funnelNew: '/funnels/new',
   segments: '/segments',
@@ -51,6 +53,10 @@ export function AppRouter(props: {
   email: string | null
   onLogout(): void
   onUnauthorized?(): void
+  /** Called after the admin's email changes, so `App` can re-read the
+   * session it renders the header from -- this screen has just made that
+   * value stale, and the server already returns the new one. */
+  onEmailChanged?(): void
 }) {
   const feed = <Feed client={props.client} onUnauthorized={props.onUnauthorized} />
   // IMPORTANT 3 from the whole-branch review: `onUnauthorized` used to be
@@ -59,6 +65,13 @@ export function AppRouter(props: {
   // same way, and it is the only screen with no unauthorized detector of
   // its own now that both destinations get one.
   const settings = <Settings client={props.client} onUnauthorized={props.onUnauthorized} />
+  const profile = (
+    <Profile
+      client={props.client}
+      email={props.email}
+      onEmailChanged={() => props.onEmailChanged?.()}
+    />
+  )
   const funnels = <Funnels client={props.client} onUnauthorized={props.onUnauthorized} />
   // Distinct `key`s for the same reason the segment builders carry them:
   // <Routes> reconciles its single child by TYPE AND POSITION, so navigating
@@ -115,6 +128,7 @@ export function AppRouter(props: {
           <Route path="/" element={feed} />
           <Route path={ROUTES.feed} element={feed} />
           <Route path={ROUTES.settings} element={settings} />
+          <Route path={ROUTES.profile} element={profile} />
           {/*
            * `<Routes>` ranks candidates by path specificity (via
            * `matchRoutes()`), not by declaration order -- verified directly:

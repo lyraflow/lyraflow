@@ -128,6 +128,34 @@ export class SessionStore {
   }
 
   /**
+   * Ends every session belonging to one admin except, optionally, the one
+   * making the request.
+   *
+   * A password change is the caller. If the change is being made because the
+   * old password leaked, leaving other sessions alive means the change
+   * revoked nobody -- whoever holds a stolen cookie keeps it until it
+   * expires on its own, which is the whole window the change was meant to
+   * close. So the default is "everything", and the browser that made the
+   * change is exempted BY TOKEN rather than kept and re-used: the caller
+   * issues itself a fresh session afterwards, so even the cookie that made
+   * the request does not survive the statement.
+   *
+   * Returns the number of rows removed, which is what lets a test tell "it
+   * ran" from "it matched nothing" -- a revoke that silently deleted zero
+   * rows would look identical to a working one from the outside.
+   */
+  async revokeAllFor(adminUserId: number, exceptToken?: string): Promise<number> {
+    const res =
+      exceptToken === undefined
+        ? await this.pg.query('DELETE FROM sessions WHERE admin_user_id = $1', [adminUserId])
+        : await this.pg.query('DELETE FROM sessions WHERE admin_user_id = $1 AND id <> $2', [
+            adminUserId,
+            hashSessionToken(exceptToken),
+          ])
+    return res.rowCount ?? 0
+  }
+
+  /**
    * Removes both expired rows and over-age rows -- a row past the max-age
    * cap but with a future `expires_at` (kept alive by renewal) would
    * otherwise sit dead in the table for up to `ttlMs` more. Served by

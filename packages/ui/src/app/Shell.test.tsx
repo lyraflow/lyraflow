@@ -241,3 +241,21 @@ describe('Shell — archived projects in the switcher', () => {
     expect(screen.queryByText(/Demo Data \(archived\)/)).not.toBeInTheDocument()
   })
 })
+
+describe('Shell — the account menu', () => {
+  // A real anchor, not a button that navigates: an account-menu entry that
+  // cannot be middle-clicked or opened in a new tab is a link pretending to
+  // be something else, and every other destination in this shell is one.
+  it('offers Profile as a link to /profile', async () => {
+    renderShell()
+    await userEvent.click(screen.getByRole('button', { name: /admin@localhost/ }))
+    const profile = await screen.findByRole('menuitem', { name: 'Profile' })
+    expect(profile).toHaveAttribute('href', '/profile')
+  })
+
+  it('still offers sign out beside it', async () => {
+    renderShell()
+    await userEvent.click(screen.getByRole('button', { name: /admin@localhost/ }))
+    expect(await screen.findByRole('menuitem', { name: 'Sign out' })).toBeInTheDocument()
+  })
+})

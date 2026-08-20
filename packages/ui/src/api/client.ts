@@ -74,6 +74,16 @@ export interface ApiClient {
    * project that is not the active one.
    */
   updateProject(id: number, patch: ProjectUpdate): Promise<Project>
+  /**
+   * The admin account's own two mutations. Both take the CURRENT password:
+   * a session is enough to read this install and deliberately not enough to
+   * change what recovers the account.
+   *
+   * Instance-scoped, so neither carries the project header -- "who am I" has
+   * no project to resolve against.
+   */
+  changeEmail(email: string, currentPassword: string): Promise<{ email: string }>
+  changePassword(currentPassword: string, newPassword: string): Promise<void>
   project(projectId: number): Promise<ProjectIdentity>
   // A field ABSENT from `patch` means "leave unchanged" -- the caller must
   // never send `monthly_event_quota: 0` for "no change", only omit the
@@ -276,6 +286,20 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
       call('/v1/projects', { method: 'POST', body: JSON.stringify({ name }) }),
     updateProject: (id: number, patch: ProjectUpdate) =>
       call<Project>(`/v1/projects/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+    changeEmail: (email, currentPassword) =>
+      call<{ email: string }>('/v1/auth/email', {
+        method: 'PATCH',
+        body: JSON.stringify({ email, current_password: currentPassword }),
+      }),
+    changePassword: async (currentPassword, newPassword) => {
+      // The response sets a fresh session cookie -- every session including
+      // this one was revoked by the change, so the browser is carried by
+      // the new cookie the server just issued. Nothing to return.
+      await call('/v1/auth/password', {
+        method: 'PATCH',
+        body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+      })
+    },
     // Both project-scoped the same way `events` is -- the header the client
     // attaches from `projectId`, not a path segment or query param.
     project: (projectId) => call('/v1/project', {}, projectId),

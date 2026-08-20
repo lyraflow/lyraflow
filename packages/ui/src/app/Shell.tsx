@@ -4,6 +4,7 @@ import {
   LayoutList,
   LogOut,
   Settings as SettingsIcon,
+  UserRound,
   Users,
 } from 'lucide-react'
 import type { ReactNode } from 'react'
@@ -145,6 +146,16 @@ function AccountMenu(props: { email: string | null; onLogout(): void }) {
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
+        {/* `asChild` so this is a real anchor: an account menu entry that
+         * cannot be middle-clicked or opened in a new tab is a button
+         * pretending to be a link, and `react-router`'s Link is what the
+         * rest of this shell navigates with. */}
+        <DropdownMenuItem asChild>
+          <Link to={ROUTES.profile}>
+            <UserRound className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
+            Profile
+          </Link>
+        </DropdownMenuItem>
         <DropdownMenuItem onSelect={() => props.onLogout()}>
           <LogOut className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
           Sign out
