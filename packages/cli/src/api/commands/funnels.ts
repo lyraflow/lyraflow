@@ -52,7 +52,9 @@ interface RunResponse {
   partial_window_entrants: number
   range: { since: string; until: string }
   as_of: string
-  warnings: { path: string; reason: string }[]
+  /** OPTIONAL because an older server may not send it (#107). Read only
+   * through `emitWarnings`, which is where the absence is handled. */
+  warnings?: { path: string; reason: string }[]
 }
 
 interface DropoffResponse {

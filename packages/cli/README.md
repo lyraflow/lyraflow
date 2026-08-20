@@ -147,6 +147,27 @@ to route around. When both `--json` and `--human` are passed, `--json` wins.
 line for a single record — no wrapping array, no header row. An empty list
 prints nothing at all, in either mode.
 
+### What the CLI assumes about the server it is talking to
+
+The CLI **casts** responses to its declared shapes rather than validating them
+against a schema. That is a deliberate choice, and it has a direction: a server
+that sends a field this CLI has never heard of is fine and always will be —
+extra fields are ignored, so a newer server never breaks an older CLI.
+
+The other direction is the one that needs care. A field this CLI reads but an
+**older** server does not send arrives as `undefined`, and the rule for that is
+narrow enough to state in a sentence: *a field the CLI cannot be certain the
+server sends is typed optional, so the compiler requires every reader to handle
+its absence.* Nothing scans the response at runtime to enforce it.
+
+What was rejected, and why it is worth recording: validating every response
+against a schema would make the CLI **refuse a newer server's answer** for
+carrying a field it does not recognise — converting a working setup into a
+broken one, which is the opposite of the failure being fixed.
+
+So there is no minimum server version, and no handshake. Mismatched versions
+degrade by omission rather than by error.
+
 ## Exit codes
 
 | Code | Meaning |
