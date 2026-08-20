@@ -21,6 +21,98 @@ here as it happened rather than tagged retroactively, for the same reason 0.1.0
 is: a tag created after the fact names a moment nobody could have fetched. Its
 one fix is contained in 0.3.0.
 
+## 0.7.0
+
+Two changes alter what stored data MEANS, and both are called out first because
+upgrading applies them whether or not you read this.
+
+### Changed
+
+- **A page view is stored as `$page`, with the page name as a property.**
+  `page('Pricing')` used to store `Pricing` as the *event name*, so a page view
+  stopped being a page view and became its own event type — there was no "all
+  page views" query, `page('signup')` and `track('signup')` were
+  indistinguishable once stored, and every page name claimed a slot in a
+  `LowCardinality` column and a property-key budget of its own. The name now
+  lands in the `$page_name` property.
+
+  **Events already stored under a page name stay as they are.** This changes
+  ingest, not history: a project that used `page(name)` before this release has
+  its old page views under their old names and its new ones under `$page`.
+
+  `$` is now reserved for Lyraflow. A property key you send beginning with `$`
+  is dropped — in both the string and the numeric map, since routing is per
+  value and a guard on one map would move the collision into the other rather
+  than prevent it. `price_$` and `a$b` are ordinary keys and are untouched.
+
+- **A `lifecycle` bound with no timezone is UTC.** It used to be resolved with
+  the server's own timezone, so the same stored segment meant a different
+  instant depending on where the process thought it was — and moving a
+  deployment between zones, or a container picking up a different `TZ`, changed
+  which people it matched with no error and no visible change to the
+  definition.
+
+  **If your server was not on UTC, such a bound has shifted by that offset.**
+  Once, visibly: the builder shows the instant it now names when you open the
+  segment. Bounds that carry a `Z` or an explicit offset are unaffected, and
+  always were.
+
+### Added
+
+- **`lyraflow_ingest_quota_used_ratio`**, a gauge per quota-carrying project.
+  Quota enforcement answers `429` once a project passes its limit, and the only
+  existing signal counted events *already lost*. Alert on this below 1.0 — at
+  1.0 events are already being refused. A scrape costs no database read; it
+  reads the ingest path's own cache.
+
+- **Every event name is discoverable, including events with no properties.**
+  The schema catalogue was fed only by unrolling each event's property maps, and
+  unrolling an empty map produces nothing — so a property-less event name was
+  invisible to `/v1/schema/events`, not merely absent from the property list.
+  Existing events are not backfilled: such a name appears when the next one
+  arrives.
+
+- **A funnel's cached summary records the range it ran over.** The list showed a
+  rate next to a timestamp with nothing to say which window produced it, so a
+  funnel last run over 90 days displayed a 90-day rate under a screen whose
+  default is seven. `last_range` is on the wire and the screen renders it — or
+  says `range unknown` for a summary written before this release, rather than
+  labelling it with a guess.
+
+- **`lyraflow usage`**, reporting what a project has consumed this month.
+
+- **A `trusted_proxies` extension point for Caddy.** Behind a CDN the address
+  Caddy observes is the intermediary's; this is where you tell it which peers to
+  believe. No visible effect until GeoIP exists, and the README says so.
+
+### Fixed
+
+- **A contended `/v1/alias` returned `503` instead of retrying.** A
+  serialization failure is Postgres asking the client to re-run the
+  transaction; nothing did, so a retryable conflict was reported as an outage.
+  Now retried, whole and bounded, with jitter.
+
+- **The CLI no longer crashes against an older server** that omits a field it
+  expects. It casts responses rather than validating them, so a field the
+  server does not send arrived as `undefined` and a command that should have
+  printed a table died with a stack trace.
+
+- **`restore.sh` asks whether it can drop the schema before destroying
+  anything**, instead of failing halfway through with ClickHouse already
+  replaced.
+
+- **Person deletion sweeps property keys only the erased person ever sent.**
+
+- **The login rate limiter's namespace map is bounded.**
+
+### Documented
+
+- **A minimum Docker Compose version: v2.21.0.** `install.sh` passes a Go
+  template to `docker compose ps --format`, which older versions reject
+  outright. Everything else these scripts use is older. The floor is derived
+  from the flags in use and checked against the README by a test, so it cannot
+  quietly go stale.
+
 ## 0.6.0 — 2026-08-19
 
 ### Added
