@@ -26,3 +26,20 @@ export function formatEventTime(iso: string, now: Date = new Date()): string {
   const date = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
   return `${date} ${time}`
 }
+
+/**
+ * One bar's minute, for the sparkline's hover readout. Hour and minute
+ * only: the bucket is a whole minute wide, so rendering seconds would
+ * claim a precision the bar does not have. 24-hour, like
+ * `formatEventTime`, so a reader comparing the readout against a row in
+ * the table below is comparing two clocks written the same way.
+ *
+ * Unparseable input falls back to the raw string for the same reason it
+ * does above -- a tooltip that says "Invalid Date" tells an operator
+ * nothing about which minute it came from.
+ */
+export function formatBucketTime(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false })
+}

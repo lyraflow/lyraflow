@@ -104,6 +104,24 @@ export interface ProjectLimits {
   monthly_event_quota: number | null
 }
 
+/**
+ * One row of `GET /v1/events`.
+ *
+ * Every field the route sends, not merely the four the feed table has
+ * columns for. That route's `FeedRow` calls itself "a compile-time
+ * allowlist" of the columns it selects, and it sends all of them; this
+ * type used to stop after `device_type`, so the context an event carries
+ * -- its campaign, its browser, where the visitor was -- was arriving on
+ * the wire and being dropped on the floor before anything could show it.
+ * A row's expanded detail is the one place in the product that answers
+ * "what exactly did you receive", and it can only be as complete as this
+ * declaration.
+ *
+ * All of the string fields are '' rather than absent when the event did
+ * not carry them -- ClickHouse has no null here -- so a reader deciding
+ * whether to render a field tests for the empty string, not for
+ * `undefined`.
+ */
 export interface LyraEvent {
   event_id: string
   /** ISO 8601, already converted server-side. */
@@ -111,12 +129,24 @@ export interface LyraEvent {
   event_name: string
   anonymous_id: string
   user_id: string
+  /** Custom properties, split by type at ingest: strings here, numbers in
+   * `properties_num`. One key never appears in both. */
   properties: Record<string, string>
   properties_num: Record<string, number>
   url: string
   path: string
   referrer: string
+  utm_source: string
+  utm_medium: string
+  utm_campaign: string
+  utm_term: string
+  utm_content: string
   device_type: string
+  os: string
+  browser: string
+  country: string
+  region: string
+  city: string
 }
 
 export interface EventsPage {

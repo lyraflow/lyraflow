@@ -1,6 +1,47 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { Project } from '../api/types.js'
+
+/** Same `lf-` prefix as the theme's own key, and the same storage, for the
+ * same reason: this is a preference belonging to whoever is sitting at this
+ * browser, not to the session or the server. */
+const KEY = 'lf-project'
+
+/**
+ * The project this browser was last switched to, or `null` if it has never
+ * been switched, or if what is stored is not a project id.
+ *
+ * Exported so a test can pin the parsing rather than reach into
+ * localStorage's key name. `Number('')` is 0 and `Number('  8 ')` is 8, so a
+ * blank value would otherwise pass as an id and a padded one would work by
+ * accident -- both are checked here rather than left to whatever the value
+ * happens to do when it reaches `projects.some(...)`.
+ */
+export function readStoredProjectId(): number | null {
+  const raw = localStorage.getItem(KEY)
+  if (raw === null || raw.trim() === '') return null
+  const id = Number(raw)
+  return Number.isInteger(id) && id > 0 ? id : null
+}
+
+/**
+ * Which project this provider should open on: the one this browser last
+ * switched to, if it is still one of `projects`, and `initialId` otherwise.
+ *
+ * The membership check is the whole point of resolving rather than simply
+ * restoring. A stored id outlives the thing it names -- a project deleted by
+ * hand in Postgres (there is no UI for it yet, #60), a different install
+ * reached at the same origin, a different operator signing in on this
+ * browser -- and an `activeId` naming a project the session does not carry
+ * scopes every request on every screen to something the server will refuse,
+ * with a switcher showing no selection and no way back except clearing site
+ * data.
+ */
+function resolveInitialId(projects: Project[], initialId: number | null): number | null {
+  const remembered = readStoredProjectId()
+  if (remembered != null && projects.some((p) => p.id === remembered)) return remembered
+  return initialId
+}
 
 interface ProjectState {
   projects: Project[]
@@ -38,11 +79,32 @@ const Ctx = createContext<ProjectState | null>(null)
  */
 export function ProjectProvider(props: {
   projects: Project[]
+  /**
+   * Which project to open on when this browser has no remembered choice, or
+   * when the remembered one is not in `projects`. The FALLBACK, not the
+   * answer -- see `resolveInitialId`.
+   */
   initialId: number | null
   children: ReactNode
 }) {
-  const [activeId, setActiveId] = useState<number | null>(props.initialId)
+  const [activeId, setActiveIdState] = useState<number | null>(() =>
+    resolveInitialId(props.projects, props.initialId),
+  )
   const [projects, setProjects] = useState<Project[]>(props.projects)
+
+  /**
+   * Remembers the switch, so a reload comes back to the project the operator
+   * was looking at rather than to whichever one the server happened to list
+   * first. Written here, on the deliberate act, and nowhere else: persisting
+   * the resolved `activeId` in an effect would also write the fallback, which
+   * turns "never chose" into a choice on the first render and makes a later
+   * change to what `initialId` means invisible to anyone who has ever loaded
+   * this page.
+   */
+  const setActiveId = useCallback((id: number) => {
+    localStorage.setItem(KEY, String(id))
+    setActiveIdState(id)
+  }, [])
 
   // Same reasoning as the `activeId` sync below: the caller's `projects`
   // prop can legitimately change (a freshly-mounted provider given a newly
@@ -65,9 +127,24 @@ export function ProjectProvider(props: {
   // syncs it without disturbing a project the user picked by hand via
   // `setActiveId`: that only ever moves in response to `initialId` itself
   // changing, never on an unrelated re-render.
+  //
+  // The ref is what keeps that true on MOUNT. Effects run after the first
+  // render too, and this one used to fire with the value `useState` had just
+  // resolved -- harmless while that value WAS `props.initialId`, and a
+  // clobber the moment it became the remembered project instead: the feed
+  // would flash the restored project and then snap back to the first one,
+  // which is the bug this whole change is about. Comparing against the last
+  // `initialId` actually seen makes "changed" mean changed.
+  //
+  // And it re-resolves rather than assigning: a remembered project that is
+  // still in the new list is still the one the operator asked for, and the
+  // membership check is exactly what this effect exists to enforce.
+  const lastInitialId = useRef(props.initialId)
   useEffect(() => {
-    setActiveId(props.initialId)
-  }, [props.initialId])
+    if (props.initialId === lastInitialId.current) return
+    lastInitialId.current = props.initialId
+    setActiveIdState(resolveInitialId(props.projects, props.initialId))
+  }, [props.initialId, props.projects])
 
   const updateProject = useCallback((id: number, patch: Partial<Project>) => {
     setProjects((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)))
@@ -85,7 +162,7 @@ export function ProjectProvider(props: {
 
   const value = useMemo(
     () => ({ projects, activeId, setActiveId, updateProject, addProject }),
-    [projects, activeId, updateProject, addProject],
+    [projects, activeId, setActiveId, updateProject, addProject],
   )
   return <Ctx.Provider value={value}>{props.children}</Ctx.Provider>
 }

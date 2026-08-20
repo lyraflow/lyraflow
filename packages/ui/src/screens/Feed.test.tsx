@@ -7,21 +7,40 @@ import { ApiError } from '../api/client.js'
 import { ProjectProvider } from '../app/ProjectContext.js'
 import { DEFAULT_POLL_INTERVAL_MS, Feed } from './Feed.js'
 
+/** The fields `GET /v1/events` sends for an event that carried none of the
+ * optional context -- spelled out once so a fixture below can override only
+ * what its own test is about. */
+const EMPTY_CONTEXT = {
+  url: '',
+  referrer: '',
+  utm_source: '',
+  utm_medium: '',
+  utm_campaign: '',
+  utm_term: '',
+  utm_content: '',
+  device_type: 'desktop',
+  os: '',
+  browser: '',
+  country: '',
+  region: '',
+  city: '',
+}
+
 const EVENTS = [
   {
+    ...EMPTY_CONTEXT,
     event_id: 'e1',
     timestamp: '2026-08-15T09:14:02.000Z',
     event_name: 'page_view',
     anonymous_id: 'anon_8fa2',
     user_id: '',
-    properties: { path: '/pricing' },
-    properties_num: {},
-    url: '',
+    properties: { plan: 'trial' },
+    properties_num: { seats: 12 },
     path: '/pricing',
-    referrer: '',
-    device_type: 'desktop',
+    utm_campaign: 'launch',
   },
   {
+    ...EMPTY_CONTEXT,
     event_id: 'e2',
     timestamp: '2026-08-15T09:14:01.000Z',
     event_name: 'signed_up',
@@ -29,10 +48,7 @@ const EVENTS = [
     user_id: 'cem@example.test',
     properties: {},
     properties_num: {},
-    url: '',
     path: '',
-    referrer: '',
-    device_type: 'desktop',
   },
 ]
 
