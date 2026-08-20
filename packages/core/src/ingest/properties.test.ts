@@ -23,6 +23,20 @@ describe('routeProperties', () => {
     })
   })
 
+  // The claim the README now makes to callers, which is sharper than
+  // "booleans are stringified": once ingested there is NO WAY BACK. A caller
+  // who sent a real boolean and one who sent the string are indistinguishable,
+  // which is why a segment filter has to use the string form (#67).
+  it('makes a real boolean and its string spelling the same stored value', () => {
+    const fromBoolean = routeProperties({ flag: true })
+    const fromString = routeProperties({ flag: 'true' })
+    expect(fromBoolean).toEqual(fromString)
+    expect(fromBoolean.properties.flag).toBe('true')
+    // And nothing records that a coercion happened -- no second column, no
+    // marker, nothing a reader could use to tell the two apart later.
+    expect(Object.keys(fromBoolean.properties_num)).toEqual([])
+  })
+
   it('drops null and undefined rather than storing empty strings', () => {
     expect(routeProperties({ a: null, b: undefined as never })).toEqual({
       properties: {},
