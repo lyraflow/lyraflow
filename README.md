@@ -350,7 +350,12 @@ screens, reachable from the sidebar:
 - **Segments** — build a filter tree in the browser: `and`/`or` groups, traits,
   context, lifecycle bounds, and behaviours with their own `where` predicates.
   Preview it before saving — the person count and a bounded page of members,
-  taken at one instant — then save, re-run, edit or delete it.
+  taken at one instant — then save, re-run, edit or delete it. Clicking a
+  person opens what the preview already knows about them: their latest
+  country, city, device, OS and browser, the referrer and campaign they
+  arrived through, and the traits `identify()` has set. Attributes with no
+  value are left out and counted rather than listed as blanks, and a person
+  carrying more traits than a row returns says how many are not shown.
 
   The same honesty details as Funnels, for the same reasons. A saved segment's
   count is the server's **cache** from its last evaluation, shown with the

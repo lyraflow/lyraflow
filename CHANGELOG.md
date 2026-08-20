@@ -48,6 +48,21 @@ one fix is contained in 0.3.0.
   In the web UI, the Where row's field now lists Attributes above Properties
   in one picker, so the name you saw in the feed is where you look for it.
 
+- **A segment's member preview returns each person's traits**, and the web UI
+  expands a person row to show them beside that person's context — country,
+  city, device, OS, browser, referrer and campaign, which the response already
+  carried and no screen had ever shown.
+
+  **Traits are capped at 50 keys per person**, with the person's real trait
+  count returned alongside, so a capped row says what it held back rather than
+  reading as the whole set. They cost no extra query: the trait join is one
+  every compiled segment already performs, because predicates read it.
+
+  `referrer`, `utm_source`, `utm_medium` and `utm_campaign` are shown as
+  **first touch**, because that is what they are: those four are recorded once,
+  at acquisition, and asking for them at `latest` scope returns the
+  first-touch value.
+
 ## 0.7.0
 
 Two changes alter what stored data MEANS, and both are called out first because
