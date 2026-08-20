@@ -1716,3 +1716,156 @@ describe('ingest quota enforcement', () => {
     expect((await post('/v1/track', validEvent())).statusCode).toBe(429)
   })
 })
+
+/**
+ * `quotaSnapshot` (#43) — the reading behind lyraflow_ingest_quota_used_ratio.
+ *
+ * Its whole reason to exist is that /metrics must answer without touching a
+ * database, so most of these are about what it declines to do.
+ */
+describe('quotaSnapshot', () => {
+  const okCh2 = { insert: async () => {} } as unknown as ClickHouseClient
+  const bindings2 = { bind: async () => 'noop' as const } as unknown as IngestDeps['bindings']
+  const aliases2 = { alias: async () => 'noop' as const } as unknown as IngestDeps['aliases']
+
+  function build(opts: {
+    quota: number | null
+    persisted: number
+    onQuery?: () => void
+  }): { app: ReturnType<typeof Fastify>; snapshot: () => ReturnType<typeof Object> } {
+    const proj: Project = {
+      id: 55,
+      slug: 'snap',
+      retentionMonths: 24,
+      monthlyEventQuota: opts.quota,
+      serverKeyHash: 'h',
+    }
+    const pool = {
+      query: async (text: string) => {
+        opts.onQuery?.()
+        if (text.includes('events_accepted'))
+          return { rows: [{ events_accepted: String(opts.persisted) }] }
+        return { rows: [] }
+      },
+    } as unknown as Pool
+    const app = Fastify({ logger: false })
+    const readiness = new Readiness()
+    readiness.markReady()
+    const reg = registerIngestRoutes(app, {
+      buffer: new IngestBuffer<EventRow>({
+        flushRows: 1000,
+        flushIntervalMs: 60_000,
+        maxRows: 1000,
+        insert: async () => {},
+      }),
+      projects: {
+        byWriteKey: async (k: string) => (k === 'wk_snap' ? proj : null),
+        byServerKey: async () => null,
+      } as unknown as IngestDeps['projects'],
+      counters: new IngestCounters(pool),
+      cardinality: new CardinalityTracker(),
+      geo: new NullGeoResolver(),
+      readiness,
+      ch: okCh2,
+      bindings: bindings2,
+      aliases: aliases2,
+    })
+    return { app, snapshot: reg.quotaSnapshot }
+  }
+
+  const send = (app: ReturnType<typeof Fastify>) =>
+    app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': 'wk_snap', 'user-agent': UA },
+      // `/v1/track` answers 202 for a REJECTED event too — accept and degrade
+      // is the whole design — so a malformed payload here looks exactly like a
+      // pass while never reaching the quota check at all. `message_id` must be
+      // a UUID; `'snap-1'` parses as a string, fails the schema, and returns
+      // the same 202 {"status":"accepted"}. Which is why the assertions below
+      // check the SNAPSHOT rather than the status code.
+      payload: { message_id: randomUUID(), anonymous_id: 'a', event: 'e' },
+    })
+
+  it('is empty before any event, so nothing is reported that was never enforced', () => {
+    const { snapshot } = build({ quota: 1000, persisted: 0 })
+    expect(snapshot()).toEqual([])
+  })
+
+  it('reports a project once enforcement has read its usage', async () => {
+    const { app, snapshot } = build({ quota: 1000, persisted: 400 })
+    expect((await send(app)).statusCode).toBe(202)
+
+    const rows = snapshot()
+    expect(rows.length).toBe(1)
+    expect(rows[0]?.projectId).toBe(55)
+    expect(rows[0]?.quota).toBe(1000)
+    // 400 persisted + 1 pending. The PENDING half is the point: reporting the
+    // persisted figure alone reads low by up to a whole flush interval, which
+    // is exactly the window in which a project crosses its limit — so the
+    // gauge would be least accurate at the moment it matters most.
+    expect(rows[0]?.used).toBe(401)
+  })
+
+  it('never reports a project with no quota', async () => {
+    // null is unlimited and is what every project carries by default. A ratio
+    // against unlimited is not a number, and such a project is short-circuited
+    // before any usage read — so it must not appear at all rather than appear
+    // with a zero or a null.
+    const { app, snapshot } = build({ quota: null, persisted: 0 })
+    expect((await send(app)).statusCode).toBe(202)
+    expect(snapshot()).toEqual([])
+  })
+
+  it('drops an entry whose month has rolled rather than reporting it', async () => {
+    // `usage` is keyed by month. Reporting last month's persisted count
+    // against this month's quota would produce a number that LOOKS like a
+    // ratio and is not one — worse than reporting nothing, because an
+    // operator would alert on it. A project that has sent nothing this month
+    // simply has no series until it does.
+    const { app, snapshot } = build({ quota: 1000, persisted: 400 })
+    await send(app)
+    expect(snapshot().length).toBe(1)
+
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date(Date.UTC(new Date().getUTCFullYear() + 1, 0, 15)))
+      expect(snapshot()).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('emits no series for a non-positive quota, which would serialise as Infinity', async () => {
+    // Unreachable through the API today — project/routes.ts refuses 0 and
+    // `isOverQuota` throws on it — so this guards the DIVISION rather than a
+    // live path. It matters because JavaScript renders `n / 0` as the literal
+    // `Infinity`, which is not valid Prometheus exposition (`+Inf` is), and
+    // one malformed line makes a scraper reject the entire body — taking
+    // every other metric down with a quota nobody set correctly.
+    const { app, snapshot } = build({ quota: 0, persisted: 5 })
+    await send(app)
+    expect(snapshot()).toEqual([])
+  })
+
+  it('costs no database query, however many times it is called', async () => {
+    // The requirement #43 states outright. /metrics is unauthenticated and
+    // scraped on a schedule nobody here controls; a per-project read per
+    // scrape would be a new load source reporting a number ingest already
+    // holds. Counted rather than reasoned about.
+    let queries = 0
+    const { app, snapshot } = build({
+      quota: 1000,
+      persisted: 400,
+      onQuery: () => {
+        queries++
+      },
+    })
+    await send(app)
+    const afterIngest = queries
+    expect(afterIngest, 'the fixture must actually query during ingest').toBeGreaterThan(0)
+
+    for (let i = 0; i < 50; i++) snapshot()
+    expect(queries).toBe(afterIngest)
+  })
+})
