@@ -12,6 +12,7 @@ function project(id: number, name: string): Project {
     created_at: '2026-08-01T00:00:00.000Z',
     retention_months: 13,
     monthly_event_quota: null,
+    disabled_at: null,
   }
 }
 

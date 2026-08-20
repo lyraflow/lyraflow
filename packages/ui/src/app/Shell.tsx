@@ -8,6 +8,7 @@ import {
 } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Link, NavLink, useLocation } from 'react-router'
+import type { Project } from '../api/types.js'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -70,9 +71,34 @@ function Mark() {
  * button matches how the switcher reads in the header (a click target with
  * a name, not a text input) and is what the rest of the app can rely on.
  */
+/**
+ * Archived projects sort last and say so, rather than being filtered out.
+ *
+ * Hiding them would break the case that actually happens: archiving the
+ * project you are looking at. The switcher would then have no entry for
+ * `activeId`, the trigger would read "Select project" while the screens
+ * below kept answering for it, and there would be no way back to restore it
+ * except Settings. Listed-and-labelled costs one suffix and has no such
+ * state.
+ */
+function switcherLabel(project: Project): string {
+  return project.disabled_at === null ? project.name : `${project.name} (archived)`
+}
+
+function byArchivedLast(a: Project, b: Project): number {
+  const archived = Number(a.disabled_at !== null) - Number(b.disabled_at !== null)
+  return archived !== 0 ? archived : 0
+}
+
 function ProjectSwitcher() {
   const { projects, activeId, setActiveId } = useProject()
   const active = projects.find((p) => p.id === activeId)
+  // `toSorted` would be cleaner and is ES2023; this package targets a
+  // browser baseline that does not have it everywhere yet, so the copy is
+  // explicit. Sorting a copy matters either way: `projects` is context
+  // state and sorting it in place would mutate what every other consumer
+  // reads.
+  const ordered = [...projects].sort(byArchivedLast)
 
   return (
     <Select
@@ -84,12 +110,14 @@ function ProjectSwitcher() {
         role="button"
         className="min-w-0 w-auto gap-1.5 border-0 bg-transparent shadow-none"
       >
-        <SelectValue className="truncate">{active?.name ?? 'Select project'}</SelectValue>
+        <SelectValue className="truncate">
+          {active ? switcherLabel(active) : 'Select project'}
+        </SelectValue>
       </SelectTrigger>
       <SelectContent>
-        {projects.map((project) => (
+        {ordered.map((project) => (
           <SelectItem key={project.id} value={String(project.id)}>
-            {project.name}
+            {switcherLabel(project)}
           </SelectItem>
         ))}
       </SelectContent>

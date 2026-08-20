@@ -12,6 +12,7 @@ import type {
   ProjectIdentity,
   ProjectLimits,
   ProjectPatch,
+  ProjectUpdate,
   PropertyKind,
   RangeBody,
   RejectionsPage,
@@ -66,6 +67,13 @@ export interface ApiClient {
   // The server key in the response exists nowhere else, ever: only its
   // SHA-256 is stored, so this is the caller's one chance to show it.
   createProject(name: string): Promise<CreatedProject>
+  /**
+   * Rename a project, archive it, or restore it. Instance-scoped like
+   * `projects()` and `createProject()` -- it names the project in the path
+   * rather than in the header, because the caller may be operating on a
+   * project that is not the active one.
+   */
+  updateProject(id: number, patch: ProjectUpdate): Promise<Project>
   project(projectId: number): Promise<ProjectIdentity>
   // A field ABSENT from `patch` means "leave unchanged" -- the caller must
   // never send `monthly_event_quota: 0` for "no change", only omit the
@@ -266,6 +274,8 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
     // the header would claim a scope this call doesn't have.
     createProject: (name) =>
       call('/v1/projects', { method: 'POST', body: JSON.stringify({ name }) }),
+    updateProject: (id: number, patch: ProjectUpdate) =>
+      call<Project>(`/v1/projects/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
     // Both project-scoped the same way `events` is -- the header the client
     // attaches from `projectId`, not a path segment or query param.
     project: (projectId) => call('/v1/project', {}, projectId),

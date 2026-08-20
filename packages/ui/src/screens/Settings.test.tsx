@@ -40,6 +40,7 @@ const PROJECTS = [
     created_at: '',
     retention_months: 24,
     monthly_event_quota: null,
+    disabled_at: null,
   },
 ]
 
@@ -56,6 +57,7 @@ function createdProject(over: Partial<Record<string, unknown>> = {}) {
     created_at: '2026-08-14T00:00:00.000Z',
     retention_months: 13,
     monthly_event_quota: null,
+    disabled_at: null,
     write_key: 'wk_new',
     server_key: 'sk_new',
     ...over,
@@ -72,6 +74,7 @@ function fakeClient(over: Record<string, unknown> = {}) {
       events_throttled: 0,
       events_bot: 3906,
       monthly_event_quota: 50000000,
+      disabled_at: null,
     })),
     projects: vi.fn(async () => PROJECTS),
     ...over,
@@ -144,6 +147,7 @@ describe('Settings — usage', () => {
         created_at: '',
         retention_months: 24,
         monthly_event_quota: 50_000_000,
+        disabled_at: null,
       },
     ]
     render(
@@ -168,6 +172,7 @@ describe('Settings — usage', () => {
           events_throttled: 0,
           events_bot: 0,
           monthly_event_quota: null,
+          disabled_at: null,
         })),
       }),
     )
@@ -216,6 +221,7 @@ describe('Settings — invented mutations', () => {
         created_at: '',
         retention_months: 24,
         monthly_event_quota: null,
+        disabled_at: null,
       },
     ]
     const view = render(
@@ -351,6 +357,7 @@ describe('Settings — limits invented mutations', () => {
         created_at: '',
         retention_months: 24,
         monthly_event_quota: 12345,
+        disabled_at: null,
       },
     ]
     render(
@@ -412,6 +419,7 @@ describe('Settings — usage stays in sync with a saved limit', () => {
         events_throttled: 0,
         events_bot: 0,
         monthly_event_quota: null,
+        disabled_at: null,
       })),
     })
     renderSettings(client)
@@ -449,6 +457,7 @@ describe('Settings — usage stays in sync with a saved limit', () => {
         created_at: '',
         retention_months: 24,
         monthly_event_quota: 50_000_000,
+        disabled_at: null,
       },
     ]
     const client = fakeClient({
@@ -460,6 +469,7 @@ describe('Settings — usage stays in sync with a saved limit', () => {
         events_throttled: 0,
         events_bot: 0,
         monthly_event_quota: 50_000_000,
+        disabled_at: null,
       })),
     })
     render(

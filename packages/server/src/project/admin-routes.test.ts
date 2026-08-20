@@ -132,7 +132,15 @@ describe('GET /v1/projects', () => {
     const mine = body.projects.find((p) => p.slug === SLUG)
     expect(mine).toBeDefined()
     expect(Object.keys(mine as Record<string, unknown>).sort()).toEqual(
-      ['created_at', 'id', 'monthly_event_quota', 'name', 'retention_months', 'slug'].sort(),
+      [
+        'created_at',
+        'disabled_at',
+        'id',
+        'monthly_event_quota',
+        'name',
+        'retention_months',
+        'slug',
+      ].sort(),
     )
   })
 
@@ -437,5 +445,189 @@ describe('a session inside its renewal window, used through GET /v1/projects', (
       [hashSessionToken(token)],
     )
     expect(after.rows[0]?.expires_at.getTime()).toBe(before.rows[0]?.expires_at.getTime())
+  })
+})
+
+describe('PATCH /v1/projects/:id', () => {
+  const patch = (id: number | string, payload: { name?: string; archived?: boolean }) =>
+    app.inject({
+      method: 'PATCH',
+      url: `/v1/projects/${id}`,
+      headers: { 'x-lyraflow-ui': '1', cookie },
+      payload,
+    })
+
+  const projectId = async (): Promise<number> => {
+    const res = await pg.query<{ id: string }>('SELECT id FROM projects WHERE slug = $1', [SLUG])
+    return Number(res.rows[0]?.id)
+  }
+
+  it('refuses a request with no session', async () => {
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/v1/projects/${await projectId()}`,
+      headers: { 'x-lyraflow-ui': '1' },
+      payload: { name: 'nope' },
+    })
+    expect(res.statusCode).toBe(401)
+  })
+
+  // The slug is what a project is addressed by outside this API --
+  // `lyraflow seed-demo demo-data` and anything an operator scripted around
+  // it. Deriving a new slug from a new name would break those silently, at
+  // the moment somebody fixed a typo in a display name.
+  it('renames without touching the slug', async () => {
+    const id = await projectId()
+    const res = await patch(id, { name: 'Renamed By Test' })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().name).toBe('Renamed By Test')
+    expect(res.json().slug).toBe(SLUG)
+
+    const row = await pg.query<{ name: string; slug: string }>(
+      'SELECT name, slug FROM projects WHERE id = $1',
+      [id],
+    )
+    expect(row.rows[0]).toEqual({ name: 'Renamed By Test', slug: SLUG })
+  })
+
+  it('archives, then restores, and says when it was archived', async () => {
+    const id = await projectId()
+    const archived = await patch(id, { archived: true })
+    expect(archived.statusCode).toBe(200)
+    expect(archived.json().disabled_at).not.toBeNull()
+
+    const restored = await patch(id, { archived: false })
+    expect(restored.statusCode).toBe(200)
+    expect(restored.json().disabled_at).toBeNull()
+  })
+
+  // Archiving twice must not move the timestamp: "when was this stopped" is
+  // the question the column exists to answer, and a second click on a
+  // control that is already in that state would otherwise rewrite history.
+  it('keeps the original instant when archived twice', async () => {
+    const id = await projectId()
+    const first = await patch(id, { archived: true })
+    const again = await patch(id, { archived: true })
+    expect(again.json().disabled_at).toBe(first.json().disabled_at)
+    await patch(id, { archived: false })
+  })
+
+  // Absent means "leave alone", independently per field -- so a rename does
+  // not restore an archived project and archiving does not blank a name.
+  it('leaves the other field alone when only one is sent', async () => {
+    const id = await projectId()
+    await patch(id, { archived: true })
+    const renamed = await patch(id, { name: 'Still Archived' })
+    expect(renamed.json().name).toBe('Still Archived')
+    expect(renamed.json().disabled_at).not.toBeNull()
+    await patch(id, { archived: false })
+  })
+
+  it('refuses an empty name and a non-numeric id', async () => {
+    const id = await projectId()
+    expect((await patch(id, { name: '   ' })).statusCode).toBe(400)
+    expect((await patch('abc', { name: 'x' })).statusCode).toBe(400)
+  })
+
+  it('answers 404 for a project that does not exist', async () => {
+    expect((await patch(2_147_483_000, { name: 'x' })).statusCode).toBe(404)
+  })
+
+  it('lists the archive state alongside every other project field', async () => {
+    const id = await projectId()
+    await patch(id, { archived: true })
+    const list = await app.inject({
+      method: 'GET',
+      url: '/v1/projects',
+      headers: { 'x-lyraflow-ui': '1', cookie },
+    })
+    const listed = list.json().projects.find((p: { id: number }) => p.id === id)
+    expect(listed.disabled_at).not.toBeNull()
+    await patch(id, { archived: false })
+  })
+})
+
+describe('an archived project and ingest', () => {
+  const projectId = async (): Promise<number> => {
+    const res = await pg.query<{ id: string }>('SELECT id FROM projects WHERE slug = $1', [SLUG])
+    return Number(res.rows[0]?.id)
+  }
+  const setArchived = (id: number, archived: boolean) =>
+    app.inject({
+      method: 'PATCH',
+      url: `/v1/projects/${id}`,
+      headers: { 'x-lyraflow-ui': '1', cookie },
+      payload: { archived },
+    })
+
+  const track = () =>
+    app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': `wk_${PREFIX}` },
+      payload: {
+        type: 'track',
+        message_id: '11111111-2222-3333-4444-555555555555',
+        anonymous_id: 'archive-test',
+        event: 'ping',
+      },
+    })
+
+  /**
+   * 401 AND NOT 403, which is forced rather than chosen: the browser SDK
+   * treats 401 alone as terminal and retries every other status forever.
+   * Self-hosters have older bundles already on their pages, so a 403 here
+   * would have every deployed snippet hammer the server indefinitely for a
+   * project that will never accept again.
+   *
+   * The distinct code in the body is what keeps this legible as something
+   * other than a bad key.
+   */
+  it('refuses ingest with 401 and a distinguishable code', async () => {
+    const id = await projectId()
+    expect((await track()).statusCode).toBe(202)
+
+    await setArchived(id, true)
+    const refused = await track()
+    expect(refused.statusCode).toBe(401)
+    expect(refused.json().error).toBe('project_archived')
+    // Not the code a bad key gets -- an operator reading a log has to be
+    // able to tell "I stopped this" from "somebody has the wrong key".
+    expect(refused.json().error).not.toBe('invalid_write_key')
+
+    await setArchived(id, false)
+    expect((await track()).statusCode).toBe(202)
+  })
+
+  /**
+   * The refusal is read off `ProjectCache`, so archiving MUST invalidate it.
+   * Without that the project keeps accepting events until the TTL lapses --
+   * and this test would still pass if the cache were merely cold, so it
+   * warms the cache first with a successful call above and again here.
+   */
+  it('takes effect immediately rather than at the next cache expiry', async () => {
+    const id = await projectId()
+    expect((await track()).statusCode).toBe(202) // warms the write-key entry
+    await setArchived(id, true)
+    expect((await track()).statusCode).toBe(401)
+    await setArchived(id, false)
+    // And the restore is immediate too, for the same reason.
+    expect((await track()).statusCode).toBe(202)
+  })
+
+  // Archiving stops collection and nothing else. The data is intact and the
+  // state is reversible, so refusing reads would make archive into delete
+  // with extra steps -- and would take away the screen an operator uses to
+  // check what they stopped.
+  it('keeps server-key reads working', async () => {
+    const id = await projectId()
+    await setArchived(id, true)
+    const read = await app.inject({
+      method: 'GET',
+      url: '/v1/events?limit=1',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY },
+    })
+    expect(read.statusCode).toBe(200)
+    await setArchived(id, false)
   })
 })
