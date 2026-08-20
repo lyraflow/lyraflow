@@ -1178,6 +1178,19 @@ key.
 Operators are `=`, `!=`, `>`, `>=`, `<`, `<=`, and `between`. `between` takes
 exactly two values; every other operator takes exactly one.
 
+**A `lifecycle` bound with no timezone is UTC.** `2026-08-01T10:00` means
+10:00 UTC, and a bare `2026-08-01` means midnight UTC. Send an instant with a
+`Z` or an offset if you want to be explicit — both are accepted and honoured —
+but a value with neither is never read in the server's local zone.
+
+That is worth knowing if you have bounds stored from before this release: they
+used to be resolved with the server's own timezone, so the same segment meant
+a different instant depending on where the process thought it was, and moving
+a deployment between zones silently changed which people it matched. Those
+bounds now mean UTC. If your server was not on UTC, such a bound has shifted
+by that offset — once, visibly, and the builder shows the instant it now names
+when you open the segment.
+
 One caveat on `context`: `referrer`, `utm_source`, `utm_medium` and
 `utm_campaign` are recorded **only** as first-touch, because for an
 acquisition attribute the original value is the one that means something. A

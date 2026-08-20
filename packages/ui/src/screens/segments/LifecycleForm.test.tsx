@@ -127,7 +127,9 @@ describe('LifecycleForm', () => {
     const { container } = render(<LifecycleForm id="c" node={lifecycleNode()} onChange={vi.fn()} />)
     const input = container.querySelector('input[aria-label="Value"]')
     expect(input).toHaveAttribute('type', 'datetime-local')
-    expect(input).toHaveValue('2026-01-01T00:00')
+    // The fixture's value is zone-less, so it is UTC (#124) and displays in
+    // this suite's zone -- which is 5h30 ahead, putting it on the 1st at 05:30.
+    expect(input).toHaveValue('2026-01-01T05:30')
   })
 
   it('changing the field updates only field, leaving operator and value untouched', async () => {
@@ -189,12 +191,17 @@ describe('LifecycleForm', () => {
       expect(valueBox()).toHaveValue(LOCAL_MIDMORNING)
     })
 
-    it('shows a stored ZONE-LESS reading UNSHIFTED, because it names no instant to convert', () => {
-      // The other side of the ruling, and load-bearing rather than tidiness:
-      // `Lifecycle`'s refine accepts a zone-less reading, so such values are
-      // already stored. Converting one here would move a bound nobody edited
-      // by an offset nobody recorded -- five and a half hours, on this
-      // fixture -- the first time its row rendered.
+    it('shows a stored ZONE-LESS reading as the UTC instant it names (#124)', () => {
+      // The inverse of what this asserted before, and the inversion is the
+      // decision. `Lifecycle`'s refine accepts a zone-less reading, so such
+      // values are already stored -- and they mean UTC, so `10:00` renders as
+      // 15:30 in this fixture's zone.
+      //
+      // That shift is real and one-time: a bound written by an operator whose
+      // server was not on UTC now names a different instant than it did. It is
+      // visible the moment the segment is opened, which is the argument for
+      // taking it over a permanent ambiguity nothing in the stored value could
+      // ever resolve.
       render(
         <LifecycleForm
           id="c"
@@ -202,7 +209,7 @@ describe('LifecycleForm', () => {
           onChange={vi.fn()}
         />,
       )
-      expect(valueBox()).toHaveValue(LOCAL_MIDMORNING)
+      expect(valueBox()).toHaveValue('2026-08-01T15:30')
     })
 
     it('writes back an instant that CARRIES a zone, not the picker’s own wall-clock text', () => {

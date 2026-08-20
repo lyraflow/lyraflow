@@ -24,66 +24,44 @@
  * would otherwise discover the answer from a count that is five and a half
  * hours off.
  *
- * Both conversions are idempotent, deliberately: `toInstant` of an instant is
- * that instant, and `toPickerValue` of a picker value is that picker value.
- * A conversion accidentally applied twice therefore cannot corrupt anything.
- * What that does NOT protect against is applying one of them and not the
- * other, which is what the round-trip tests exist for.
+ * `toInstant` is idempotent: `toInstant` of an instant is that instant, so
+ * writing twice cannot corrupt.
  *
- * ## Two encodings live in the `lifecycle` column, and that is deliberate
+ * **`toPickerValue` is NOT, and that is a safety property #124 took away.** It
+ * emits a zone-less LOCAL reading, and a zone-less string on the way IN now
+ * means UTC -- so its output and its input are the same syntax with different
+ * meanings, and applying it twice shifts twice. It used to be idempotent
+ * precisely because zone-less values were passed through untouched, which is
+ * the behaviour the ruling removed. What protects the screen instead is that
+ * each direction is applied in exactly one place, and the round-trip tests
+ * pin it. The loss is stated here, and pinned by its own test, so it is found
+ * by reading rather than by watching a bound move five and a half hours on a
+ * re-render.
  *
- * `Lifecycle`'s refine (`ast.ts`) is looser than an `absolute` window's
- * `.datetime()`: it accepts a zone-less wall-clock reading as well as an
- * instant, so both shapes are already stored in the field today. The rule
- * this module implements, for every datetime control on the screen:
+ * ## One encoding, one meaning (#124)
  *
- * - **On read, a zone-less value passes through UNSHIFTED.** Stored
- *   zone-less values exist -- written by an earlier build of this screen,
- *   and accepted by the API and the CLI -- and shifting one by the local
- *   offset would silently change what an operator's saved segment means, by
- *   an offset nobody recorded.
- * - **On read, a value that CARRIES a zone (`Z` or an offset) is converted
- *   to local for display.** This is the half `LifecycleForm` was missing:
- *   the input renders nothing at all for a `Z`-suffixed string, so a saved
- *   bound appeared as an empty control on a condition that matched on it.
- * - **On write, a zone-carrying instant is emitted**, so every bound this
- *   screen produces from here on is unambiguous.
+ * `Lifecycle`'s refine is looser than an `absolute` window's `.datetime()`: it
+ * accepts a zone-less reading as well as an instant, so both shapes are stored
+ * in the field today. What changed is that they no longer mean different
+ * things. **A zone-less lifecycle value is UTC**, decided by fiat and
+ * implemented once, in core's `lifecycleInstant` -- which the compiler, this
+ * module and the summary all call, so what the picker shows, what the sentence
+ * says and what the SQL matches cannot disagree.
  *
- * The accepted cost is therefore two encodings in one column, read by one
- * rule. The alternative -- normalising on read -- is the shift described
- * above, applied to every already-stored bound.
+ * Every read therefore converts, and a stored bound written before the ruling
+ * by an operator whose server was not on UTC now names a different instant
+ * than it did, shifted by that server's offset. That cost was taken
+ * deliberately: it is bounded, it happens once, and it is visible the moment a
+ * segment is opened -- against a permanent ambiguity that nothing in a stored
+ * value could ever resolve.
  *
- * **The other half of this is still open, and is NOT a UI question.** A
- * zone-less lifecycle value reaches `packages/core/src/segments/predicates.ts`
- * and is compiled with `new Date(String(v))`, which resolves it in the
- * SERVER's zone rather than the operator's. Nothing in this module changes
- * that, and nothing here should: it is a decision about what a stored
- * wall-clock reading means, which has to be made where the SQL is generated.
- *
- * One residual belongs to that same open question and is left with it, rather
- * than settled quietly here: a BARE DATE (`2026-08-01`) is zone-less, so it is
- * passed through unshifted -- and a `datetime-local` control renders nothing
- * for it, because it is not a valid local date-and-time string. `Lifecycle`'s
- * refine accepts one, so a hand-written API call can store it. Displaying
- * anything for it means first deciding whether it meant UTC midnight (which is
- * what `new Date`, and therefore the compiler, decide) or the operator's own
- * midnight; picking one here would be answering the server's question in a
- * display helper. Pinned as behaviour in this module's tests so the choice is
- * visible rather than implied.
+ * The residual #126 recorded -- a BARE DATE rendering as an empty control --
+ * is gone with it. `2026-08-01` is midnight UTC, which is a local wall-clock
+ * reading like any other.
  */
 
+import { lifecycleInstant } from '@lyraflow/core/segments/instants.js'
 import type { ConditionValue, Scalar } from './ValueInput.js'
-
-/**
- * Whether a stored string names an INSTANT rather than a wall-clock reading
- * -- i.e. whether it carries a zone designator at all.
- *
- * The `T` in front is load-bearing: without it, the `[+-]\d{2}:?\d{2}` half
- * would have to be trusted not to match the `-08-01` of a bare date, and
- * "trusted not to" is how this class of bug is written. Anchored at the end,
- * so only a trailing designator counts.
- */
-const CARRIES_A_ZONE = /T.*(?:Z|[+-]\d{2}:?\d{2})$/i
 
 /**
  * A `Date` rendered in the picker's own format -- LOCAL wall-clock, built
@@ -124,17 +102,25 @@ export function toInstant(local: string): string {
 /**
  * A stored value -> what the picker should DISPLAY.
  *
- * A string with no zone designator is passed through untouched, and that is
- * not merely a convenience. It is what keeps this safe to point at a field
- * whose stored values are zone-less wall-clock readings (`lifecycle`, whose
- * refine accepts them): shifting such a value by the local offset would move
- * an instant nobody edited. Only a string that actually names an instant is
- * converted.
+ * Every stored value is now an INSTANT, including one with no zone designator
+ * (#124: those are UTC), so all of them convert to local for display. This
+ * used to pass a zone-less value through untouched, because what it meant had
+ * not been decided and shifting it would have moved an instant nobody edited.
+ * The decision is made, so the special case is gone -- and its removal is what
+ * makes a BARE DATE displayable at all (#126): `2026-08-01` is midnight UTC,
+ * which is a local wall-clock reading like any other.
+ *
+ * Resolved through core's `lifecycleInstant`, the SAME function the compiler
+ * uses, rather than a second reading of the same rule. What the picker shows
+ * and what the SQL matches cannot disagree, because there is one function.
+ *
+ * Anything unparseable is returned UNCHANGED rather than blanked: a half-typed
+ * value is the operator's own text and belongs back on screen, and the schema
+ * is what rejects it.
  */
 export function toPickerValue(stored: string): string {
   if (stored === '') return ''
-  if (!CARRIES_A_ZONE.test(stored)) return stored
-  const at = new Date(stored)
+  const at = lifecycleInstant(stored)
   if (Number.isNaN(at.getTime())) return stored
   return datetimeLocal(at)
 }
