@@ -21,6 +21,33 @@ here as it happened rather than tagged retroactively, for the same reason 0.1.0
 is: a tag created after the fact names a moment nobody could have fetched. Its
 one fix is contained in 0.3.0.
 
+## Unreleased
+
+### Added
+
+- **A segment behaviour's `where` can filter on the event's own attributes**,
+  not just its custom properties: `path`, `url`, `referrer`, the five `utm_*`
+  fields, `device_type`, `os`, `browser`, `country`, `region` and `city`. Set
+  `"source": "attribute"` on a predicate and name one of them. "Viewed pricing
+  at least once in the last 30 days, from the spring campaign" was not
+  expressible before — a predicate on `utm_campaign` was well-formed, saved
+  without complaint, and read an empty property slot, so it answered zero.
+
+  **A `context` condition is not the same thing** and is not replaced by this.
+  It matches whoever was ACQUIRED through a campaign, whatever they later did;
+  a `where` predicate matches people who did *this* thing *from* it.
+
+  **Nothing about existing segments changes.** A predicate with no `source` is
+  a property predicate, exactly as before, and `ast_version` is still `1` — no
+  migration, and no stored tree means anything different than it did. A
+  property genuinely named `path` keeps working; nothing is inferred from a
+  name.
+
+  Funnel steps take the same predicate, because they use the same shape.
+
+  In the web UI, the Where row's field now lists Attributes above Properties
+  in one picker, so the name you saw in the feed is where you look for it.
+
 ## 0.7.0
 
 Two changes alter what stored data MEANS, and both are called out first because

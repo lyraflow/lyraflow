@@ -310,7 +310,7 @@ it flips the last step into a success state and waits for you to click
 done with it. There is also a "Skip to dashboard" for the case where you
 cannot instrument the target site right now.
 
-Past the wizard (or immediately, if a project already exists), there are three
+Past the wizard (or immediately, if a project already exists), there are four
 screens, reachable from the sidebar:
 
 - **Feed** — a live event feed, split into an **Accepted** tab and a
@@ -347,16 +347,26 @@ screens, reachable from the sidebar:
   stops showing the filter as though it applied, because the numbers alone
   look entirely normal.
 
-**Volunteering the limit:** that is the whole UI. Segments, people and person
-profiles have **no** screens at all yet; reach them the way the rest of this
-document shows, over the HTTP API or the CLI.
+- **Segments** — build a filter tree in the browser: `and`/`or` groups, traits,
+  context, lifecycle bounds, and behaviours with their own `where` predicates.
+  Preview it before saving — the person count and a bounded page of members,
+  taken at one instant — then save, re-run, edit or delete it.
 
-The CLI is still strictly more capable for funnels than the UI is. A funnel
-step can carry conditions on that event's own properties — `page_view` where
-`path` is `/pricing` — and the builder here does not author those; a funnel
-that has them opens read-only rather than silently dropping them on save, and
-`lyraflow funnels` remains the way to write one. The per-step list of *which*
-people dropped is likewise API- and CLI-only for now, since there is no person
+  The same honesty details as Funnels, for the same reasons. A saved segment's
+  count is the server's **cache** from its last evaluation, shown with the
+  instant it was taken and never passed off as current; a segment that has
+  never been evaluated says so rather than rendering as a count of zero. The
+  list does not silently re-evaluate everything on every visit, because each
+  evaluation is a real ClickHouse scan. And a segment whose stored tree no
+  longer parses opens read-only rather than being offered for editing as
+  though the builder understood it.
+
+**Volunteering the limit:** that is the whole UI. People and person profiles
+have **no** screens at all yet; reach them the way the rest of this document
+shows, over the HTTP API or the CLI.
+
+The CLI is still more capable for funnels than the UI is. The per-step list of
+*which* people dropped is API- and CLI-only for now, since there is no person
 profile screen to open one from.
 
 ## Tracking more than one site
@@ -1173,10 +1183,51 @@ key.
 | `trait` | a trait set through `identify()` |
 | `context` | country, region, city, device_type, os, browser, referrer, or a `utm_*` value, with `scope` of `latest` or `first_touch` |
 | `lifecycle` | `first_seen` / `last_seen` |
-| `behavior` | an event name (or `*` for any), aggregated as `count`, `sum`, `min`, `max`, or `distinct`, over a `last` / `absolute` / `ever` window |
+| `behavior` | an event name (or `*` for any), aggregated as `count`, `sum`, `min`, `max`, or `distinct`, over a `last` / `absolute` / `ever` window, optionally narrowed by `where` (see below) |
 
 Operators are `=`, `!=`, `>`, `>=`, `<`, `<=`, and `between`. `between` takes
 exactly two values; every other operator takes exactly one.
+
+#### `where`: narrowing a behaviour to particular events
+
+A `behavior` — and a funnel step, which uses the same shape — may carry up to
+ten `where` predicates. They are ANDed together and applied to each event
+BEFORE it is aggregated, so they say *which* events count, not what the person
+is like.
+
+A predicate names one of two things, and it says which:
+
+```json
+{ "kind": "behavior", "event": "$page", "aggregate": "count",
+  "operator": ">=", "value": 1, "window": { "kind": "last", "n": 30, "unit": "days" },
+  "where": [
+    { "property": "plan", "operator": "=", "value": "pro" },
+    { "source": "attribute", "attribute": "utm_campaign", "operator": "=", "value": "spring" }
+  ] }
+```
+
+- **A property predicate** reads a key from the event's own `properties` —
+  whatever the caller put there. This is the default: a predicate with no
+  `source` is a property predicate, which is why every segment written before
+  attributes existed still means exactly what it meant.
+- **An attribute predicate** reads a column of the event itself. Set `"source":
+  "attribute"` and name one of `path`, `url`, `referrer`, `utm_source`,
+  `utm_medium`, `utm_campaign`, `utm_term`, `utm_content`, `device_type`, `os`,
+  `browser`, `country`, `region`, `city`. Any other name is a `400`. Values are
+  strings, because every one of those columns is a string.
+
+**Nothing is inferred from the name.** A property genuinely called `path` is
+possible — `properties` comes from the caller's own bag and `path` from
+`context` — so `{ "property": "path" }` reads the property and
+`{ "source": "attribute", "attribute": "path" }` reads the column, whichever
+one your events happen to carry.
+
+**An attribute predicate is not a `context` condition**, and the difference is
+the question each answers. A `context` condition is about the PERSON: it
+matches whoever was acquired through a campaign, whatever they later did. A
+`where` predicate is about the EVENT: it matches people who did *this* thing
+*from* that campaign. "Viewed pricing at least once in the last 30 days, from
+the spring campaign" is the second, and cannot be written as the first.
 
 **A `lifecycle` bound with no timezone is UTC.** `2026-08-01T10:00` means
 10:00 UTC, and a bare `2026-08-01` means midnight UTC. Send an instant with a
@@ -1435,7 +1486,8 @@ curl -X POST https://analytics.example.com/v1/funnels \
 ```
 
 A **step** is one event, optionally constrained by predicates on that event's
-own properties. `where` is exactly the shape a segment behaviour uses —
+own properties or attributes. `where` is exactly the shape a segment behaviour
+uses —
 `{ property, operator, value }`, with `operator` one of `=`, `!=`, `>`, `>=`,
 `<`, `<=`, `between` — so you write a predicate the same way in both places.
 Predicates matter more than they look: a page-view funnel is several `$page`

@@ -45,18 +45,21 @@ function isAttribute(name: string): name is EventColumnField {
  * on the trimmed text -- because a picker whose two halves narrow
  * differently is a picker that appears to lose rows as you type.
  *
- * ## Free text is a property, and that is a decision
+ * ## Free text is a property, with no exceptions
  *
  * Choosing a row states which section it came from, so a property genuinely
  * named `path` and the column named `path` are distinguishable even though
- * they read identically. Typed text has no such statement attached, so it
- * means a property -- the behaviour this field has always had, and the only
- * reading that cannot silently retarget an existing predicate.
+ * they read identically. Typed text carries no such statement, so it means a
+ * property -- the behaviour this field has always had, and the only reading
+ * that cannot silently retarget a predicate as it is being written.
  *
- * The one exception is not an inference: text that exactly matches the
- * attribute this row ALREADY names keeps naming it. Without that, correcting
- * a typo in `utm_campaigns` back to `utm_campaign` would quietly demote a
- * working attribute predicate to a property one that matches nothing.
+ * That includes editing a row that already names an attribute: the first
+ * keystroke makes it a property row again. A rule preserving the attribute
+ * "when the text still spells it" was written and removed, because it could
+ * not fire for any edit made one character at a time -- the text stops
+ * spelling the attribute at the first keystroke and the row is a property
+ * row by the time it spells it again. `columnFieldNote` is the recovery
+ * path, and it appears on the row the moment the name matches.
  */
 export function FieldCombobox(props: {
   client: ApiClient
@@ -114,14 +117,11 @@ export function FieldCombobox(props: {
         placeholder="Property or attribute name -- starts with what you type"
         onChange={(next, group) => {
           setText(next)
+          // `isAttribute` as well as the section, so a stale group label
+          // could never put a name the AST's enum refuses into a predicate
+          // typed `attribute`.
           if (group === ATTRIBUTES && isAttribute(next)) {
             onChange({ source: 'attribute', name: next })
-            return
-          }
-          if (group === undefined && value.source === 'attribute' && next === value.name) {
-            // Re-typed the same attribute name: see this component's own doc
-            // for why that is preserved rather than demoted.
-            onChange(value)
             return
           }
           onChange({ source: 'property', name: next })

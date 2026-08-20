@@ -7,8 +7,12 @@ import { describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '../../api/client.js'
 import { WherePredicates } from './WherePredicates.js'
 
-function fakeClient(): ApiClient {
-  return { schemaProperties: vi.fn(async () => []) } as unknown as ApiClient
+function fakeClient(properties: string[] = []): ApiClient {
+  return {
+    schemaProperties: vi.fn(async (_p: number, _e: string | undefined, q: string) =>
+      properties.filter((n) => n.startsWith(q)),
+    ),
+  } as unknown as ApiClient
 }
 
 describe('WherePredicates', () => {
@@ -307,5 +311,105 @@ describe('WherePredicates', () => {
         .getAllByRole('textbox')
         .filter((el) => el.getAttribute('aria-label')?.startsWith('Value')),
     ).toHaveLength(2)
+  })
+})
+
+describe('WherePredicates — attribute rows', () => {
+  it('shows an attribute predicate in the field, like any other row', () => {
+    render(
+      <WherePredicates
+        id="beh"
+        event="$page"
+        client={fakeClient()}
+        projectId={1}
+        value={[
+          { source: 'attribute', attribute: 'utm_campaign', operator: '=', value: 'august-digest' },
+        ]}
+        onChange={vi.fn()}
+      />,
+    )
+    const row = within(screen.getByTestId('beh-where-0'))
+    expect(row.getByLabelText('Property or attribute')).toHaveValue('utm_campaign')
+    expect(row.getByRole('textbox', { name: /value/i })).toHaveValue('august-digest')
+    // No note: this row already reads the column, so a line telling it where
+    // the value lives would be describing a problem it does not have.
+    expect(screen.queryByTestId('beh-where-0-note')).toBeNull()
+  })
+
+  // Switching the field is correcting WHICH field, not starting over. Making
+  // the operator retype the value because they picked the wrong half of the
+  // picker would be the form charging them for its own ambiguity.
+  it('keeps the operator and the value when a row changes from a property to an attribute', async () => {
+    const onChange = vi.fn()
+    render(
+      <WherePredicates
+        id="beh"
+        event="$page"
+        client={fakeClient(['plan'])}
+        projectId={1}
+        value={[{ property: 'utm_campaign', operator: '!=', value: 'august-digest' }]}
+        onChange={onChange}
+      />,
+    )
+    await userEvent.click(screen.getByLabelText('Property or attribute'))
+    await waitFor(() => expect(screen.getByText('Attributes')).toBeInTheDocument())
+    await userEvent.click(screen.getByRole('option', { name: 'utm_campaign' }))
+    expect(onChange).toHaveBeenLastCalledWith([
+      { source: 'attribute', attribute: 'utm_campaign', operator: '!=', value: 'august-digest' },
+    ])
+  })
+
+  // A property predicate must keep serialising exactly as it always did --
+  // no `source` key written on save. A tree that gained one would differ
+  // from the one on disk for every untouched segment, which the funnel
+  // store's definition equality reads as a change.
+  it('writes no source key when a row goes back to being a property', async () => {
+    const onChange = vi.fn()
+    render(
+      <WherePredicates
+        id="beh"
+        event="$page"
+        client={fakeClient(['path_template'])}
+        projectId={1}
+        value={[{ source: 'attribute', attribute: 'path', operator: '=', value: '/pricing' }]}
+        onChange={onChange}
+      />,
+    )
+    // The box holds `path`, so both sections narrow to it: the attribute
+    // and a property whose name starts the same way.
+    await userEvent.click(screen.getByLabelText('Property or attribute'))
+    await waitFor(() => expect(screen.getByText('Properties')).toBeInTheDocument())
+    await userEvent.click(screen.getByRole('option', { name: 'path_template' }))
+    expect(onChange).toHaveBeenLastCalledWith([
+      { property: 'path_template', operator: '=', value: '/pricing' },
+    ])
+    expect(Object.keys(onChange.mock.lastCall?.[0][0] ?? {})).not.toContain('source')
+  })
+
+  // A number can only get into a predicate through the API, but it can, and
+  // an attribute predicate's value is a string in the AST. Carrying the
+  // number across would build a tree the server refuses while the form looks
+  // complete.
+  it('converts a numeric value to text when a row becomes an attribute', async () => {
+    const onChange = vi.fn()
+    render(
+      <WherePredicates
+        id="beh"
+        event="$page"
+        client={fakeClient([])}
+        projectId={1}
+        value={[{ property: 'seats', operator: '>', value: 12 }]}
+        onChange={onChange}
+      />,
+    )
+    // No attribute starts with "seats", so the box is cleared first --
+    // which is what an operator changing their mind about the field does.
+    await userEvent.clear(screen.getByLabelText('Property or attribute'))
+    await userEvent.click(screen.getByLabelText('Property or attribute'))
+    await waitFor(() => expect(screen.getByText('Attributes')).toBeInTheDocument())
+    await userEvent.click(screen.getByRole('option', { name: 'city' }))
+    expect(onChange).toHaveBeenLastCalledWith([
+      { source: 'attribute', attribute: 'city', operator: '>', value: '12' },
+    ])
   })
 })
