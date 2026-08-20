@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { Authenticate } from '../auth/bridge.js'
 import { parseChDateTime } from '../ingest/row.js'
+import { countParam } from '../numeric-id.js'
 
 export interface SchemaDeps {
   authenticate: Authenticate
@@ -15,7 +16,7 @@ export const SCHEMA_MAX_LIMIT = 100
 const Query = z.object({
   q: z.string().max(128).optional(),
   event: z.string().max(128).optional(),
-  limit: z.coerce.number().int().positive().max(SCHEMA_MAX_LIMIT).default(50),
+  limit: countParam({ min: 1, max: SCHEMA_MAX_LIMIT, fallback: 50 }),
 })
 
 /** `trait` is REQUIRED, unlike `event` on the properties route. There is no
@@ -26,7 +27,7 @@ const Query = z.object({
 const TraitValueQuery = z.object({
   trait: z.string().min(1).max(128),
   q: z.string().max(128).optional(),
-  limit: z.coerce.number().int().positive().max(SCHEMA_MAX_LIMIT).default(50),
+  limit: countParam({ min: 1, max: SCHEMA_MAX_LIMIT, fallback: 50 }),
 })
 
 /**

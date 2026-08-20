@@ -11,6 +11,7 @@ import {
   resolvePersonScope,
 } from '../identity/scope.js'
 import { parseChDateTime } from '../ingest/row.js'
+import { countParam } from '../numeric-id.js'
 import { SEGMENT_MAX_EXECUTION_SECONDS, SEGMENT_MAX_MEMORY_BYTES } from '../segments/execute.js'
 import { FeedCursorError, decodeFeedCursor, encodeFeedCursor } from './cursor.js'
 
@@ -149,8 +150,8 @@ const RejectionsQuery = z.object({
   since: z.string().datetime().optional(),
   until: z.string().datetime().optional(),
   reason: z.string().min(1).max(64).optional(),
-  limit: z.coerce.number().int().positive().max(REJECTIONS_MAX_LIMIT).default(50),
-  offset: z.coerce.number().int().min(0).max(REJECTIONS_MAX_OFFSET).default(0),
+  limit: countParam({ min: 1, max: REJECTIONS_MAX_LIMIT, fallback: 50 }),
+  offset: countParam({ min: 0, max: REJECTIONS_MAX_OFFSET, fallback: 0 }),
 })
 
 /** The exact column list this route selects and returns — a compile-time allowlist. */
@@ -174,7 +175,7 @@ const Query = z.object({
   until: z.string().datetime().optional(),
   event: z.string().max(128).optional(),
   person: z.string().max(128).optional(),
-  limit: z.coerce.number().int().positive().max(EVENTS_MAX_LIMIT).default(50),
+  limit: countParam({ min: 1, max: EVENTS_MAX_LIMIT, fallback: 50 }),
   after: z.string().max(512).optional(),
 })
 

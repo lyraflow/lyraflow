@@ -968,8 +968,10 @@ describe('runEvents', () => {
       expect(maxMatch).not.toBeNull()
       expect(Number(maxMatch?.[1])).toBe(EVENTS_MAX_LIMIT)
 
+      // The shape changed with #95: `limit` is parsed by `countParam` now,
+      // which refuses non-canonical input the way route ids always have.
       const defaultMatch =
-        /limit:\s*z\.coerce\.number\(\)\.int\(\)\.positive\(\)\.max\(EVENTS_MAX_LIMIT\)\.default\((\d+)\)/.exec(
+        /limit:\s*countParam\(\{\s*min:\s*1,\s*max:\s*EVENTS_MAX_LIMIT,\s*fallback:\s*(\d+)\s*\}\)/.exec(
           routesSrc,
         )
       expect(defaultMatch).not.toBeNull()
