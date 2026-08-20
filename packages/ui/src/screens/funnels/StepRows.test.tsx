@@ -151,12 +151,12 @@ describe('StepRows -- per-step where predicates', () => {
       />,
     )
     const s1p0 = within(screen.getByTestId('step-1-where-0'))
-    expect(s1p0.getByLabelText('Property')).toHaveValue('path')
+    expect(s1p0.getByLabelText('Property or attribute')).toHaveValue('path')
     expect(s1p0.getByRole('combobox', { name: /operator/i })).toHaveValue('=')
     expect(s1p0.getByRole('textbox', { name: /^value$/i })).toHaveValue('/changelog')
 
     const s2p1 = within(screen.getByTestId('step-2-where-1'))
-    expect(s2p1.getByLabelText('Property')).toHaveValue('seats')
+    expect(s2p1.getByLabelText('Property or attribute')).toHaveValue('seats')
     expect(s2p1.getByRole('combobox', { name: /operator/i })).toHaveValue('>')
     expect(s2p1.getByRole('textbox', { name: /^value$/i })).toHaveValue('5')
   })
@@ -249,7 +249,7 @@ describe('StepRows -- per-step where predicates', () => {
       />,
     )
     await userEvent.type(
-      within(screen.getByTestId('step-2-where-0')).getByLabelText('Property'),
+      within(screen.getByTestId('step-2-where-0')).getByLabelText('Property or attribute'),
       'x',
     )
     await waitFor(() => expect(schemaProperties).toHaveBeenCalledWith(7, 'signup_started', 'planx'))
@@ -271,7 +271,7 @@ describe('StepRows -- per-step where predicates', () => {
       />,
     )
     await userEvent.type(
-      within(screen.getByTestId('step-1-where-0')).getByLabelText('Property'),
+      within(screen.getByTestId('step-1-where-0')).getByLabelText('Property or attribute'),
       'x',
     )
     await waitFor(() => expect(schemaProperties).toHaveBeenCalledWith(7, undefined, 'pathx'))
@@ -292,7 +292,7 @@ describe('StepRows -- per-step where predicates', () => {
       />,
     )
     await userEvent.type(
-      within(screen.getByTestId('step-1-where-0')).getByLabelText('Property'),
+      within(screen.getByTestId('step-1-where-0')).getByLabelText('Property or attribute'),
       'x',
     )
     await waitFor(() => expect(onUnauthorized).toHaveBeenCalled())

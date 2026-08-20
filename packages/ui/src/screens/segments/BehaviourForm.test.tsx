@@ -225,8 +225,8 @@ describe('BehaviourForm', () => {
       />,
     )
     const whereRow = within(screen.getByTestId('beh-where-0'))
-    expect(whereRow.getByLabelText('Property')).toHaveValue('plan')
-    await userEvent.type(whereRow.getByLabelText('Property'), 'x')
+    expect(whereRow.getByLabelText('Property or attribute')).toHaveValue('plan')
+    await userEvent.type(whereRow.getByLabelText('Property or attribute'), 'x')
     await waitFor(() =>
       expect(schemaProperties).toHaveBeenCalledWith(9, 'checkout_completed', 'planx'),
     )
@@ -247,13 +247,14 @@ describe('BehaviourForm', () => {
     await waitFor(() => expect(schemaProperties).toHaveBeenCalledWith(1, undefined, 'q'))
   })
 
-  it("warns about a column-backed field here too -- a segment's where predicates hit the same compiler", () => {
+  it("points at the attribute here too -- a segment's where predicates hit the same compiler", () => {
     // Not a separate fix: `BehaviourForm` and `StepRows` render the SAME
     // `WherePredicates` against the SAME `wherePredicate` compiler, so a
-    // behaviour's `where` on `path` reads the same empty map slot a funnel
-    // step's does. This test exists so that stays true -- a note wired into
-    // one caller only would pass every funnel test and leave this screen
-    // exactly as it was.
+    // behaviour's `where` on a property named `referrer` reads the same
+    // empty map slot a funnel step's does, and both offer the same
+    // attribute one section up. This test exists so that stays true -- a
+    // note wired into one caller only would pass every funnel test and
+    // leave this screen exactly as it was.
     render(
       <BehaviourForm
         id="beh"
@@ -271,8 +272,8 @@ describe('BehaviourForm', () => {
     )
     expect(screen.queryByTestId('beh-where-0-note')).toBeNull()
     const note = screen.getByTestId('beh-where-1-note')
-    expect(note).toHaveTextContent('recorded on the event itself')
-    expect(note).toHaveTextContent('context condition')
+    expect(note).toHaveTextContent('Attributes')
+    expect(note).toHaveTextContent('referrer')
   })
 
   it('adding a where predicate through the form updates the node, not a detached copy', async () => {

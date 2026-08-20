@@ -1,11 +1,8 @@
-import { useEffect, useId, useRef, useState } from 'react'
-import { ApiError } from '../../api/client.js'
+import { useEffect, useId, useState } from 'react'
 import type { ApiClient } from '../../api/client.js'
 import { Combobox } from '../../components/Combobox.js'
 import { Label } from '../../components/ui/label.js'
-
-/** How long to wait after the last keystroke before asking the server. */
-const DEBOUNCE_MS = 250
+import { usePropertyNames } from './usePropertyNames.js'
 
 /**
  * A property-name field backed by `GET /v1/schema/properties` -- mirrors
@@ -84,67 +81,24 @@ export function PropertyCombobox(props: {
     emptyMessage,
   } = props
   const [text, setText] = useState(value)
-  const [options, setOptions] = useState<string[]>([])
-  // Distinguishes "no lookup has answered yet" from "a lookup answered with
-  // nothing" -- without it, `emptyMessage` renders during the first debounce
-  // and tells the operator no traits exist before anything has been asked.
-  const [fetched, setFetched] = useState(false)
-  // `onUnauthorized` is a callback a parent typically re-creates on every one
-  // of ITS renders, so naming it in the lookup effect's dependency list makes
-  // an unrelated parent render re-run the lookup -- a redundant request per
-  // keystroke elsewhere on the page. Held in a ref instead, and read only
-  // inside the async continuation below.
-  //
-  // A plain `useEffect` is right here, unlike the identity ref in
-  // `SegmentBuilder` which must be written in `useLayoutEffect`: nothing
-  // reads this one to make a decision DURING render, only after an await, so
-  // there is no window in which a stale value changes what the component
-  // renders or refuses.
-  const unauthorizedRef = useRef(onUnauthorized)
-  useEffect(() => {
-    unauthorizedRef.current = onUnauthorized
-  }, [onUnauthorized])
-  // Same reasoning as EventCombobox's own `loadError`: a 401 routes to
-  // `onUnauthorized`, any other failure says the suggestions themselves
-  // failed rather than silently implying the property has none -- free
-  // typing stays usable either way.
-  const [loadError, setLoadError] = useState(false)
   const id = useId()
 
   useEffect(() => {
     setText(value)
   }, [value])
 
-  useEffect(() => {
-    const q = text.trim()
-    const timer = window.setTimeout(() => {
-      client
-        .schemaProperties(projectId, event, q)
-        .then((list) => {
-          setOptions(list)
-          setLoadError(false)
-          setFetched(true)
-        })
-        .catch((err: unknown) => {
-          if (err instanceof ApiError && err.status === 401) {
-            unauthorizedRef.current?.()
-            return
-          }
-          setOptions([])
-          setLoadError(true)
-          // Deliberately NOT `setFetched(true)`: a failed lookup is not an
-          // answer about whether any names exist, and `loadError` already
-          // says the suggestions themselves failed. Setting it here would
-          // stack "could not load" with "none recorded yet", the second of
-          // which this call gives no evidence for.
-        })
-    }, DEBOUNCE_MS)
-    return () => window.clearTimeout(timer)
-    // `event` is a real dependency, not an oversight: switching the chosen
-    // event must re-scope the very next lookup, not keep serving
-    // suggestions for whichever event was selected when this field first
-    // fetched.
-  }, [text, event, client, projectId])
+  // The lookup, the debounce and the 401 route live in `usePropertyNames` --
+  // shared with `FieldCombobox`, which offers the same names under a
+  // sectioned popup. Same reasoning as EventCombobox's own `loadError`: a
+  // 401 routes to `onUnauthorized`, any other failure says the suggestions
+  // themselves failed rather than silently implying the property has none.
+  const { options, loading, error } = usePropertyNames({
+    client,
+    projectId,
+    event,
+    query: text,
+    onUnauthorized,
+  })
 
   return (
     <div className="flex min-w-0 flex-col gap-1">
@@ -154,12 +108,10 @@ export function PropertyCombobox(props: {
         label={label}
         value={text}
         options={options}
-        loading={!fetched && !loadError}
+        loading={loading}
         emptyMessage={emptyMessage}
         errorMessage={
-          loadError
-            ? 'Could not load suggestions. You can still type the property name.'
-            : undefined
+          error ? 'Could not load suggestions. You can still type the property name.' : undefined
         }
         disabled={disabled}
         placeholder={placeholder ?? 'Property name -- starts with what you type'}

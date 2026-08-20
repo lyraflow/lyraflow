@@ -1,10 +1,11 @@
-import { MAX_WHERE_PREDICATES } from '@lyraflow/core/segments/ast.js'
-import type { WherePredicate } from '@lyraflow/core/segments/ast.js'
+import { MAX_WHERE_PREDICATES, wherePredicateField } from '@lyraflow/core/segments/ast.js'
+import type { EventColumnField, WherePredicate } from '@lyraflow/core/segments/ast.js'
 import type { ApiClient } from '../../api/client.js'
 import { Button } from '../../components/ui/button.js'
+import type { FieldChoice } from './FieldCombobox.js'
+import { FieldCombobox } from './FieldCombobox.js'
 import { OperatorSelect } from './OperatorSelect.js'
-import { PropertyCombobox } from './PropertyCombobox.js'
-import type { ConditionValue } from './ValueInput.js'
+import type { ConditionValue, Scalar } from './ValueInput.js'
 import { ValueInput } from './ValueInput.js'
 import { columnFieldNote } from './columnFields.js'
 
@@ -14,6 +15,42 @@ import { columnFieldNote } from './columnFields.js'
  * in, same as every other "just added" leaf in this builder. */
 function newPredicate(): WherePredicate {
   return { property: '', operator: '=', value: '' }
+}
+
+/**
+ * An attribute predicate's value is a string in the AST, because every
+ * column one can name is `String` in ClickHouse. Everything this editor
+ * produces is already text, but a tree written through the API can carry a
+ * number -- and switching such a predicate from a property to an attribute
+ * would otherwise build a tree the server then refuses, with the operator
+ * looking at a form that seems complete.
+ */
+function asText(value: ConditionValue): string | [string, string] {
+  const one = (v: Scalar): string => (v == null ? '' : String(v))
+  return Array.isArray(value) ? [one(value[0]), one(value[1])] : one(value)
+}
+
+/**
+ * The same predicate, now naming `choice`. Operator and value are carried
+ * across deliberately: an operator who picked the wrong half of the picker
+ * is correcting the FIELD, and making them retype `august-digest` because
+ * of it would be the form punishing them for its own ambiguity.
+ */
+function withField(p: WherePredicate, choice: FieldChoice): WherePredicate {
+  if (choice.source === 'attribute') {
+    return {
+      source: 'attribute',
+      attribute: choice.name as EventColumnField,
+      operator: p.operator,
+      value: asText(p.value as ConditionValue),
+    }
+  }
+  // No `source` written for a property predicate: absent is what every tree
+  // saved before attribute predicates existed carries, and writing
+  // `source: 'property'` on every save would make an untouched segment
+  // serialise differently from the one on disk -- which the funnel store's
+  // own equality check reads as a change.
+  return { property: choice.name, operator: p.operator, value: p.value }
 }
 
 /**
@@ -80,21 +117,22 @@ export function WherePredicates(props: {
       {predicates.map((p, i) => {
         const rowId = `${id}-where-${i}`
         const operatorId = `${rowId}-operator`
-        // Said HERE, while the name is being typed, rather than at save
-        // time: the predicate is not invalid, it simply reads a map this
-        // name is not in, and a rejection on save would refuse a field this
-        // builder deliberately leaves free-typed. See `columnFields.ts`.
-        const note = columnFieldNote(p.property)
+        const field = wherePredicateField(p)
+        // Only ever about a PROPERTY predicate: an attribute predicate has
+        // already reached the column, so the note would be describing a
+        // problem the row does not have. Said HERE, while the name is being
+        // typed, rather than at save time -- the predicate is not invalid,
+        // it simply reads a map this name is not in. See `columnFields.ts`.
+        const note = field.source === 'property' ? columnFieldNote(field.name) : null
         return (
           <div key={rowId} data-testid={rowId} className="flex min-w-0 flex-col gap-1">
             <div className="flex min-w-0 flex-wrap items-end gap-2">
-              <PropertyCombobox
+              <FieldCombobox
                 client={client}
                 projectId={projectId}
                 event={event}
-                value={p.property}
-                onChange={(property) => updateAt(i, { ...p, property })}
-                label="Property"
+                value={field}
+                onChange={(choice) => updateAt(i, withField(p, choice))}
                 onUnauthorized={onUnauthorized}
               />
               <OperatorSelect
@@ -137,7 +175,7 @@ export function WherePredicates(props: {
        * which limit it hit reads as a broken button. */}
       {atCap && (
         <p className="text-xs text-muted-foreground">
-          {`Adding here would bring this event to ${MAX_WHERE_PREDICATES + 1} property conditions; the maximum is ${MAX_WHERE_PREDICATES}.`}
+          {`Adding here would bring this event to ${MAX_WHERE_PREDICATES + 1} conditions; the maximum is ${MAX_WHERE_PREDICATES}.`}
         </p>
       )}
     </div>

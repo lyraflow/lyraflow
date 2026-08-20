@@ -17,7 +17,7 @@
  * selects by value keeps working, and the CLI -- which prints ids, names and
  * counts, and deliberately renders no tree as prose at all -- is untouched.
  */
-import { COMPARISON_OPERATORS } from '@lyraflow/core/segments/ast.js'
+import { COMPARISON_OPERATORS, wherePredicateField } from '@lyraflow/core/segments/ast.js'
 import type { ComparisonOperator, WherePredicate, Window } from '@lyraflow/core/segments/ast.js'
 import { lifecycleInstant } from '@lyraflow/core/segments/instants.js'
 
@@ -218,6 +218,16 @@ export function formatValue(value: unknown, formatScalar: (v: unknown) => string
  */
 export function wherePhrase(where: readonly WherePredicate[]): string {
   return where
-    .map((w) => `${w.property} ${operatorWord(w.operator)} ${formatValue(w.value)}`)
+    .map((w) => {
+      // The name only, whichever half of the union it came from: a summary
+      // reads as a sentence, and "attribute utm_campaign is august-digest"
+      // is not one. The cost is that a property named `path` and the column
+      // named `path` summarise identically -- accepted, because the sentence
+      // is a summary and the editor rows below it are the thing that says
+      // which is which. Nothing here can tell them apart anyway: this
+      // function sees one tree, never the project's property namespace.
+      const { name } = wherePredicateField(w)
+      return `${name} ${operatorWord(w.operator)} ${formatValue(w.value)}`
+    })
     .join(', ')
 }

@@ -138,7 +138,7 @@ describe('FunnelBuilder', () => {
       within(screen.getByTestId('step-1-where')).getByRole('button', { name: /add predicate/i }),
     )
     await userEvent.type(
-      within(screen.getByTestId('step-1-where-0')).getByLabelText('Property'),
+      within(screen.getByTestId('step-1-where-0')).getByLabelText('Property or attribute'),
       'page',
     )
     await userEvent.type(
@@ -149,7 +149,7 @@ describe('FunnelBuilder', () => {
       within(screen.getByTestId('step-2-where')).getByRole('button', { name: /add predicate/i }),
     )
     await userEvent.type(
-      within(screen.getByTestId('step-2-where-0')).getByLabelText('Property'),
+      within(screen.getByTestId('step-2-where-0')).getByLabelText('Property or attribute'),
       'plan',
     )
     await userEvent.selectOptions(
@@ -545,7 +545,7 @@ describe('FunnelBuilder — steps carry their own where predicates through a sav
       within(screen.getByTestId('step-2-where')).getByRole('button', { name: /add predicate/i }),
     )
     const row = within(screen.getByTestId('step-2-where-1'))
-    await userEvent.type(row.getByLabelText('Property'), 'seats')
+    await userEvent.type(row.getByLabelText('Property or attribute'), 'seats')
     await userEvent.type(row.getByRole('textbox', { name: /^value$/i }), '5')
 
     await userEvent.click(screen.getByRole('button', { name: /save/i }))
@@ -571,7 +571,7 @@ describe('FunnelBuilder — steps carry their own where predicates through a sav
     })
     renderBuilder(client, FUNNEL.id)
     const row = within(await screen.findByTestId('step-1-where-0'))
-    expect(row.getByLabelText('Property')).toHaveValue('path')
+    expect(row.getByLabelText('Property or attribute')).toHaveValue('path')
     expect(row.getByRole('combobox', { name: /operator/i })).toHaveValue('=')
     expect(row.getByRole('textbox', { name: /^value$/i })).toHaveValue('/changelog')
   })

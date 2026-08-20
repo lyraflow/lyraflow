@@ -23,7 +23,7 @@ describe('WherePredicates', () => {
         onChange={vi.fn()}
       />,
     )
-    expect(screen.queryByLabelText('Property')).toBeNull()
+    expect(screen.queryByLabelText('Property or attribute')).toBeNull()
     expect(screen.getByRole('button', { name: /add predicate/i })).toBeInTheDocument()
   })
 
@@ -43,12 +43,12 @@ describe('WherePredicates', () => {
       />,
     )
     const row0 = within(screen.getByTestId('beh-where-0'))
-    expect(row0.getByLabelText('Property')).toHaveValue('plan')
+    expect(row0.getByLabelText('Property or attribute')).toHaveValue('plan')
     expect(row0.getByRole('combobox', { name: /operator/i })).toHaveValue('=')
     expect(row0.getByRole('textbox', { name: /^value$/i })).toHaveValue('pro')
 
     const row1 = within(screen.getByTestId('beh-where-1'))
-    expect(row1.getByLabelText('Property')).toHaveValue('amount')
+    expect(row1.getByLabelText('Property or attribute')).toHaveValue('amount')
     expect(row1.getByRole('combobox', { name: /operator/i })).toHaveValue('>')
     expect(row1.getByRole('textbox', { name: /^value$/i })).toHaveValue('100')
   })
@@ -159,7 +159,7 @@ describe('WherePredicates', () => {
       />,
     )
     await userEvent.type(
-      within(screen.getByTestId('beh-where-0')).getByLabelText('Property'),
+      within(screen.getByTestId('beh-where-0')).getByLabelText('Property or attribute'),
       'amt',
     )
     await waitFor(() => expect(schemaProperties).toHaveBeenCalledWith(7, undefined, 'amt'))
@@ -217,7 +217,7 @@ describe('WherePredicates', () => {
     expect(screen.queryByText(/maximum is/)).toBeNull()
   })
 
-  it('says a column-backed field cannot match here, on the row that names it', async () => {
+  it('points a property row at the attribute of the same name, on the row that names it', async () => {
     // Two predicates, only ONE of them column-backed: a fixture with a
     // single row cannot tell "notes the row you are looking at" from "notes
     // the first row".
@@ -238,17 +238,20 @@ describe('WherePredicates', () => {
     )
     expect(screen.queryByTestId('beh-where-0-note')).toBeNull()
     const note = screen.getByTestId('beh-where-1-note')
-    expect(note).toHaveTextContent('recorded on the event itself')
+    expect(note).toHaveTextContent('Attributes')
     expect(note).toHaveTextContent('path')
     // Informing, not preventing: nothing about the value reaches the caller
     // differently, and no control is disabled.
     expect(screen.getByRole('button', { name: /add predicate/i })).toBeEnabled()
-    expect(within(screen.getByTestId('beh-where-1')).getByLabelText('Property')).toHaveValue('path')
+    expect(
+      within(screen.getByTestId('beh-where-1')).getByLabelText('Property or attribute'),
+    ).toHaveValue('path')
   })
 
   it('the note appears as the name is typed, before anything is saved', async () => {
-    // The point of the whole thing: the operator learns why `path` cannot
-    // work WHILE writing it, not after a run answers zero. Driven through
+    // The point of the whole thing: the operator learns that `path` names
+    // an attribute WHILE writing it, not after a run answers zero. Driven
+    // through
     // the real control, with the parent re-rendering from `onChange`, so
     // this fails if the note is computed from anything but the live value.
     function Harness() {
@@ -268,8 +271,8 @@ describe('WherePredicates', () => {
     }
     render(<Harness />)
     expect(screen.queryByTestId('beh-where-0-note')).toBeNull()
-    await userEvent.type(screen.getByLabelText('Property'), 'path')
-    expect(screen.getByTestId('beh-where-0-note')).toHaveTextContent('filters properties only')
+    await userEvent.type(screen.getByLabelText('Property or attribute'), 'path')
+    expect(screen.getByTestId('beh-where-0-note')).toHaveTextContent('Attributes')
   })
 
   it('says nothing at all for an ordinary property name', () => {

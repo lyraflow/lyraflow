@@ -3,7 +3,7 @@ import { notSuppressedExpr } from '../privacy/suppression.js'
 import { type CompiledQuery, MEMBER_PAGE_SIZE } from '../segments/compile.js'
 import type { Cursor } from '../segments/cursor.js'
 import { Params, chDateTime } from '../segments/params.js'
-import { wherePredicate } from '../segments/predicates.js'
+import { attributeColumns, wherePredicate } from '../segments/predicates.js'
 import type { FunnelDefinition, FunnelStep } from './ast.js'
 import { funnelCostWarnings, validateFunnel, validateRange } from './validate.js'
 
@@ -120,6 +120,15 @@ export function compileFunnel(opts: {
   // entry-instant aggregate needs the first one. Calling the builder twice for
   // one step would bind its values twice — harmless, but it would suggest the
   // two copies could legitimately differ.
+  // Same rule as the segment scan (`behaviour.ts`): a step's attribute
+  // predicate compiles to a bare column, so the column must be in this
+  // subquery's projection -- and only the ones some step actually names are
+  // added, because the alternative is fourteen extra columns read by every
+  // funnel run in the product. Names come from a Zod enum over
+  // `EVENT_COLUMN_FIELDS`, which is what makes this interpolation safe.
+  const attributes = attributeColumns(definition.steps.flatMap((s) => s.where ?? []))
+  const attributeSelect = attributes.length > 0 ? `,\n           ${attributes.join(', ')}` : ''
+
   const conditions = definition.steps.map((s, i) => {
     const cond = stepCondition(s, params, eventPlaceholder)
     // Step 1 additionally bounds ENTRY to the range. Without it the extended
@@ -182,7 +191,7 @@ export function compileFunnel(opts: {
     minIf(timestamp, ${conditions[0]}) AS entered_at
   FROM (
     SELECT project_id, anonymous_id, user_id, timestamp, event_name,
-           properties, properties_num, event_id
+           properties, properties_num, event_id${attributeSelect}
     FROM events
     WHERE project_id = ${projectParam}
       AND timestamp >= ${since}

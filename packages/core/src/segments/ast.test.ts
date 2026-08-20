@@ -7,6 +7,7 @@ import {
   Lifecycle,
   SegmentQuery,
   WherePredicate,
+  wherePredicateField,
 } from './ast.js'
 
 const trait = { kind: 'trait', key: 'plan', operator: '=', value: 'trial' }
@@ -205,5 +206,144 @@ describe('EVENT_COLUMN_FIELDS', () => {
     expect(
       WherePredicate.safeParse({ property: 'path', operator: '=', value: '/changelog' }).success,
     ).toBe(true)
+  })
+})
+
+describe('WherePredicate — the two shapes', () => {
+  // The compatibility promise. Every tree saved before attribute predicates
+  // existed carries `property` and no `source`; if one of those ever parsed
+  // as anything but a property predicate, an operator's segment would change
+  // meaning under them with no migration and no version bump.
+  it('parses a predicate saved before attributes existed, unchanged', () => {
+    const parsed = WherePredicate.parse({ property: 'plan', operator: '=', value: 'pro' })
+    expect(parsed).toEqual({ property: 'plan', operator: '=', value: 'pro' })
+    expect('attribute' in parsed).toBe(false)
+  })
+
+  it('parses an attribute predicate', () => {
+    const parsed = WherePredicate.parse({
+      source: 'attribute',
+      attribute: 'utm_campaign',
+      operator: '=',
+      value: 'august-digest',
+    })
+    expect(parsed).toEqual({
+      source: 'attribute',
+      attribute: 'utm_campaign',
+      operator: '=',
+      value: 'august-digest',
+    })
+  })
+
+  it('accepts every field of EVENT_COLUMN_FIELDS, so the picker cannot offer one the API refuses', () => {
+    for (const attribute of EVENT_COLUMN_FIELDS) {
+      expect(
+        WherePredicate.safeParse({ source: 'attribute', attribute, operator: '=', value: 'x' })
+          .success,
+        attribute,
+      ).toBe(true)
+    }
+  })
+
+  // THE INJECTION BOUNDARY. `predicates.ts` interpolates `attribute` as a
+  // bare SQL identifier, exactly as `contextExpr` does with a context field,
+  // and this refusal is the only thing between request data and that
+  // identifier. A name that parses is a name that reaches the query text.
+  it('refuses a column that is not on the allowlist', () => {
+    for (const attribute of [
+      'event_id',
+      'timestamp',
+      'user_id',
+      'properties',
+      '1; DROP TABLE events',
+      'path ',
+      'PATH',
+      '',
+    ]) {
+      const result = WherePredicate.safeParse({
+        source: 'attribute',
+        attribute,
+        operator: '=',
+        value: 'x',
+      })
+      expect(result.success, attribute).toBe(false)
+    }
+  })
+
+  // Every attribute column is String/LowCardinality(String). A number here
+  // would either be stringified in the compiler -- comparing 5 against '5'
+  // and looking like it worked -- or bound as Float64 against a string
+  // column, which answers nothing at all.
+  it('refuses a non-string value for an attribute, while a property still takes one', () => {
+    expect(
+      WherePredicate.safeParse({
+        source: 'attribute',
+        attribute: 'city',
+        operator: '=',
+        value: 5,
+      }).success,
+    ).toBe(false)
+    expect(WherePredicate.safeParse({ property: 'seats', operator: '=', value: 5 }).success).toBe(
+      true,
+    )
+  })
+
+  it('applies the same between rule to attributes as to properties', () => {
+    const two = { source: 'attribute', attribute: 'path', operator: 'between', value: ['/a', '/m'] }
+    expect(WherePredicate.safeParse(two).success).toBe(true)
+    expect(WherePredicate.safeParse({ ...two, value: '/a' }).success).toBe(false)
+    expect(WherePredicate.safeParse({ ...two, operator: '=', value: ['/a', '/m'] }).success).toBe(
+      false,
+    )
+  })
+
+  // A predicate cannot be half of each: `attribute` without the tag would
+  // otherwise fall through to the property member, where it has no
+  // `property` at all, and a tagged one carrying `property` would be stating
+  // two fields for one question.
+  it('refuses a predicate that mixes the two shapes', () => {
+    expect(
+      WherePredicate.safeParse({ attribute: 'path', operator: '=', value: '/a' }).success,
+    ).toBe(false)
+    expect(
+      WherePredicate.safeParse({
+        source: 'attribute',
+        property: 'path',
+        operator: '=',
+        value: '/a',
+      }).success,
+    ).toBe(false)
+  })
+})
+
+describe('wherePredicateField', () => {
+  it('names the field and where it is read from', () => {
+    expect(wherePredicateField({ property: 'plan', operator: '=', value: 'pro' })).toEqual({
+      source: 'property',
+      name: 'plan',
+    })
+    expect(
+      wherePredicateField({
+        source: 'attribute',
+        attribute: 'utm_campaign',
+        operator: '=',
+        value: 'x',
+      }),
+    ).toEqual({ source: 'attribute', name: 'utm_campaign' })
+  })
+
+  // The distinction the funnel store's definition equality depends on: a
+  // property named `path` and the column named `path` are two different
+  // predicates that read identically.
+  it('tells apart a property and an attribute of the same name', () => {
+    const property = wherePredicateField({ property: 'path', operator: '=', value: '/a' })
+    const attribute = wherePredicateField({
+      source: 'attribute',
+      attribute: 'path',
+      operator: '=',
+      value: '/a',
+    })
+    expect(property.name).toBe(attribute.name)
+    expect(property.source).not.toBe(attribute.source)
   })
 })
