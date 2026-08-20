@@ -289,22 +289,8 @@ export function buildApp(input: {
   // for the same reason.
   registerSdkRoutes(app)
   registerAuthRoutes(app, { pg, sessions, limiter: loginLimiter, readiness })
-  // Sourced from IngestCounters, not an onResponse hook counting HTTP
-  // responses: /v1/batch answers with a single response for up to 500
-  // events, so a response-derived count would undercount by up to 500x and
-  // couldn't tell the accepted items in a batch from the rejected ones.
-  // IngestCounters.record() is already called once per event in
-  // registerIngestRoutes, at the exact granularity this metric needs.
-  registerMetrics(app, {
-    bufferDepth: () => buffer.depth,
-    totals: () => counters.totals(),
-    retention: () => ({
-      lastRunAt: retentionLastRunAt,
-      partitionsDropped: retentionPartitionsDropped,
-    }),
-  })
 
-  registerIngestRoutes(app, {
+  const ingest = registerIngestRoutes(app, {
     buffer,
     projects,
     counters,
@@ -316,6 +302,26 @@ export function buildApp(input: {
     aliases,
     allowedOrigins: config.allowedOrigins,
   })
+  // Registered AFTER registerIngestRoutes rather than before it, because
+  // the quota gauge reads that registration's own in-memory usage cache
+  // (#43). Route registration order does not matter to Fastify for
+  // distinct paths; the dependency does.
+  // Sourced from IngestCounters, not an onResponse hook counting HTTP
+  // responses: /v1/batch answers with a single response for up to 500
+  // events, so a response-derived count would undercount by up to 500x and
+  // couldn't tell the accepted items in a batch from the rejected ones.
+  // IngestCounters.record() is already called once per event in
+  // registerIngestRoutes, at the exact granularity this metric needs.
+  registerMetrics(app, {
+    bufferDepth: () => buffer.depth,
+    quota: () => ingest.quotaSnapshot(),
+    totals: () => counters.totals(),
+    retention: () => ({
+      lastRunAt: retentionLastRunAt,
+      partitionsDropped: retentionPartitionsDropped,
+    }),
+  })
+
   registerPersonRoutes(app, { authenticate, ch, bindings, aliases, suppression })
   // Shares `bindings`/`aliases` with the registrations above and below
   // rather than constructing new instances — the person filter's resolution

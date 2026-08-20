@@ -213,7 +213,43 @@ async function writeDeadLetters(
   }
 }
 
-export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): void {
+/**
+ * What a project's quota looks like from the ingest path's own cache, as of
+ * the last time enforcement actually read it. See `quotaSnapshot`.
+ */
+export interface QuotaUsage {
+  projectId: number
+  /** Accepted events this month: the persisted figure plus this process's
+   *  unflushed tally -- the SAME sum `overQuotaNow` compares. */
+  used: number
+  quota: number
+  /** Epoch ms of the persisted read this is derived from. */
+  readAt: number
+}
+
+export interface IngestRegistration {
+  /**
+   * Every quota-carrying project this process has enforced against this
+   * month, read PURELY from memory.
+   *
+   * "Purely from memory" is the requirement, not an implementation detail.
+   * #43 asks for a warning before the cliff, and the obvious way to build it
+   * -- ask Postgres for current usage when /metrics is scraped -- would add a
+   * database read per scrape per project, on an UNAUTHENTICATED endpoint, to
+   * report a number the ingest path already has. A scrape must cost nothing.
+   *
+   * Which is why `quota` is captured at enforcement time rather than looked
+   * up here: `ProjectCache.byId` is async and reads Postgres on a miss.
+   *
+   * Projects with no quota never appear, because they are short-circuited
+   * before any usage read (`persistedForQuota`) and so were never recorded.
+   * That is the right answer rather than a gap -- `null` is unlimited, and a
+   * ratio against unlimited is not a number.
+   */
+  quotaSnapshot: () => QuotaUsage[]
+}
+
+export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): IngestRegistration {
   const {
     buffer,
     projects,
@@ -267,6 +303,12 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
    * events.
    */
   const usage = new Map<number, { month: string; persisted: number; fetchedAt: number }>()
+  /**
+   * The quota each project carried when enforcement last read its usage.
+   * Kept beside `usage` and written only by `persistedForQuota`, so an
+   * entry here always has a counterpart there.
+   */
+  const quotaInForce = new Map<number, number>()
   // Single-flight per project: without this, the first N concurrent events
   // arriving on a cold or just-expired entry would each start their own
   // Postgres read — reinstating the per-event round trip precisely under the
@@ -375,6 +417,11 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
    */
   async function persistedForQuota(project: Project): Promise<number> {
     if (project.monthlyEventQuota === null) return 0
+    // Captured HERE, on the one path that already holds the project, because
+    // /metrics must not do a lookup of its own -- ProjectCache.byId is async
+    // and reads Postgres on a miss. A project that loses its quota simply
+    // stops being recorded and ages out of `usage` with everything else.
+    quotaInForce.set(project.id, project.monthlyEventQuota)
     return persistedAcceptedCached(project.id)
   }
 
@@ -855,4 +902,40 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): vo
     const result = await aliases.alias(project.id, fromUserId, toUserId)
     return reply.code(200).send({ status: result })
   })
+
+  return {
+    quotaSnapshot: () => {
+      const month = currentMonth()
+      const out: QuotaUsage[] = []
+      for (const [projectId, quota] of quotaInForce) {
+        const entry = usage.get(projectId)
+        // A stale entry is dropped rather than reported. `usage` is keyed by
+        // month, and reporting last month's persisted count against this
+        // month's quota would be a number that looks like a ratio and is not
+        // one -- worse than reporting nothing, because an operator would
+        // alert on it.
+        if (!entry || entry.month !== month) continue
+        // Belt and braces on a value that reaches a DIVISION. Both the API
+        // (project/routes.ts refuses 0) and `isOverQuota` (throws on it)
+        // already guarantee a positive quota, so this cannot fire today --
+        // but if it ever did, `used / 0` is `Infinity`, and JavaScript
+        // serialises that as the literal `Infinity`, which is NOT valid
+        // Prometheus exposition (it wants `+Inf`). One malformed line makes a
+        // scraper reject the WHOLE body, so a bad quota would take every
+        // other metric down with it. Skipping costs a series nobody can use.
+        if (!(quota > 0)) continue
+        out.push({
+          projectId,
+          // The SAME sum enforcement compares. Reporting only the persisted
+          // figure would read low by up to a whole flush interval, which is
+          // exactly the window in which a project crosses its limit -- so the
+          // gauge would be most wrong at the moment it matters most.
+          used: entry.persisted + counters.pendingAccepted(projectId),
+          quota,
+          readAt: entry.fetchedAt,
+        })
+      }
+      return out
+    },
+  }
 }

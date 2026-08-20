@@ -1,7 +1,16 @@
 import type { FastifyInstance } from 'fastify'
 
+import type { QuotaUsage } from './ingest/routes.js'
+
 export interface MetricsDeps {
   bufferDepth: () => number
+  /**
+   * Quota-carrying projects only, read from the ingest path's own in-memory
+   * cache. MUST NOT touch a database: /metrics is unauthenticated, scraped on
+   * a schedule nobody here controls, and a per-project read on every scrape
+   * would be a new load source reporting a number ingest already holds.
+   */
+  quota: () => QuotaUsage[]
   totals: () => {
     accepted: number
     rejected: number
@@ -47,6 +56,33 @@ export function registerMetrics(app: FastifyInstance, deps: MetricsDeps): void {
       // means the sender is sending bad data and should fix it, bot means
       // the sender was never a customer's user in the first place.
       `lyraflow_ingest_events_total{outcome="bot"} ${totals.bot}`,
+      // #43: there was nothing between "fine" and "refused". Enforcement
+      // answers 429 once a project passes its limit, and the only existing
+      // signal -- lyraflow_ingest_events_total{outcome="over_quota"} -- counts
+      // events ALREADY LOST. This is the one that fires before the cliff.
+      //
+      // A ratio rather than a threshold, so the policy decision stays with the
+      // operator: alert at 0.8, or 0.95, or both, without the product picking
+      // for them. Absolute counts are deliberately not emitted here -- they
+      // are one authenticated call away at GET /v1/project/usage, and a series
+      // per project per number is cardinality that has to earn itself.
+      //
+      // Only projects that HAVE a quota appear. null is unlimited and is what
+      // every project carries by default, and a ratio against unlimited is not
+      // a number. An absent series is the honest answer, and it is also why
+      // this costs a deployment that has never set a quota exactly nothing.
+      //
+      // Can exceed 1.0, and that is not a bug to clamp: `used` is the same sum
+      // enforcement compares, and a batch is admitted or refused as a whole,
+      // so a project can finish a batch slightly past its limit.
+      "# HELP lyraflow_ingest_quota_used_ratio Accepted events this month as a fraction of the project's monthly quota, for projects that have one. Alert BELOW 1.0 — at 1.0 events are already being refused. Absent for projects with no quota.",
+      '# TYPE lyraflow_ingest_quota_used_ratio gauge',
+      ...deps
+        .quota()
+        .map(
+          (q) =>
+            `lyraflow_ingest_quota_used_ratio{project_id="${q.projectId}"} ${q.used / q.quota}`,
+        ),
       // A retention worker that has silently stopped — crashed, wedged,
       // never started — looks exactly like one that is running fine with
       // nothing left to expire: neither shows up as an error, a failed

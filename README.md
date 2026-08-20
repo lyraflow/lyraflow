@@ -2249,9 +2249,36 @@ deliberately kept out of it, because that table records data that could not be
 parsed, and filling it with valid events refused by policy would bury the
 bad-data signal it exists to carry.
 
-There is nothing that warns you as a project approaches its limit, and no
-command that reports current consumption. Until there is, alert on the counter
-leaving zero and read `ingest_counters` for the month's totals.
+**To be warned *before* the cliff, alert on
+`lyraflow_ingest_quota_used_ratio`.** It is a gauge, labelled by
+`project_id`, carrying this month's accepted events as a fraction of that
+project's quota:
+
+```
+lyraflow_ingest_quota_used_ratio{project_id="7"} 0.83
+```
+
+The threshold is yours to pick — 0.8, 0.95, both — which is why this is a
+ratio rather than a built-in warning level. The counter above tells you that
+events have **already been lost**; this one tells you they are about to be.
+
+Three things about it are worth knowing rather than discovering:
+
+- **Only projects that have a quota appear.** `null` is unlimited and is the
+  default, and a ratio against unlimited is not a number. A deployment that
+  has never set a quota emits the `HELP` and `TYPE` lines and no series, and
+  pays nothing for them.
+- **A project appears only once it has sent an event this month**, because
+  the figure comes from the ingest path's own cache rather than from a query
+  — a scrape costs no database read, on an endpoint that is unauthenticated
+  and scraped on a schedule the server does not control. A project that has
+  gone quiet has no series until it sends again.
+- **It can exceed 1.0.** A batch is admitted or refused as a whole, so a
+  project can finish one slightly past its limit. That is not clamped, because
+  crossing the line is the transition worth being able to see afterwards.
+
+For the month's durable totals, read `ingest_counters`; for one project's
+current consumption on demand, `lyraflow usage` or `GET /v1/project/usage`.
 
 **If Postgres is unreachable, the quota is not enforced from persisted state.**
 The usage read falls back to the last known figure for the current month, or
