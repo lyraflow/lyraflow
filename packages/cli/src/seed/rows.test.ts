@@ -135,9 +135,24 @@ describe('toDemoRow property routing', () => {
   it('gives every row the event name the schema catalogue will show', () => {
     const data = generateDemoData({ seed: 9, persons: 60, events: 900, days: 60, anchor: ANCHOR })
     const names = new Set(data.events.map((e) => toDemoRow(e, PROJECT).event_name))
-    expect(names).toContain('page_view')
+    // `$page`, not 'page_view': every page view is stored under one name now,
+    // with the page's own name as the `$page_name` property (#53).
+    expect(names).toContain('$page')
     expect(names).toContain('purchase')
     expect(names).toContain('$identify')
-    expect(names).not.toContain('$page')
+    // The seeder's page payloads carry a page NAME, and none of those names
+    // may become an event name any more -- that was the defect (#53). Checking
+    // the whole PAGES list rather than one example, because a single missed
+    // call site would still pass a spot check.
+    for (const slug of [
+      'home',
+      'pricing',
+      'docs',
+      'docs-segments',
+      'changelog',
+      'signup',
+      'dashboard',
+    ])
+      expect(names, `${slug} leaked into event_name`).not.toContain(slug)
   })
 })

@@ -1,4 +1,4 @@
-import { MAX_PROPERTIES_PER_EVENT } from '@lyraflow/core'
+import { MAX_PROPERTIES_PER_EVENT, eventNameFor, propertyBagFor } from '@lyraflow/core'
 import type { IngestPayload } from '@lyraflow/core'
 
 export { MAX_PROPERTIES_PER_EVENT }
@@ -62,23 +62,12 @@ export class CardinalityTracker {
   }
 }
 
-function payloadName(payload: IngestPayload): string {
-  if (payload.type === 'track') return payload.event
-  if (payload.type === 'page') return payload.name ?? '$page'
-  return '$identify'
-}
-
-function payloadProperties(payload: IngestPayload): Record<string, unknown> {
-  if (payload.type === 'identify') return payload.traits
-  return payload.properties
-}
-
 export function checkLimits(
   payload: IngestPayload,
   tracker: CardinalityTracker,
   projectId = 0,
 ): LimitResult {
-  const properties = payloadProperties(payload)
+  const properties = propertyBagFor(payload)
   const keys = Object.keys(properties)
 
   if (keys.length > MAX_PROPERTIES_PER_EVENT) {
@@ -89,7 +78,12 @@ export function checkLimits(
     }
   }
 
-  const name = payloadName(payload)
+  // From core, the same function `toEventRow` uses. These two used to be
+  // separate copies with a comment on each saying they had to move together
+  // (#53) -- which is a convention, not a guarantee. Cardinality accounting
+  // and storage disagreeing about what an event is CALLED is the failure that
+  // arrangement invited.
+  const name = eventNameFor(payload)
   if (
     !tracker.knowsEventName(projectId, name) &&
     tracker.eventNameCount(projectId) >= MAX_EVENT_NAMES_PER_PROJECT

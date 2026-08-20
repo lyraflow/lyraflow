@@ -322,6 +322,7 @@ describe('generateDemoData traits and properties', () => {
   it('produces more than just the funnel, so the feed has variety', () => {
     const distinct = new Set(names(generateDemoData(opts({ persons: 200, events: 3_000 }))))
     expect(distinct).toContain('$identify')
+    expect(distinct).toContain('$page')
     for (const name of FUNNEL_EVENTS) expect(distinct).toContain(name)
     for (const name of ['feature_used', 'docs_search', 'invite_sent']) {
       expect(distinct).toContain(name)

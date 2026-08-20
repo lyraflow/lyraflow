@@ -131,3 +131,54 @@ describe('parseChDateTime', () => {
     expect(parseChDateTime(chDateTime(original)).getTime()).toBe(original.getTime())
   })
 })
+
+describe('page views are one event name with the name as a property (#53)', () => {
+  const page = (extra: Record<string, unknown> = {}) =>
+    toEventRow({
+      ...base,
+      payload: {
+        type: 'page',
+        message_id: '0b2f6a1e-9c4d-4a1f-8f3b-2f1c7d5e6a91',
+        anonymous_id: 'a-1',
+        properties: {},
+        context: {},
+        ...extra,
+      } as never,
+    })
+
+  it('names a NAMED page view $page, not the page name', () => {
+    const row = page({ name: 'Pricing' })
+    // The defect: `event_name: 'Pricing'` made the page view its own event
+    // type, indistinguishable from `track('Pricing')` once stored, and put an
+    // unbounded set of names into a LowCardinality column.
+    expect(row.event_name).toBe('$page')
+    expect(row.properties.$page_name).toBe('Pricing')
+  })
+
+  it('adds no $page_name at all when the page view has no name', () => {
+    const row = page()
+    expect(row.event_name).toBe('$page')
+    expect('$page_name' in row.properties).toBe(false)
+  })
+
+  it('a caller cannot displace the real page name with their own string', () => {
+    const row = page({ name: 'Pricing', properties: { $page_name: 'forged' } })
+    expect(row.properties.$page_name).toBe('Pricing')
+  })
+
+  it('...nor smuggle it into the other map as a number', () => {
+    // The half that matters. `routeProperties` sends numbers to
+    // `properties_num`, so a guard on the string map alone would let this
+    // land in a different column entirely -- present, unfindable, and
+    // contradicting the real one.
+    const row = page({ name: 'Pricing', properties: { $page_name: 42 } })
+    expect(row.properties.$page_name).toBe('Pricing')
+    expect('$page_name' in row.properties_num).toBe(false)
+  })
+
+  it("keeps the caller's own ordinary properties", () => {
+    const row = page({ name: 'Pricing', properties: { variant: 'b', seats: 3 } })
+    expect(row.properties).toEqual({ $page_name: 'Pricing', variant: 'b' })
+    expect(row.properties_num).toEqual({ seats: 3 })
+  })
+})
