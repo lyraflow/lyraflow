@@ -21,9 +21,37 @@ here as it happened rather than tagged retroactively, for the same reason 0.1.0
 is: a tag created after the fact names a moment nobody could have fetched. Its
 one fix is contained in 0.3.0.
 
-## Unreleased
+## 0.8.0
+
+A release about being able to see and operate what is already there. Event rows
+and person rows open to show everything they carry, a segment condition can
+filter on the attributes an event actually has rather than only its custom
+properties, and projects and the admin account can be managed from the browser
+instead of from `psql` and the CLI.
+
+Three of the entries below are fixes, and they share a shape worth naming: each
+was a screen or a query that was **not wrong so much as quietly incomplete** —
+a chart drawing zeros as though they were ones, a switcher forgetting which
+project you chose, and a segment condition on a numeric property that saved,
+ran, and matched nobody. None of them errored. All of them answered.
 
 ### Added
+
+- **Clicking an event in the Feed shows everything that arrived with it** — the
+  full timestamp and id, the URL, path and referrer, the campaign it came
+  through, the device, OS and browser, and every custom property, with the
+  string and numeric maps merged back into the one bag you sent. Attributes the
+  event did not carry are left out and counted rather than listed as blanks.
+
+  This needed the UI's own event type widened: `GET /v1/events` was already
+  sending `utm_*`, `os`, `browser`, `country`, `region` and `city`, and the
+  browser was discarding them.
+
+- **The Feed's events-per-minute chart is readable.** It fills the width of its
+  card instead of a fixed 6px per minute, hovering a bar names its value and
+  minute, and the tallest bucket in the window is labelled — bars are only
+  shaped relative to each other, so one event in a silent hour drew exactly the
+  chart a thousand would.
 
 - **A segment behaviour's `where` can filter on the event's own attributes**,
   not just its custom properties: `path`, `url`, `referrer`, the five `utm_*`
@@ -94,6 +122,19 @@ one fix is contained in 0.3.0.
   an OS change with no stored choice is still followed live.
 
 ### Fixed
+
+- **A minute with no events was drawn as a small bar.** The Feed's chart applied
+  its minimum bar height before consulting the count, so an hour of silence
+  rendered as a dotted line of small values — the same false reading the chart's
+  zero-fill exists to prevent, one layer further down. An empty minute now draws
+  nothing above the baseline.
+
+- **The project switcher forgot your choice on every reload.** It opened on
+  whichever project the server listed first, every time, so any project but the
+  first was unusable for anything that outlived one page load. The choice is
+  remembered per browser now, and validated against the project list before it
+  is used — a remembered project that no longer exists falls back rather than
+  scoping every request on every screen to something the server refuses.
 
 - **A segment condition on a numeric property matched nobody when it was
   written in the web UI.** Every control in the builder yields text, and a
