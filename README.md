@@ -2342,7 +2342,15 @@ Two smaller things worth knowing. Restoring a backup older than a project's
 `retention_months` brings back events the policy has already expired; the next
 retention sweep drops them again, harmlessly. And `restore.sh` drops and
 recreates the `public` schema, which assumes the role Lyraflow connects with
-owns it — true of the stack this repository ships.
+owns it — true of the stack this repository ships, and not necessarily true of
+a managed Postgres or a deployment where the application role is deliberately
+not an owner. The restore now checks this **before** it destroys anything and
+refuses with an explanation if the role cannot drop the schema, rather than
+failing partway through. To check for yourself:
+
+```sql
+SELECT nspowner::regrole FROM pg_namespace WHERE nspname = 'public';
+```
 
 
 ### Behind a CDN: recording the visitor's IP
