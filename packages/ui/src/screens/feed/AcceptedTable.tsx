@@ -1,6 +1,7 @@
-import { ChevronRight } from 'lucide-react'
 import { Fragment, useState } from 'react'
 import type { LyraEvent } from '../../api/types.js'
+import type { DetailField } from '../../components/DetailList.js'
+import { DetailPanel, DetailSection, ExpandToggle, FieldList } from '../../components/DetailList.js'
 import {
   Table,
   TableBody,
@@ -10,12 +11,6 @@ import {
   TableRow,
 } from '../../components/ui/table.js'
 import { formatEventTime } from './format.js'
-
-/** One `label: value` line of an expanded row. */
-interface DetailField {
-  label: string
-  value: string
-}
 
 /**
  * The built-in columns of the events table, in the order an expanded row
@@ -83,29 +78,6 @@ function propertyFields(event: LyraEvent): DetailField[] {
   return [...strings, ...numbers].sort((a, b) => a.label.localeCompare(b.label))
 }
 
-function FieldList(props: { fields: DetailField[] }) {
-  return (
-    <dl className="grid grid-cols-[minmax(6rem,auto)_1fr] gap-x-4 gap-y-1.5 text-sm">
-      {props.fields.map((field) => (
-        <Fragment key={field.label}>
-          <dt className="text-muted-foreground">{field.label}</dt>
-          {/* `break-all` rather than `truncate`: a URL with a long query
-           * string is the most common thing in here, and a truncated one
-           * is unreadable in exactly the case someone opened the row to
-           * read it. */}
-          <dd className="break-all font-mono">
-            {field.value === '' ? (
-              <span className="text-muted-foreground">(empty)</span>
-            ) : (
-              field.value
-            )}
-          </dd>
-        </Fragment>
-      ))}
-    </dl>
-  )
-}
-
 /**
  * Everything the feed knows about one event, revealed under its row.
  *
@@ -123,11 +95,8 @@ function EventDetail(props: { event: LyraEvent; id: string }) {
   const properties = propertyFields(event)
 
   return (
-    <div className="grid gap-6 px-4 py-4 md:grid-cols-2" id={id}>
-      <section className="min-w-0">
-        <h3 className="mb-2 font-medium text-muted-foreground text-xs uppercase tracking-wide">
-          Attributes
-        </h3>
+    <DetailPanel id={id}>
+      <DetailSection title="Attributes">
         <FieldList fields={present} />
         {emptyCount > 0 && (
           <p className="mt-2 text-muted-foreground text-xs">
@@ -135,18 +104,15 @@ function EventDetail(props: { event: LyraEvent; id: string }) {
             event and {emptyCount === 1 ? 'is' : 'are'} not listed.
           </p>
         )}
-      </section>
-      <section className="min-w-0">
-        <h3 className="mb-2 font-medium text-muted-foreground text-xs uppercase tracking-wide">
-          Properties
-        </h3>
+      </DetailSection>
+      <DetailSection title="Properties">
         {properties.length === 0 ? (
           <p className="text-muted-foreground text-sm">This event carried no properties.</p>
         ) : (
           <FieldList fields={properties} />
         )}
-      </section>
-    </div>
+      </DetailSection>
+    </DetailPanel>
   )
 }
 
@@ -228,22 +194,12 @@ export function AcceptedTable(props: {
                * toggle twice and land back where it started. */}
               <TableRow className="cursor-pointer" onClick={toggle}>
                 <TableCell className="pr-0">
-                  <button
-                    type="button"
-                    aria-expanded={open}
-                    aria-controls={detailId}
-                    aria-label={`${open ? 'Hide' : 'Show'} details for ${event.event_name} at ${formatEventTime(event.timestamp)}`}
-                    className="flex size-5 items-center justify-center rounded-sm text-muted-foreground focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      toggle()
-                    }}
-                  >
-                    <ChevronRight
-                      className={`size-4 transition-transform ${open ? 'rotate-90' : ''}`}
-                      aria-hidden="true"
-                    />
-                  </button>
+                  <ExpandToggle
+                    open={open}
+                    describes={`${event.event_name} at ${formatEventTime(event.timestamp)}`}
+                    controls={detailId}
+                    onToggle={toggle}
+                  />
                 </TableCell>
                 <TableCell className="font-mono text-muted-foreground">
                   {formatEventTime(event.timestamp)}

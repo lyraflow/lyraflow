@@ -278,11 +278,29 @@ export interface Segment {
   updated_at: string
 }
 
+/**
+ * One row of a segment's member preview.
+ *
+ * The named fields are what `memberProjection` (core, `segments/compile.ts`)
+ * always selects; the index signature is the ten `CONTEXT_FIELDS` values it
+ * also selects, which have no fixed names here. Both record types appear in
+ * the signature only because TypeScript requires it to cover every named
+ * member above it.
+ *
+ * `traits`/`traits_num` are split by type because `person_traits` stores them
+ * that way -- one key is never in both -- and are capped per person, which is
+ * what `trait_total` exists to report: it is the person's real trait count,
+ * so a reader can be told what was held back rather than shown a truncated
+ * list that looks complete.
+ */
 export interface MemberRow {
   person_id: string
   first_seen: string
   last_seen: string
-  [field: string]: string | number
+  traits: Record<string, string>
+  traits_num: Record<string, number>
+  trait_total: number
+  [field: string]: string | number | Record<string, string> | Record<string, number>
 }
 
 /** Both preview routes. `members`, `next_cursor` and `window_exhausted` are

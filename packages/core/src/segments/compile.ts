@@ -42,12 +42,79 @@ export { MEMBER_PAGE_SIZE, MEMBER_WINDOW_MAX } from './limits.js'
  * Note that for referrer and the UTM trio the two scopes read the same
  * column, so those return first-touch values — documented in the README.
  *
- * Traits are deliberately absent: a per-person map of arbitrary size,
- * multiplied by a hundred rows, is unbounded by construction.
+ * Traits ARE returned, bounded — see `boundedTraitMap` for the bound and for
+ * why this reversed. They cost no extra join: the `traits` CTE is built and
+ * LEFT JOINed for every compiled segment already, because predicates read it.
  */
+/**
+ * How many of one person's traits a member row carries.
+ *
+ * A bound rather than none, and the reason is the comment this replaced:
+ * "traits are deliberately absent -- a per-person map of arbitrary size,
+ * multiplied by a hundred rows, is unbounded by construction". That was very
+ * nearly right. The only thing capping distinct trait keys is
+ * `MAX_PROPERTY_KEYS_PER_EVENT_NAME` in the ingest limiter, applied to
+ * `$identify` -- and that limiter's own doc calls itself "an in-memory view
+ * of cardinality observed BY THIS PROCESS SINCE IT STARTED", so it resets on
+ * every restart. A cap that a redeploy lifts is not a bound this query may
+ * rely on.
+ *
+ * Fifty is far above what an `identify()` call carries in practice and far
+ * below what would make a hundred-row page expensive. Whatever the number,
+ * the point is that it is stated here, applied in SQL, and reported: the row
+ * also carries `trait_total`, so a reader is told what was held back instead
+ * of being shown a truncated list that looks whole.
+ */
+export const TRAITS_PER_MEMBER_MAX = 50
+
+/**
+ * One person's traits of a given kind, as a `Map`, capped and deterministic.
+ *
+ * Three things this has to get right, and only the first is obvious:
+ *
+ * - **The `t_has_num` filter is load-bearing.** The traits CTE builds `t_str`
+ *   and `t_num` over the SAME key set, so every string trait has an entry in
+ *   `t_num` sitting at its `Float64` default of 0. Selecting the raw maps
+ *   would give every person a `plan: 0` next to their real `plan: "pro"` --
+ *   the same defect `traitExpr` guards against when it compares a numeric
+ *   trait, for the same reason.
+ * - **Sorted before slicing.** A `Map`'s key order is whatever `groupArray`
+ *   produced, so an unsorted slice would return a different fifty on
+ *   different runs of the same query, and page two of a walk could disagree
+ *   with page one about which traits a person has.
+ * - **Values looked up by key, not sliced in parallel.** Slicing keys and
+ *   values as two independent arrays only lines up while both are in the
+ *   same order, which is an assumption about `mapKeys`/`mapValues` that
+ *   nothing here enforces. `arrayMap(k -> m[k], keys)` cannot mispair.
+ *
+ * No request data reaches this SQL: it names only CTE columns and a
+ * compile-time integer.
+ */
+function boundedTraitMap(kind: 'string' | 'number'): string {
+  const source = kind === 'string' ? 't_str' : 't_num'
+  const hasNum = kind === 'string' ? '0' : '1'
+  const chType = kind === 'string' ? 'String' : 'Float64'
+  const mine = `mapFilter((k, v) -> t_has_num[k] = ${hasNum}, ${source})`
+  const keys = `arraySlice(arraySort(mapKeys(${mine})), 1, ${TRAITS_PER_MEMBER_MAX})`
+  return `CAST((${keys}, arrayMap(k -> ${source}[k], ${keys})), 'Map(String, ${chType})')`
+}
+
 function memberProjection(): string {
   const context = CONTEXT_FIELDS.map((f) => `${CONTEXT_COLUMNS[f].latest} AS ${f}`)
-  return ['person_id', 'first_seen', 'last_seen', ...context].join(',\n  ')
+  return [
+    'person_id',
+    'first_seen',
+    'last_seen',
+    ...context,
+    `${boundedTraitMap('string')} AS traits`,
+    `${boundedTraitMap('number')} AS traits_num`,
+    // NOT the size of either bounded map above: this is how many the person
+    // actually has, so a reader can be told what was held back rather than
+    // shown a truncated list that looks complete. `toUInt32` because a UInt64
+    // reaches JSON as a STRING -- `"4"`, not `4` -- and a count that arrives
+    // as a string is a count someone compares with `>` against a number.
+    'toUInt32(length(t_has_num)) AS trait_total',
+  ].join(',\n  ')
 }
 
 /**
