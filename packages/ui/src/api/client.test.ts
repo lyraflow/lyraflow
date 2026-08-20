@@ -591,7 +591,7 @@ describe('createClient', () => {
       expect(new Headers(init.headers).get('x-lyraflow-project')).toBe('3')
     })
 
-    it('schemaProperties sends event and q in the query string and maps to property_key', async () => {
+    it('schemaProperties sends event and q in the query string and keeps each value kind', async () => {
       const fetchImpl = vi.fn(
         async () =>
           new Response(
@@ -608,7 +608,14 @@ describe('createClient', () => {
 
       const out = await client.schemaProperties(3, 'signed_up', 'pla')
 
-      expect(out).toEqual(['plan', 'plan_price'])
+      // The kind is kept, not dropped. Dropping it is what made a condition
+      // on a numeric property read the string map and match nothing --
+      // `wherePredicate` picks the map from the value's JavaScript type, and
+      // this is the only thing that tells a browser form which to send.
+      expect(out).toEqual([
+        { name: 'plan', kind: 'string' },
+        { name: 'plan_price', kind: 'number' },
+      ])
       const [path, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
       const url = String(path)
       expect(url).toMatch(/^\/v1\/schema\/properties\?/)
@@ -676,7 +683,7 @@ describe('createClient', () => {
 
 describe('createClient -- catalogue dedupe', () => {
   it('issues one request when sibling fields ask for the same property list at once', async () => {
-    const f = fakeFetch(200, { properties: [{ property_key: 'plan' }] })
+    const f = fakeFetch(200, { properties: [{ property_key: 'plan', value_kind: 'string' }] })
     const client = createClient(f as unknown as typeof fetch)
 
     // Three fields mounting in the same instant under one behaviour, all
@@ -689,9 +696,10 @@ describe('createClient -- catalogue dedupe', () => {
     ])
 
     expect(f).toHaveBeenCalledTimes(1)
-    expect(a).toEqual(['plan'])
-    expect(b).toEqual(['plan'])
-    expect(c).toEqual(['plan'])
+    const one = [{ name: 'plan', kind: 'string' }]
+    expect(a).toEqual(one)
+    expect(b).toEqual(one)
+    expect(c).toEqual(one)
   })
 
   it('does not collapse fields scoped to different events', async () => {

@@ -278,11 +278,29 @@ export interface Segment {
   updated_at: string
 }
 
+/**
+ * One row of a segment's member preview.
+ *
+ * The named fields are what `memberProjection` (core, `segments/compile.ts`)
+ * always selects; the index signature is the ten `CONTEXT_FIELDS` values it
+ * also selects, which have no fixed names here. Both record types appear in
+ * the signature only because TypeScript requires it to cover every named
+ * member above it.
+ *
+ * `traits`/`traits_num` are split by type because `person_traits` stores them
+ * that way -- one key is never in both -- and are capped per person, which is
+ * what `trait_total` exists to report: it is the person's real trait count,
+ * so a reader can be told what was held back rather than shown a truncated
+ * list that looks complete.
+ */
 export interface MemberRow {
   person_id: string
   first_seen: string
   last_seen: string
-  [field: string]: string | number
+  traits: Record<string, string>
+  traits_num: Record<string, number>
+  trait_total: number
+  [field: string]: string | number | Record<string, string> | Record<string, number>
 }
 
 /** Both preview routes. `members`, `next_cursor` and `window_exhausted` are
@@ -303,4 +321,26 @@ export interface SegmentPreview {
 export interface PreviewOptions {
   include?: ['members']
   cursor?: string
+}
+
+/**
+ * Which of the two property maps a name's values live in, as `event_schema`
+ * recorded them.
+ *
+ * This is not a formality. Ingest routes a finite number to `properties_num`
+ * and everything else to `properties` (`routeProperties`, core), and a
+ * predicate reads ONE of those two maps -- chosen from the JavaScript type of
+ * its value. A builder that cannot produce a number therefore writes
+ * predicates that read the wrong map and match nothing, which is what this
+ * type exists to prevent.
+ *
+ * `mixed` is a real answer, not a missing one: a project that has sent the
+ * same key both ways has both rows in `event_schema`, and no single predicate
+ * can read both maps.
+ */
+export type PropertyKind = 'string' | 'number' | 'mixed'
+
+export interface SchemaProperty {
+  name: string
+  kind: PropertyKind
 }

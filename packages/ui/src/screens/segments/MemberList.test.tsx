@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
@@ -11,6 +11,9 @@ function page(n: number, offset = 0): MemberRow[] {
     person_id: `person-${offset + i}`,
     first_seen: '2026-08-01T00:00:00.000Z',
     last_seen: '2026-08-10T00:00:00.000Z',
+    traits: {},
+    traits_num: {},
+    trait_total: 0,
   }))
 }
 
@@ -311,5 +314,131 @@ describe('MemberList', () => {
       person_count: 10_000,
     })
     await waitFor(() => expect(screen.getByTestId('member-list-end')).toBeInTheDocument())
+  })
+})
+
+describe('MemberList — person detail', () => {
+  /** One member with the shape the server actually sends: the ten context
+   * columns, some empty, plus traits split by type. */
+  function person(over: Partial<MemberRow> = {}): MemberRow {
+    return {
+      person_id: 'demo-live-0025',
+      first_seen: '2026-08-01T00:00:00.000Z',
+      last_seen: '2026-08-10T00:00:00.000Z',
+      country: '',
+      region: '',
+      city: '',
+      device_type: 'desktop',
+      os: 'macos',
+      browser: 'chrome',
+      referrer: 'https://search.invalid/',
+      utm_source: 'newsletter',
+      utm_medium: 'email',
+      utm_campaign: 'august-digest',
+      traits: { email: 'a@demo.invalid', plan: 'pro' },
+      traits_num: { seats: 12 },
+      trait_total: 3,
+      ...over,
+    }
+  }
+
+  const showPeople = async (members: MemberRow[]) => {
+    renderMembers({ members, next_cursor: null, window_exhausted: false, person_count: 1 })
+    await userEvent.click(screen.getByRole('button', { name: /show people/i }))
+    await screen.findByRole('cell', { name: members[0]?.person_id })
+  }
+
+  const toggleFor = (id: string) =>
+    screen.getByRole('button', { name: new RegExp(`details for ${id}`, 'i') })
+
+  /** One section of the open panel, by its heading. */
+  const section = (title: string) =>
+    screen.getByRole('heading', { name: title }).parentElement as HTMLElement
+
+  it('shows no detail until a row is clicked', async () => {
+    await showPeople([person()])
+    expect(screen.queryByText('Attributes')).not.toBeInTheDocument()
+    expect(toggleFor('demo-live-0025')).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('expands to the attributes and traits the row already carried', async () => {
+    await showPeople([person()])
+    await userEvent.click(screen.getByRole('cell', { name: 'demo-live-0025' }))
+
+    // Scoped to their own sections, not just "somewhere on the page":
+    // `email` is a trait KEY here and also the value of `utm_medium`, and an
+    // unscoped query cannot tell those apart -- nor could it catch a panel
+    // that rendered every field into one list.
+    const attributes = within(section('Attributes'))
+    expect(attributes.getByText('Device type')).toBeInTheDocument()
+    expect(attributes.getByText('desktop')).toBeInTheDocument()
+    expect(attributes.getByText('chrome')).toBeInTheDocument()
+
+    // Traits, both maps merged back into the one bag identify() was called
+    // with -- the string/number split is a storage detail of person_traits.
+    const traits = within(section('Traits'))
+    expect(traits.getByText('email')).toBeInTheDocument()
+    expect(traits.getByText('a@demo.invalid')).toBeInTheDocument()
+    expect(traits.getByText('seats')).toBeInTheDocument()
+    expect(traits.getByText('12')).toBeInTheDocument()
+    // And a numeric trait is not ALSO listed as a string one -- the has_num
+    // split in the projection is what prevents `seats: ""` beside `seats: 12`.
+    expect(traits.getAllByText('seats')).toHaveLength(1)
+  })
+
+  // `referrer` and the UTM trio are stored once, at acquisition, so a panel
+  // labelling them the same way as `os` and `city` -- which really are
+  // current -- would assert a freshness the column does not have.
+  it('labels the four acquisition attributes as first touch, and no others', async () => {
+    await showPeople([person()])
+    await userEvent.click(screen.getByRole('cell', { name: 'demo-live-0025' }))
+    expect(screen.getByText('UTM campaign (first touch)')).toBeInTheDocument()
+    expect(screen.getByText('Referrer (first touch)')).toBeInTheDocument()
+    expect(screen.getByText('Browser')).toBeInTheDocument()
+    expect(screen.queryByText('Browser (first touch)')).not.toBeInTheDocument()
+  })
+
+  it('drops attributes with no value but says how many it dropped', async () => {
+    await showPeople([person()])
+    await userEvent.click(screen.getByRole('cell', { name: 'demo-live-0025' }))
+    expect(screen.queryByText('Country')).not.toBeInTheDocument()
+    expect(screen.getByText(/3 more attributes have no value recorded/)).toBeInTheDocument()
+  })
+
+  // The cap is only honest if a capped row says so. `trait_total` is the
+  // person's real count, not the size of the map that arrived.
+  it('says how many traits were held back by the cap', async () => {
+    await showPeople([person({ trait_total: 61 })])
+    await userEvent.click(screen.getByRole('cell', { name: 'demo-live-0025' }))
+    expect(screen.getByText(/58 more traits are recorded for this person/)).toBeInTheDocument()
+  })
+
+  it('says nothing was held back when nothing was', async () => {
+    await showPeople([person()])
+    await userEvent.click(screen.getByRole('cell', { name: 'demo-live-0025' }))
+    expect(screen.queryByText(/more traits are recorded/)).not.toBeInTheDocument()
+  })
+
+  it('says so plainly when a person has no traits', async () => {
+    await showPeople([person({ traits: {}, traits_num: {}, trait_total: 0 })])
+    await userEvent.click(screen.getByRole('cell', { name: 'demo-live-0025' }))
+    expect(screen.getByText(/No traits recorded for this person/)).toBeInTheDocument()
+  })
+
+  it('opens one row at a time', async () => {
+    await showPeople([person(), person({ person_id: 'demo-live-0026' })])
+    await userEvent.click(screen.getByRole('cell', { name: 'demo-live-0025' }))
+    await userEvent.click(screen.getByRole('cell', { name: 'demo-live-0026' }))
+    expect(toggleFor('demo-live-0025')).toHaveAttribute('aria-expanded', 'false')
+    expect(toggleFor('demo-live-0026')).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  it('is reachable by keyboard through the row chevron', async () => {
+    await showPeople([person()])
+    toggleFor('demo-live-0025').focus()
+    await userEvent.keyboard('{Enter}')
+    // Once, not twice: the chevron's own click must not also reach the row's
+    // handler, or the panel would open and close in one press.
+    expect(toggleFor('demo-live-0025')).toHaveAttribute('aria-expanded', 'true')
   })
 })

@@ -300,3 +300,37 @@ describe('wherePhrase', () => {
     expect(wherePhrase([])).toBe('')
   })
 })
+
+describe('wherePhrase — attribute predicates', () => {
+  // A saved segment reads as a sentence in the list and on the detail
+  // screen, and `wherePhrase` used to read `.property` unconditionally --
+  // an attribute predicate would have rendered "undefined is
+  // august-digest".
+  it('renders an attribute predicate by its own field name', () => {
+    expect(
+      wherePhrase([
+        { source: 'attribute', attribute: 'utm_campaign', operator: '=', value: 'august-digest' },
+      ]),
+    ).toBe('utm_campaign is august-digest')
+  })
+
+  it('mixes the two in one clause, in the order given', () => {
+    expect(
+      wherePhrase([
+        { property: 'plan', operator: '=', value: 'pro' },
+        { source: 'attribute', attribute: 'path', operator: '=', value: '/pricing' },
+      ]),
+    ).toBe('plan is pro, path is /pricing')
+  })
+
+  // The accepted cost of reading as a sentence: a property named `path` and
+  // the column named `path` summarise identically. Recorded as a test so it
+  // is a decision someone made, not a surprise someone finds -- the editor
+  // rows are where the two are told apart, and this function sees one tree,
+  // never the project's property namespace.
+  it('reads the same for a property and an attribute of the same name', () => {
+    expect(wherePhrase([{ property: 'path', operator: '=', value: '/a' }])).toBe(
+      wherePhrase([{ source: 'attribute', attribute: 'path', operator: '=', value: '/a' }]),
+    )
+  })
+})

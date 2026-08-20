@@ -3,6 +3,7 @@ import {
   type FunnelDefinition,
   FunnelStep,
   type WherePredicate,
+  wherePredicateField,
 } from '@lyraflow/core'
 import type { Pool } from '@lyraflow/db'
 import { z } from 'zod'
@@ -110,9 +111,17 @@ function stepsEqual(a: FunnelStep[], b: FunnelStep[]): boolean {
     if (whereA.length !== whereB.length) return false
     return whereA.every((p, j) => {
       const q = whereB[j]
+      if (!q) return false
+      // Through `wherePredicateField`, so a predicate on the PROPERTY named
+      // `path` is never equal to one on the COLUMN named `path`. Comparing
+      // the names alone would call an edit between those two "no change" and
+      // skip the write, leaving the stored definition disagreeing with what
+      // the operator just saved.
+      const fieldP = wherePredicateField(p)
+      const fieldQ = wherePredicateField(q)
       return (
-        !!q &&
-        p.property === q.property &&
+        fieldP.source === fieldQ.source &&
+        fieldP.name === fieldQ.name &&
         p.operator === q.operator &&
         valueEqual(p.value, q.value)
       )

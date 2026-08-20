@@ -12,9 +12,11 @@ import type {
   ProjectIdentity,
   ProjectLimits,
   ProjectPatch,
+  PropertyKind,
   RangeBody,
   RejectionsPage,
   RejectionsQuery,
+  SchemaProperty,
   Segment,
   SegmentPreview,
   StatsPage,
@@ -124,7 +126,11 @@ export interface ApiClient {
   // autocomplete. `schemaEvents` already exists from the funnels work;
   // this one does not, and adding it here rather than inventing a second
   // fetch site mid-form.
-  schemaProperties(projectId: number, event: string | undefined, q: string): Promise<string[]>
+  schemaProperties(
+    projectId: number,
+    event: string | undefined,
+    q: string,
+  ): Promise<SchemaProperty[]>
   schemaEvents(projectId: number, q: string): Promise<string[]>
   // The values one trait holds. `trait` is required, not optional like
   // `schemaProperties`' `event`: the endpoint refuses a request without one,
@@ -132,6 +138,57 @@ export interface ApiClient {
   // 400. Expensive on the server — see the route's own comment — so callers
   // must reach it on an explicit interaction, never on render.
   schemaTraitValues(projectId: number, trait: string, q: string): Promise<string[]>
+}
+
+/**
+ * Collapses the endpoint's `(property_key, value_kind)` rows into one entry
+ * per name.
+ *
+ * `value_kind` used to be dropped here, and that was the whole of #-this-bug:
+ * `wherePredicate` and `traitExpr` choose which of the two property maps to
+ * read from the JAVASCRIPT TYPE of the predicate's value, and a form whose
+ * every control yields `e.target.value` can only ever produce a string. So a
+ * predicate on a numeric property read the string map, matched nothing, and
+ * said so with a zero. The kind was on the wire the entire time.
+ *
+ * The endpoint returns one row per DISTINCT pair, so a key a project has sent
+ * both ways appears twice. That is `mixed`, and it is not the same as either:
+ * a single predicate cannot read both maps, so a caller is told the fact
+ * rather than handed a guess dressed as an answer.
+ *
+ * An unrecognised `value_kind` is ignored rather than trusted -- a name whose
+ * only rows carry one is `string`, which is what this client did for every
+ * name before it read the field at all.
+ */
+export function foldPropertyKinds(
+  rows: { property_key: string; value_kind: string }[],
+): SchemaProperty[] {
+  const kinds = new Map<string, Set<string>>()
+  for (const row of rows) {
+    if (row.value_kind !== 'string' && row.value_kind !== 'number') continue
+    const seen = kinds.get(row.property_key) ?? new Set<string>()
+    seen.add(row.value_kind)
+    kinds.set(row.property_key, seen)
+  }
+  const out: SchemaProperty[] = []
+  const emitted = new Set<string>()
+  // Driven off `rows`, not off the map, so the endpoint's own ORDER BY
+  // survives -- the picker renders these verbatim.
+  for (const row of rows) {
+    if (emitted.has(row.property_key)) continue
+    emitted.add(row.property_key)
+    const seen = kinds.get(row.property_key)
+    const kind: PropertyKind =
+      seen === undefined || seen.size === 0
+        ? 'string'
+        : seen.size > 1
+          ? 'mixed'
+          : seen.has('number')
+            ? 'number'
+            : 'string'
+    out.push({ name: row.property_key, kind })
+  }
+  return out
 }
 
 function qs(params: Record<string, string | number | undefined>): string {
@@ -268,13 +325,15 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
     // adds no staleness rules (#127).
     schemaProperties: dedupeInFlight(
       async (projectId: number, event: string | undefined, q: string) =>
-        (
-          await call<{ properties: { property_key: string }[] }>(
-            `/v1/schema/properties${qs({ event, q, limit: 50 })}`,
-            {},
-            projectId,
-          )
-        ).properties.map((p) => p.property_key),
+        foldPropertyKinds(
+          (
+            await call<{ properties: { property_key: string; value_kind: string }[] }>(
+              `/v1/schema/properties${qs({ event, q, limit: 50 })}`,
+              {},
+              projectId,
+            )
+          ).properties,
+        ),
       (projectId: number, event: string | undefined, q: string) =>
         `${projectId}\u0000${event ?? ''}\u0000${q}`,
     ),

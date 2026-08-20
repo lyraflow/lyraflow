@@ -19,32 +19,32 @@ describe('columnFieldNote', () => {
     }
   })
 
-  it('names where the value actually lives, and does not call it an error', () => {
+  it('names the attribute as the remedy, and does not call it an error', () => {
     const note = columnFieldNote('path')
-    expect(note).toContain('recorded on the event itself')
-    expect(note).toContain('filters properties only')
-    // The wording an operator reads must not accuse them. These are the
-    // words a rejection would use, and this is not one.
+    expect(note).toContain('Attributes')
+    expect(note).toContain('properties')
+    // The wording an operator reads must not accuse them. Free text in this
+    // field means a property, which is what it has always meant, so naming
+    // one that happens to also be an attribute is not a mistake. These are
+    // the words a rejection would use, and this is not one.
     expect(note).not.toMatch(/invalid|not allowed|cannot be used|error/i)
   })
 
-  it('points at the context condition for a field that has one', () => {
-    // `referrer` IS a context field, so there is a working way to match it
-    // and the note has to say which -- "this will not work" with no next
-    // step is the same dead end as the silent zero.
-    const note = columnFieldNote('referrer')
-    expect(note).toContain('context condition')
-    expect(note).toContain('referrer')
-  })
-
-  it('claims no context condition for the four fields that have none', () => {
-    // `path`, `url`, `utm_term` and `utm_content` are stored per event and
-    // never folded into the device index, so no `context` condition reads
-    // them back. Naming one here would replace a silent zero with a
-    // confident wrong instruction -- strictly worse.
+  // Before attribute predicates existed this note had two forms: the ten
+  // context fields were told to reach for a `context` condition, and the
+  // four with no such condition -- `path`, `url`, `utm_term`, `utm_content`
+  // -- were told the fact and given no remedy at all. All fourteen now have
+  // the same one, in the same box, so the split is gone; a note that still
+  // sent an operator to a `context` condition would be answering a
+  // per-event question with a person-level condition.
+  it('offers the same remedy for every field, including the four with no context condition', () => {
+    for (const field of EVENT_COLUMN_FIELDS) {
+      const note = columnFieldNote(field)
+      expect(note, field).toContain('Attributes')
+      expect(note, field).not.toContain('context condition')
+    }
     for (const field of ['path', 'url', 'utm_term', 'utm_content']) {
       expect(CONTEXT_FIELDS).not.toContain(field)
-      expect(columnFieldNote(field), field).not.toContain('context condition')
     }
   })
 

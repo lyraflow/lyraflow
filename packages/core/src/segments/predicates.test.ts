@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { Behavior, FilterNode } from './ast.js'
+import type { Behavior, FilterNode, WherePredicate } from './ast.js'
 import { Params } from './params.js'
-import { treeExpr } from './predicates.js'
+import { attributeColumns, treeExpr, wherePredicate } from './predicates.js'
 
 const build = (node: FilterNode, aliasFor = new Map<Behavior, string>()) => {
   const params = new Params()
@@ -135,5 +135,95 @@ describe('a lifecycle bound means the same instant on every server (#124)', () =
     const { values } = compileOne('2026-08-01T10:00:00+05:30')
     vi.unstubAllEnvs()
     expect(Object.values(values)).toContain('2026-08-01 04:30:00.000')
+  })
+})
+
+describe('attribute predicates', () => {
+  const compile = (w: WherePredicate) => {
+    const params = new Params()
+    return { sql: wherePredicate(w, params), params }
+  }
+
+  // The whole point of the feature: a name that used to read an empty map
+  // slot now reads the column it was always describing. `utm_campaign` is
+  // the one Cem hit -- a $page event carried it, the feed's row detail
+  // showed it, and the Where box could not reach it.
+  it('compiles to the column itself, with the value bound', () => {
+    const { sql, params } = compile({
+      source: 'attribute',
+      attribute: 'utm_campaign',
+      operator: '=',
+      value: 'august-digest',
+    })
+    expect(sql).toMatch(/^utm_campaign = \{/)
+    expect(sql).not.toContain('properties')
+    expect(Object.values(params.values)).toContain('august-digest')
+  })
+
+  // The identifier is interpolated, so it must be the ONLY thing that is:
+  // a value reaching SQL unbound here would be the difference between this
+  // and every other predicate in the compiler.
+  it('binds the value rather than inlining it, for every operator', () => {
+    for (const operator of ['=', '!=', '>', '>=', '<', '<='] as const) {
+      const { sql } = compile({ source: 'attribute', attribute: 'path', operator, value: '/x' })
+      expect(sql, operator).not.toContain("'/x'")
+      expect(sql, operator).toContain('path')
+    }
+    const between = compile({
+      source: 'attribute',
+      attribute: 'path',
+      operator: 'between',
+      value: ['/a', '/m'],
+    })
+    expect(between.sql).toMatch(/^path BETWEEN \{.+\} AND \{.+\}$/)
+    expect(Object.values(between.params.values)).toEqual(expect.arrayContaining(['/a', '/m']))
+  })
+
+  // Every attribute column is String/LowCardinality(String) in
+  // 002_events.sql, and the AST refuses a number for one -- so there is no
+  // numeric branch here to take. A `Float64` binding would compare a string
+  // column against a number and answer nothing, silently.
+  it('always binds as String, never as Float64', () => {
+    const { params } = compile({
+      source: 'attribute',
+      attribute: 'city',
+      operator: '=',
+      value: '9',
+    })
+    expect(JSON.stringify(params.values)).not.toContain('Float64')
+    for (const [name, value] of Object.entries(params.values)) {
+      expect(typeof value, name).toBe('string')
+    }
+  })
+
+  // A property predicate is what every tree saved before this existed
+  // carries, and it must compile exactly as it always did -- through the
+  // map, with the key bound, numeric values still routed to properties_num.
+  it('leaves a property predicate compiling through the map, unchanged', () => {
+    expect(compile({ property: 'plan', operator: '=', value: 'pro' }).sql).toContain('properties[{')
+    expect(compile({ property: 'seats', operator: '>', value: 3 }).sql).toContain(
+      'properties_num[{',
+    )
+    // Including one whose NAME is a column: nothing is inferred from the
+    // name, so this still reads the property bag.
+    expect(compile({ property: 'path', operator: '=', value: '/x' }).sql).toContain('properties[{')
+  })
+})
+
+describe('attributeColumns', () => {
+  it('lists only the attributes a set of predicates names, deduplicated and sorted', () => {
+    expect(
+      attributeColumns([
+        { source: 'attribute', attribute: 'utm_source', operator: '=', value: 'hn' },
+        { property: 'plan', operator: '=', value: 'pro' },
+        { source: 'attribute', attribute: 'path', operator: '=', value: '/a' },
+        { source: 'attribute', attribute: 'utm_source', operator: '!=', value: 'x' },
+      ]),
+    ).toEqual(['path', 'utm_source'])
+  })
+
+  it('is empty for predicates that name no attribute at all', () => {
+    expect(attributeColumns([{ property: 'plan', operator: '=', value: 'pro' }])).toEqual([])
+    expect(attributeColumns([])).toEqual([])
   })
 })

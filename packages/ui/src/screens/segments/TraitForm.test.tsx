@@ -19,7 +19,9 @@ const traitNode = (): Trait => ({ kind: 'trait', key: 'plan', operator: '>=', va
  * a field that now offers a list. */
 function fakeClient(properties: string[] = [], values: string[] = []): ApiClient {
   return {
-    schemaProperties: vi.fn(async () => properties),
+    schemaProperties: vi.fn(async () =>
+      properties.map((name) => ({ name, kind: 'string' as const })),
+    ),
     schemaTraitValues: vi.fn(async () => values),
   } as unknown as ApiClient
 }
@@ -315,5 +317,59 @@ describe('TraitForm -- knowing what to type in the value box', () => {
     expect(box).not.toBeDisabled()
     expect(box).toHaveAttribute('aria-controls', screen.getByRole('listbox').id)
     expect(box).not.toHaveAttribute('readonly')
+  })
+})
+
+// The same defect `WherePredicates` had, one node type over: `traitExpr`
+// picks `t_str` or `t_num` from the JavaScript type of the value, and this
+// form could only ever produce a string. Verified live at the time of the
+// fix -- trait `seats = "12"` found 0 people where `seats = 12` found 20.
+describe("TraitForm — the value carries the trait's kind", () => {
+  const numericTraits = {
+    schemaProperties: vi.fn(async () => [{ name: 'seats', kind: 'number' as const }]),
+    schemaTraitValues: vi.fn(async () => []),
+  } as unknown as ApiClient
+
+  function Harness(props: { client: ApiClient; node: Trait }) {
+    const [node, setNode] = useState<Trait>(props.node)
+    current = node
+    return <TraitForm id="c" node={node} onChange={setNode} client={props.client} projectId={7} />
+  }
+
+  let current: Trait
+
+  it('converts the value once the schema says the trait is numeric', async () => {
+    render(
+      <Harness
+        client={numericTraits}
+        node={{ kind: 'trait', key: 'seats', operator: '=', value: '12' }}
+      />,
+    )
+    await waitFor(() => expect(current.value).toBe(12))
+  })
+
+  it('leaves a text trait alone', async () => {
+    const client = {
+      schemaProperties: vi.fn(async () => [{ name: 'plan', kind: 'string' as const }]),
+      schemaTraitValues: vi.fn(async () => []),
+    } as unknown as ApiClient
+    render(
+      <Harness
+        client={client}
+        node={{ kind: 'trait', key: 'plan', operator: '=', value: 'pro' }}
+      />,
+    )
+    await waitFor(() => expect(client.schemaProperties).toHaveBeenCalled())
+    expect(current.value).toBe('pro')
+  })
+
+  it('says so when the trait has never been recorded and the value looks numeric', async () => {
+    render(
+      <Harness
+        client={fakeClient([])}
+        node={{ kind: 'trait', key: 'seats', operator: '=', value: '12' }}
+      />,
+    )
+    await waitFor(() => expect(screen.getByTestId('c-kind-note')).toHaveTextContent('as text'))
   })
 })

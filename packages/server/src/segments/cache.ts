@@ -3,7 +3,17 @@ export interface MemberRow {
   person_id: string
   first_seen: string
   last_seen: string
-  [field: string]: string | number
+  /** The person's traits, split by type exactly as `person_traits` stores
+   * them, and capped at `TRAITS_PER_MEMBER_MAX` keys each. */
+  traits: Record<string, string>
+  traits_num: Record<string, number>
+  /** How many traits the person actually has, which is not the size of the
+   * two maps above when the cap bit. See `boundedTraitMap` in core. */
+  trait_total: number
+  /** The context columns `memberProjection` selects -- one per
+   * `CONTEXT_FIELDS` entry. The record types are here only because an index
+   * signature must cover every named member above it. */
+  [field: string]: string | number | Record<string, string> | Record<string, number>
 }
 
 export interface CachedResult {

@@ -21,6 +21,68 @@ here as it happened rather than tagged retroactively, for the same reason 0.1.0
 is: a tag created after the fact names a moment nobody could have fetched. Its
 one fix is contained in 0.3.0.
 
+## Unreleased
+
+### Added
+
+- **A segment behaviour's `where` can filter on the event's own attributes**,
+  not just its custom properties: `path`, `url`, `referrer`, the five `utm_*`
+  fields, `device_type`, `os`, `browser`, `country`, `region` and `city`. Set
+  `"source": "attribute"` on a predicate and name one of them. "Viewed pricing
+  at least once in the last 30 days, from the spring campaign" was not
+  expressible before — a predicate on `utm_campaign` was well-formed, saved
+  without complaint, and read an empty property slot, so it answered zero.
+
+  **A `context` condition is not the same thing** and is not replaced by this.
+  It matches whoever was ACQUIRED through a campaign, whatever they later did;
+  a `where` predicate matches people who did *this* thing *from* it.
+
+  **Nothing about existing segments changes.** A predicate with no `source` is
+  a property predicate, exactly as before, and `ast_version` is still `1` — no
+  migration, and no stored tree means anything different than it did. A
+  property genuinely named `path` keeps working; nothing is inferred from a
+  name.
+
+  Funnel steps take the same predicate, because they use the same shape.
+
+  In the web UI, the Where row's field now lists Attributes above Properties
+  in one picker, so the name you saw in the feed is where you look for it.
+
+- **A segment's member preview returns each person's traits**, and the web UI
+  expands a person row to show them beside that person's context — country,
+  city, device, OS, browser, referrer and campaign, which the response already
+  carried and no screen had ever shown.
+
+  **Traits are capped at 50 keys per person**, with the person's real trait
+  count returned alongside, so a capped row says what it held back rather than
+  reading as the whole set. They cost no extra query: the trait join is one
+  every compiled segment already performs, because predicates read it.
+
+  `referrer`, `utm_source`, `utm_medium` and `utm_campaign` are shown as
+  **first touch**, because that is what they are: those four are recorded once,
+  at acquisition, and asking for them at `latest` scope returns the
+  first-touch value.
+
+### Fixed
+
+- **A segment condition on a numeric property matched nobody when it was
+  written in the web UI.** Every control in the builder yields text, and a
+  predicate reads `properties` or `properties_num` depending on whether its
+  value is a JSON string or a JSON number — so `results = 21`, typed in the
+  builder, asked the string map for a number and got a confident zero. The
+  same held for a numeric trait. The builder now reads each property's
+  recorded kind from `GET /v1/schema/properties` and sends the matching type.
+
+  **Segments saved before this fix keep the value they were saved with.**
+  Opening one in the builder converts it as soon as the schema answers, and
+  saving persists the corrected value; nothing is rewritten in place until
+  then.
+
+  Where the kind cannot be established — a property the project has never
+  recorded, or one it has recorded both as text and as a number — the
+  condition stays text, as it always was, and the row now says so instead of
+  leaving a zero to be interpreted.
+
 ## 0.7.0
 
 Two changes alter what stored data MEANS, and both are called out first because

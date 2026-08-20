@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { cn } from '../lib/utils.js'
 import { Input } from './ui/input.js'
@@ -22,10 +22,12 @@ import { Input } from './ui/input.js'
  *
  * ## What it deliberately does NOT do
  *
- *  - **It never filters.** `options` is rendered verbatim. Filtering is a
- *    server-side prefix lookup owned by the caller (`startsWith`, debounced),
- *    and re-filtering the answer here would silently apply a second, different
- *    rule to a list that has already been narrowed.
+ *  - **It never filters.** `options` (or `groups`) is rendered verbatim.
+ *    Filtering is a prefix match owned by the caller -- a debounced
+ *    server-side `startsWith` for the lists that come from ClickHouse, a
+ *    local one for the fixed list of event columns -- and re-filtering the
+ *    answer here would silently apply a second, different rule to a list
+ *    that has already been narrowed.
  *  - **It never fetches.** When and how eagerly a list may be asked for
  *    depends entirely on what is behind it -- a catalogue read is cheap and
  *    happens on mount, a partition scan is not and waits for a focus. The
@@ -70,9 +72,30 @@ export function Combobox(props: {
    * visible `<Label>` carries. */
   label: string
   value: string
-  onChange: (next: string) => void
-  /** Rendered verbatim, in order. Already filtered by whoever fetched them. */
+  /** `group` is the label of the section a row was chosen from, and is
+   * undefined for text the operator typed. A caller with no `groups` can
+   * ignore it entirely. */
+  onChange: (next: string, group?: string) => void
+  /** Rendered verbatim, in order. Already filtered by whoever fetched them.
+   * Ignored when `groups` is given. */
   options: string[]
+  /**
+   * Sectioned options, rendered with a heading above each section, in the
+   * order given. When present this REPLACES `options` -- a caller has one
+   * list or the other, never both.
+   *
+   * Selection stays flat: `active`, ArrowUp/ArrowDown and Enter walk the
+   * concatenation of every section's options and skip the headings, which
+   * is what the ARIA listbox pattern requires (a heading is not an option
+   * and must not be reachable as one).
+   *
+   * `onChange`'s second argument names the section a row was CHOSEN from,
+   * and is the only reason this exists rather than the caller flattening
+   * the list itself: two sections may legitimately offer the same name --
+   * an event property called `path` and the event column called `path` --
+   * and which was picked is a fact only this component holds.
+   */
+  groups?: { label: string; options: string[] }[]
   /** Called with this box's current text when the popup opens and on every
    * keystroke -- the hook a caller whose lookup is on-demand hangs its fetch
    * on. A caller that fetches eagerly needs none. */
@@ -105,6 +128,7 @@ export function Combobox(props: {
     value,
     onChange,
     options,
+    groups,
     onInteract,
     placeholder,
     disabled,
@@ -118,6 +142,14 @@ export function Combobox(props: {
   const generatedId = useId()
   const id = idProp ?? generatedId
   const listId = `${generatedId}-listbox`
+
+  // What the keyboard walks. Sections are a rendering concern only: every
+  // index below -- `active`, `aria-activedescendant`, the option ids -- is
+  // an index into THIS array, so the two modes share one selection model
+  // and a heading can never become the active descendant.
+  const rows: { option: string; group?: string }[] = groups
+    ? groups.flatMap((g) => g.options.map((option) => ({ option, group: g.label })))
+    : options.map((option) => ({ option }))
 
   const [open, setOpen] = useState(false)
   // -1 is "no option is active", and it is the state a freshly opened popup
@@ -194,16 +226,20 @@ export function Combobox(props: {
   // the list -- `aria-activedescendant` would then name an id that no longer
   // exists, which a screen reader reports as nothing at all.
   useEffect(() => {
-    setActive((current) => (current >= options.length ? options.length - 1 : current))
-  }, [options.length])
+    setActive((current) => (current >= rows.length ? rows.length - 1 : current))
+  }, [rows.length])
 
   // Keeps the highlighted row on screen once the list is taller than the
   // popup. Guarded because jsdom implements no scrolling at all.
   useEffect(() => {
     if (!open || active < 0) return
-    const el = listRef.current?.children[active] as HTMLElement | undefined
+    // By id, not by child index: with sections the popup's children are
+    // headings and options interleaved, so `children[active]` would scroll
+    // to whatever happens to sit at that position. `useId` values contain
+    // colons, which `querySelector` would reject as a selector.
+    const el = document.getElementById(`${listId}-option-${active}`)
     if (typeof el?.scrollIntoView === 'function') el.scrollIntoView({ block: 'nearest' })
-  }, [open, active])
+  }, [open, active, listId])
 
   // No `if (disabled) return` here: every route into this function --
   // `onFocus`, `onClick`, ArrowUp/ArrowDown -- needs an enabled input to
@@ -214,7 +250,7 @@ export function Combobox(props: {
     setOpen(true)
     // The row already in the box, if it is one of them. Nothing otherwise --
     // see the `active` declaration.
-    setActive(options.indexOf(text))
+    setActive(rows.findIndex((r) => r.option === text))
     onInteract?.(text)
   }
 
@@ -223,8 +259,14 @@ export function Combobox(props: {
   // already-focused element fires nothing -- whereas focusing one that HAD
   // lost focus would run `onFocus` and re-open the popup the operator just
   // closed by choosing from it.
-  function commit(next: string) {
-    onChange(next)
+  function commit(next: string, group?: string) {
+    // The second argument is passed only when there IS one. A flat-list
+    // caller's `onChange` then sees exactly the one-argument call it has
+    // always seen -- invisible to the callers themselves, but not to a test
+    // asserting on the call, and not worth changing for three consumers
+    // that have no sections.
+    if (group === undefined) onChange(next)
+    else onChange(next, group)
     setOpen(false)
     setActive(-1)
   }
@@ -236,7 +278,7 @@ export function Combobox(props: {
         openPopup(value)
         return
       }
-      setActive((i) => (options.length === 0 ? -1 : (i + 1) % options.length))
+      setActive((i) => (rows.length === 0 ? -1 : (i + 1) % rows.length))
       return
     }
     if (e.key === 'ArrowUp') {
@@ -245,16 +287,16 @@ export function Combobox(props: {
         openPopup(value)
         return
       }
-      setActive((i) => (options.length === 0 ? -1 : (i <= 0 ? options.length : i) - 1))
+      setActive((i) => (rows.length === 0 ? -1 : (i <= 0 ? rows.length : i) - 1))
       return
     }
     if (e.key === 'Enter') {
-      const chosen = active >= 0 ? options[active] : undefined
+      const chosen = active >= 0 ? rows[active] : undefined
       if (open && chosen !== undefined) {
         // Only swallowed when it actually chose something: an Enter that
         // selects nothing must still reach whatever the field is inside.
         e.preventDefault()
-        commit(chosen)
+        commit(chosen.option, chosen.group)
       }
       return
     }
@@ -316,28 +358,48 @@ export function Combobox(props: {
             }}
             className="z-50 overflow-y-auto overflow-x-hidden rounded-md border border-border bg-popover py-1 text-sm text-foreground shadow-md"
           >
-            {options.length === 0 && errorMessage !== undefined ? (
+            {rows.length === 0 && errorMessage !== undefined ? (
               <p role="alert" className="px-3 py-2 text-xs text-destructive">
                 {errorMessage}
               </p>
-            ) : options.length === 0 ? (
+            ) : rows.length === 0 ? (
               <p className="px-3 py-2 text-xs text-muted-foreground">{emptyText}</p>
             ) : (
-              options.map((option, i) => (
-                // biome-ignore lint/a11y/useFocusableInteractive: same as the listbox above -- aria-activedescendant, not focus, is what moves through these rows.
-                // biome-ignore lint/a11y/useKeyWithClickEvents: the keyboard path for choosing a row is ArrowUp/ArrowDown/Enter on the combobox itself, where the ARIA pattern puts it. Focus never reaches this element, so a key handler on it could not fire.
-                <div
-                  key={option}
-                  id={`${listId}-option-${i}`}
-                  // biome-ignore lint/a11y/useSemanticElements: <option> is only meaningful inside <select>/<datalist>; this list exists precisely because neither can be opened on demand or styled.
-                  role="option"
-                  aria-selected={i === active}
-                  onMouseMove={() => setActive(i)}
-                  onClick={() => commit(option)}
-                  className={cn('cursor-pointer truncate px-3 py-1.5', i === active && 'bg-accent')}
-                >
-                  {option}
-                </div>
+              rows.map((row, i) => (
+                /* A heading is emitted BEFORE the first row of its section
+                 * rather than as a row of its own, so the list stays a flat
+                 * sequence of `role="option"` children with nothing
+                 * unselectable interleaved into the index space. `aria-hidden`
+                 * because the grouping is announced by `aria-label` on the
+                 * options' own container in every browser that supports it,
+                 * and a bare text node inside a listbox is read as an option
+                 * that cannot be chosen in the ones that do not. */
+                <Fragment key={`${row.group ?? ''}:${row.option}`}>
+                  {row.group !== undefined && row.group !== rows[i - 1]?.group && (
+                    <p
+                      aria-hidden="true"
+                      className="px-3 pt-2 pb-1 font-medium text-[0.6875rem] text-muted-foreground uppercase tracking-wide first:pt-1"
+                    >
+                      {row.group}
+                    </p>
+                  )}
+                  {/* biome-ignore lint/a11y/useFocusableInteractive: same as the listbox above -- aria-activedescendant, not focus, is what moves through these rows. */}
+                  {/* biome-ignore lint/a11y/useKeyWithClickEvents: the keyboard path for choosing a row is ArrowUp/ArrowDown/Enter on the combobox itself, where the ARIA pattern puts it. Focus never reaches this element, so a key handler on it could not fire. */}
+                  <div
+                    id={`${listId}-option-${i}`}
+                    // biome-ignore lint/a11y/useSemanticElements: <option> is only meaningful inside <select>/<datalist>; this list exists precisely because neither can be opened on demand or styled.
+                    role="option"
+                    aria-selected={i === active}
+                    onMouseMove={() => setActive(i)}
+                    onClick={() => commit(row.option, row.group)}
+                    className={cn(
+                      'cursor-pointer truncate px-3 py-1.5',
+                      i === active && 'bg-accent',
+                    )}
+                  >
+                    {row.option}
+                  </div>
+                </Fragment>
               ))
             )}
           </div>,

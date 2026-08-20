@@ -151,3 +151,54 @@ describe('behaviourCte', () => {
     expect(pass.cte).toMatch(/sumIf\(/)
   })
 })
+
+describe('attribute columns in the scan', () => {
+  const attr = (attribute: string, value: string) =>
+    ({ source: 'attribute', attribute, operator: '=', value }) as never
+
+  // A predicate compiles to a bare column reference, and the subquery it
+  // sits over selects an explicit list -- so a column the scan did not ask
+  // for is a query that does not parse, not one that answers wrongly.
+  it('projects a column a predicate names', () => {
+    const { pass } = build([beh({ where: [attr('utm_campaign', 'august-digest')] })])
+    expect(pass.cte).toContain('utm_campaign')
+  })
+
+  // The pin that stops "just project all fourteen" arriving later as a
+  // tidy-up. `events` is the hot path and it is columnar: fourteen unused
+  // columns would be read by every segment evaluation in the product, to
+  // serve the ones that use none.
+  it('projects nothing extra when no predicate names an attribute', () => {
+    const { pass } = build([beh({ where: [{ property: 'plan', operator: '=', value: 'pro' }] })])
+    for (const column of ['utm_campaign', 'device_type', 'country', 'referrer', 'os', 'city']) {
+      expect(pass.cte, column).not.toContain(column)
+    }
+  })
+
+  it('projects each named column once, however many predicates name it', () => {
+    const { pass } = build([
+      beh({ where: [attr('path', '/a'), attr('path', '/b')] }),
+      beh({ where: [attr('path', '/c'), attr('os', 'macos')] }),
+    ])
+    // The PROJECTION only -- between the inner SELECT and its FROM. The
+    // text before that is the aggregates, where every predicate mentions
+    // its own column and four `path`s are expected.
+    const cte = pass.cte as string
+    const projection = cte.slice(cte.indexOf('SELECT project_id'), cte.indexOf('FROM events'))
+    expect(projection.match(/\bpath\b/g)).toHaveLength(1)
+    expect(projection).toContain('os')
+  })
+
+  // One behaviour naming a column puts it in the ONE scan every behaviour
+  // reads, so a second behaviour's predicate on the same column compiles
+  // against a projection it did not itself ask for. That is fine, and it is
+  // worth pinning: the collection is over the whole tree, not per node.
+  it('collects across every behaviour in the tree, not just the first', () => {
+    const { pass } = build([
+      beh({ where: [attr('path', '/a')] }),
+      beh({ where: [attr('city', 'x')] }),
+    ])
+    expect(pass.cte).toContain('path')
+    expect(pass.cte).toContain('city')
+  })
+})

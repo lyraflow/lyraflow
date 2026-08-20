@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { FilterNode, SegmentQuery } from './ast.js'
-import { MEMBER_PAGE_SIZE, compileSegment } from './compile.js'
+import { MEMBER_PAGE_SIZE, TRAITS_PER_MEMBER_MAX, compileSegment } from './compile.js'
 import { SegmentValidationError } from './validate.js'
 
 const compile = (filter: FilterNode) =>
@@ -169,6 +169,62 @@ describe('compileSegment', () => {
     // And they must be absent in count mode, which is what makes this a
     // discriminating assertion rather than a coincidence.
     expect(compile(trait).sql).not.toContain('AS country')
+  })
+
+  describe('traits on a member row', () => {
+    // Reversing a documented decision, so it gets a test that states what
+    // changed: the projection used to say traits were "deliberately absent"
+    // because a per-person map of arbitrary size is unbounded. They are here
+    // now, bounded, and both halves matter.
+    it('selects both trait maps and the real total', () => {
+      const { sql } = members(trait)
+      expect(sql).toContain('AS traits')
+      expect(sql).toContain('AS traits_num')
+      expect(sql).toContain('AS trait_total')
+      // Count mode selects one number and nothing else -- traits there would
+      // be a per-person map on a query that returns a single row.
+      expect(compile(trait).sql).not.toContain('AS traits')
+    })
+
+    // THE defect this filter exists to prevent. The traits CTE builds t_str
+    // and t_num over the same key set, so every string trait has a Float64
+    // default of 0 sitting in t_num under its own name. Without the
+    // has_num filter every person comes back with `plan: 0` beside their
+    // real `plan: "pro"`, and nothing about the response looks wrong.
+    it('splits the two maps by has_num, so a string trait has no numeric twin', () => {
+      const { sql } = members(trait)
+      expect(sql).toContain('mapFilter((k, v) -> t_has_num[k] = 0, t_str)')
+      expect(sql).toContain('mapFilter((k, v) -> t_has_num[k] = 1, t_num)')
+    })
+
+    it('caps each map and sorts before it slices', () => {
+      const { sql } = members(trait)
+      expect(sql).toContain(`, 1, ${TRAITS_PER_MEMBER_MAX})`)
+      // Sorted first: a Map's key order is whatever groupArray produced, so
+      // an unsorted slice returns a different fifty on different runs of the
+      // same query -- and page two of a walk would disagree with page one
+      // about which traits a person has.
+      expect(sql).toContain('arraySlice(arraySort(mapKeys(')
+    })
+
+    // Slicing keys and values as two independent arrays lines up only while
+    // both are in the same order, which is an assumption about
+    // mapKeys/mapValues that nothing here enforces. Looking each value up by
+    // its key cannot mispair.
+    it('looks values up by key rather than slicing values in parallel', () => {
+      const { sql } = members(trait)
+      expect(sql).toContain('arrayMap(k -> t_str[k]')
+      expect(sql).toContain('arrayMap(k -> t_num[k]')
+      expect(sql).not.toContain('mapValues')
+    })
+
+    // The count is what makes the cap honest -- it is the person's real
+    // total, so a capped row can say what it held back instead of reading as
+    // the whole set. A UInt64 reaches JSON as a string, and a count that
+    // arrives as `"51"` is one a reader compares with `>` against a number.
+    it('reports the total as a UInt32, not the size of the capped map', () => {
+      expect(members(trait).sql).toContain('toUInt32(length(t_has_num)) AS trait_total')
+    })
   })
 
   it('orders by last_seen then person_id so the ordering is total', () => {

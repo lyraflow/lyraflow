@@ -1,4 +1,12 @@
-import type { Behavior, Context, FilterNode, Lifecycle, Trait, WherePredicate } from './ast.js'
+import type {
+  Behavior,
+  Context,
+  EventColumnField,
+  FilterNode,
+  Lifecycle,
+  Trait,
+  WherePredicate,
+} from './ast.js'
 import { CONTEXT_COLUMNS } from './base.js'
 import { lifecycleInstant } from './instants.js'
 import { type ChType, type Params, chDateTime } from './params.js'
@@ -24,9 +32,30 @@ function compare(
 }
 
 /**
- * A predicate on one event's own properties. `property` is a MAP KEY, not a
- * column, so it is a bound parameter like any other value — there is no
- * identifier injection surface here.
+ * A predicate on one event — either on a key in its own property bag, or on
+ * one of its columns.
+ *
+ * The two halves have opposite injection stories, and that is why they are
+ * separate shapes in the AST rather than one shape with a flag:
+ *
+ * - a property's name is a MAP KEY, not a column, so it is a bound parameter
+ *   like any other value and there is no identifier surface at all;
+ * - an attribute's name IS a column and is interpolated bare. Safe for
+ *   exactly the reason `contextExpr` below is safe: `w.attribute` is typed
+ *   `EventColumnField`, a Zod enum over `EVENT_COLUMN_FIELDS`, so a caller
+ *   cannot name a column the allowlist does not contain and there is no
+ *   runtime check here that a later edit could drop.
+ *
+ * Every attribute column is `String`/`LowCardinality(String)` in
+ * `002_events.sql` and the AST admits only string values for them, so the
+ * comparison type is `String` unconditionally — there is no numeric branch
+ * to get wrong.
+ *
+ * The caller must have PROJECTED the column. Both scans select an explicit
+ * list (`behaviour.ts`, `funnels/compile.ts`) and add only the attributes
+ * their tree references, via `attributeColumns` below; a column named here
+ * and missing there is a query that fails to parse rather than one that
+ * answers wrongly.
  *
  * Exported because two engines compile it: the segment behavioural pass, and
  * the funnel step compiler. A funnel step and a segment behaviour's `where`
@@ -34,12 +63,40 @@ function compare(
  * would be two grammars for it, drifting first at the operator list.
  */
 export function wherePredicate(w: WherePredicate, params: Params): string {
+  if (w.source === 'attribute') {
+    return compare(w.attribute, w.operator, w.value, 'String', params)
+  }
   const numeric =
     typeof w.value === 'number' || (Array.isArray(w.value) && typeof w.value[0] === 'number')
   const bag = numeric ? 'properties_num' : 'properties'
   const type = numeric ? 'Float64' : 'String'
   const key = params.add(w.property, 'String')
   return compare(`${bag}[${key}]`, w.operator, w.value, type, params)
+}
+
+/**
+ * The columns a set of `where` predicates needs projected, deduplicated and
+ * in a stable order.
+ *
+ * Every scan of `events` in this codebase selects an EXPLICIT column list
+ * inside a subquery, so an attribute predicate can only read a column the
+ * scan asked for. This is what both engines call to find out which ones.
+ *
+ * Referenced columns only, never all fourteen. `events` is the one table
+ * where the cost is real: it is columnar, it is the hot path, and every
+ * segment evaluation in the product would otherwise read fourteen more
+ * columns to serve the queries that use none of them. `compile.test.ts`
+ * pins that a column appears only when a predicate names it, which is what
+ * stops "just project all of them" coming back later as a tidy-up.
+ *
+ * Sorted so the generated SQL is stable for a given tree — two calls with
+ * the same predicates in a different order produce the same query text,
+ * which is what makes the compiler's own tests readable.
+ */
+export function attributeColumns(predicates: Iterable<WherePredicate>): EventColumnField[] {
+  const out = new Set<EventColumnField>()
+  for (const w of predicates) if (w.source === 'attribute') out.add(w.attribute)
+  return [...out].sort()
 }
 
 function traitExpr(n: Trait, ctx: Ctx): string {

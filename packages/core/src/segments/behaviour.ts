@@ -2,7 +2,7 @@ import { RESOLVED_PERSON_ALIAS, resolvedPersonExpr } from '../identity/resolve.j
 import { notSuppressedExpr } from '../privacy/suppression.js'
 import type { Behavior, Window } from './ast.js'
 import { type Params, chDateTime } from './params.js'
-import { wherePredicate } from './predicates.js'
+import { attributeColumns, wherePredicate } from './predicates.js'
 
 export interface BehaviourPass {
   /** null when the tree has no behavioural nodes — the caller omits the join. */
@@ -127,6 +127,16 @@ export function behaviourCte(opts: {
     })
     .join(',\n      ')
 
+  // The event columns this tree's `where` predicates name, and only those.
+  // A predicate compiles to a bare column reference, so the column has to be
+  // in the subquery's projection or the query does not parse -- and adding
+  // all fourteen unconditionally would make every segment evaluation in the
+  // product read fourteen more columns from the one table where that cost is
+  // real. Every name comes from `EVENT_COLUMN_FIELDS` via a Zod enum, which
+  // is what makes interpolating the list safe; see `attributeColumns`.
+  const attributes = attributeColumns(behaviors.flatMap((b) => b.where ?? []))
+  const attributeSelect = attributes.length > 0 ? `,\n             ${attributes.join(', ')}` : ''
+
   const resolved = resolvedPersonExpr({ database, alias: 'e' })
 
   // Per-event suppression, applied between the deduplicated scan and the
@@ -158,7 +168,7 @@ export function behaviourCte(opts: {
       ${aggregates}
     FROM (
       SELECT project_id, anonymous_id, user_id, timestamp, event_name,
-             properties, properties_num, event_id
+             properties, properties_num, event_id${attributeSelect}
       FROM events
       WHERE project_id = ${projectParam}${scanBound}
       LIMIT 1 BY project_id, event_id

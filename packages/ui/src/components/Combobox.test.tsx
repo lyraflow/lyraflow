@@ -472,3 +472,100 @@ describe('Combobox -- the accessible tree the rest of the app queries', () => {
     expect(screen.getAllByLabelText(/event/i)).toHaveLength(1)
   })
 })
+
+describe('Combobox — sectioned options', () => {
+  /** Same shape `FieldCombobox` passes: two sections, and one name present
+   * in BOTH, which is the case the whole `group` argument exists for. */
+  const GROUPS = [
+    { label: 'Attributes', options: ['path', 'utm_campaign'] },
+    { label: 'Properties', options: ['path', 'plan'] },
+  ]
+
+  function Sectioned(props: { onChange?: (v: string, g?: string) => void }) {
+    const [value, setValue] = useState('')
+    return (
+      <Combobox
+        label="Field"
+        value={value}
+        options={[]}
+        groups={GROUPS}
+        onChange={(v, g) => {
+          setValue(v)
+          props.onChange?.(v, g)
+        }}
+      />
+    )
+  }
+
+  it('shows each section under its own heading', async () => {
+    render(<Sectioned />)
+    await userEvent.click(screen.getByRole('combobox', { name: 'Field' }))
+    expect(screen.getByText('Attributes')).toBeInTheDocument()
+    expect(screen.getByText('Properties')).toBeInTheDocument()
+    expect(screen.getAllByRole('option').map((o) => o.textContent)).toEqual([
+      'path',
+      'utm_campaign',
+      'path',
+      'plan',
+    ])
+  })
+
+  // A heading is not an option. If it were reachable as one, Enter on it
+  // would commit the section's own name as the field, and
+  // `aria-activedescendant` would name something a screen reader announces
+  // as nothing.
+  it('walks options only, skipping the headings', async () => {
+    render(<Sectioned />)
+    const box = screen.getByRole('combobox', { name: 'Field' })
+    await userEvent.click(box)
+    for (const expected of ['path', 'utm_campaign', 'path', 'plan']) {
+      await userEvent.keyboard('{ArrowDown}')
+      const active = screen
+        .getAllByRole('option')
+        .find((o) => o.getAttribute('aria-selected') === 'true')
+      expect(active?.textContent).toBe(expected)
+    }
+    // And wraps back to the first option rather than onto a heading.
+    await userEvent.keyboard('{ArrowDown}')
+    const active = screen
+      .getAllByRole('option')
+      .find((o) => o.getAttribute('aria-selected') === 'true')
+    expect(active?.textContent).toBe('path')
+  })
+
+  // The reason this prop exists at all. Both sections offer `path`; which
+  // one was chosen is a fact only this component holds, and without it the
+  // caller cannot tell an event column from a property of the same name.
+  it('reports which section a chosen row came from', async () => {
+    const onChange = vi.fn()
+    render(<Sectioned onChange={onChange} />)
+    await userEvent.click(screen.getByRole('combobox', { name: 'Field' }))
+    await userEvent.click(screen.getAllByRole('option', { name: 'path' })[1] as HTMLElement)
+    expect(onChange).toHaveBeenLastCalledWith('path', 'Properties')
+
+    await userEvent.click(screen.getByRole('combobox', { name: 'Field' }))
+    await userEvent.click(screen.getAllByRole('option', { name: 'path' })[0] as HTMLElement)
+    expect(onChange).toHaveBeenLastCalledWith('path', 'Attributes')
+  })
+
+  it('reports the section when a row is chosen by keyboard too', async () => {
+    const onChange = vi.fn()
+    render(<Sectioned onChange={onChange} />)
+    await userEvent.click(screen.getByRole('combobox', { name: 'Field' }))
+    await userEvent.keyboard('{ArrowDown}{ArrowDown}{Enter}')
+    expect(onChange).toHaveBeenLastCalledWith('utm_campaign', 'Attributes')
+  })
+
+  // Typed text belongs to no section, and the caller reads that as "this is
+  // free text" -- the difference between choosing an attribute and typing
+  // its name.
+  it('passes no section for text the operator typed', async () => {
+    const onChange = vi.fn()
+    render(<Sectioned onChange={onChange} />)
+    await userEvent.type(screen.getByRole('combobox', { name: 'Field' }), 'pa')
+    // On the arguments, not on the call shape: this harness forwards both
+    // of them, so what matters is that the second one is undefined.
+    expect(onChange.mock.lastCall?.[0]).toBe('pa')
+    expect(onChange.mock.lastCall?.[1]).toBeUndefined()
+  })
+})

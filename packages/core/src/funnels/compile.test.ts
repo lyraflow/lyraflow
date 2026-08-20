@@ -207,3 +207,48 @@ describe('compileFunnel', () => {
     }
   })
 })
+
+describe('attribute predicates on a step', () => {
+  const attr = (attribute: string, value: string) =>
+    ({ source: 'attribute', attribute, operator: '=', value }) as never
+
+  // A funnel step's `where` is the SAME `WherePredicate` a segment
+  // behaviour's is, compiled by the same function -- so a step reaches the
+  // column, and this scan has to project it for the same reason the
+  // behavioural one does.
+  it('compiles to the column and projects it', () => {
+    const c = compileFunnel({
+      ...base,
+      definition: {
+        steps: [{ event: '$page', where: [attr('utm_campaign', 'august-digest')] }, { event: 'b' }],
+        window_seconds: 3600,
+      },
+    })
+    expect(c.sql).toContain('utm_campaign')
+    expect(c.sql).not.toContain("'august-digest'")
+    expect(Object.values(c.params)).toContain('august-digest')
+  })
+
+  it('projects nothing extra when no step names an attribute', () => {
+    const c = compileFunnel({ ...base, definition: twoSteps })
+    for (const column of ['utm_campaign', 'device_type', 'country', 'referrer', 'city']) {
+      expect(c.sql, column).not.toContain(column)
+    }
+  })
+
+  it('collects across every step, not just the first', () => {
+    const c = compileFunnel({
+      ...base,
+      definition: {
+        steps: [
+          { event: 'a', where: [attr('path', '/pricing')] },
+          { event: 'b', where: [attr('os', 'macos')] },
+        ],
+        window_seconds: 3600,
+      },
+    })
+    const projection = c.sql.slice(c.sql.indexOf('SELECT project_id'), c.sql.indexOf('FROM events'))
+    expect(projection).toContain('path')
+    expect(projection).toContain('os')
+  })
+})
