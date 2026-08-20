@@ -7,7 +7,13 @@ import { useProject } from '../app/ProjectContext.js'
 import { ROUTES, funnelPath } from '../app/Router.js'
 import { Badge } from '../components/ui/badge.js'
 import { Button } from '../components/ui/button.js'
-import { formatPercent, formatRelative, formatWindow, stepChain } from './funnels/format.js'
+import {
+  formatPercent,
+  formatRangeDays,
+  formatRelative,
+  formatWindow,
+  stepChain,
+} from './funnels/format.js'
 
 /**
  * `last_entered`/`last_converted`/`last_evaluated_at` are a CACHE the
@@ -38,13 +44,30 @@ import { formatPercent, formatRelative, formatWindow, stepChain } from './funnel
  * this row". Both must short-circuit to the same "0 entered" text as the
  * literal-zero case above, before the division is ever reached.
  */
+/**
+ * The RANGE the cached counts came from, rendered beside them (#91).
+ *
+ * Without it this row showed a rate next to a timestamp and nothing else, so a
+ * funnel last run over 90 days displayed a 90-day conversion rate under a
+ * heading that implies the 7-day default. Two people reading the same row were
+ * answering different questions and neither could tell.
+ *
+ * `'range unknown'` rather than a guess for a row summarised before the server
+ * recorded ranges. The numbers are real; what they answer is not known, and
+ * labelling them "Last 7 days" because that is the default would manufacture
+ * exactly the false precision this fixes.
+ */
+function rangeLabel(f: Funnel): string {
+  return f.last_range === null ? 'range unknown' : formatRangeDays(f.last_range)
+}
+
 function funnelRateLabel(f: Funnel, now: Date): string {
   if (f.last_evaluated_at === null) return 'Not run yet'
   if (f.last_entered === 0 || f.last_entered === null) {
-    return `0 entered · ${formatRelative(f.last_evaluated_at, now)}`
+    return `0 entered · ${rangeLabel(f)} · ${formatRelative(f.last_evaluated_at, now)}`
   }
   const rate = Number(f.last_converted) / Number(f.last_entered)
-  return `${formatPercent(rate)} · ${formatRelative(f.last_evaluated_at, now)}`
+  return `${formatPercent(rate)} · ${rangeLabel(f)} · ${formatRelative(f.last_evaluated_at, now)}`
 }
 
 /** A stale funnel's `steps` no longer parse -- rendering an empty step chain

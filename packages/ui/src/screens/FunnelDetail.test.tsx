@@ -54,6 +54,7 @@ const FUNNEL: Funnel = {
   last_entered: 1204,
   last_converted: 491,
   last_evaluated_at: '2026-08-15T11:58:00.000Z',
+  last_range: null,
   created_at: '2026-08-01T00:00:00.000Z',
   updated_at: '2026-08-01T00:00:00.000Z',
 }
@@ -99,6 +100,7 @@ const SEGMENT_DEFAULTS = {
   filter: null,
   last_count: null,
   last_evaluated_at: null,
+  last_range: null,
   created_at: '2026-01-01T00:00:00.000Z',
   updated_at: '2026-01-01T00:00:00.000Z',
 }

@@ -190,6 +190,13 @@ export interface Funnel {
   last_entered: number | null
   last_converted: number | null
   last_evaluated_at: string | null
+  /**
+   * The window the cached counts were computed over (#91). `null` for a funnel
+   * that has never run, and for one summarised before the range was recorded
+   * at all -- in which case the rate is real but the question it answers is
+   * unknown, and must not be rendered as though it were the list's default.
+   */
+  last_range: { since: string; until: string } | null
   created_at: string
   updated_at: string
 }

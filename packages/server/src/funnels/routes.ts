@@ -68,6 +68,11 @@ function toWire(f: StoredFunnel | ListedFunnel) {
     last_entered: f.lastEntered,
     last_converted: f.lastConverted,
     last_evaluated_at: f.lastEvaluatedAt,
+    // One nested object rather than two flat fields, so a client cannot
+    // receive half a range. `null` means the cached counts came from a run
+    // that predates migration 016, or that there are no cached counts --
+    // either way the rate beside them must not be labelled with a window.
+    last_range: f.lastRange,
     created_at: f.createdAt,
     updated_at: f.updatedAt,
   }
@@ -410,6 +415,9 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
         entered: result.entered,
         converted: result.converted,
         at: new Date(),
+        // The range this run actually used, not the list's default. Without it
+        // the cached rate answered a question nobody could see (#91).
+        range,
       })
       return reply.code(200).send(body)
     } catch (err) {

@@ -17,6 +17,10 @@ export interface StoredFunnel {
   lastEntered: number | null
   lastConverted: number | null
   lastEvaluatedAt: string | null
+  /** The window the cached counts were computed over, or null for a row that
+   *  never ran -- or one summarised before migration 016, which genuinely does
+   *  not know. Both bounds or neither (#91). */
+  lastRange: { since: string; until: string } | null
   createdAt: string
   updatedAt: string
 }
@@ -38,6 +42,10 @@ export interface StaleListedFunnel {
   lastEntered: number | null
   lastConverted: number | null
   lastEvaluatedAt: string | null
+  /** The window the cached counts were computed over, or null for a row that
+   *  never ran -- or one summarised before migration 016, which genuinely does
+   *  not know. Both bounds or neither (#91). */
+  lastRange: { since: string; until: string } | null
   createdAt: string
   updatedAt: string
 }
@@ -138,6 +146,22 @@ function definitionChanged(
   return false
 }
 
+/**
+ * The two range columns as one value, or null.
+ *
+ * Both or neither, enforced here rather than trusted: a half-known range is
+ * not a range, and a caller that could receive `since` without `until` would
+ * have to invent the missing half or render something incomplete. NULL is the
+ * honest answer for a row summarised before migration 016, which genuinely
+ * does not know what it ran over.
+ */
+function lastRangeOf(row: Row): { since: string; until: string } | null {
+  if (row.last_range_since == null || row.last_range_until == null) return null
+  return { since: iso(row.last_range_since), until: iso(row.last_range_until) }
+}
+
+const iso = (v: Date | string): string => (v instanceof Date ? v.toISOString() : v)
+
 interface Row {
   id: string
   name: string
@@ -148,6 +172,13 @@ interface Row {
   last_entered: string | null
   last_converted: string | null
   last_evaluated_at: string | null
+  // `Date`, not `string`. node-postgres parses `timestamptz` into a JS Date,
+  // and the sibling columns above are DECLARED `string | null` while actually
+  // arriving as Dates -- harmless on the wire, because JSON.stringify turns a
+  // Date into the same ISO string, but the declaration is not true. Rather
+  // than inherit that, these two say what arrives and are normalised below.
+  last_range_since: Date | string | null
+  last_range_until: Date | string | null
   created_at: string
   updated_at: string
 }
@@ -182,6 +213,7 @@ export class FunnelStore {
       lastEntered: row.last_entered === null ? null : Number(row.last_entered),
       lastConverted: row.last_converted === null ? null : Number(row.last_converted),
       lastEvaluatedAt: row.last_evaluated_at,
+      lastRange: lastRangeOf(row),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }
@@ -199,6 +231,7 @@ export class FunnelStore {
       lastEntered: row.last_entered === null ? null : Number(row.last_entered),
       lastConverted: row.last_converted === null ? null : Number(row.last_converted),
       lastEvaluatedAt: row.last_evaluated_at,
+      lastRange: lastRangeOf(row),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }
@@ -207,7 +240,8 @@ export class FunnelStore {
   async list(projectId: number): Promise<ListedFunnel[]> {
     const r = await this.pool.query<Row>(
       `SELECT id, name, definition_version, steps, window_seconds, segment_id,
-              last_entered, last_converted, last_evaluated_at, created_at, updated_at
+              last_entered, last_converted, last_evaluated_at,
+              last_range_since, last_range_until, created_at, updated_at
          FROM funnels WHERE project_id = $1 ORDER BY name ASC`,
       [projectId],
     )
@@ -224,7 +258,8 @@ export class FunnelStore {
   async get(projectId: number, id: number): Promise<StoredFunnel | null> {
     const r = await this.pool.query<Row>(
       `SELECT id, name, definition_version, steps, window_seconds, segment_id,
-              last_entered, last_converted, last_evaluated_at, created_at, updated_at
+              last_entered, last_converted, last_evaluated_at,
+              last_range_since, last_range_until, created_at, updated_at
          FROM funnels WHERE project_id = $1 AND id = $2`,
       [projectId, id],
     )
@@ -240,7 +275,8 @@ export class FunnelStore {
   async getByName(projectId: number, name: string): Promise<StoredFunnel | null> {
     const r = await this.pool.query<Row>(
       `SELECT id, name, definition_version, steps, window_seconds, segment_id,
-              last_entered, last_converted, last_evaluated_at, created_at, updated_at
+              last_entered, last_converted, last_evaluated_at,
+              last_range_since, last_range_until, created_at, updated_at
          FROM funnels WHERE project_id = $1 AND name = $2`,
       [projectId, name],
     )
@@ -258,7 +294,8 @@ export class FunnelStore {
         `INSERT INTO funnels (project_id, name, definition_version, steps, window_seconds, segment_id)
          VALUES ($1, $2, $3, $4, $5, $6)
          RETURNING id, name, definition_version, steps, window_seconds, segment_id,
-                   last_entered, last_converted, last_evaluated_at, created_at, updated_at`,
+                   last_entered, last_converted, last_evaluated_at,
+              last_range_since, last_range_until, created_at, updated_at`,
         [
           projectId,
           name,
@@ -323,7 +360,8 @@ export class FunnelStore {
 
       const existing = await client.query<Row>(
         `SELECT id, name, definition_version, steps, window_seconds, segment_id,
-                last_entered, last_converted, last_evaluated_at, created_at, updated_at
+                last_entered, last_converted, last_evaluated_at,
+              last_range_since, last_range_until, created_at, updated_at
            FROM funnels WHERE project_id = $1 AND id = $2 FOR UPDATE`,
         [projectId, id],
       )
@@ -349,10 +387,19 @@ export class FunnelStore {
            last_entered      = CASE WHEN $8 THEN NULL ELSE last_entered END,
            last_converted    = CASE WHEN $8 THEN NULL ELSE last_converted END,
            last_evaluated_at = CASE WHEN $8 THEN NULL ELSE last_evaluated_at END,
+           -- Cleared with the counts, never separately. A stored range
+           -- describes the definition it was computed from exactly as much as
+           -- the counts do (012's own note), so leaving it behind would put a
+           -- precise-looking window on numbers that no longer exist -- which
+           -- reads MORE authoritative than the bare stale number this clause
+           -- already exists to prevent.
+           last_range_since  = CASE WHEN $8 THEN NULL ELSE last_range_since END,
+           last_range_until  = CASE WHEN $8 THEN NULL ELSE last_range_until END,
            updated_at        = now()
          WHERE project_id = $1 AND id = $2
          RETURNING id, name, definition_version, steps, window_seconds, segment_id,
-                   last_entered, last_converted, last_evaluated_at, created_at, updated_at`,
+                   last_entered, last_converted, last_evaluated_at,
+              last_range_since, last_range_until, created_at, updated_at`,
         [
           projectId,
           id,
@@ -395,15 +442,32 @@ export class FunnelStore {
    * and it is always rendered alongside `lastEvaluatedAt` rather than as a
    * bare number.
    */
+  /**
+   * `range` is REQUIRED, not optional, and that is the whole of #91: the
+   * summary used to be written after every run regardless of what it ran over,
+   * so a list rendering the rate beside its timestamp was answering a question
+   * nobody could see. A caller that has counts necessarily has the range that
+   * produced them, so there is no case where making this optional would help
+   * and one where it would let the defect back in.
+   */
   async recordRun(
     projectId: number,
     id: number,
-    run: { entered: number; converted: number; at: Date },
+    run: { entered: number; converted: number; at: Date; range: { since: Date; until: Date } },
   ): Promise<void> {
     await this.pool.query(
-      `UPDATE funnels SET last_entered = $3, last_converted = $4, last_evaluated_at = $5
+      `UPDATE funnels SET last_entered = $3, last_converted = $4, last_evaluated_at = $5,
+                          last_range_since = $6, last_range_until = $7
          WHERE project_id = $1 AND id = $2`,
-      [projectId, id, run.entered, run.converted, run.at.toISOString()],
+      [
+        projectId,
+        id,
+        run.entered,
+        run.converted,
+        run.at.toISOString(),
+        run.range.since.toISOString(),
+        run.range.until.toISOString(),
+      ],
     )
   }
 }
