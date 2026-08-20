@@ -297,6 +297,24 @@ export default function App(props: { client?: ApiClient; sessionPollIntervalMs?:
         email={session.email}
         onLogout={handleLogout}
         onUnauthorized={handleSessionExpired}
+        // Re-read rather than patched in place: the header renders `email`
+        // from this state, and `GET /v1/auth/session` is the thing that
+        // knows what was actually stored -- taking the profile screen's
+        // word for it would be two sources for one value. A failure here is
+        // deliberately silent: the change already succeeded, and the only
+        // consequence is a header showing the old address until the next
+        // load, which is not worth an error banner over a saved change.
+        onEmailChanged={() => {
+          client
+            .session()
+            .then((s) =>
+              // The PROJECTS are kept, not re-fetched: they did not change,
+              // and replacing them from a second request would race
+              // `ProjectContext`'s own additive edits (#89).
+              setPhase({ kind: 'authenticated', session: { ...session, email: s.email } }),
+            )
+            .catch(() => {})
+        }}
       />
     </ProjectProvider>
   )

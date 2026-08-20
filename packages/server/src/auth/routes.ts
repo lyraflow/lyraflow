@@ -1,6 +1,6 @@
-import { verifyPassword } from '@lyraflow/core'
+import { hashPassword, verifyPassword } from '@lyraflow/core'
 import type { Pool } from '@lyraflow/db'
-import type { FastifyInstance } from 'fastify'
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { z } from 'zod'
 import { type Readiness, refuseIfDraining } from '../health.js'
 import { SESSION_COOKIE, clearSessionCookie, requireUiHeader, setSessionCookie } from './cookie.js'
@@ -17,6 +17,32 @@ export interface AuthDeps {
 const LoginBody = z.object({
   email: z.string().min(1).max(320),
   password: z.string().min(1).max(1024),
+})
+
+/**
+ * The shortest new password this accepts.
+ *
+ * Length and nothing else. Composition rules -- a digit, a symbol, mixed
+ * case -- reliably produce WORSE passwords, because people satisfy them with
+ * predictable substitutions on a short word rather than by choosing a longer
+ * one. Twelve is the floor NIST settled on for user-chosen secrets, and this
+ * is a single-admin instance behind a login that is already rate-limited.
+ *
+ * Applied only to a password being SET. Login keeps `min(1)`: an existing
+ * password shorter than this must still be usable, or raising the floor
+ * would lock out the operator it was meant to protect -- and the length of a
+ * rejected login attempt is not a thing to disclose.
+ */
+export const MIN_PASSWORD_LENGTH = 12
+
+const EmailBody = z.object({
+  email: z.string().min(3).max(320).includes('@'),
+  current_password: z.string().min(1).max(1024),
+})
+
+const PasswordBody = z.object({
+  current_password: z.string().min(1).max(1024),
+  new_password: z.string().min(MIN_PASSWORD_LENGTH).max(1024),
 })
 
 export function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): void {
@@ -116,6 +142,170 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): void {
     ])
     reply.header('cache-control', 'no-store')
     return reply.code(200).send({ email: res.rows[0]?.email ?? null })
+  })
+
+  /**
+   * The session's own admin id, or null after answering 401 itself.
+   *
+   * Shared by both routes below because they have identical gates and the
+   * gates are the security-relevant part: a copy that drifted on the drain
+   * check or the UI header would be the kind of difference nobody notices
+   * until it matters.
+   *
+   * NON-RENEWING, like every route but `GET /v1/auth/session`: neither of
+   * these re-sends the cookie, and `verify`'s renewing form is documented as
+   * being only for the one caller that can.
+   */
+  async function requireAdmin(
+    req: FastifyRequest,
+    reply: FastifyReply,
+  ): Promise<{ adminUserId: number; token: string } | null> {
+    if (!requireUiHeader(req, reply)) return null
+    if (refuseIfDraining(readiness, reply)) return null
+    const token = req.cookies?.[SESSION_COOKIE]
+    if (!token) {
+      reply.code(401).send({ error: 'no_session' })
+      return null
+    }
+    const rec = await sessions.verify(token)
+    if (!rec) {
+      reply.code(401).send({ error: 'no_session' })
+      return null
+    }
+    return { adminUserId: rec.adminUserId, token }
+  }
+
+  /**
+   * Confirms the caller knows the CURRENT password, under the same limiter
+   * the login form uses.
+   *
+   * Both routes below take a current password, and without a limiter they
+   * are a password oracle sitting behind a session -- a strictly easier
+   * target than the login form, because it needs no email and answers with
+   * a clean 401/200 split. Keyed by IP and by admin id so neither a single
+   * host nor a single account can be ground down.
+   *
+   * A missing row cannot happen here -- a verified session guarantees one --
+   * and the comparison inside `verifyPassword` is constant-time either way,
+   * so a wrong password is not distinguishable from a right one by timing.
+   *
+   * Returns a plain boolean: it has already answered the caller's request
+   * when it returns false, so a caller's only job is to stop.
+   */
+  async function confirmPassword(
+    req: FastifyRequest,
+    reply: FastifyReply,
+    adminUserId: number,
+    password: string,
+  ): Promise<boolean> {
+    const keys = [`ip:${req.ip}`, `admin:${adminUserId}`]
+    if (!limiter.check(keys)) {
+      reply.code(429).header('retry-after', '900').send({ error: 'too_many_attempts' })
+      return false
+    }
+    const res = await pg.query<{ password_hash: string }>(
+      'SELECT password_hash FROM admin_user WHERE id = $1',
+      [adminUserId],
+    )
+    const hash = res.rows[0]?.password_hash
+    if (hash === undefined || !(await verifyPassword(password, hash))) {
+      limiter.record(keys)
+      reply.code(401).send({ error: 'invalid_credentials' })
+      return false
+    }
+    return true
+  }
+
+  /**
+   * Change the admin's email address.
+   *
+   * Requires the current password: a session cookie is enough to READ this
+   * account's data, and not enough to change the address that recovers it --
+   * an unattended browser would otherwise be a full account takeover.
+   *
+   * Sessions are deliberately NOT revoked. An email change is an identity
+   * change, not a credential one; the password that authenticates every
+   * session is untouched, so ending them would be theatre.
+   */
+  app.patch('/v1/auth/email', async (req, reply) => {
+    const admin = await requireAdmin(req, reply)
+    if (!admin) return
+
+    const body = EmailBody.safeParse(req.body)
+    if (!body.success) return reply.code(400).send({ error: 'invalid_body' })
+    const email = body.data.email.trim()
+    if (email.length === 0) return reply.code(400).send({ error: 'invalid_body' })
+
+    if (!(await confirmPassword(req, reply, admin.adminUserId, body.data.current_password))) return
+
+    // Checked case-insensitively BEFORE the write, because
+    // `admin_user_email_lower_key` is a lower(email) unique index: an
+    // unchecked collision surfaces as a 23505 and a 500, which tells the
+    // operator nothing about what to do. Excludes this admin's own row so
+    // re-saving your own address in a different case is not a conflict.
+    const clash = await pg.query(
+      'SELECT 1 FROM admin_user WHERE lower(email) = lower($1) AND id <> $2',
+      [email, admin.adminUserId],
+    )
+    if (clash.rows.length > 0) return reply.code(409).send({ error: 'email_taken' })
+
+    await pg.query('UPDATE admin_user SET email = $1 WHERE id = $2', [email, admin.adminUserId])
+    reply.header('cache-control', 'no-store')
+    return reply.code(200).send({ email })
+  })
+
+  /**
+   * Change the admin's password, and end every other session.
+   *
+   * The revocation is the point, not a courtesy. A password is changed most
+   * urgently when the old one may be known to someone else, and a change
+   * that left their session alive would have revoked nobody -- the stolen
+   * cookie keeps working until it expires on its own.
+   *
+   * The browser making the change gets a FRESH session rather than keeping
+   * its own: `revokeAllFor` takes the lot, so the cookie that authenticated
+   * this request is dead by the time the response is written, and issuing a
+   * new one is what keeps the operator from being logged out by their own
+   * deliberate action.
+   */
+  app.patch('/v1/auth/password', async (req, reply) => {
+    const admin = await requireAdmin(req, reply)
+    if (!admin) return
+
+    const body = PasswordBody.safeParse(req.body)
+    // The minimum length is stated rather than left as a bare 400: a form
+    // that refuses without saying what would be accepted is a guessing game.
+    if (!body.success) {
+      return reply.code(400).send({
+        error: 'invalid_body',
+        detail: `A new password must be at least ${MIN_PASSWORD_LENGTH} characters.`,
+      })
+    }
+    const { current_password, new_password } = body.data
+
+    if (!(await confirmPassword(req, reply, admin.adminUserId, current_password))) return
+
+    // Refused rather than accepted as a no-op: "change my password" that
+    // ends with the same password is not what the operator meant, and
+    // silently succeeding would tell them the old one was retired when it
+    // was not.
+    if (new_password === current_password) {
+      return reply.code(400).send({ error: 'password_unchanged' })
+    }
+
+    await pg.query('UPDATE admin_user SET password_hash = $1 WHERE id = $2', [
+      await hashPassword(new_password),
+      admin.adminUserId,
+    ])
+
+    // Everything, including this request's own cookie -- then a new session
+    // for this browser. Ordered this way so there is no instant in which the
+    // old token is valid against the new password.
+    await sessions.revokeAllFor(admin.adminUserId)
+    const fresh = await sessions.issue(admin.adminUserId)
+    setSessionCookie(reply, req, fresh.token, fresh.expiresAt)
+    reply.header('cache-control', 'no-store')
+    return reply.code(200).send({ ok: true })
   })
 
   app.post('/v1/auth/logout', async (req, reply) => {

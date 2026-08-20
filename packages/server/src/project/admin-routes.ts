@@ -17,6 +17,18 @@ export interface AdminProjectDeps {
 const CreateBody = z.object({ name: z.string().min(1).max(200) })
 
 /**
+ * Both fields are optional INDEPENDENTLY: absent means "leave alone", which
+ * is how a rename happens without touching the archive state and vice versa
+ * -- the same contract `PATCH /v1/project` uses for retention and quota.
+ * A body with neither is a no-op rather than an error; it changes nothing
+ * and the response still tells the caller what the row is.
+ */
+const UpdateBody = z.object({
+  name: z.string().min(1).max(200).optional(),
+  archived: z.boolean().optional(),
+})
+
+/**
  * The instance-scoped admin surface: which projects exist, and creating a
  * new one. Both are the project switcher's and the create-project flow's
  * backing routes for the coming web UI.
@@ -65,8 +77,9 @@ export function registerAdminProjectRoutes(app: FastifyInstance, deps: AdminProj
       created_at: Date
       retention_months: number
       monthly_event_quota: string | null
+      disabled_at: Date | null
     }>(
-      `SELECT id, name, slug, created_at, retention_months, monthly_event_quota
+      `SELECT id, name, slug, created_at, retention_months, monthly_event_quota, disabled_at
        FROM projects ORDER BY created_at ASC, id ASC`,
     )
     reply.header('cache-control', 'no-store')
@@ -80,7 +93,92 @@ export function registerAdminProjectRoutes(app: FastifyInstance, deps: AdminProj
         // null means unlimited and must survive as null -- Number(null) is
         // 0, which isOverQuota refuses to evaluate at all.
         monthly_event_quota: r.monthly_event_quota === null ? null : Number(r.monthly_event_quota),
+        disabled_at: r.disabled_at === null ? null : r.disabled_at.toISOString(),
       })),
+    })
+  })
+
+  /**
+   * Rename a project, archive it, or restore it.
+   *
+   * **A rename never touches the slug.** The slug is what a project is
+   * addressed by outside this API -- `lyraflow seed-demo demo-data`, and
+   * anything an operator has scripted around it -- so deriving a new slug
+   * from a new name would break stored commands silently, at the moment
+   * somebody fixed a typo in a display name. Nothing else about a name is
+   * unique, so a rename cannot collide and this route has no 409.
+   *
+   * **Archiving is not deleting.** It stops ingest and nothing else: every
+   * read keeps working, retention keeps sweeping (archived data still ages,
+   * and skipping it would turn an archive into unbounded storage growth),
+   * and restoring is one more call. Deleting a project would have to clean
+   * ClickHouse as well as Postgres -- three partition drops and two
+   * asynchronous mutations, in an order that cannot orphan data -- which is
+   * what #39 and #60 park on and is not this route.
+   */
+  app.patch<{ Params: { id: string } }>('/v1/projects/:id', async (req, reply) => {
+    if (!(await requireSession(req, reply))) return
+
+    const id = Number(req.params.id)
+    // `Number('12abc')` is NaN and `Number('')` is 0, so both the shape and
+    // the range are checked -- a bare parse would send `NaN` to Postgres as
+    // a bind parameter and fail as a 500 rather than a 400.
+    if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_id' })
+
+    const body = UpdateBody.safeParse(req.body)
+    if (!body.success) return reply.code(400).send({ error: 'invalid_body' })
+
+    const name = body.data.name?.trim()
+    if (name !== undefined && name.length === 0) {
+      return reply.code(400).send({ error: 'invalid_name' })
+    }
+
+    // One statement, so a name and an archive state given together cannot
+    // half-apply. COALESCE leaves `name` alone when none was sent; the
+    // archive expression distinguishes all three cases -- true stamps now,
+    // false clears, absent keeps whatever is there.
+    const res = await pg.query<{
+      id: string
+      name: string
+      slug: string
+      created_at: Date
+      retention_months: number
+      monthly_event_quota: string | null
+      disabled_at: Date | null
+    }>(
+      `UPDATE projects
+          SET name = COALESCE($2, name),
+              disabled_at = CASE
+                WHEN $3::boolean IS NULL THEN disabled_at
+                WHEN $3::boolean THEN COALESCE(disabled_at, now())
+                ELSE NULL
+              END
+        WHERE id = $1
+    RETURNING id, name, slug, created_at, retention_months, monthly_event_quota, disabled_at`,
+      [id, name ?? null, body.data.archived ?? null],
+    )
+
+    const row = res.rows[0]
+    if (!row) return reply.code(404).send({ error: 'project_not_found' })
+
+    // MUST come after the write and MUST happen even for a rename. The
+    // write-key authenticator reads `disabledAt` off this cache, so an
+    // archive that skipped this keeps admitting events until the TTL lapses
+    // -- and the cache is keyed by id and by both keys, so there is no
+    // cheaper eviction than the whole thing. `PATCH /v1/project` invalidates
+    // for exactly the same reason.
+    projects.invalidate()
+
+    reply.header('cache-control', 'no-store')
+    return reply.code(200).send({
+      id: Number(row.id),
+      name: row.name,
+      slug: row.slug,
+      created_at: row.created_at.toISOString(),
+      retention_months: row.retention_months,
+      monthly_event_quota:
+        row.monthly_event_quota === null ? null : Number(row.monthly_event_quota),
+      disabled_at: row.disabled_at === null ? null : row.disabled_at.toISOString(),
     })
   })
 
@@ -131,6 +229,12 @@ export function registerAdminProjectRoutes(app: FastifyInstance, deps: AdminProj
       retention_months: created.retentionMonths,
       monthly_event_quota:
         created.monthlyEventQuota === null ? null : Number(created.monthlyEventQuota),
+      // Always null for a project that was created a millisecond ago, and
+      // present anyway so this response is the same shape GET /v1/projects
+      // returns -- the UI appends this row to that list (#89) and a missing
+      // field would make the new row the only one whose archive state is
+      // `undefined` rather than "active".
+      disabled_at: null,
       write_key: created.writeKey,
       server_key: created.serverKey,
     })

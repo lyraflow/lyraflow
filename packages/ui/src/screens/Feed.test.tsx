@@ -197,6 +197,7 @@ function renderFeed(
       created_at: '',
       retention_months: 24,
       monthly_event_quota: null,
+      disabled_at: null,
     },
     {
       id: 2,
@@ -205,6 +206,7 @@ function renderFeed(
       created_at: '',
       retention_months: 24,
       monthly_event_quota: null,
+      disabled_at: null,
     },
   ]
   const view = render(

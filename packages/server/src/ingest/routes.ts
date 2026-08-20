@@ -84,6 +84,23 @@ export function makeAuthenticator(
   lookup: (key: string) => Promise<Project | null>,
   missingCode: string,
   invalidCode: string,
+  /**
+   * Answered instead of admitting an ARCHIVED project. Passed only by the
+   * write-key authenticator: archiving stops ingest, and deliberately does
+   * not stop reads -- the data is intact and archiving is reversible, so a
+   * server-key read of an archived project is a legitimate thing to do and
+   * is how an operator checks what they stopped.
+   *
+   * **The status stays 401, and that is forced rather than chosen.** The
+   * browser SDK treats 401 alone as terminal (`transport.ts` stops the
+   * queue and warns); every other status falls through to its backoff and
+   * is retried indefinitely. Self-hosters have older SDK bundles already
+   * deployed on their pages, so answering 403 here would have every
+   * existing snippet hammer the server forever for a project that will
+   * never accept an event again. The distinct CODE in the body is what
+   * lets anything reading the response tell this from a bad key.
+   */
+  archivedCode?: string,
 ) {
   return async (req: FastifyRequest, reply: FastifyReply) => {
     if (readiness.draining) {
@@ -98,6 +115,10 @@ export function makeAuthenticator(
     const project = await lookup(key)
     if (!project) {
       reply.code(401).send({ error: invalidCode })
+      return null
+    }
+    if (archivedCode !== undefined && project.disabledAt !== null) {
+      reply.code(401).send({ error: archivedCode })
       return null
     }
     return project
@@ -273,6 +294,7 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): In
     (key) => projects.byWriteKey(key),
     'missing_write_key',
     'invalid_write_key',
+    'project_archived',
   )
   // Gates /v1/alias on the secret server key rather than the public write
   // key — see SERVER_KEY_HEADER's docstring above for why.

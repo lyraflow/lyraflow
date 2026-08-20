@@ -1,0 +1,32 @@
+-- 018_project_archive: a project can be stopped without being destroyed.
+--
+-- There was no way to remove a project from the UI, and delete is not the
+-- feature to reach for first. Postgres would cascade cleanly -- every
+-- project-scoped table carries ON DELETE CASCADE -- but ClickHouse would not:
+-- `events`, `device_index` and `person_traits` are partitioned by project_id
+-- and could be dropped, while `event_schema` has no partitioning at all and
+-- `events_dead_letter` is partitioned by received_at, so both would need
+-- asynchronous ALTER ... DELETE mutations. That ordering and its failure
+-- handling is what issues #39 and #60 already park on, and a half-finished
+-- delete leaves partitions nothing will ever sweep again.
+--
+-- Archiving destroys nothing, is reversible, and answers the question an
+-- operator actually has ("stop this project") without asking them to be sure
+-- in a way delete demands. Delete stays open behind it.
+--
+-- A TIMESTAMP rather than a boolean: "when was this stopped" is the next
+-- question asked, and a boolean cannot answer it. NULL means active, which
+-- is what every existing row gets and what `create-project` keeps producing
+-- with no change.
+--
+-- What the column means elsewhere, recorded here because the column alone
+-- cannot say it:
+--
+--   * ingest refuses an archived project with 401 (see ingest/routes.ts for
+--     why 401 and not 403 -- the browser SDK treats 401 alone as terminal);
+--   * every read keeps working, because the data is intact and this is
+--     reversible;
+--   * retention keeps sweeping it, because archived data still ages and
+--     skipping it would turn an archive into unbounded storage growth.
+
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS disabled_at timestamptz;

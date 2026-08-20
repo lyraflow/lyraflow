@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { ApiError } from '../../api/client.js'
 import type { ApiClient } from '../../api/client.js'
-import type { CreatedProject } from '../../api/types.js'
+import type { CreatedProject, Project } from '../../api/types.js'
 import { useProject } from '../../app/ProjectContext.js'
 import { Button } from '../../components/ui/button.js'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card.js'
@@ -9,6 +9,181 @@ import { Input } from '../../components/ui/input.js'
 import { Label } from '../../components/ui/label.js'
 
 type Mode = 'idle' | 'form' | 'created'
+
+/**
+ * One project, with the two things that can be done to it.
+ *
+ * Its own component because each row carries independent state -- one row
+ * being renamed while another is being archived is the ordinary case on an
+ * install with several sites, and a single set of "editing"/"busy" flags in
+ * the parent would make those two rows fight over them.
+ *
+ * The write goes through `client.updateProject` and the ANSWER is merged
+ * into context, never the optimistic value: `PATCH` returns the stored row,
+ * so merging the response is what keeps the header switcher and this list
+ * agreeing with what was actually saved. Same reasoning the create flow
+ * gives for handing its response to `addProject` rather than re-fetching.
+ */
+function ProjectRow(props: {
+  project: Project
+  client: ApiClient
+  onUpdated: (next: Project) => void
+}) {
+  const { project, client, onUpdated } = props
+  const [renaming, setRenaming] = useState(false)
+  const [draft, setDraft] = useState(project.name)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  // Archiving stops ingest, which is outward-facing and invisible from this
+  // screen -- every page already carrying the snippet starts being refused.
+  // So it is a two-step, the same shape `SegmentDetail`/`FunnelDetail` use
+  // for delete. Restoring is one click: it can only ever admit more.
+  const [confirmArchive, setConfirmArchive] = useState(false)
+  const archived = project.disabled_at !== null
+
+  async function save(patch: { name?: string; archived?: boolean }) {
+    setBusy(true)
+    setError(null)
+    try {
+      onUpdated(await client.updateProject(project.id, patch))
+      setRenaming(false)
+      setConfirmArchive(false)
+    } catch (err) {
+      setError(
+        err instanceof ApiError && err.status === 404
+          ? 'That project no longer exists.'
+          : 'Could not save that. Try again.',
+      )
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <li className="flex min-w-0 flex-col gap-1 py-2">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        {renaming ? (
+          <>
+            <Label htmlFor={`rename-${project.id}`} className="sr-only">
+              {`New name for ${project.name}`}
+            </Label>
+            <Input
+              id={`rename-${project.id}`}
+              value={draft}
+              disabled={busy}
+              className="h-8 max-w-64"
+              onChange={(e) => setDraft(e.target.value)}
+            />
+            <Button
+              type="button"
+              size="sm"
+              disabled={busy || draft.trim() === ''}
+              onClick={() => save({ name: draft.trim() })}
+            >
+              Save
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={busy}
+              onClick={() => {
+                setDraft(project.name)
+                setRenaming(false)
+                setError(null)
+              }}
+            >
+              Cancel
+            </Button>
+          </>
+        ) : (
+          <>
+            <span className="min-w-0 truncate text-foreground text-sm">{project.name}</span>
+            {/* The slug, because a rename does not change it -- and this is
+             * the only screen that says so. An operator whose scripts call
+             * `lyraflow seed-demo demo-data` needs to see that the name
+             * they just edited is not the handle those use. */}
+            <span className="truncate font-mono text-muted-foreground text-xs">{project.slug}</span>
+            {archived && (
+              <span className="rounded-sm bg-muted px-1.5 py-0.5 text-muted-foreground text-xs">
+                archived
+              </span>
+            )}
+            <span className="flex-1" />
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setDraft(project.name)
+                setRenaming(true)
+              }}
+            >
+              Rename
+            </Button>
+            {archived ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={busy}
+                onClick={() => save({ archived: false })}
+              >
+                Restore
+              </Button>
+            ) : confirmArchive ? (
+              <>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="destructive"
+                  disabled={busy}
+                  onClick={() => save({ archived: true })}
+                >
+                  {`Archive ${project.name}`}
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => setConfirmArchive(false)}
+                >
+                  Cancel
+                </Button>
+              </>
+            ) : (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => setConfirmArchive(true)}
+              >
+                Archive
+              </Button>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* Said at the moment of asking, not after: archiving is reversible,
+       * but it stops collection, and events refused while a project is
+       * archived are not queued anywhere to arrive later. */}
+      {confirmArchive && !archived && (
+        <p className="text-muted-foreground text-xs">
+          This stops Lyraflow accepting events for this project. Nothing is deleted, every report
+          keeps working, and you can restore it here. Events sent while it is archived are refused,
+          not queued.
+        </p>
+      )}
+      {error != null && (
+        <p role="alert" className="text-destructive text-xs">
+          {error}
+        </p>
+      )}
+    </li>
+  )
+}
 
 /**
  * The full project list plus "create a new one" -- the only place in the
@@ -34,7 +209,7 @@ type Mode = 'idle' | 'form' | 'created'
  */
 export function ProjectsSection(props: { client: ApiClient }) {
   const { client } = props
-  const { projects, addProject } = useProject()
+  const { projects, addProject, updateProject } = useProject()
 
   const [mode, setMode] = useState<Mode>('idle')
   const [name, setName] = useState('')
@@ -98,11 +273,14 @@ export function ProjectsSection(props: { client: ApiClient }) {
         <CardTitle>Projects</CardTitle>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
-        <ul className="flex flex-col gap-1">
+        <ul className="flex flex-col divide-y divide-border border-border border-y">
           {projects.map((p) => (
-            <li key={p.id} className="text-sm text-foreground">
-              {p.name}
-            </li>
+            <ProjectRow
+              key={p.id}
+              project={p}
+              client={client}
+              onUpdated={(next) => updateProject(next.id, next)}
+            />
           ))}
         </ul>
 

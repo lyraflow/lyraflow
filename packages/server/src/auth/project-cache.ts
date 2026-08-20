@@ -15,6 +15,18 @@ export interface Project {
    */
   monthlyEventQuota: number | null
   /**
+   * When this project was archived, or `null` while it is active.
+   *
+   * Cached alongside the keys because the WRITE-KEY authenticator is the one
+   * place that has to refuse an archived project, and it already has this
+   * row in hand -- reading Postgres again per event to answer a question that
+   * changes once in a project's lifetime would put a query on the hot path
+   * for nothing. Which also means archiving MUST invalidate this cache, or
+   * an archived project keeps accepting events until the TTL lapses; see
+   * `PATCH /v1/projects/:id`.
+   */
+  disabledAt: Date | null
+  /**
    * SHA-256 of the project's server key, at rest in Postgres. Nothing that
    * serialises a `Project` to a response ever exists in this codebase, so it
    * never crosses the wire — it is a per-project, server-side, stable value
@@ -183,8 +195,9 @@ export class ProjectCache {
         retention_months: number
         monthly_event_quota: string | null
         server_key_hash: string
+        disabled_at: Date | null
       }>(
-        `SELECT id, slug, retention_months, monthly_event_quota, server_key_hash
+        `SELECT id, slug, retention_months, monthly_event_quota, server_key_hash, disabled_at
          FROM projects WHERE ${where}`,
         [param],
       )
@@ -194,6 +207,7 @@ export class ProjectCache {
             id: Number(row.id),
             slug: row.slug,
             retentionMonths: row.retention_months,
+            disabledAt: row.disabled_at,
             // The explicit null test is load-bearing in BOTH directions.
             // `Number(null)` is `0`, not `null`, so a bare Number() call
             // turns every unlimited project — which, after 011, is every

@@ -65,6 +65,23 @@ export interface Project {
   retention_months: number
   /** null means unlimited, and is what every project carries by default. */
   monthly_event_quota: number | null
+  /**
+   * When this project was archived, or `null` while it is active.
+   *
+   * Archived means ingest is refused and nothing else: every read still
+   * works, retention still sweeps it, and restoring is one call. It is
+   * deliberately not deletion -- see migration 018 for why deletion is a
+   * separate, larger thing.
+   */
+  disabled_at: string | null
+}
+
+/** `PATCH /v1/projects/:id`. Both fields are optional independently: absent
+ * means "leave alone", so a rename does not touch the archive state and an
+ * archive does not touch the name. */
+export interface ProjectUpdate {
+  name?: string
+  archived?: boolean
 }
 
 /**

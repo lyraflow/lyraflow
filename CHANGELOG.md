@@ -63,6 +63,36 @@ one fix is contained in 0.3.0.
   at acquisition, and asking for them at `latest` scope returns the
   first-touch value.
 
+- **Projects can be renamed and archived from Settings.** Archiving stops
+  Lyraflow accepting events for a project and changes nothing else: the data is
+  intact, every report keeps working, retention keeps applying, and restoring is
+  one click. Ingest for an archived project answers `401` with
+  `{"error":"project_archived"}` — `401` specifically, because the browser SDK
+  treats it as final and retries anything else forever.
+
+  **A rename never changes the slug**, which is what `lyraflow` commands address
+  a project by.
+
+  There is still no delete: clearing a project's data means dropping ClickHouse
+  partitions for some tables and running asynchronous mutations for others, in
+  an order that cannot orphan data. Archiving is the reversible answer until that
+  exists.
+
+- **A Profile screen**, from the account menu, for changing the admin's email
+  address and password. Both require the current password, and both are
+  rate-limited exactly as the login form is. **Changing the password signs out
+  every other browser** and keeps the one that made the change. There is no
+  confirmation email — Lyraflow sends no mail — so a new address takes effect
+  immediately.
+
+### Changed
+
+- **The theme control is two states, not three.** It shows one icon and flips
+  between light and dark, instead of cycling through a "system" state you had to
+  pass through. Following the operating system is still the default and still
+  what a first visit gets: nothing is stored until the control is clicked, and
+  an OS change with no stored choice is still followed live.
+
 ### Fixed
 
 - **A segment condition on a numeric property matched nobody when it was

@@ -721,6 +721,7 @@ describe('ingest routes (mocked deps)', () => {
     retentionMonths: 24,
     monthlyEventQuota: 1_000_000,
     serverKeyHash: 'mocked-server-key-hash',
+    disabledAt: null,
   }
 
   // Minimal fakes satisfying only the methods routes.ts actually calls; cast
@@ -1743,6 +1744,7 @@ describe('quotaSnapshot', () => {
       retentionMonths: 24,
       monthlyEventQuota: opts.quota,
       serverKeyHash: 'h',
+      disabledAt: null,
     }
     const pool = {
       query: async (text: string) => {

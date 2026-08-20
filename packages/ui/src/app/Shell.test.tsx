@@ -7,6 +7,7 @@ import { render, screen } from '@testing-library/react'
 import { userEvent } from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
+import type { Project } from '../api/types.js'
 import { ProjectProvider, useProject } from './ProjectContext.js'
 import { Shell } from './Shell.js'
 
@@ -18,6 +19,7 @@ const PROJECTS = [
     created_at: '',
     retention_months: 24,
     monthly_event_quota: null,
+    disabled_at: null,
   },
   {
     id: 2,
@@ -26,6 +28,7 @@ const PROJECTS = [
     created_at: '',
     retention_months: 24,
     monthly_event_quota: null,
+    disabled_at: null,
   },
 ]
 
@@ -191,5 +194,68 @@ describe('Shell', () => {
     expect(screen.getByRole('link', { name: /feed/i })).toHaveAttribute('aria-current', 'page')
     expect(screen.getByRole('link', { name: /funnels/i })).not.toHaveAttribute('aria-current')
     expect(screen.getByRole('link', { name: /settings/i })).not.toHaveAttribute('aria-current')
+  })
+})
+
+describe('Shell — archived projects in the switcher', () => {
+  /** Its own render: `renderShell` pins one fixture list, and these two need
+   * their own. */
+  const withProjects = (projects: Project[], initialId: number) =>
+    render(
+      <MemoryRouter initialEntries={['/feed']}>
+        <ProjectProvider projects={projects} initialId={initialId}>
+          <Shell email="admin@localhost" onLogout={vi.fn()}>
+            <p>content</p>
+          </Shell>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+
+  const project = (over: Partial<Project> = {}): Project => ({
+    id: 1,
+    name: 'Demo Data',
+    slug: 'demo-data',
+    created_at: '2026-08-01T00:00:00.000Z',
+    retention_months: 13,
+    monthly_event_quota: null,
+    disabled_at: null,
+    ...over,
+  })
+
+  // Listed and labelled rather than filtered out. Hiding them breaks the
+  // case that actually happens -- archiving the project you are looking at
+  // -- because the switcher would then have no entry for `activeId`, the
+  // trigger would read "Select project" while every screen below kept
+  // answering for it, and there would be no way back except Settings.
+  it('says which projects are archived instead of hiding them', () => {
+    withProjects(
+      [project(), project({ id: 2, name: 'Old Site', disabled_at: '2026-08-19T00:00:00.000Z' })],
+      2,
+    )
+    expect(screen.getByRole('button', { name: /Old Site \(archived\)/ })).toBeInTheDocument()
+  })
+
+  it('leaves an active project unlabelled', () => {
+    withProjects([project()], 1)
+    expect(screen.getByRole('button', { name: /Demo Data/ })).toBeInTheDocument()
+    expect(screen.queryByText(/Demo Data \(archived\)/)).not.toBeInTheDocument()
+  })
+})
+
+describe('Shell — the account menu', () => {
+  // A real anchor, not a button that navigates: an account-menu entry that
+  // cannot be middle-clicked or opened in a new tab is a link pretending to
+  // be something else, and every other destination in this shell is one.
+  it('offers Profile as a link to /profile', async () => {
+    renderShell()
+    await userEvent.click(screen.getByRole('button', { name: /admin@localhost/ }))
+    const profile = await screen.findByRole('menuitem', { name: 'Profile' })
+    expect(profile).toHaveAttribute('href', '/profile')
+  })
+
+  it('still offers sign out beside it', async () => {
+    renderShell()
+    await userEvent.click(screen.getByRole('button', { name: /admin@localhost/ }))
+    expect(await screen.findByRole('menuitem', { name: 'Sign out' })).toBeInTheDocument()
   })
 })

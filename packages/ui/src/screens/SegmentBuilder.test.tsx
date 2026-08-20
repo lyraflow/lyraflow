@@ -24,6 +24,7 @@ const PROJECTS = [
     created_at: '',
     retention_months: 24,
     monthly_event_quota: null,
+    disabled_at: null,
   },
 ]
 
@@ -1600,6 +1601,7 @@ const PROJECTS_TWO = [
     created_at: '',
     retention_months: 24,
     monthly_event_quota: null,
+    disabled_at: null,
   },
 ]
 

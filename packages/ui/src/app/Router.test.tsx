@@ -13,6 +13,7 @@ const PROJECTS = [
     created_at: '',
     retention_months: 24,
     monthly_event_quota: null,
+    disabled_at: null,
   },
 ]
 
@@ -30,6 +31,7 @@ function renderAt(path: string) {
       events_throttled: 0,
       events_bot: 0,
       monthly_event_quota: null,
+      disabled_at: null,
     })),
     projects: vi.fn(async () => PROJECTS),
     funnels: vi.fn(async () => []),
@@ -153,6 +155,7 @@ describe('AppRouter', () => {
         events_throttled: 0,
         events_bot: 0,
         monthly_event_quota: null,
+        disabled_at: null,
       })),
       projects: vi.fn(async () => PROJECTS),
     } as never
