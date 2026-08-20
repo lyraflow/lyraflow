@@ -58,7 +58,19 @@ Four steps. About five minutes, most of it waiting for Docker.
 
 ### 1. Install
 
-You need Docker and Docker Compose. Nothing else.
+You need Docker and **Docker Compose v2.21.0 or newer**. Nothing else.
+
+That version is not arbitrary. `install.sh` asks Compose for a container's
+status with a Go template (`docker compose ps caddy --format '{{.Status}}'`),
+and `--format` only learned to accept a template in v2.21.0 — before that it
+took `table` or `json` and answered anything else with
+`format value "…" could not be parsed`. Everything else these scripts use is
+older: `up --wait` since v2.1.1, `ps --status` since the first v2 release.
+
+If you are on something older, the install still completes — that call is on an
+error path and falls back to saying nothing rather than failing. You would only
+notice by getting a less specific message when a container fails to start.
+Check yours with `docker compose version`.
 
 ```sh
 git clone https://github.com/lyraflow/lyraflow.git
