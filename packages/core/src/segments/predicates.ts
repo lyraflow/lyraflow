@@ -1,5 +1,6 @@
 import type { Behavior, Context, FilterNode, Lifecycle, Trait, WherePredicate } from './ast.js'
 import { CONTEXT_COLUMNS } from './base.js'
+import { lifecycleInstant } from './instants.js'
 import { type ChType, type Params, chDateTime } from './params.js'
 
 interface Ctx {
@@ -73,7 +74,10 @@ function contextExpr(n: Context, ctx: Ctx): string {
  * this point.
  */
 function lifecycleExpr(n: Lifecycle, ctx: Ctx): string {
-  const toCh = (v: unknown) => chDateTime(new Date(String(v)))
+  // `lifecycleInstant`, not `new Date`. A zone-less value is UTC (#124); a
+  // bare `new Date` resolved it in whatever zone the SERVER thinks it is in,
+  // so the same stored segment matched different people on different hosts.
+  const toCh = (v: unknown) => chDateTime(lifecycleInstant(String(v)))
   if (n.operator === 'between') {
     const [lo, hi] = n.value as [string, string]
     return (

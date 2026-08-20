@@ -1,0 +1,31 @@
+-- 016_funnel_summary_range: the cached run summary records what it ran over.
+--
+-- `last_entered`/`last_converted`/`last_evaluated_at` were written after every
+-- run REGARDLESS of the range that run used, and the columns recorded no range
+-- at all. So running a funnel over "last 90 days" left the funnels list showing
+-- a 90-day conversion rate next to a timestamp, with nothing to say it was not
+-- the 7-day default the list implies. Two operators reading the same row were
+-- answering different questions (#91).
+--
+-- The other option considered was recording a summary only for one canonical
+-- range, which is less data and also less useful: a funnel is most often run
+-- over a range somebody chose, and refusing to cache that means the list is
+-- either empty or lying about which numbers it has.
+--
+-- Nullable with no default and no backfill, deliberately. A row summarised
+-- before this migration ran genuinely does not know its range, and inventing
+-- one -- "probably the default" -- would be a fabricated fact indistinguishable
+-- from a recorded one. NULL says "not known", which readers already have to
+-- handle because `last_evaluated_at` is nullable for a funnel never run.
+--
+-- BOTH columns move together, always. A half-known range is not a range, and
+-- the API surfaces them as one nested object so a caller cannot receive one
+-- without the other.
+--
+-- These join the set a PATCH must CLEAR when it changes `steps`,
+-- `window_seconds` or `segment_id` -- see 012's own note on why. A stored range
+-- describes the definition it was computed from just as much as the counts do,
+-- and leaving it behind would put a precise-looking window on numbers that no
+-- longer exist.
+ALTER TABLE funnels ADD COLUMN IF NOT EXISTS last_range_since timestamptz;
+ALTER TABLE funnels ADD COLUMN IF NOT EXISTS last_range_until timestamptz;

@@ -104,25 +104,23 @@ describe('toPickerValue -- stored instant to picker reading', () => {
     expect(toPickerValue('2026-08-01T00:00:00-04:30')).toBe(LOCAL_MIDMORNING)
   })
 
-  it('passes a zone-less reading through UNSHIFTED, since it names no instant to convert', () => {
-    // Load-bearing, not tidiness. `Lifecycle` stores exactly this shape
-    // (verified below), so a blanket UTC-to-local conversion here would move
-    // every stored lifecycle bound by the local offset the first time its
-    // row rendered -- five and a half hours, on this fixture.
-    expect(toPickerValue(LOCAL_MIDMORNING)).toBe(LOCAL_MIDMORNING)
+  it('reads a zone-less reading as UTC and shows it in local time (#124)', () => {
+    // This test used to assert the OPPOSITE, and it was right to at the time:
+    // what a zone-less bound meant had not been decided, so shifting one would
+    // have moved an instant nobody edited. The decision is now UTC by fiat, so
+    // `10:00` with no designator is 10:00 UTC and displays as 15:30 in this
+    // fixture's zone -- the SAME instant the compiler will match on, which is
+    // the whole point of deciding.
+    expect(toPickerValue(LOCAL_MIDMORNING)).toBe('2026-08-01T15:30')
   })
 
-  it('passes a BARE DATE through unshifted too -- the one shape where that guard is observable', () => {
-    // The fixture above cannot actually pin the zone-less branch, which is
-    // worth stating rather than discovering later: `new Date` reads a
-    // zone-less date-TIME as local, so rendering it back as local wall-clock
-    // returns the same string, and deleting the guard leaves that assertion
-    // green. A bare date is the shape where the two disagree -- the language
-    // reads `2026-08-01` as UTC midnight, not local midnight -- so removing
-    // the guard shifts it to `2026-08-01T05:30` here. `Lifecycle`'s refine
-    // accepts a bare date (asserted below), so this is a value a
-    // hand-written API call can really store.
-    expect(toPickerValue('2026-08-01')).toBe('2026-08-01')
+  it('renders a BARE DATE, which it could not before (#126)', () => {
+    // The residual #126 was filed for. `2026-08-01` is not a valid
+    // `datetime-local` value, so the control rendered an EMPTY box for a bound
+    // that matched perfectly well -- and it could not be fixed alone, because
+    // displaying it meant first deciding whether it was UTC midnight or the
+    // operator's. It is UTC midnight, so here it is 05:30 local.
+    expect(toPickerValue('2026-08-01')).toBe('2026-08-01T05:30')
   })
 
   it('leaves an empty value empty', () => {
@@ -137,9 +135,34 @@ describe('the round trip', () => {
     }
   })
 
-  it('is idempotent in both directions, so a conversion applied twice cannot corrupt', () => {
+  it('round-trips: picker -> stored -> picker returns the same reading', () => {
+    // The property that matters, and the one that survives #124. Both halves
+    // must be applied, and applied once each.
+    expect(toPickerValue(toInstant(LOCAL_MIDMORNING))).toBe(LOCAL_MIDMORNING)
+    expect(toInstant(toPickerValue(INSTANT_MIDMORNING))).toBe(INSTANT_MIDMORNING)
+  })
+
+  it('toInstant is still idempotent, so writing twice cannot corrupt', () => {
     expect(toInstant(toInstant(LOCAL_MIDMORNING))).toBe(INSTANT_MIDMORNING)
-    expect(toPickerValue(toPickerValue(INSTANT_MIDMORNING))).toBe(LOCAL_MIDMORNING)
+  })
+
+  it('toPickerValue is NOT idempotent any more, and this pins what that costs', () => {
+    // A REGRESSION IN A SAFETY PROPERTY, recorded rather than hidden, because
+    // it is an unavoidable consequence of #124 rather than an oversight.
+    //
+    // `toPickerValue` emits a zone-less local reading, and since #124 a
+    // zone-less string INPUT means UTC. The output and the input are now the
+    // same syntax with different meanings, so applying it twice shifts twice.
+    // It used to be idempotent precisely because zone-less values were passed
+    // through untouched -- the behaviour #124 removed.
+    //
+    // What protects the screen is that the conversion happens in exactly one
+    // place on each side (`LifecycleForm` reads, `LifecycleForm` writes) and
+    // the round-trip above pins it. This test exists so a future reader finds
+    // the hazard stated instead of discovering it from a bound that moves five
+    // and a half hours every time a row re-renders.
+    expect(toPickerValue(toPickerValue(INSTANT_MIDMORNING))).not.toBe(LOCAL_MIDMORNING)
+    expect(toPickerValue(toPickerValue(INSTANT_MIDMORNING))).toBe('2026-08-01T15:30')
   })
 })
 

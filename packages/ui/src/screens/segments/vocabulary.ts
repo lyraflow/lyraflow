@@ -19,7 +19,7 @@
  */
 import { COMPARISON_OPERATORS } from '@lyraflow/core/segments/ast.js'
 import type { ComparisonOperator, WherePredicate, Window } from '@lyraflow/core/segments/ast.js'
-import { toPickerValue } from './datetime.js'
+import { lifecycleInstant } from '@lyraflow/core/segments/instants.js'
 
 /**
  * The word an operator reads as.
@@ -92,24 +92,17 @@ export const WINDOW_KIND_OPTIONS: { kind: Window['kind']; label: string }[] = [
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
 /**
- * A wall-clock reading, as `datetime.ts` spells one: `YYYY-MM-DD`, optionally
- * followed by `THH:mm`, optionally followed by seconds and a fraction.
- * Anchored at both ends -- anything else is not a reading this can render and
- * is handed back untouched.
- */
-const WALL_CLOCK = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?)?$/
-
-/**
  * A stored datetime bound, as PROSE: `1 Jul 2026, 03:00`.
  *
  * Three decisions, none of them cosmetic:
  *
- * - **It shows the same reading the picker does**, because it goes through
- *   `toPickerValue` -- the module that owns the store-UTC/display-local rule
- *   and its one exception (a stored value carrying no zone is a wall-clock
- *   reading and is passed through unshifted, never shifted by an offset
- *   nobody recorded). So a bound read in a list summary and the same bound
- *   opened in the builder cannot disagree, by construction rather than by two
+ * - **It shows the same instant the picker does, and the same one the SQL
+ *   matches**, because all three resolve the stored string through core's
+ *   `lifecycleInstant`. A zone-less bound is UTC (#124), so there is no longer
+ *   a "wall-clock reading whose zone nobody decided" case to special-case --
+ *   which is what used to make a bare date unrenderable (#126). A bound read
+ *   in a list summary, the same bound opened in the builder, and the rows it
+ *   actually selects cannot disagree, by construction rather than by three
  *   conversions that happen to match.
  * - **Absolute, not relative.** `formatRelative` is right for a "last
  *   evaluated" instant, which is an event that happened and whose interest is
@@ -128,28 +121,31 @@ const WALL_CLOCK = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.\
  * is unusual, and silently dropping the `:07` off one would misreport it,
  * while printing `:00` on every ordinary bound is noise.
  *
- * Anything this cannot read -- an empty bound (an unfinished condition), a
+ * Anything unparseable -- an empty bound (an unfinished condition), a
  * half-typed value, a nonsense month -- comes back exactly as stored. It is
  * the operator's own text, and the row that shows it says separately that the
  * condition is not finished.
  */
 export function formatBound(stored: string): string {
-  const local = toPickerValue(stored)
-  const match = WALL_CLOCK.exec(local)
-  if (match == null) return stored
-  const [, year, month, day, hour, minute, second] = match
-  const monthIndex = Number(month) - 1
-  if (monthIndex < 0 || monthIndex > 11) return stored
-  if (Number(day) < 1 || Number(day) > 31) return stored
-  const date = `${Number(day)} ${MONTHS[monthIndex]} ${year}`
-  // A bare date, which `Lifecycle`'s refine accepts and a hand-written API
-  // call can therefore store. Rendered as the date it names and nothing
-  // more: inventing a time for it would be answering the question
-  // `datetime.ts` deliberately leaves to the compiler (whose midnight?).
-  if (hour == null || minute == null) return date
-  if (Number(hour) > 23 || Number(minute) > 59) return stored
-  const seconds = second != null && second !== '00' ? `:${second}` : ''
-  return `${date}, ${hour}:${minute}${seconds}`
+  // Resolved through core's `lifecycleInstant` -- the SAME function the
+  // compiler uses -- and then rendered from local getters, rather than routed
+  // through the picker's format.
+  //
+  // It used to go through `toPickerValue`, which is `YYYY-MM-DDTHH:mm` and
+  // carries NO seconds: a bound stored as `09:00:07` summarised as `09:00`,
+  // silently dropping precision this function's own doc comment promises to
+  // keep. The picker has to drop them because the control cannot display
+  // them; a sentence has no such constraint.
+  const at = lifecycleInstant(stored)
+  if (Number.isNaN(at.getTime())) return stored
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const date = `${at.getDate()} ${MONTHS[at.getMonth()]} ${at.getFullYear()}`
+  const seconds = at.getSeconds() !== 0 ? `:${pad(at.getSeconds())}` : ''
+  // A bare date now renders WITH its time (#124/#126). It names midnight UTC,
+  // which is a real instant and is rarely local midnight -- printing the date
+  // alone would imply a whole-day meaning it does not have, and would disagree
+  // with the row the operator opens in the builder.
+  return `${date}, ${pad(at.getHours())}:${pad(at.getMinutes())}${seconds}`
 }
 
 /**

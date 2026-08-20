@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { Behavior, FilterNode } from './ast.js'
 import { Params } from './params.js'
 import { treeExpr } from './predicates.js'
@@ -85,5 +85,55 @@ describe('treeExpr', () => {
       value: ['2026-01-01T00:00:00.000Z', '2026-02-01T00:00:00.000Z'],
     })
     expect(sql).toMatch(/first_seen BETWEEN .+ AND .+/)
+  })
+})
+
+describe('a lifecycle bound means the same instant on every server (#124)', () => {
+  const compileOne = (value: string) => {
+    const { params } = build({
+      kind: 'lifecycle',
+      field: 'first_seen',
+      operator: '>=',
+      value,
+    } as FilterNode)
+    return { values: params.values }
+  }
+
+  it('compiles a zone-less bound as UTC, whatever the process zone is', () => {
+    // Compiled TWICE, in two different zones, and required to produce the same
+    // parameter. That is the actual claim -- "resolves as UTC" is one reading
+    // of one run, and the defect was that the answer moved with the host.
+    vi.stubEnv('TZ', 'Asia/Kolkata')
+    const kolkata = compileOne('2026-08-01T10:00')
+    // The stub MUST actually take, or this test compares two identical runs
+    // and passes against the very defect it is written for. `new Date` on a
+    // zone-less form is the thing that used to move; if it does not move here,
+    // the fixture is broken rather than the code being right.
+    const asLocalInKolkata = new Date('2026-08-01T10:00').toISOString()
+
+    vi.stubEnv('TZ', 'America/Sao_Paulo')
+    const saoPaulo = compileOne('2026-08-01T10:00')
+    const asLocalInSaoPaulo = new Date('2026-08-01T10:00').toISOString()
+    vi.unstubAllEnvs()
+
+    expect(asLocalInKolkata, 'TZ stubbing had no effect — this test would be vacuous').not.toBe(
+      asLocalInSaoPaulo,
+    )
+    expect(kolkata.values).toEqual(saoPaulo.values)
+    expect(Object.values(kolkata.values)).toContain('2026-08-01 10:00:00.000')
+  })
+
+  it('compiles a bare date as UTC midnight', () => {
+    vi.stubEnv('TZ', 'Asia/Kolkata')
+    const { values } = compileOne('2026-08-01')
+    vi.unstubAllEnvs()
+    expect(Object.values(values)).toContain('2026-08-01 00:00:00.000')
+  })
+
+  it('still honours an explicit offset rather than overriding it', () => {
+    vi.stubEnv('TZ', 'UTC')
+    const { values } = compileOne('2026-08-01T10:00:00+05:30')
+    vi.unstubAllEnvs()
+    expect(Object.values(values)).toContain('2026-08-01 04:30:00.000')
   })
 })

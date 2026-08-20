@@ -12,13 +12,18 @@ export {
   type EventRow,
   type GeoInfo,
   type RowInput,
+  PAGE_EVENT_NAME,
+  PAGE_NAME_PROPERTY,
   chDateTime,
+  eventNameFor,
   parseChDateTime,
+  propertyBagFor,
   toEventRow,
 } from './ingest/row.js'
 export * from './identity/ranges.js'
 export * from './identity/resolve.js'
 export * from './segments/ast.js'
+export * from './segments/instants.js'
 export * from './segments/validate.js'
 export * from './segments/params.js'
 export * from './segments/base.js'

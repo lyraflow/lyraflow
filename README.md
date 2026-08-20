@@ -496,7 +496,7 @@ header.
 | Endpoint | Purpose |
 | --- | --- |
 | `POST /v1/track` | A named thing a person did. Requires `event`. |
-| `POST /v1/page` | A page or screen view. Optional `name`; defaults to `$page`. |
+| `POST /v1/page` | A page or screen view. Always stored as `$page`; an optional `name` becomes the `$page_name` property. |
 | `POST /v1/identify` | Attach traits to a known user. Requires `user_id`; stored as `$identify`. |
 | `POST /v1/batch` | `{"batch": [ … ]}` — 1 to 500 items, each with an explicit `"type"` of `track`, `page`, or `identify`. |
 
@@ -569,6 +569,31 @@ exactly as `create-project` prints it once, and never served again by
 anything.
 
 Sent directly from browser JavaScript (as opposed to a server-side SDK),
+### Page views, and the `$` prefix
+
+**Every page view is stored under the event name `$page`**, named or not. A name
+becomes the `$page_name` property rather than the event name, so "how many page
+views" is one query and `page('signup')` cannot be confused with
+`track('signup')`.
+
+It works that way for a storage reason as much as a naming one: `event_name` is
+a `LowCardinality(String)` column and the second key of the schema catalogue's
+sort order, while page names are unbounded by construction — one per URL. Under
+the old behaviour every page name also claimed its own property-key budget
+instead of all page views sharing one.
+
+**`$` is reserved for Lyraflow.** A property key you send that begins with `$`
+is **dropped**, in both the string and the numeric map — dropped rather than
+refused, because ingest degrades rather than failing an otherwise valid event,
+and because the write key is public and refusing here would hand a visitor a way
+to make a site's events disappear. Everything else about the key is untouched:
+`price_$` and `a$b` are ordinary keys and are stored.
+
+Events already stored under a page name stay as they are. This changes what is
+written from now on, not history — so a project that used `page(name)` before
+this release has its old page views under their old names and its new ones under
+`$page`.
+
 `/v1/track`, `/v1/page`, `/v1/identify` and `/v1/batch` are CORS-preflighted
 requests. By default Lyraflow answers that preflight for any origin — set
 `LYRAFLOW_ALLOWED_ORIGINS` (comma-separated) on the server to restrict it.
@@ -587,7 +612,7 @@ works on first paste with no configuration.
 | `anonymous_id` | one of these two | Device/browser identifier, up to 128 characters. |
 | `user_id` | one of these two | Known-user identifier, up to 128 characters. `identify` always requires it. |
 | `event` | `track` only | Event name, up to 128 characters. |
-| `name` | `page` only | Page name, up to 128 characters. Defaults to `$page`. |
+| `name` | `page` only | Page name, up to 128 characters. Stored as the `$page_name` **property**, never as the event name. |
 | `properties` | no | Flat object. `track` and `page` only. |
 | `traits` | no | Flat object. `identify` only. |
 | `timestamp` | no | ISO-8601. Defaults to server time at receipt; see *Retries*. |
@@ -811,8 +836,8 @@ lyraflow.track('signup', { plan: 'trial', seats: 3 })
 ```
 
 ```js
-lyraflow.page()            // name defaults server-side to "$page"
-lyraflow.page('Pricing')   // an explicit name
+lyraflow.page()            // stored as $page, with no $page_name
+lyraflow.page('Pricing')   // stored as $page, with $page_name = "Pricing"
 ```
 
 ```js
@@ -1153,6 +1178,19 @@ key.
 Operators are `=`, `!=`, `>`, `>=`, `<`, `<=`, and `between`. `between` takes
 exactly two values; every other operator takes exactly one.
 
+**A `lifecycle` bound with no timezone is UTC.** `2026-08-01T10:00` means
+10:00 UTC, and a bare `2026-08-01` means midnight UTC. Send an instant with a
+`Z` or an offset if you want to be explicit — both are accepted and honoured —
+but a value with neither is never read in the server's local zone.
+
+That is worth knowing if you have bounds stored from before this release: they
+used to be resolved with the server's own timezone, so the same segment meant
+a different instant depending on where the process thought it was, and moving
+a deployment between zones silently changed which people it matched. Those
+bounds now mean UTC. If your server was not on UTC, such a bound has shifted
+by that offset — once, visibly, and the builder shows the instant it now names
+when you open the segment.
+
 One caveat on `context`: `referrer`, `utm_source`, `utm_medium` and
 `utm_campaign` are recorded **only** as first-touch, because for an
 acquisition attribute the original value is the one that means something. A
@@ -1464,6 +1502,26 @@ to get subtly wrong.
 
 `POST /v1/funnels/preview` takes the same body plus a full definition and runs
 it without saving anything — for trying a funnel out before committing to it.
+
+Every run also updates the funnel's **cached summary** — `last_entered`,
+`last_converted`, `last_evaluated_at` and `last_range` — which is what
+`GET /v1/funnels` returns so a list of N funnels renders without N scans.
+
+`last_range` is the window those counts came from, as
+`{ "since": …, "until": … }`, and it exists because the counts are meaningless
+without it: running a funnel over 90 days used to leave the list showing a
+90-day rate with nothing to say it was not the seven-day default. **Always
+render the rate beside both its range and its timestamp**, never as a bare
+number.
+
+It is `null` in two cases, and they are not the same: a funnel that has never
+run has `null` counts too, while a funnel summarised before ranges were
+recorded has real counts and no record of what they answer. Neither should be
+labelled with a guess.
+
+All four are **cleared together** by a `PATCH` that changes `steps`,
+`window_seconds` or `segment_id`. A stored range describes the definition it
+was computed from just as much as the counts do.
 
 ### How a person is counted
 

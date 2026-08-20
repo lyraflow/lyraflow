@@ -14,7 +14,7 @@
  */
 import type { UserAgentInfo } from '../enrich/user-agent.js'
 import type { IngestPayload } from './payloads.js'
-import { routeProperties } from './properties.js'
+import { type PropertyValue, routeProperties } from './properties.js'
 import { clampTimestamp } from './timestamp.js'
 
 /**
@@ -80,24 +80,74 @@ export function parseChDateTime(s: string): Date {
   return new Date(`${s.replace(' ', 'T')}Z`)
 }
 
-function eventName(payload: IngestPayload): string {
+/** Every page view is stored under this name, named or not (#53). */
+export const PAGE_EVENT_NAME = '$page'
+/** ...and the name, when there is one, is a PROPERTY under this key. */
+export const PAGE_NAME_PROPERTY = '$page_name'
+
+/**
+ * The stored `event_name` for a payload.
+ *
+ * EXPORTED, and that is the point of it. This logic used to exist twice --
+ * here and as `payloadName` in the server's cardinality tracker -- with a
+ * comment on each saying they had to move together. They did not have to; they
+ * merely both happened to be right. Now there is one.
+ *
+ * `page(name)` used to store the NAME as the event name, which meant a page
+ * view stopped being a page view and became its own event type. Three things
+ * were wrong with that, and only the first is about naming:
+ *
+ * - There was no "all page views" query. `page('signup')` and
+ *   `track('signup')` were indistinguishable once stored, and the `type`
+ *   discriminator that could have told them apart was discarded right here.
+ * - `event_name` is `LowCardinality(String)` and the second column of
+ *   `event_schema`'s ORDER BY. Per-URL page names are unbounded by
+ *   construction, which is the storage-level form of the same mistake.
+ * - Every page name got its OWN per-event-name property-key budget in the
+ *   cardinality tracker, rather than all page views sharing one.
+ *
+ * Events already stored under a page name stay that way: this changes ingest,
+ * not history.
+ */
+export function eventNameFor(payload: IngestPayload): string {
   if (payload.type === 'track') return payload.event
-  if (payload.type === 'page') return payload.name ?? '$page'
+  if (payload.type === 'page') return PAGE_EVENT_NAME
   return '$identify'
+}
+
+/**
+ * The CALLER'S own property bag, before Lyraflow adds anything to it.
+ *
+ * Deliberately does not include `$page_name`, and the cardinality tracker
+ * depends on that: `MAX_PROPERTIES_PER_EVENT` is the caller's budget, so a
+ * `page('Pricing')` carrying exactly 250 properties must not be throttled
+ * because the product added a 251st of its own.
+ */
+export function propertyBagFor(payload: IngestPayload): Record<string, PropertyValue> {
+  return payload.type === 'identify' ? payload.traits : payload.properties
 }
 
 export function toEventRow(input: RowInput): EventRow {
   const { payload, now, projectId, trusted, geo, ua } = input
-  const bag = payload.type === 'identify' ? payload.traits : payload.properties
-  const { properties, properties_num } = routeProperties(bag)
+  const { properties, properties_num } = routeProperties(propertyBagFor(payload))
   const ctx = payload.context ?? {}
+
+  // AFTER routing, which is what makes the `$` reservation structural rather
+  // than a convention: `routeProperties` drops every caller-supplied key with
+  // this prefix, so the only way one exists in a stored row is a write like
+  // this one. A caller sending their own `$page_name` -- as a string or as a
+  // number, which would otherwise land in the other map entirely -- cannot
+  // collide with, shadow, or displace this.
+  if (payload.type === 'page' && payload.name !== undefined) {
+    properties[PAGE_NAME_PROPERTY] = payload.name
+  }
 
   return {
     project_id: projectId,
     event_id: payload.message_id,
     anonymous_id: payload.anonymous_id ?? '',
     user_id: payload.user_id ?? '',
-    event_name: eventName(payload),
+    event_name: eventNameFor(payload),
     timestamp: chDateTime(clampTimestamp(payload.timestamp, now)),
     received_at: chDateTime(now),
     trusted: trusted ? 1 : 0,

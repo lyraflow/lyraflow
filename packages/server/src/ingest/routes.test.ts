@@ -214,7 +214,7 @@ describe('ingest routes', () => {
     expect(rows[0]).toEqual({ event_name: '$identify', user_id: 'u-routes', plan: 'pro' })
   })
 
-  it('accepts a page event and uses its name as the event name', async () => {
+  it('stores a NAMED page view as $page, with the name as a property (#53)', async () => {
     const id = randomUUID()
     const res = await app.inject({
       method: 'POST',
@@ -231,11 +231,15 @@ describe('ingest routes', () => {
     await app.deps.buffer.flush()
 
     const rs = await ch.query({
-      query: `SELECT event_name, path FROM events WHERE event_id = '${id}'`,
+      query: `SELECT event_name, path, properties['$page_name'] AS page_name
+              FROM events WHERE event_id = '${id}'`,
       format: 'JSONEachRow',
     })
-    const rows = await rs.json<{ event_name: string; path: string }>()
-    expect(rows[0]).toEqual({ event_name: 'Pricing', path: '/pricing' })
+    const rows = await rs.json<{ event_name: string; path: string; page_name: string }>()
+    // Was `event_name: 'Pricing'`, which is the defect this test used to pin:
+    // the page view stopped being a page view and became its own event type,
+    // indistinguishable from `track('Pricing')` once stored.
+    expect(rows[0]).toEqual({ event_name: '$page', path: '/pricing', page_name: 'Pricing' })
   })
 
   it('falls back to $page when a page event carries no name', async () => {
