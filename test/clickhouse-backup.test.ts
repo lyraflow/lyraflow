@@ -135,8 +135,15 @@ async function traitKeysFor(anonymousId: string): Promise<string[]> {
 
 /**
  * Distinct value kinds recorded for one event name, sorted. Same argument as
- * traitKeysFor: event_schema is fed by event_schema_str_mv and
- * event_schema_num_mv, and only a kind-aware probe separates them.
+ * traitKeysFor: event_schema is fed by THREE views now, and only a kind-aware
+ * probe separates them -- `string` from event_schema_str_mv, `number` from
+ * event_schema_num_mv, and the empty kind from event_schema_name_mv, the view
+ * whose only job is to register an event name so a property-less event is
+ * still discoverable (#22).
+ *
+ * The empty kind earning a place here is the point: without it that third
+ * view could vanish in a restore and every assertion in this file would still
+ * pass, which is exactly the gap the per-view probes exist to close.
  */
 async function schemaKindsFor(eventName: string): Promise<string[]> {
   const rs = await ch.query({
@@ -305,7 +312,7 @@ describe('ClickHouse BACKUP and RESTORE', () => {
     expect(beforeTraitsKeyed).toBeGreaterThan(0)
     expect(beforeSchemaKeyed).toBeGreaterThan(0)
     expect(beforeTraitKeys).toEqual(['mrr', 'tier'])
-    expect(beforeSchemaKinds).toEqual(['number', 'string'])
+    expect(beforeSchemaKinds).toEqual(['', 'number', 'string'])
 
     await ch.command({ query: `BACKUP DATABASE lyraflow TO Disk('backups', 'probe.zip')` })
     await chAdmin.command({ query: 'DROP DATABASE lyraflow SYNC' })
@@ -358,10 +365,11 @@ describe('ClickHouse BACKUP and RESTORE', () => {
 
     // One assertion per view rather than per table. `tier` can only have been
     // written by person_traits_str_mv and `mrr` only by person_traits_num_mv;
-    // likewise 'string' and 'number' for the two event_schema views. Together
-    // with device_index above, all five views are now separately required.
+    // likewise 'string', 'number' and '' for the three event_schema views --
+    // the empty kind can only come from event_schema_name_mv (#22). Together
+    // with device_index above, all SIX views are separately required.
     expect(await traitKeysFor(ANON_AFTER)).toEqual(['mrr', 'tier'])
-    expect(await schemaKindsFor(EVENT_AFTER)).toEqual(['number', 'string'])
+    expect(await schemaKindsFor(EVENT_AFTER)).toEqual(['', 'number', 'string'])
 
     // Kept alongside the key probes above, not instead of them: this is the
     // shape the brief prescribed, and it is the one that would notice a view
