@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
+import type { Funnel } from '../api/types.js'
 import { ProjectProvider } from '../app/ProjectContext.js'
 import { FunnelBuilder } from './FunnelBuilder.js'
 import { Funnels } from './Funnels.js'
@@ -30,6 +31,7 @@ const RUN_ONCE = {
   last_entered: 1204,
   last_converted: 491,
   last_evaluated_at: '2026-08-15T11:58:00.000Z',
+  last_range: null,
   created_at: '2026-08-01T00:00:00.000Z',
   updated_at: '2026-08-01T00:00:00.000Z',
 }
@@ -41,6 +43,7 @@ const NEVER_RUN = {
   last_entered: null,
   last_converted: null,
   last_evaluated_at: null,
+  last_range: null,
 }
 
 function renderList(funnels: unknown[]) {
@@ -424,6 +427,7 @@ describe('Funnels list — single source of truth with the builder', () => {
       id: 11,
       name: 'Brand new',
       last_evaluated_at: null,
+      last_range: null,
       last_entered: null,
       last_converted: null,
     }
@@ -470,5 +474,49 @@ describe('Funnels list — single source of truth with the builder', () => {
     // funnel appearing here is what proves there is no such cache.
     expect(await screen.findByRole('link', { name: /Brand new/ })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /Signup flow/ })).toBeInTheDocument()
+  })
+})
+
+describe('the rate says which range produced it (#91)', () => {
+  const withRange = (over: Partial<Funnel> = {}): Funnel =>
+    ({
+      id: 1,
+      name: 'signup',
+      definition_version: 1,
+      steps: [{ event: 'a' }, { event: 'b' }],
+      window_seconds: 604800,
+      segment_id: null,
+      stale: false,
+      last_entered: 100,
+      last_converted: 12,
+      last_evaluated_at: '2026-08-20T09:00:00.000Z',
+      last_range: { since: '2026-05-22T09:00:00.000Z', until: '2026-08-20T09:00:00.000Z' },
+      created_at: '2026-08-01T00:00:00.000Z',
+      updated_at: '2026-08-01T00:00:00.000Z',
+      ...over,
+    }) as Funnel
+
+  it('labels a 90-day run as 90 days, not as the list default', async () => {
+    // The defect: this row rendered "12% · 2h ago" for a funnel last run over
+    // 90 days, under a screen whose own default is 7. Two people reading the
+    // same row were answering different questions and neither could tell.
+    renderList([withRange()])
+    expect(await screen.findByText(/Last 90 days/)).toBeInTheDocument()
+  })
+
+  it('says the range is unknown rather than guessing, for a pre-migration row', async () => {
+    // The numbers are real; what they answer is not known. Labelling them with
+    // the default would manufacture exactly the false precision this fixes.
+    renderList([withRange({ last_range: null })])
+    expect(await screen.findByText(/range unknown/)).toBeInTheDocument()
+  })
+
+  it('carries the range on a run that found nobody, too', async () => {
+    // "0 entered" is a real answer about a real window, and the window is
+    // exactly what makes it interpretable — zero over a day is not zero over
+    // a quarter.
+    renderList([withRange({ last_entered: 0, last_converted: 0 })])
+    expect(await screen.findByText(/0 entered/)).toBeInTheDocument()
+    expect(await screen.findByText(/Last 90 days/)).toBeInTheDocument()
   })
 })

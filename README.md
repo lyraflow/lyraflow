@@ -1482,6 +1482,26 @@ to get subtly wrong.
 `POST /v1/funnels/preview` takes the same body plus a full definition and runs
 it without saving anything — for trying a funnel out before committing to it.
 
+Every run also updates the funnel's **cached summary** — `last_entered`,
+`last_converted`, `last_evaluated_at` and `last_range` — which is what
+`GET /v1/funnels` returns so a list of N funnels renders without N scans.
+
+`last_range` is the window those counts came from, as
+`{ "since": …, "until": … }`, and it exists because the counts are meaningless
+without it: running a funnel over 90 days used to leave the list showing a
+90-day rate with nothing to say it was not the seven-day default. **Always
+render the rate beside both its range and its timestamp**, never as a bare
+number.
+
+It is `null` in two cases, and they are not the same: a funnel that has never
+run has `null` counts too, while a funnel summarised before ranges were
+recorded has real counts and no record of what they answer. Neither should be
+labelled with a guess.
+
+All four are **cleared together** by a `PATCH` that changes `steps`,
+`window_seconds` or `segment_id`. A stored range describes the definition it
+was computed from just as much as the counts do.
+
 ### How a person is counted
 
 - **In order.** Steps must happen in the order listed. Unrelated events in

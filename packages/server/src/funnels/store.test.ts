@@ -55,6 +55,13 @@ afterAll(async () => {
   await ch.close()
 })
 
+/** Any fixed window; `recordRun` requires one (#91) and these tests are about
+ *  the counts, not the range. The range's own behaviour is pinned below. */
+const RANGE = {
+  since: new Date('2026-08-01T00:00:00.000Z'),
+  until: new Date('2026-08-08T00:00:00.000Z'),
+}
+
 describe('FunnelStore', () => {
   it('creates and reads back a definition', async () => {
     const created = await store.create(projectId, 'signup', signup)
@@ -91,7 +98,12 @@ describe('FunnelStore', () => {
 
   it('clears the snapshot when the steps change', async () => {
     const f = await store.create(projectId, 'signup', signup)
-    await store.recordRun(projectId, f.id, { entered: 100, converted: 10, at: new Date() })
+    await store.recordRun(projectId, f.id, {
+      entered: 100,
+      converted: 10,
+      at: new Date(),
+      range: RANGE,
+    })
     await store.update(projectId, f.id, { steps: [{ event: 'x' }, { event: 'y' }] })
     const after = await store.get(projectId, f.id)
     expect(after?.lastEntered).toBeNull()
@@ -101,14 +113,24 @@ describe('FunnelStore', () => {
 
   it('clears the snapshot when the window changes', async () => {
     const f = await store.create(projectId, 'signup', signup)
-    await store.recordRun(projectId, f.id, { entered: 100, converted: 10, at: new Date() })
+    await store.recordRun(projectId, f.id, {
+      entered: 100,
+      converted: 10,
+      at: new Date(),
+      range: RANGE,
+    })
     await store.update(projectId, f.id, { windowSeconds: 60 })
     expect((await store.get(projectId, f.id))?.lastEntered).toBeNull()
   })
 
   it('clears the snapshot when the segment restriction changes', async () => {
     const f = await store.create(projectId, 'signup', signup)
-    await store.recordRun(projectId, f.id, { entered: 100, converted: 10, at: new Date() })
+    await store.recordRun(projectId, f.id, {
+      entered: 100,
+      converted: 10,
+      at: new Date(),
+      range: RANGE,
+    })
     await store.update(projectId, f.id, { segmentId: 42 })
     const after = await store.get(projectId, f.id)
     expect(after?.segmentId).toBe(42)
@@ -117,7 +139,12 @@ describe('FunnelStore', () => {
 
   it('KEEPS the snapshot on a rename', async () => {
     const f = await store.create(projectId, 'signup', signup)
-    await store.recordRun(projectId, f.id, { entered: 100, converted: 10, at: new Date() })
+    await store.recordRun(projectId, f.id, {
+      entered: 100,
+      converted: 10,
+      at: new Date(),
+      range: RANGE,
+    })
     await store.update(projectId, f.id, { name: 'signup-v2' })
     const after = await store.get(projectId, f.id)
     expect(after?.name).toBe('signup-v2')
@@ -132,7 +159,12 @@ describe('FunnelStore', () => {
   describe('keeps the snapshot when the definition is unchanged, even if the patch carries it', () => {
     it('rename plus the current steps and window echoed back verbatim', async () => {
       const f = await store.create(projectId, 'signup', signup)
-      await store.recordRun(projectId, f.id, { entered: 100, converted: 10, at: new Date() })
+      await store.recordRun(projectId, f.id, {
+        entered: 100,
+        converted: 10,
+        at: new Date(),
+        range: RANGE,
+      })
       await store.update(projectId, f.id, {
         name: 'signup-v2',
         steps: signup.steps,
@@ -147,14 +179,24 @@ describe('FunnelStore', () => {
 
     it('window_seconds re-sent at its current value', async () => {
       const f = await store.create(projectId, 'signup', signup)
-      await store.recordRun(projectId, f.id, { entered: 100, converted: 10, at: new Date() })
+      await store.recordRun(projectId, f.id, {
+        entered: 100,
+        converted: 10,
+        at: new Date(),
+        range: RANGE,
+      })
       await store.update(projectId, f.id, { windowSeconds: signup.window_seconds })
       expect((await store.get(projectId, f.id))?.lastEntered).toBe(100)
     })
 
     it('segment_id re-sent at its current value', async () => {
       const f = await store.create(projectId, 'signup', { ...signup, segment_id: 42 })
-      await store.recordRun(projectId, f.id, { entered: 100, converted: 10, at: new Date() })
+      await store.recordRun(projectId, f.id, {
+        entered: 100,
+        converted: 10,
+        at: new Date(),
+        range: RANGE,
+      })
       await store.update(projectId, f.id, { segmentId: 42 })
       const after = await store.get(projectId, f.id)
       expect(after?.segmentId).toBe(42)
@@ -163,7 +205,12 @@ describe('FunnelStore', () => {
 
     it('segment_id explicitly re-cleared to null when it was already null', async () => {
       const f = await store.create(projectId, 'signup', signup) // segment_id absent → null
-      await store.recordRun(projectId, f.id, { entered: 100, converted: 10, at: new Date() })
+      await store.recordRun(projectId, f.id, {
+        entered: 100,
+        converted: 10,
+        at: new Date(),
+        range: RANGE,
+      })
       await store.update(projectId, f.id, { segmentId: null })
       const after = await store.get(projectId, f.id)
       expect(after?.segmentId).toBeNull()
@@ -174,7 +221,12 @@ describe('FunnelStore', () => {
   describe('still clears the snapshot for a genuine definition change, echoed-back fields notwithstanding', () => {
     it('a changed event name within a step', async () => {
       const f = await store.create(projectId, 'signup', signup)
-      await store.recordRun(projectId, f.id, { entered: 100, converted: 10, at: new Date() })
+      await store.recordRun(projectId, f.id, {
+        entered: 100,
+        converted: 10,
+        at: new Date(),
+        range: RANGE,
+      })
       const changed = structuredClone(signup.steps)
       const secondStep = changed[1]
       if (!secondStep) throw new Error('fixture must have a second step')
@@ -185,7 +237,12 @@ describe('FunnelStore', () => {
 
     it('the same steps in a different order', async () => {
       const f = await store.create(projectId, 'signup', signup)
-      await store.recordRun(projectId, f.id, { entered: 100, converted: 10, at: new Date() })
+      await store.recordRun(projectId, f.id, {
+        entered: 100,
+        converted: 10,
+        at: new Date(),
+        range: RANGE,
+      })
       const reordered = [...signup.steps].reverse()
       await store.update(projectId, f.id, { steps: reordered })
       expect((await store.get(projectId, f.id))?.lastEntered).toBeNull()
@@ -193,7 +250,12 @@ describe('FunnelStore', () => {
 
     it('an added where predicate', async () => {
       const f = await store.create(projectId, 'signup', signup)
-      await store.recordRun(projectId, f.id, { entered: 100, converted: 10, at: new Date() })
+      await store.recordRun(projectId, f.id, {
+        entered: 100,
+        converted: 10,
+        at: new Date(),
+        range: RANGE,
+      })
       const withExtraPredicate = structuredClone(signup.steps)
       const firstStep = withExtraPredicate[0]
       if (!firstStep) throw new Error('fixture must have a first step')
@@ -207,7 +269,12 @@ describe('FunnelStore', () => {
 
     it('a removed where predicate', async () => {
       const f = await store.create(projectId, 'signup', signup)
-      await store.recordRun(projectId, f.id, { entered: 100, converted: 10, at: new Date() })
+      await store.recordRun(projectId, f.id, {
+        entered: 100,
+        converted: 10,
+        at: new Date(),
+        range: RANGE,
+      })
       const withoutPredicate = structuredClone(signup.steps)
       const firstStep = withoutPredicate[0]
       if (!firstStep) throw new Error('fixture must have a first step')
@@ -218,14 +285,24 @@ describe('FunnelStore', () => {
 
     it('a genuinely changed window_seconds', async () => {
       const f = await store.create(projectId, 'signup', signup)
-      await store.recordRun(projectId, f.id, { entered: 100, converted: 10, at: new Date() })
+      await store.recordRun(projectId, f.id, {
+        entered: 100,
+        converted: 10,
+        at: new Date(),
+        range: RANGE,
+      })
       await store.update(projectId, f.id, { windowSeconds: signup.window_seconds + 1 })
       expect((await store.get(projectId, f.id))?.lastEntered).toBeNull()
     })
 
     it('segment_id set for the first time', async () => {
       const f = await store.create(projectId, 'signup', signup)
-      await store.recordRun(projectId, f.id, { entered: 100, converted: 10, at: new Date() })
+      await store.recordRun(projectId, f.id, {
+        entered: 100,
+        converted: 10,
+        at: new Date(),
+        range: RANGE,
+      })
       await store.update(projectId, f.id, { segmentId: 99 })
       const after = await store.get(projectId, f.id)
       expect(after?.segmentId).toBe(99)
@@ -234,7 +311,12 @@ describe('FunnelStore', () => {
 
     it('segment_id cleared to null having previously been set', async () => {
       const f = await store.create(projectId, 'signup', { ...signup, segment_id: 7 })
-      await store.recordRun(projectId, f.id, { entered: 100, converted: 10, at: new Date() })
+      await store.recordRun(projectId, f.id, {
+        entered: 100,
+        converted: 10,
+        at: new Date(),
+        range: RANGE,
+      })
       await store.update(projectId, f.id, { segmentId: null })
       const after = await store.get(projectId, f.id)
       expect(after?.segmentId).toBeNull()
@@ -283,10 +365,93 @@ describe('FunnelStore', () => {
 
   it('records a run snapshot', async () => {
     const f = await store.create(projectId, 'signup', signup)
-    await store.recordRun(projectId, f.id, { entered: 51, converted: 7, at: new Date() })
+    await store.recordRun(projectId, f.id, {
+      entered: 51,
+      converted: 7,
+      at: new Date(),
+      range: RANGE,
+    })
     const after = await store.get(projectId, f.id)
     expect(after?.lastEntered).toBe(51)
     expect(after?.lastConverted).toBe(7)
     expect(after?.lastEvaluatedAt).not.toBeNull()
+  })
+})
+
+describe('the cached summary records what it ran over (#91)', () => {
+  const OTHER = {
+    since: new Date('2026-05-10T00:00:00.000Z'),
+    until: new Date('2026-08-08T00:00:00.000Z'),
+  }
+
+  it('stores the range the run used, not a default', async () => {
+    const f = await store.create(projectId, 'ranged', signup)
+    await store.recordRun(projectId, f.id, {
+      entered: 90,
+      converted: 9,
+      at: new Date(),
+      range: OTHER,
+    })
+    const after = await store.get(projectId, f.id)
+    expect(after?.lastRange).toEqual({
+      since: OTHER.since.toISOString(),
+      until: OTHER.until.toISOString(),
+    })
+  })
+
+  it('reports no range for a funnel that has never run', async () => {
+    const f = await store.create(projectId, 'never-run', signup)
+    expect((await store.get(projectId, f.id))?.lastRange).toBeNull()
+  })
+
+  it('clears the range with the counts when the definition changes', async () => {
+    // A stored range describes the definition it was computed from exactly as
+    // much as the counts do. Leaving it behind would put a precise-looking
+    // window on numbers that no longer exist, which reads MORE authoritative
+    // than the bare stale number the clearing already exists to prevent.
+    const f = await store.create(projectId, 'edited', signup)
+    await store.recordRun(projectId, f.id, {
+      entered: 90,
+      converted: 9,
+      at: new Date(),
+      range: OTHER,
+    })
+    await store.update(projectId, f.id, { steps: [{ event: 'x' }, { event: 'y' }] })
+    const after = await store.get(projectId, f.id)
+    expect(after?.lastRange).toBeNull()
+    expect(after?.lastEntered).toBeNull()
+  })
+
+  it('reports NO range when only half of one survives', async () => {
+    // "Both or neither" is claimed by the migration and by the API's own type,
+    // so it gets a test rather than a comment. Not reachable through the app --
+    // the two columns are only ever written together -- but reachable by hand,
+    // by a partially applied migration, or by a restore, and the failure mode
+    // is the worst kind: a range object with an empty bound renders as a real
+    // window computed from a nonsense date rather than as missing data.
+    const f = await store.create(projectId, 'half', signup)
+    await store.recordRun(projectId, f.id, {
+      entered: 90,
+      converted: 9,
+      at: new Date(),
+      range: OTHER,
+    })
+    await pg.query('UPDATE funnels SET last_range_until = NULL WHERE project_id = $1 AND id = $2', [
+      projectId,
+      f.id,
+    ])
+    expect((await store.get(projectId, f.id))?.lastRange).toBeNull()
+  })
+
+  it('surfaces the range through list(), which is the screen that needed it', async () => {
+    const f = await store.create(projectId, 'listed', signup)
+    await store.recordRun(projectId, f.id, {
+      entered: 90,
+      converted: 9,
+      at: new Date(),
+      range: OTHER,
+    })
+    const row = (await store.list(projectId)).find((x) => x.id === f.id)
+    expect(row?.lastRange?.since).toBe(OTHER.since.toISOString())
   })
 })
