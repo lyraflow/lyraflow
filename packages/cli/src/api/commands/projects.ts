@@ -265,9 +265,9 @@ async function runProjectsList(mode: Mode, ctx: AdminCommandContext): Promise<nu
 
 /** One `PurgeProgress` rendered as a single line — json mode gets an
  * object per table (matching every other list this CLI prints, one record
- * per line); human mode gets a short sentence, which is what step 7's
- * by-hand run is checking for: a visible line per table as the teardown
- * happens. */
+ * per line); human mode gets a short sentence, so a teardown that takes
+ * minutes shows a visible line per table as it happens rather than a silent
+ * terminal. */
 function writeProgress(p: PurgeProgress, mode: Mode, ctx: AdminCommandContext): void {
   if (mode === 'json') {
     emitObject({ event: 'purge_progress', ...p }, mode, ctx.write)
@@ -319,9 +319,10 @@ async function runProjectsDelete(
   // these after `store.request()` had already stamped `deleting_at` and
   // inserted the queue row meant that exact throw would escape with the
   // project stamped deleting and a request pending — a raw stack trace on
-  // an operator's terminal, the same shape Minor 5 exists to prevent for a
-  // rejected prompt. Resolving here means a degenerate config fails before
-  // the confirmation prompt is even shown, let alone anything is written.
+  // an operator's terminal, which is exactly what the rejected-prompt branch
+  // below is also written to avoid. Resolving here means a degenerate config
+  // fails before the confirmation prompt is even shown, let alone anything is
+  // written.
   const leaseMs = resolvePurgeLeaseMs()
   const maxAttempts = resolvePurgeMaxAttempts()
   const claimDelayMs = claimDelayOverride ?? resolveClaimDelayMs()
@@ -461,11 +462,11 @@ async function runProjectsDelete(
       .join(', ')
     await store.defer(request.id, `rows reappeared during purge (${detail})`)
     ctx.writeErr(
-      'rows reappeared while purging (a running server had buffered events); ' +
-        `the claim was released, so the server's purge worker picks request ${request.id} ` +
-        'up again on its next pass (LYRAFLOW_PROJECT_PURGE_INTERVAL_MS, 15s by default). ' +
-        `Check it with: lyraflow projects deletion get ${request.id}\n`,
+      'rows reappeared while purging (a running server had buffered events); the claim was ' +
+        'released, so the purge worker picks it up again on its next pass ' +
+        '(LYRAFLOW_PROJECT_PURGE_INTERVAL_MS, 15s by default)\n',
     )
+    ctx.writeErr(`check it with: lyraflow projects deletion get ${request.id}\n`)
     return 1
   }
 
