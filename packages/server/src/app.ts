@@ -30,7 +30,10 @@ import { registerPrivacyRoutes } from './privacy/routes.js'
 import { SuppressionStore } from './privacy/suppression-store.js'
 import { PurgeWorker } from './privacy/worker.js'
 import { registerAdminProjectRoutes } from './project/admin-routes.js'
+import { ProjectDeletionStore } from './project/deletion-store.js'
+import { purgeProject } from './project/purge.js'
 import { registerProjectRoutes } from './project/routes.js'
+import { ProjectPurgeWorker } from './project/worker.js'
 import { logDroppedPartition } from './retention/logging.js'
 import { RetentionStore } from './retention/store.js'
 import { RetentionWorker } from './retention/worker.js'
@@ -56,6 +59,17 @@ export interface AppDeps {
    * interval — see retention/wiring.test.ts.
    */
   retention: RetentionWorker
+  /**
+   * Exposed for the same reason `purge`/`retention` are (see index.ts and
+   * shutdown.ts): a live timer belongs to boot succeeding, not to
+   * construction, and a test that wants to drive a real project purge does
+   * it through `runOnce()` on this exact instance. Its backing
+   * `ProjectDeletionStore` is not exposed here -- unlike this worker, Task
+   * 5's routes are registered inside `buildApp()` itself and reach it
+   * through the same closure this worker is built in, so a second exposure
+   * point on `AppDeps` would be redundant.
+   */
+  projectPurge: ProjectPurgeWorker
   /**
    * Exposed for the same reason `buffer`/`counters`/`purge` already are:
    * tests need to reach the EXACT instance the routes share, not a
@@ -206,6 +220,26 @@ export function buildApp(input: {
     onError: (err, ctx) => app.log.error({ err, ...ctx }, 'purge failed'),
   })
 
+  // Exactly ONE ProjectDeletionStore, for the same reason there is exactly
+  // one SuppressionStore/DeletionStore/PurgeWorker: Task 5's routes consume
+  // this same instance, and a second construction site would let a request
+  // accepted through one and claimed through the other drift apart.
+  const projectDeletions = new ProjectDeletionStore(pg)
+  const projectPurge = new ProjectPurgeWorker({
+    claim: () =>
+      projectDeletions.claim({
+        leaseMs: config.projectPurgeLeaseMs,
+        maxAttempts: config.projectPurgeMaxAttempts,
+      }),
+    purge: (projectId) => purgeProject({ ch, pg, projectId }),
+    complete: (id) => projectDeletions.complete(id),
+    fail: (id, error) => projectDeletions.fail(id, error),
+    intervalMs: config.projectPurgeIntervalMs,
+    leaseMs: config.projectPurgeLeaseMs,
+    maxAttempts: config.projectPurgeMaxAttempts,
+    onError: (err, ctx) => app.log.error({ err, ...ctx }, 'project purge failed'),
+  })
+
   // Mutated only from `onRun` below, on the single-threaded event loop —
   // no lock needed. `null` until the first successful run completes;
   // registerMetrics renders that as `0`, matching this worker's `onRun`
@@ -278,6 +312,7 @@ export function buildApp(input: {
     counters,
     purge,
     retention,
+    projectPurge,
     segmentCache,
     projects,
     sessions,
@@ -413,6 +448,10 @@ export function buildApp(input: {
   // same rule again — a live timer issuing real `DELETE FROM sessions`
   // during unrelated tests would be the identical cross-file interference —
   // see auth/boot.test.ts, which drives it through `runOnce()` directly.
+  // `projectPurge` follows the same rule once more — a live timer issuing
+  // real `ALTER TABLE ... DROP PARTITION` calls and `DELETE FROM projects`
+  // against the shared test database on every unrelated test file's boot
+  // would be the identical interference. index.ts starts it too.
   return app
 }
 

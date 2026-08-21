@@ -131,7 +131,13 @@ export class RetentionStore {
   /** Every project and the retention it is currently configured with. */
   async listProjects(): Promise<RetentionTarget[]> {
     const result = await this.#pg.query<{ id: string; retention_months: number }>(
-      'SELECT id, retention_months FROM projects ORDER BY id',
+      // Deleting projects are excluded: `purgeProject` is about to remove
+      // everything retention would trim, and two workers reaching for the
+      // same partitions is redundant work with no upside. Dropping an
+      // already-dropped partition is safe, so this is tidiness rather than
+      // correctness — but a project mid-purge reported in retention metrics
+      // reads as a live project.
+      'SELECT id, retention_months FROM projects WHERE deleting_at IS NULL ORDER BY id',
     )
     return result.rows.map((row) => ({
       projectId: Number(row.id),

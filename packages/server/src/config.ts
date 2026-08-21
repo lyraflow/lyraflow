@@ -11,6 +11,9 @@ export interface Config {
   purgeIntervalMs: number
   purgeLeaseMs: number
   purgeMaxAttempts: number
+  projectPurgeIntervalMs: number
+  projectPurgeLeaseMs: number
+  projectPurgeMaxAttempts: number
   allowedOrigins: string[]
   retentionIntervalMs: number
   retentionEnabled: boolean
@@ -108,6 +111,13 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     // A poisoned request stops being claimed past this, with last_error
     // saying why, rather than spinning forever.
     purgeMaxAttempts: num(env, 'LYRAFLOW_PURGE_MAX_ATTEMPTS', 5),
+    // The project purge's own knobs, separate from the person purge's: a
+    // project teardown is minutes of partition drops and mutations where a
+    // person purge is seconds, so the lease that makes a crash recoverable
+    // is not the same number.
+    projectPurgeIntervalMs: num(env, 'LYRAFLOW_PROJECT_PURGE_INTERVAL_MS', 15_000),
+    projectPurgeLeaseMs: num(env, 'LYRAFLOW_PROJECT_PURGE_LEASE_MS', 1_800_000),
+    projectPurgeMaxAttempts: num(env, 'LYRAFLOW_PROJECT_PURGE_MAX_ATTEMPTS', 5),
     // Origins permitted to call the write-key ingest routes from a browser.
     // Empty means any origin.
     //
