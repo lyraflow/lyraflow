@@ -396,7 +396,15 @@ export function buildApp(input: {
   registerProjectRoutes(app, { authenticate, pg, projects })
   // Session-only and NOT given `authenticate` -- see admin-routes.ts's own
   // docstring for why these two routes must not accept a project server key.
-  registerAdminProjectRoutes(app, { pg, sessions, projects, readiness })
+  registerAdminProjectRoutes(app, {
+    pg,
+    sessions,
+    projects,
+    readiness,
+    deletions: projectDeletions,
+    maxAttempts: config.projectPurgeMaxAttempts,
+    leaseMs: config.projectPurgeLeaseMs,
+  })
   // One shared object, not one built per registration: registerExportRoute
   // takes the exact same PrivacyDeps registerPrivacyRoutes does (export.ts's
   // own docstring), and constructing a second literal here is exactly the

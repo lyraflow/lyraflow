@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 import cookiePlugin from '@fastify/cookie'
-import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
+import { type Pool, createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
 import Fastify, { type FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { buildApp } from '../app.js'
@@ -10,6 +10,7 @@ import { SessionStore, hashSessionToken } from '../auth/sessions.js'
 import { loadConfig } from '../config.js'
 import { Readiness } from '../health.js'
 import { registerAdminProjectRoutes } from './admin-routes.js'
+import { ProjectDeletionStore } from './deletion-store.js'
 
 const CH = {
   url: 'http://localhost:8123',
@@ -26,9 +27,46 @@ const SLUG = `${PREFIX}-project`
 const SERVER_KEY = `sk_${PREFIX}`
 const EMAIL = `${PREFIX}-suite@example.test`
 const PASSWORD = `${PREFIX}-suite-password`
+// A distinct prefix for the DELETE-route tests below, so their cleanup
+// (which wipes by prefix) can never touch the shared SLUG project every
+// other describe block in this file depends on.
+const DEL_PREFIX = `${PREFIX}-del`
 
 let app: FastifyInstance
 let cookie = ''
+let sessionHeaders: Record<string, string>
+const uiHeaderOnly = { 'x-lyraflow-ui': '1' }
+
+// Same store DELETE /v1/projects/:id and GET /v1/project-deletions/:id
+// consume inside buildApp -- see app.ts's comment on why it is not exposed
+// on AppDeps. A second instance pointed at the same pool is fine (it holds
+// no state of its own), which is exactly the pattern deletion-store.test.ts
+// and worker.test.ts already use.
+const store = new ProjectDeletionStore(pg)
+
+let delCounter = 0
+/** Raw INSERT, one unique slug per call -- same reasoning as deletion-store.test.ts's helper. */
+async function createProject(
+  db: Pool,
+  name: string,
+): Promise<{ id: number; slug: string; name: string }> {
+  const slug = `${DEL_PREFIX}-${Date.now()}-${delCounter++}`
+  const r = await db.query<{ id: string }>(
+    `INSERT INTO projects (name, slug, write_key, server_key_hash)
+     VALUES ($1, $2, $3, $4) RETURNING id`,
+    [name, slug, `wk_${slug}`, `sk_${slug}`],
+  )
+  return { id: Number(r.rows[0]?.id), slug, name }
+}
+
+function del(project: { id: number; slug: string }) {
+  return app.inject({
+    method: 'DELETE',
+    url: `/v1/projects/${project.id}`,
+    headers: sessionHeaders,
+    payload: { slug: project.slug },
+  })
+}
 
 /** The cookie value only, from a Set-Cookie header -- same helper as auth/routes.test.ts. */
 function cookieValue(setCookie: string): string {
@@ -73,10 +111,17 @@ beforeAll(async () => {
   })
   const setCookie = login.headers['set-cookie']
   cookie = `lf_session=${cookieValue(Array.isArray(setCookie) ? (setCookie[0] ?? '') : (setCookie ?? ''))}`
+  sessionHeaders = { cookie, 'x-lyraflow-ui': '1' }
 })
 
 afterAll(async () => {
   await app.close()
+  // Both by prefix: DELETE-route tests mint one project per call and never
+  // name them individually, unlike the fixed-name POST /v1/projects tests
+  // below. No FK ties project_deletions to projects (deliberately -- see
+  // ProjectDeletionStore.get's docstring), so nothing enforces an order here.
+  await pg.query(`DELETE FROM project_deletions WHERE slug LIKE '${DEL_PREFIX}-%'`)
+  await pg.query(`DELETE FROM projects WHERE slug LIKE '${DEL_PREFIX}-%'`)
   await pg.query('DELETE FROM projects WHERE slug = $1', [SLUG])
   await pg.query('DELETE FROM projects WHERE name = ANY($1)', [
     ['Admin Routes Created', 'Admin Routes Duplicate'],
@@ -134,6 +179,7 @@ describe('GET /v1/projects', () => {
     expect(Object.keys(mine as Record<string, unknown>).sort()).toEqual(
       [
         'created_at',
+        'deleting_at',
         'disabled_at',
         'id',
         'monthly_event_quota',
@@ -429,7 +475,15 @@ describe('a session inside its renewal window, used through GET /v1/projects', (
     const projects = new ProjectCache(pg, 60_000)
     const local = Fastify()
     await local.register(cookiePlugin)
-    registerAdminProjectRoutes(local, { pg, sessions: routeSessions, projects, readiness })
+    registerAdminProjectRoutes(local, {
+      pg,
+      sessions: routeSessions,
+      projects,
+      readiness,
+      deletions: store,
+      maxAttempts: 5,
+      leaseMs: 1_800_000,
+    })
     await local.ready()
 
     const res = await local.inject({
@@ -629,5 +683,128 @@ describe('an archived project and ingest', () => {
     })
     expect(read.statusCode).toBe(200)
     await setArchived(id, false)
+  })
+})
+
+describe('DELETE /v1/projects/:id', () => {
+  it('202s a delete whose body carries the right slug', async () => {
+    const project = await createProject(pg, 'Acme')
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/projects/${project.id}`,
+      headers: sessionHeaders,
+      payload: { slug: project.slug },
+    })
+    expect(res.statusCode).toBe(202)
+    expect(res.json()).toMatchObject({ project_id: project.id, status: 'pending' })
+  })
+
+  it('409s a slug that does not match, stamping nothing and queueing nothing', async () => {
+    const project = await createProject(pg, 'Acme')
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/projects/${project.id}`,
+      headers: sessionHeaders,
+      payload: { slug: 'not-acme' },
+    })
+    expect(res.statusCode).toBe(409)
+    expect(res.json()).toEqual({ error: 'slug_mismatch' })
+    const row = await pg.query('SELECT deleting_at FROM projects WHERE id = $1', [project.id])
+    expect(row.rows[0].deleting_at).toBeNull()
+    expect(
+      (await pg.query('SELECT count(*) FROM project_deletions WHERE project_id = $1', [project.id]))
+        .rows[0].count,
+    ).toBe('0')
+  })
+
+  it('409s a second delete and names the request already in flight', async () => {
+    const project = await createProject(pg, 'Acme')
+    const first = await del(project)
+    const second = await del(project)
+    expect(second.statusCode).toBe(409)
+    expect(second.json()).toEqual({ error: 'already_deleting', id: first.json().id })
+  })
+
+  it('404s an unknown project', async () => {
+    const res = await app.inject({
+      method: 'DELETE',
+      url: '/v1/projects/999999',
+      headers: sessionHeaders,
+      payload: { slug: 'anything' },
+    })
+    expect(res.statusCode).toBe(404)
+    expect(res.json()).toEqual({ error: 'project_not_found' })
+  })
+
+  it('400s a non-numeric id', async () => {
+    const res = await app.inject({
+      method: 'DELETE',
+      url: '/v1/projects/abc',
+      headers: sessionHeaders,
+      payload: { slug: 'acme' },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'invalid_id' })
+  })
+
+  it('400s a body with no slug', async () => {
+    const project = await createProject(pg, 'Acme')
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/projects/${project.id}`,
+      headers: sessionHeaders,
+      payload: {},
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'invalid_body' })
+  })
+
+  it('401s without a session', async () => {
+    const project = await createProject(pg, 'Acme')
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/projects/${project.id}`,
+      headers: uiHeaderOnly,
+      payload: { slug: project.slug },
+    })
+    expect(res.statusCode).toBe(401)
+    expect(res.json()).toEqual({ error: 'invalid_session' })
+  })
+
+  it('still lists a deleting project, with deleting_at set', async () => {
+    const project = await createProject(pg, 'Acme')
+    await del(project)
+    const res = await app.inject({ method: 'GET', url: '/v1/projects', headers: sessionHeaders })
+    const listed = res.json().projects.find((p: { id: number }) => p.id === project.id)
+    expect(listed.deleting_at).toEqual(expect.any(String))
+  })
+})
+
+describe('GET /v1/project-deletions/:id', () => {
+  it('reports a deletion status by id', async () => {
+    const project = await createProject(pg, 'Acme')
+    const { id } = (await del(project)).json()
+    const res = await app.inject({
+      method: 'GET',
+      url: `/v1/project-deletions/${id}`,
+      headers: sessionHeaders,
+    })
+    expect(res.json()).toMatchObject({ status: 'pending', completed_at: null })
+  })
+
+  // The pin that proves the missing foreign key on project_deletions is
+  // deliberate: with ON DELETE CASCADE the status row would vanish along
+  // with the project and this would 404 instead of reporting `completed`.
+  it('reports completed after the row is gone', async () => {
+    const project = await createProject(pg, 'Acme')
+    const { id } = (await del(project)).json()
+    await store.complete(id)
+    await pg.query('DELETE FROM projects WHERE id = $1', [project.id])
+    const res = await app.inject({
+      method: 'GET',
+      url: `/v1/project-deletions/${id}`,
+      headers: sessionHeaders,
+    })
+    expect(res.json().status).toBe('completed')
   })
 })
