@@ -99,21 +99,21 @@ describe('ProjectDeletionStore', () => {
   it('claims one request under a lease and increments attempts', async () => {
     const project = await createProject(pg, 'Acme')
     await store.request(project.id)
-    const claimed = await store.claim({ leaseMs: 60_000, maxAttempts: 5 })
+    const claimed = await store.claim({ leaseMs: 60_000, maxAttempts: 5, claimDelayMs: 0 })
     expect(claimed?.attempts).toBe(1)
     // A second claim inside the lease window finds nothing.
-    expect(await store.claim({ leaseMs: 60_000, maxAttempts: 5 })).toBeNull()
+    expect(await store.claim({ leaseMs: 60_000, maxAttempts: 5, claimDelayMs: 0 })).toBeNull()
   })
 
   it('re-claims a request whose lease has expired', async () => {
     const project = await createProject(pg, 'Acme')
     await store.request(project.id)
-    await store.claim({ leaseMs: 60_000, maxAttempts: 5 })
+    await store.claim({ leaseMs: 60_000, maxAttempts: 5, claimDelayMs: 0 })
     await pg.query(
       "UPDATE project_deletions SET claimed_at = now() - interval '2 hours' WHERE project_id = $1",
       [project.id],
     )
-    const again = await store.claim({ leaseMs: 60_000, maxAttempts: 5 })
+    const again = await store.claim({ leaseMs: 60_000, maxAttempts: 5, claimDelayMs: 0 })
     expect(again?.attempts).toBe(2)
   })
 
@@ -124,14 +124,18 @@ describe('ProjectDeletionStore', () => {
       'UPDATE project_deletions SET attempts = 5, claimed_at = NULL WHERE project_id = $1',
       [project.id],
     )
-    expect(await store.claim({ leaseMs: 60_000, maxAttempts: 5 })).toBeNull()
+    expect(await store.claim({ leaseMs: 60_000, maxAttempts: 5, claimDelayMs: 0 })).toBeNull()
   })
 
   describe('claimById', () => {
     it('claims the named request and increments attempts', async () => {
       const project = await createProject(pg, 'Acme')
       const { id } = (await store.request(project.id)) as { id: number }
-      const claimed = await store.claimById(id, { leaseMs: 60_000, maxAttempts: 5 })
+      const claimed = await store.claimById(id, {
+        leaseMs: 60_000,
+        maxAttempts: 5,
+        claimDelayMs: 0,
+      })
       expect(claimed?.id).toBe(id)
       expect(claimed?.attempts).toBe(1)
     })
@@ -139,8 +143,10 @@ describe('ProjectDeletionStore', () => {
     it('returns null when the named request is already claimed inside the lease', async () => {
       const project = await createProject(pg, 'Acme')
       const { id } = (await store.request(project.id)) as { id: number }
-      await store.claimById(id, { leaseMs: 60_000, maxAttempts: 5 })
-      expect(await store.claimById(id, { leaseMs: 60_000, maxAttempts: 5 })).toBeNull()
+      await store.claimById(id, { leaseMs: 60_000, maxAttempts: 5, claimDelayMs: 0 })
+      expect(
+        await store.claimById(id, { leaseMs: 60_000, maxAttempts: 5, claimDelayMs: 0 }),
+      ).toBeNull()
     })
 
     it('returns null for the named request past maxAttempts', async () => {
@@ -149,7 +155,9 @@ describe('ProjectDeletionStore', () => {
       await pg.query('UPDATE project_deletions SET attempts = 5, claimed_at = NULL WHERE id = $1', [
         id,
       ])
-      expect(await store.claimById(id, { leaseMs: 60_000, maxAttempts: 5 })).toBeNull()
+      expect(
+        await store.claimById(id, { leaseMs: 60_000, maxAttempts: 5, claimDelayMs: 0 }),
+      ).toBeNull()
     })
 
     // THE PIN: an older, unrelated, perfectly claimable request must never
@@ -169,12 +177,80 @@ describe('ProjectDeletionStore', () => {
       const target = await createProject(pg, 'Target')
       const targetReq = (await store.request(target.id)) as { id: number }
 
-      const claimed = await store.claimById(targetReq.id, { leaseMs: 60_000, maxAttempts: 5 })
+      const claimed = await store.claimById(targetReq.id, {
+        leaseMs: 60_000,
+        maxAttempts: 5,
+        claimDelayMs: 0,
+      })
       expect(claimed?.id).toBe(targetReq.id)
       expect(claimed?.projectId).toBe(target.id)
 
       const untouched = await store.get(olderReq.id)
       expect(untouched).toMatchObject({ claimedAt: null, attempts: 0, completedAt: null })
+    })
+  })
+
+  /**
+   * The cache horizon, pinned on both claim statements SEPARATELY — removing
+   * the `requested_at` predicate from one of them must fail exactly the test
+   * named for it. That separation is the point: `claim()` is what the
+   * server's worker calls and `claimById()` is what `lyraflow projects
+   * delete` calls, so a guard present in only one of them is a guard the
+   * other path does not have.
+   *
+   * Age is simulated by backdating `requested_at` rather than by sleeping:
+   * the predicate compares two Postgres timestamps, so an older row is
+   * indistinguishable from a row that waited.
+   *
+   * Every other test in this file passes `claimDelayMs: 0` — they are about
+   * the lease, the attempt count and the id scoping, and opting out of the
+   * horizon keeps them fast and keeps this block the only place the horizon
+   * itself is asserted.
+   */
+  describe('the ingest cache horizon', () => {
+    const DELAY_MS = 60_000
+
+    it('refuses a request younger than the delay, and hands it over once it is older', async () => {
+      const project = await createProject(pg, 'Acme')
+      await store.request(project.id)
+
+      expect(
+        await store.claim({ leaseMs: 60_000, maxAttempts: 5, claimDelayMs: DELAY_MS }),
+      ).toBeNull()
+
+      await pg.query(
+        "UPDATE project_deletions SET requested_at = now() - interval '2 minutes' WHERE project_id = $1",
+        [project.id],
+      )
+      const claimed = await store.claim({
+        leaseMs: 60_000,
+        maxAttempts: 5,
+        claimDelayMs: DELAY_MS,
+      })
+      expect(claimed?.projectId).toBe(project.id)
+    })
+
+    it('refuses the same request through claimById, and hands it over once it is older', async () => {
+      const project = await createProject(pg, 'Acme')
+      const { id } = (await store.request(project.id)) as { id: number }
+
+      expect(
+        await store.claimById(id, { leaseMs: 60_000, maxAttempts: 5, claimDelayMs: DELAY_MS }),
+      ).toBeNull()
+      // Not merely unclaimed: refusing must not consume an attempt either,
+      // or a CLI polling this would exhaust the budget while waiting.
+      expect((await store.get(id))?.attempts).toBe(0)
+
+      await pg.query(
+        "UPDATE project_deletions SET requested_at = now() - interval '2 minutes' WHERE id = $1",
+        [id],
+      )
+      const claimed = await store.claimById(id, {
+        leaseMs: 60_000,
+        maxAttempts: 5,
+        claimDelayMs: DELAY_MS,
+      })
+      expect(claimed?.id).toBe(id)
     })
   })
 

@@ -181,7 +181,7 @@ export function buildApp(input: {
   // worker's reads and the routes' writes have to see each other's effects
   // immediately, and a second ProjectCache-shaped duplicate would double the
   // Postgres load an identical lookup produces.
-  const projects = new ProjectCache(pg, 60_000)
+  const projects = new ProjectCache(pg, config.projectCacheTtlMs)
   const sessions = new SessionStore(pg)
   const loginLimiter = new AttemptLimiter()
   // Wraps the SAME `sessions` instance every route above reads and writes
@@ -230,6 +230,12 @@ export function buildApp(input: {
       projectDeletions.claim({
         leaseMs: config.projectPurgeLeaseMs,
         maxAttempts: config.projectPurgeMaxAttempts,
+        // The cache horizon this same process's `projects` cache is built
+        // with, derived once in config.ts. A worker claiming sooner than
+        // this would tear a project down while a sibling process (or this
+        // one, before `invalidate()` reached it) can still be admitting
+        // events for it.
+        claimDelayMs: config.projectPurgeClaimDelayMs,
       }),
     purge: (projectId) => purgeProject({ ch, pg, projectId }),
     complete: (id) => projectDeletions.complete(id),

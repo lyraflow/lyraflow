@@ -21,6 +21,11 @@
 
 import type { ClickHouseClient, Pool } from '@lyraflow/db'
 import {
+  DEFAULT_FLUSH_INTERVAL_MS,
+  DEFAULT_PROJECT_CACHE_TTL_MS,
+  purgeClaimDelayMs,
+} from '@lyraflow/server/dist/config.js'
+import {
   type ProjectDeletionRequest,
   ProjectDeletionStore,
 } from '@lyraflow/server/dist/project/deletion-store.js'
@@ -104,6 +109,28 @@ function resolvePurgeMaxAttempts(): number {
 }
 
 /**
+ * How long this command must wait, after filing the request, before any
+ * purge may claim it — `purgeClaimDelayMs` computed from the same two
+ * environment variables `config.ts` computes the server's value from, so a
+ * tuned install gets a CLI that agrees with the server it shares a database
+ * with rather than one that waits a shipped-default window.
+ *
+ * This process cannot shortcut the wait by invalidating anything. The route
+ * calls `projects.invalidate()` because it lives INSIDE the process holding
+ * the cache; this command talks to Postgres directly and there may be no
+ * server process at all, or three of them on other hosts. Waiting the
+ * horizon out is the only form of "the caches are cold now" available here —
+ * and `ProjectDeletionStore`'s claim SQL enforces it regardless, so skipping
+ * the wait does not produce a fast delete, it produces an unclaimable one.
+ */
+export function resolveClaimDelayMs(): number {
+  return purgeClaimDelayMs({
+    projectCacheTtlMs: envNumber('LYRAFLOW_PROJECT_CACHE_TTL_MS', DEFAULT_PROJECT_CACHE_TTL_MS),
+    flushIntervalMs: envNumber('LYRAFLOW_FLUSH_INTERVAL_MS', DEFAULT_FLUSH_INTERVAL_MS),
+  })
+}
+
+/**
  * How long `runProjectsDelete` waits between the first `purgeProject` call
  * and its one retry, when rows reappeared (a running server's buffered
  * flush landing after the partition drop — see purge.ts's own docstring).
@@ -157,6 +184,16 @@ interface DeletionStore {
 export interface ProjectsDeps {
   purge?: typeof purgeProject
   makeStore?: (pg: Pool) => DeletionStore
+  /**
+   * Overrides `resolveClaimDelayMs()` for a test that is not about the wait
+   * itself — passing `0` makes `projects delete` claim immediately, the way
+   * it did before the cache horizon existed. Every test that overrides this
+   * is opting OUT of the guard, so the one test that proves the guard works
+   * (a real delete against a live app's warm `ProjectCache`) deliberately
+   * does not pass `deps` at all. Real dispatch (index.ts) never passes this
+   * parameter either.
+   */
+  claimDelayMs?: number
 }
 
 /** GET /v1/projects's own row shape (admin-routes.ts), plus the derived
@@ -271,6 +308,7 @@ async function runProjectsDelete(
   ctx: AdminCommandContext,
   purge: typeof purgeProject,
   makeStore: (pg: Pool) => DeletionStore,
+  claimDelayOverride: number | undefined,
 ): Promise<number> {
   // Resolved once, up front — BEFORE anything below writes anything.
   // `envNumber` throws on a malformed `LYRAFLOW_PROJECT_PURGE_LEASE_MS`/
@@ -284,6 +322,7 @@ async function runProjectsDelete(
   // the confirmation prompt is even shown, let alone anything is written.
   const leaseMs = resolvePurgeLeaseMs()
   const maxAttempts = resolvePurgeMaxAttempts()
+  const claimDelayMs = claimDelayOverride ?? resolveClaimDelayMs()
 
   const yes = flags.yes === true
   const queue = flags.queue === true
@@ -367,7 +406,26 @@ async function runProjectsDelete(
     return 0
   }
 
-  const request = await store.claimById(result.id, { leaseMs, maxAttempts })
+  // THE WAIT IS THE FEATURE, NOT LATENCY TO BE OPTIMISED AWAY. See
+  // `resolveClaimDelayMs` above and `purgeClaimDelayMs` (config.ts): until
+  // this window has passed, a server process can still be answering 202 for
+  // this project out of a cached row that predates the stamp, and the events
+  // it accepted are still in memory on their way to `events`. Purging inside
+  // it drops partitions that are about to be repopulated and then deletes
+  // the Postgres row that made them findable. Said out loud rather than
+  // spent silently: an operator watching a terminal do nothing for a minute
+  // needs to know it is waiting on purpose and on what.
+  if (claimDelayMs > 0) {
+    ctx.writeErr(`waiting ${Math.ceil(claimDelayMs / 1000)}s before tearing down "${row.slug}"\n`)
+    ctx.writeErr(
+      'in-flight events are still draining, and a running server can still be holding a ' +
+        'cached copy of this project that says it is live; no purge may start until that ' +
+        'window has passed\n',
+    )
+    await new Promise<void>((resolve) => setTimeout(resolve, claimDelayMs))
+  }
+
+  const request = await store.claimById(result.id, { leaseMs, maxAttempts, claimDelayMs })
   if (!request) {
     // Real, if narrow: the server's own periodic worker runs `claim()` on
     // the same table (whatever is oldest and claimable, queue-wide) and
@@ -377,7 +435,7 @@ async function runProjectsDelete(
     // call. Not an error in the request itself: it is queued and will be
     // completed, just not by this process.
     ctx.writeErr(
-      `request ${result.id} could not be claimed here (the server worker claimed it in the moment before this call); it is still queued and will be completed\n`,
+      `request ${result.id} could not be claimed here (the server worker claimed it while this command waited out the ingest window); it is still queued and will be completed\n`,
     )
     return 1
   }
@@ -552,7 +610,7 @@ export async function runProjects(
       parseCtx,
     )
     if (code !== undefined) return code
-    return runProjectsDelete(slug, flags, mode, ctx, purge, makeStore)
+    return runProjectsDelete(slug, flags, mode, ctx, purge, makeStore, deps.claimDelayMs)
   }
 
   // subcommand === 'deletion'

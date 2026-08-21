@@ -43,6 +43,16 @@ function toRequest(row: Row): ProjectDeletionRequest {
  * on every poll. */
 const MAX_LAST_ERROR_LENGTH = 2000
 
+/**
+ * THE `requested_at` PREDICATE IS THE CACHE-HORIZON GUARD, NOT A NICETY.
+ * See `purgeClaimDelayMs` (config.ts) for the window it enforces and why a
+ * purge that starts inside it recreates the orphaned-project state this
+ * feature exists to prevent. It lives in SQL, in BOTH claim statements,
+ * because that is the only place every claimer passes through: the server's
+ * worker, a second app process, and a CLI invocation talking to Postgres
+ * with no server running at all. A check in any one caller is a check the
+ * other two do not make.
+ */
 const CLAIM_SQL = `
   UPDATE project_deletions
      SET claimed_at = now(), attempts = attempts + 1
@@ -51,6 +61,7 @@ const CLAIM_SQL = `
       WHERE completed_at IS NULL
         AND attempts < $1
         AND (claimed_at IS NULL OR claimed_at < now() - make_interval(secs => $2))
+        AND requested_at <= now() - make_interval(secs => $3)
       ORDER BY requested_at
       LIMIT 1
       FOR UPDATE SKIP LOCKED
@@ -58,9 +69,9 @@ const CLAIM_SQL = `
    RETURNING *`
 
 /** `CLAIM_SQL`'s sibling for `claimById` -- same guards (not completed, under
- * `maxAttempts`, not currently leased), scoped to one id instead of picking
- * the oldest candidate. No `ORDER BY`/`LIMIT`: `id` is the primary key, so
- * the inner SELECT matches at most one row already. */
+ * `maxAttempts`, not currently leased, past the cache horizon), scoped to one
+ * id instead of picking the oldest candidate. No `ORDER BY`/`LIMIT`: `id` is
+ * the primary key, so the inner SELECT matches at most one row already. */
 const CLAIM_BY_ID_SQL = `
   UPDATE project_deletions
      SET claimed_at = now(), attempts = attempts + 1
@@ -70,6 +81,7 @@ const CLAIM_BY_ID_SQL = `
         AND completed_at IS NULL
         AND attempts < $2
         AND (claimed_at IS NULL OR claimed_at < now() - make_interval(secs => $3))
+        AND requested_at <= now() - make_interval(secs => $4)
       FOR UPDATE SKIP LOCKED
    )
    RETURNING *`
@@ -177,12 +189,22 @@ export class ProjectDeletionStore {
    * its own request) cannot take the same row: the inner SELECT locks its
    * pick with FOR UPDATE SKIP LOCKED, and a concurrent claimer skips past it
    * to the next candidate rather than blocking on it.
+   *
+   * `claimDelayMs` is REQUIRED rather than defaulted: it is the guard that
+   * keeps a purge from starting while ingest can still be admitting events
+   * for the project (see CLAIM_SQL above), and a default would let a new
+   * caller opt out of it by saying nothing.
    */
   async claim(opts: {
     leaseMs: number
     maxAttempts: number
+    claimDelayMs: number
   }): Promise<ProjectDeletionRequest | null> {
-    const r = await this.pool.query<Row>(CLAIM_SQL, [opts.maxAttempts, opts.leaseMs / 1000])
+    const r = await this.pool.query<Row>(CLAIM_SQL, [
+      opts.maxAttempts,
+      opts.leaseMs / 1000,
+      opts.claimDelayMs / 1000,
+    ])
     return r.rows[0] ? toRequest(r.rows[0]) : null
   }
 
@@ -208,12 +230,13 @@ export class ProjectDeletionStore {
    */
   async claimById(
     id: number,
-    opts: { leaseMs: number; maxAttempts: number },
+    opts: { leaseMs: number; maxAttempts: number; claimDelayMs: number },
   ): Promise<ProjectDeletionRequest | null> {
     const r = await this.pool.query<Row>(CLAIM_BY_ID_SQL, [
       id,
       opts.maxAttempts,
       opts.leaseMs / 1000,
+      opts.claimDelayMs / 1000,
     ])
     return r.rows[0] ? toRequest(r.rows[0]) : null
   }

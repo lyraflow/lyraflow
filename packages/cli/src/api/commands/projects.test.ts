@@ -14,7 +14,12 @@ import { ProjectDeletionStore } from '@lyraflow/server/dist/project/deletion-sto
 import type { purgeProject } from '@lyraflow/server/dist/project/purge.js'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { AdminCommandContext } from './projects.js'
-import { PROJECT_PURGE_LEASE_MS, PROJECT_PURGE_MAX_ATTEMPTS, runProjects } from './projects.js'
+import {
+  PROJECT_PURGE_LEASE_MS,
+  PROJECT_PURGE_MAX_ATTEMPTS,
+  resolveClaimDelayMs,
+  runProjects,
+} from './projects.js'
 
 const pg = createPgPool('postgres://lyraflow:lyraflow@localhost:5433/lyraflow_test')
 const ch = createChClient({
@@ -122,8 +127,9 @@ function spiedStore(pool: Pool) {
   const real = new ProjectDeletionStore(pool)
   const complete = vi.fn((id: number) => real.complete(id))
   const fail = vi.fn((id: number, error: string) => real.fail(id, error))
-  const claimById = vi.fn((id: number, opts: { leaseMs: number; maxAttempts: number }) =>
-    real.claimById(id, opts),
+  const claimById = vi.fn(
+    (id: number, opts: { leaseMs: number; maxAttempts: number; claimDelayMs: number }) =>
+      real.claimById(id, opts),
   )
   return {
     complete,
@@ -173,6 +179,40 @@ describe('PROJECT_PURGE_LEASE_MS / PROJECT_PURGE_MAX_ATTEMPTS', () => {
     expect(PROJECT_PURGE_LEASE_MS).toBe(config.projectPurgeLeaseMs)
     expect(PROJECT_PURGE_MAX_ATTEMPTS).toBe(config.projectPurgeMaxAttempts)
   })
+
+  /**
+   * The CLI and the server compute the claim delay from the SAME two
+   * environment variables, so an install that tuned either one gets a CLI
+   * that waits exactly as long as its own server's worker would. Asserted on
+   * a TUNED environment as well as the default: two implementations that
+   * agree on the shipped defaults and disagree on everything else would look
+   * correct here with only the first case.
+   */
+  it('resolves the same claim delay config.ts derives, tuned or not', () => {
+    const base = {
+      LYRAFLOW_POSTGRES_URL: 'postgres://x',
+      LYRAFLOW_CLICKHOUSE_URL: 'http://x',
+      LYRAFLOW_CLICKHOUSE_USER: 'x',
+      LYRAFLOW_CLICKHOUSE_PASSWORD: 'x',
+      LYRAFLOW_CLICKHOUSE_DB: 'x',
+    }
+    const tuned = {
+      LYRAFLOW_PROJECT_CACHE_TTL_MS: '12000',
+      LYRAFLOW_FLUSH_INTERVAL_MS: '750',
+    }
+    for (const overrides of [{}, tuned]) {
+      const before = { ...process.env }
+      try {
+        for (const [k, v] of Object.entries(tuned)) delete process.env[k]
+        Object.assign(process.env, overrides)
+        expect(resolveClaimDelayMs()).toBe(
+          loadConfig({ ...base, ...overrides }).projectPurgeClaimDelayMs,
+        )
+      } finally {
+        process.env = before
+      }
+    }
+  })
 })
 
 describe('runProjects', () => {
@@ -202,7 +242,12 @@ describe('runProjects', () => {
   it('deletes a project when the typed slug matches', async () => {
     const project = await createProject(pg, 'Acme')
     const ctx = fakeCtx({ answers: ['acme'], stdinIsTty: true })
-    expect(await runProjects(['delete', 'acme'], ctx)).toBe(0)
+    // `claimDelayMs: 0` wherever this file drives a purge: the wait itself is
+    // asserted end to end, against a live app's warm `ProjectCache`, in
+    // `projects-cache-horizon.test.ts`. Every delete here is about consent,
+    // exit codes or which request gets claimed, none of which the wait
+    // changes — and none of which is worth a real minute of sleeping.
+    expect(await runProjects(['delete', 'acme'], ctx, { claimDelayMs: 0 })).toBe(0)
     expect((await pg.query('SELECT id FROM projects WHERE id = $1', [project.id])).rowCount).toBe(0)
   })
 
@@ -236,7 +281,7 @@ describe('runProjects', () => {
   it('--yes skips the prompt even at a terminal', async () => {
     const project = await createProject(pg, 'Acme')
     const ctx = fakeCtx({ stdinIsTty: true, answers: [] })
-    expect(await runProjects(['delete', 'acme', '--yes'], ctx)).toBe(0)
+    expect(await runProjects(['delete', 'acme', '--yes'], ctx, { claimDelayMs: 0 })).toBe(0)
     expect((await pg.query('SELECT id FROM projects WHERE id = $1', [project.id])).rowCount).toBe(0)
   })
 
@@ -304,7 +349,7 @@ describe('runProjects', () => {
 
     const target = await createProject(pg, 'Target')
     const ctx = fakeCtx({ stdinIsTty: true, answers: [target.slug] })
-    expect(await runProjects(['delete', target.slug], ctx)).toBe(0)
+    expect(await runProjects(['delete', target.slug], ctx, { claimDelayMs: 0 })).toBe(0)
 
     // target is fully gone.
     expect((await pg.query('SELECT id FROM projects WHERE id = $1', [target.id])).rowCount).toBe(0)
@@ -420,6 +465,7 @@ describe('runProjects — injected deps (the claim race, the retry, and the stor
     const code = await runProjects(['delete', 'acme'], ctx, {
       purge: purge as unknown as typeof purgeProject,
       makeStore,
+      claimDelayMs: 0,
     })
 
     expect(code).toBe(1)
@@ -442,6 +488,7 @@ describe('runProjects — injected deps (the claim race, the retry, and the stor
     const code = await runProjects(['delete', 'acme'], ctx, {
       purge: purge as unknown as typeof purgeProject,
       makeStore,
+      claimDelayMs: 0,
     })
 
     expect(code).toBe(1)
@@ -472,6 +519,7 @@ describe('runProjects — injected deps (the claim race, the retry, and the stor
     const code = await runProjects(['delete', 'acme'], ctx, {
       purge: purge as unknown as typeof purgeProject,
       makeStore,
+      claimDelayMs: 0,
     })
 
     expect(code).toBe(0)

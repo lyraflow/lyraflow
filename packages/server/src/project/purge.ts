@@ -103,8 +103,17 @@ async function countRows(ch: ClickHouseClient, table: string, projectId: number)
  * and `device_index_mv` / `event_schema_str_mv` / `event_schema_num_mv` then
  * repopulate from it. A non-zero count returns `deleted: false` with the
  * Postgres row intact, which leaves the request claimable and the next pass
- * redoes the teardown. Ingest is already refused by then, so the reappearing
- * set is bounded and the second pass converges.
+ * redoes the teardown.
+ *
+ * THAT SECOND PASS CONVERGES ONLY BECAUSE INGEST IS ALREADY REFUSED, AND
+ * INGEST IS ONLY REFUSED BECAUSE OF THE CLAIM DELAY. Nothing in this
+ * function establishes it: the refusal is read from `ProjectCache`, an
+ * in-process map with a TTL, and no purge may claim a request until that
+ * horizon has passed (`purgeClaimDelayMs`, config.ts, enforced in
+ * `ProjectDeletionStore`'s claim SQL). Remove the delay and this step
+ * degrades from a guarantee into a count of a set that is still growing —
+ * the teardown races live ingest, and a delete that "converges" has simply
+ * lost the race quietly.
  *
  * Idempotent by construction: every step is predicated on `project_id`,
  * dropping an already-dropped partition is a no-op, and a crash mid-purge is
