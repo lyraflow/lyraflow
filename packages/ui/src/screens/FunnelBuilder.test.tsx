@@ -20,6 +20,7 @@ const PROJECTS = [
     retention_months: 24,
     monthly_event_quota: null,
     disabled_at: null,
+    deleting_at: null,
   },
 ]
 
@@ -677,6 +678,7 @@ const PROJECTS_TWO = [
     retention_months: 24,
     monthly_event_quota: null,
     disabled_at: null,
+    deleting_at: null,
   },
 ]
 

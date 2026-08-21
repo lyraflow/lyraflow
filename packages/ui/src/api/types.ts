@@ -74,6 +74,15 @@ export interface Project {
    * separate, larger thing.
    */
   disabled_at: string | null
+  /**
+   * When this project's deletion was requested, or `null` before one ever
+   * is. NOT `disabled_at`'s sibling in meaning: archived is reversible and
+   * every read still works, while a deleting project is neither -- its
+   * event and person data is torn down in both databases, there is no
+   * restore, and `deleting_at` is stamped once and never cleared (migration
+   * 019), so it stays set even if the teardown itself fails partway.
+   */
+  deleting_at: string | null
 }
 
 /** `PATCH /v1/projects/:id`. Both fields are optional independently: absent
@@ -98,6 +107,21 @@ export interface ProjectUpdate {
 export interface CreatedProject extends Project {
   write_key: string
   server_key: string
+}
+
+/**
+ * `GET /v1/project-deletions/:id` -- `:id` names the deletion request
+ * (`deleteProject`'s own response `id`), not the project. `completed_at`
+ * and `error` are both a CACHE of what the last poll saw, same discipline
+ * as `Funnel`'s `last_evaluated_at`: `completed_at === null` while pending
+ * or in progress, and `error` is set for a `failed` status, or for a
+ * `pending` retry that has already failed once and will try again.
+ */
+export interface ProjectDeletion {
+  status: 'pending' | 'in_progress' | 'completed' | 'failed'
+  requested_at: string
+  completed_at: string | null
+  error?: string | null
 }
 
 /**

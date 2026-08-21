@@ -5,6 +5,7 @@ import { render, screen } from '@testing-library/react'
 // namespace, which has no `.click` -- `vitest run` doesn't type-check, so it
 // passed while `pnpm typecheck` failed. The named export is the same object.
 import { userEvent } from '@testing-library/user-event'
+import type { ReactNode } from 'react'
 import { MemoryRouter } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import type { Project } from '../api/types.js'
@@ -20,6 +21,7 @@ const PROJECTS = [
     retention_months: 24,
     monthly_event_quota: null,
     disabled_at: null,
+    deleting_at: null,
   },
   {
     id: 2,
@@ -29,6 +31,7 @@ const PROJECTS = [
     retention_months: 24,
     monthly_event_quota: null,
     disabled_at: null,
+    deleting_at: null,
   },
 ]
 
@@ -219,6 +222,7 @@ describe('Shell — archived projects in the switcher', () => {
     retention_months: 13,
     monthly_event_quota: null,
     disabled_at: null,
+    deleting_at: null,
     ...over,
   })
 
@@ -257,5 +261,49 @@ describe('Shell — the account menu', () => {
     renderShell()
     await userEvent.click(screen.getByRole('button', { name: /admin@localhost/ }))
     expect(await screen.findByRole('menuitem', { name: 'Sign out' })).toBeInTheDocument()
+  })
+})
+
+describe('Shell — deleting projects in the switcher', () => {
+  const NOW = '2026-08-21T09:00:00.000Z'
+  const acme: Project = {
+    id: 1,
+    name: 'Acme',
+    slug: 'acme',
+    created_at: '',
+    retention_months: 24,
+    monthly_event_quota: null,
+    disabled_at: null,
+    deleting_at: null,
+  }
+  const other: Project = { ...acme, id: 2, name: 'Other', slug: 'other' }
+
+  /** A `render` wrapper, not a self-rendering helper -- this test needs
+   * `{ wrapper: withProjects([...]) }`, the shape `render`'s own option
+   * expects, rather than a function that renders on its own. */
+  function withProjects(projects: Project[]) {
+    return function Wrapper({ children }: { children: ReactNode }) {
+      return (
+        <MemoryRouter initialEntries={['/feed']}>
+          <ProjectProvider projects={projects} initialId={projects[0]?.id ?? null}>
+            {children}
+          </ProjectProvider>
+        </MemoryRouter>
+      )
+    }
+  }
+
+  it('omits a deleting project from the switcher', async () => {
+    render(<Shell email="a@example.com" onLogout={() => {}} />, {
+      wrapper: withProjects([acme, { ...other, deleting_at: NOW }]),
+    })
+    expect(screen.getByRole('button', { name: /Acme/ })).toBeInTheDocument()
+    // The trigger alone never names a non-active project either way, so the
+    // filter can only be pinned by opening the list: Radix unmounts
+    // `SelectContent` entirely while closed, and "Other" is absent from
+    // the closed trigger regardless of whether this filter runs at all.
+    await userEvent.click(screen.getByRole('button', { name: /Acme/ }))
+    expect(screen.getByRole('option', { name: /Acme/ })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: /Other/ })).not.toBeInTheDocument()
   })
 })

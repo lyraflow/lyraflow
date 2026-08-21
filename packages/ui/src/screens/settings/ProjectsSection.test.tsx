@@ -1,8 +1,9 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import { userEvent } from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import type { ReactNode } from 'react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '../../api/client.js'
-import type { Project } from '../../api/types.js'
+import type { Project, ProjectDeletion } from '../../api/types.js'
 import { ProjectProvider } from '../../app/ProjectContext.js'
 import { ProjectsSection } from './ProjectsSection.js'
 
@@ -15,6 +16,7 @@ function project(over: Partial<Project> = {}): Project {
     retention_months: 13,
     monthly_event_quota: null,
     disabled_at: null,
+    deleting_at: null,
     ...over,
   }
 }
@@ -163,5 +165,138 @@ describe('ProjectsSection — archive', () => {
     expect(screen.getByLabelText('New name for Demo Data')).toBeInTheDocument()
     expect(within(row('Marketing')).getByRole('button', { name: 'Rename' })).toBeInTheDocument()
     expect(screen.queryByLabelText('New name for Marketing')).not.toBeInTheDocument()
+  })
+})
+
+describe('ProjectsSection — delete', () => {
+  const NOW = '2026-08-21T09:00:00.000Z'
+  // `name` deliberately differs from `slug` -- the row renders both, and a
+  // fixture where they're identical makes every text query ambiguous
+  // (`getByText('acme')` would match the name span AND the slug span).
+  const acme = project({ id: 1, name: 'Acme Corp', slug: 'acme' })
+  const other = project({ id: 2, name: 'Other Co', slug: 'other' })
+
+  /** A `render` wrapper -- this describe block's tests need
+   * `{ wrapper: withProjects([...]) }`, not a helper that renders itself. */
+  function withProjects(projects: Project[]) {
+    return function Wrapper({ children }: { children: ReactNode }) {
+      return (
+        <ProjectProvider projects={projects} initialId={projects[0]?.id ?? null}>
+          {children}
+        </ProjectProvider>
+      )
+    }
+  }
+
+  let client: ApiClient
+  let user: ReturnType<typeof userEvent.setup>
+
+  beforeEach(() => {
+    // `shouldAdvanceTime` lets `user.click`/`user.type` (both driven by real
+    // promises under the hood) resolve normally while `vi.advanceTimersByTimeAsync`
+    // still drives the poll effect's `setInterval` -- the same technique
+    // `usePolling.test.ts` and `Feed.test.tsx` already use for a polled screen.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    user = userEvent.setup({ delay: null })
+    client = {
+      deleteProject: vi.fn(async () => ({ id: 1, project_id: acme.id, status: 'pending' })),
+      projectDeletion: vi.fn(
+        async (): Promise<ProjectDeletion> => ({
+          status: 'in_progress',
+          requested_at: NOW,
+          completed_at: null,
+        }),
+      ),
+    } as unknown as ApiClient
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  /** Opens the row's delete confirmation, types the slug exactly, and
+   * confirms -- the flow every polling test starts from. */
+  async function confirmDelete(slug: string) {
+    // Scoped to the row: more than one project on screen means more than
+    // one plain "Delete" button, and only the row's own must be clicked.
+    await user.click(within(row(slug)).getByRole('button', { name: 'Delete' }))
+    await user.type(screen.getByLabelText(new RegExp(`Type ${slug} to confirm`)), slug)
+    await user.click(screen.getByRole('button', { name: new RegExp(`Delete ${slug} permanently`) }))
+  }
+
+  it('keeps the delete button disabled until the slug is typed exactly', async () => {
+    render(<ProjectsSection client={client} />, { wrapper: withProjects([acme]) })
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+    const confirm = screen.getByRole('button', { name: /Delete acme permanently/ })
+    expect(confirm).toBeDisabled()
+    await user.type(screen.getByLabelText(/Type acme to confirm/), 'acm')
+    expect(confirm).toBeDisabled()
+    await user.type(screen.getByLabelText(/Type acme to confirm/), 'e')
+    expect(confirm).toBeEnabled()
+  })
+
+  it('says what delete destroys, at the moment of asking', async () => {
+    render(<ProjectsSection client={client} />, { wrapper: withProjects([acme]) })
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+    expect(screen.getByText(/cannot be undone/i)).toBeInTheDocument()
+  })
+
+  it('polls after a delete and removes the row when it completes', async () => {
+    client.deleteProject = vi.fn(async () => ({ id: 7, project_id: acme.id, status: 'pending' }))
+    client.projectDeletion = vi
+      .fn()
+      .mockResolvedValueOnce({ status: 'in_progress', requested_at: NOW, completed_at: null })
+      .mockResolvedValueOnce({ status: 'completed', requested_at: NOW, completed_at: NOW })
+    render(<ProjectsSection client={client} />, { wrapper: withProjects([acme, other]) })
+    await confirmDelete('acme')
+    expect(await screen.findByText('deleting')).toBeInTheDocument()
+    await vi.advanceTimersByTimeAsync(6000)
+    // The removal lands via `removeProject`, triggered from inside the poll
+    // effect's own `setInterval` callback rather than an RTL-tracked event --
+    // `waitFor` is what the rest of this codebase reaches for after a fake-
+    // timer advance for exactly that reason (see `Feed.test.tsx`).
+    await waitFor(() => expect(screen.queryByText('acme')).not.toBeInTheDocument())
+    expect(screen.getByText('other')).toBeInTheDocument()
+  })
+
+  it('shows the error and keeps the row when a deletion fails', async () => {
+    client.deleteProject = vi.fn(async () => ({ id: 7, project_id: acme.id, status: 'pending' }))
+    client.projectDeletion = vi.fn(async () => ({
+      status: 'failed' as const,
+      requested_at: NOW,
+      completed_at: null,
+      error: 'ClickHouse unreachable',
+    }))
+    render(<ProjectsSection client={client} />, { wrapper: withProjects([acme]) })
+    await confirmDelete('acme')
+    await vi.advanceTimersByTimeAsync(3500)
+    expect(await screen.findByText(/ClickHouse unreachable/)).toBeInTheDocument()
+    expect(screen.getByText('acme')).toBeInTheDocument()
+  })
+
+  it('stops polling when unmounted', async () => {
+    client.deleteProject = vi.fn(async () => ({ id: 7, project_id: acme.id, status: 'pending' }))
+    client.projectDeletion = vi.fn(async () => ({
+      status: 'in_progress' as const,
+      requested_at: NOW,
+      completed_at: null,
+    }))
+    const view = render(<ProjectsSection client={client} />, { wrapper: withProjects([acme]) })
+    await confirmDelete('acme')
+    await vi.advanceTimersByTimeAsync(3500)
+    const callsBefore = (client.projectDeletion as ReturnType<typeof vi.fn>).mock.calls.length
+    view.unmount()
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect((client.projectDeletion as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(
+      callsBefore,
+    )
+  })
+
+  it('renders a project that was already deleting as deleting, with its controls disabled', async () => {
+    render(<ProjectsSection client={client} />, {
+      wrapper: withProjects([{ ...acme, deleting_at: NOW }]),
+    })
+    expect(screen.getByText('deleting')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Rename' })).toBeDisabled()
   })
 })

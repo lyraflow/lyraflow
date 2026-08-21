@@ -94,12 +94,20 @@ function byArchivedLast(a: Project, b: Project): number {
 function ProjectSwitcher() {
   const { projects, activeId, setActiveId } = useProject()
   const active = projects.find((p) => p.id === activeId)
+  // A deleting project is omitted outright, unlike an archived one -- there
+  // is no restoring it, and switching to it would scope every screen to a
+  // project mid-teardown. `active` above is still looked up against the
+  // FULL `projects` list, not this filtered one: the active project itself
+  // becoming the deleting one is a real case (deleting the project you are
+  // looking at), and the trigger must keep naming it rather than reading
+  // `undefined`.
+  const visible = projects.filter((p) => p.deleting_at === null)
   // `toSorted` would be cleaner and is ES2023; this package targets a
   // browser baseline that does not have it everywhere yet, so the copy is
   // explicit. Sorting a copy matters either way: `projects` is context
   // state and sorting it in place would mutate what every other consumer
   // reads.
-  const ordered = [...projects].sort(byArchivedLast)
+  const ordered = [...visible].sort(byArchivedLast)
 
   return (
     <Select
@@ -165,7 +173,7 @@ function AccountMenu(props: { email: string | null; onLogout(): void }) {
   )
 }
 
-export function Shell(props: { email: string | null; onLogout(): void; children: ReactNode }) {
+export function Shell(props: { email: string | null; onLogout(): void; children?: ReactNode }) {
   // `Router.tsx` answers `/` with the SAME element as `/feed` (a bare hard
   // refresh at the root has to land somewhere), but `NavLink`'s own
   // `isActive` match is computed from `to` against the current location, so

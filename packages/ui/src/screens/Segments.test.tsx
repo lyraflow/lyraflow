@@ -15,6 +15,7 @@ const PROJECTS = [
     retention_months: 24,
     monthly_event_quota: null,
     disabled_at: null,
+    deleting_at: null,
   },
 ]
 
@@ -168,6 +169,7 @@ describe('Segments list — active project', () => {
         retention_months: 24,
         monthly_event_quota: null,
         disabled_at: null,
+        deleting_at: null,
       },
     ]
     const view = render(

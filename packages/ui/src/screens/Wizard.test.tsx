@@ -16,6 +16,7 @@ const CREATED = {
   retention_months: 24,
   monthly_event_quota: null,
   disabled_at: null,
+  deleting_at: null,
   write_key: 'wk_new',
   server_key: 'sk_new',
 }
@@ -40,6 +41,7 @@ function fakeClient(over: Record<string, unknown> = {}) {
         retention_months: 24,
         monthly_event_quota: null,
         disabled_at: null,
+        deleting_at: null,
       },
     ]),
     events: vi.fn(async () => ({ events: [], next_cursor: null })),

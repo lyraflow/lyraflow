@@ -9,6 +9,7 @@ import type {
   FunnelStep,
   PreviewOptions,
   Project,
+  ProjectDeletion,
   ProjectIdentity,
   ProjectLimits,
   ProjectPatch,
@@ -74,6 +75,19 @@ export interface ApiClient {
    * project that is not the active one.
    */
   updateProject(id: number, patch: ProjectUpdate): Promise<Project>
+  /**
+   * Destroys a project and everything it holds, in both databases. `slug`
+   * travels as the confirmation the server re-checks -- the UI having
+   * already matched it is not the guarantee, the server's own check is.
+   * 202: the teardown runs asynchronously, and `id` here is the DELETION
+   * REQUEST's id (`projectDeletion`'s own param), not the project's.
+   */
+  deleteProject(
+    id: number,
+    slug: string,
+  ): Promise<{ id: number; project_id: number; status: string }>
+  /** Polls one deletion request by the id `deleteProject` returned. */
+  projectDeletion(id: number): Promise<ProjectDeletion>
   /**
    * The admin account's own two mutations. Both take the CURRENT password:
    * a session is enough to read this install and deliberately not enough to
@@ -286,6 +300,15 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
       call('/v1/projects', { method: 'POST', body: JSON.stringify({ name }) }),
     updateProject: (id: number, patch: ProjectUpdate) =>
       call<Project>(`/v1/projects/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+    deleteProject: (id: number, slug: string) =>
+      call<{ id: number; project_id: number; status: string }>(`/v1/projects/${id}`, {
+        method: 'DELETE',
+        // The slug travels in the body as the confirmation the server
+        // re-checks. The UI having already matched it is not the guarantee --
+        // the server's own check is.
+        body: JSON.stringify({ slug }),
+      }),
+    projectDeletion: (id: number) => call<ProjectDeletion>(`/v1/project-deletions/${id}`),
     changeEmail: (email, currentPassword) =>
       call<{ email: string }>('/v1/auth/email', {
         method: 'PATCH',

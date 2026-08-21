@@ -41,6 +41,7 @@ const PROJECTS = [
     retention_months: 24,
     monthly_event_quota: null,
     disabled_at: null,
+    deleting_at: null,
   },
 ]
 
@@ -58,6 +59,7 @@ function createdProject(over: Partial<Record<string, unknown>> = {}) {
     retention_months: 13,
     monthly_event_quota: null,
     disabled_at: null,
+    deleting_at: null,
     write_key: 'wk_new',
     server_key: 'sk_new',
     ...over,
@@ -148,6 +150,7 @@ describe('Settings — usage', () => {
         retention_months: 24,
         monthly_event_quota: 50_000_000,
         disabled_at: null,
+        deleting_at: null,
       },
     ]
     render(
@@ -222,6 +225,7 @@ describe('Settings — invented mutations', () => {
         retention_months: 24,
         monthly_event_quota: null,
         disabled_at: null,
+        deleting_at: null,
       },
     ]
     const view = render(
@@ -358,6 +362,7 @@ describe('Settings — limits invented mutations', () => {
         retention_months: 24,
         monthly_event_quota: 12345,
         disabled_at: null,
+        deleting_at: null,
       },
     ]
     render(
@@ -458,6 +463,7 @@ describe('Settings — usage stays in sync with a saved limit', () => {
         retention_months: 24,
         monthly_event_quota: 50_000_000,
         disabled_at: null,
+        deleting_at: null,
       },
     ]
     const client = fakeClient({
