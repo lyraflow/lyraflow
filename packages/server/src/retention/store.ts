@@ -128,16 +128,27 @@ export class RetentionStore {
     this.#onDrop = opts.onDrop ?? (() => {})
   }
 
-  /** Every project and the retention it is currently configured with. */
+  /**
+   * Every project and the retention it is currently configured with —
+   * INCLUDING one that is being deleted.
+   *
+   * Excluding `deleting_at IS NOT NULL` was tried and reverted. The saving
+   * was redundant work (dropping an already-dropped partition is a no-op),
+   * and the cost was the one thing this method must never do: hide data from
+   * the sweep. A project purge can end permanently `failed` — attempts
+   * exhausted, `deleting_at` stamped and never cleared — with whatever
+   * survived the partial teardown still in ClickHouse. Excluded from here,
+   * that data is never swept and never reported again, which is precisely
+   * the orphaned-project state (#39) the delete feature exists to make
+   * unreachable, reached down the failure path instead.
+   *
+   * The overlap it avoided is harmless in a way the omission is not: every
+   * step of both workers is predicated on the project, and both are
+   * idempotent.
+   */
   async listProjects(): Promise<RetentionTarget[]> {
     const result = await this.#pg.query<{ id: string; retention_months: number }>(
-      // Deleting projects are excluded: `purgeProject` is about to remove
-      // everything retention would trim, and two workers reaching for the
-      // same partitions is redundant work with no upside. Dropping an
-      // already-dropped partition is safe, so this is tidiness rather than
-      // correctness — but a project mid-purge reported in retention metrics
-      // reads as a live project.
-      'SELECT id, retention_months FROM projects WHERE deleting_at IS NULL ORDER BY id',
+      'SELECT id, retention_months FROM projects ORDER BY id',
     )
     return result.rows.map((row) => ({
       projectId: Number(row.id),

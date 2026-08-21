@@ -568,14 +568,22 @@ describe('RetentionStore', () => {
     expect(b?.retentionMonths).toBe(3)
   })
 
-  it('omits a project that is being deleted', async () => {
+  /**
+   * A project being deleted IS still swept, deliberately. A purge that ends
+   * permanently failed leaves `deleting_at` stamped forever with whatever
+   * survived the teardown still in ClickHouse; excluding those projects here
+   * would mean nothing ever sweeps or reports that data again. Redundant
+   * work between the two workers is the cheap side of this trade, and both
+   * are idempotent.
+   */
+  it('still sweeps a project that is being deleted', async () => {
     const live = await createProject(pg, 'Live')
     const dying = await createProject(pg, 'Dying')
     try {
       await pg.query('UPDATE projects SET deleting_at = now() WHERE id = $1', [dying.id])
       const targets = await store.listProjects()
       expect(targets.map((t) => t.projectId)).toContain(live.id)
-      expect(targets.map((t) => t.projectId)).not.toContain(dying.id)
+      expect(targets.map((t) => t.projectId)).toContain(dying.id)
     } finally {
       await pg.query('DELETE FROM projects WHERE id = ANY($1)', [[live.id, dying.id]])
     }

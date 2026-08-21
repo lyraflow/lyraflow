@@ -128,6 +128,7 @@ function spiedStore(pool: Pool) {
   const complete = vi.fn((id: number) => real.complete(id))
   const fail = vi.fn((id: number, error: string) => real.fail(id, error))
   const defer = vi.fn((id: number, note: string) => real.defer(id, note))
+  const reopen = vi.fn((id: number) => real.reopen(id))
   const claimById = vi.fn(
     (id: number, opts: { leaseMs: number; maxAttempts: number; claimDelayMs: number }) =>
       real.claimById(id, opts),
@@ -136,9 +137,11 @@ function spiedStore(pool: Pool) {
     complete,
     fail,
     defer,
+    reopen,
     claimById,
     makeStore: () => ({
       request: (id: number) => real.request(id),
+      reopen,
       claimById,
       complete,
       fail,
@@ -440,6 +443,63 @@ describe('runProjects', () => {
     expect(parsed).toMatchObject({ status: 'completed' })
     expect(parsed.completed_at).not.toBeNull()
     expect(typeof parsed.completed_at).toBe('string')
+  })
+
+  /**
+   * The command an operator reaches for after a delete has failed for good.
+   * Asserted through the real store on a request that is genuinely past
+   * `maxAttempts` — the state where nothing else in the product can move it.
+   */
+  it('resumes a permanently failed deletion, leaving its error on record', async () => {
+    const project = await createProject(pg, 'Acme')
+    const queueCtx = fakeCtx({ stdinIsTty: true })
+    await runProjects(['delete', 'acme', '--yes', '--queue'], queueCtx)
+    const found = await pg.query<{ id: string }>(
+      'SELECT id FROM project_deletions WHERE project_id = $1',
+      [project.id],
+    )
+    const id = Number(found.rows[0]?.id)
+    await pg.query(
+      "UPDATE project_deletions SET attempts = 5, claimed_at = now(), last_error = 'boom' WHERE id = $1",
+      [id],
+    )
+
+    const read = fakeCtx()
+    expect(await runProjects(['deletion', 'get', String(id), '--json'], read)).toBe(0)
+    expect(JSON.parse(read.lines()[0] as string)).toMatchObject({ status: 'failed' })
+
+    const retry = fakeCtx()
+    expect(await runProjects(['deletion', 'retry', String(id), '--json'], retry)).toBe(0)
+    expect(JSON.parse(retry.lines()[0] as string)).toMatchObject({
+      id,
+      project_id: project.id,
+      status: 'pending',
+      error: 'boom',
+    })
+
+    const again = fakeCtx()
+    expect(await runProjects(['deletion', 'get', String(id), '--json'], again)).toBe(0)
+    // Pending WITH the error, not failed: claimable again, and still saying
+    // why the last attempt did not finish.
+    expect(JSON.parse(again.lines()[0] as string)).toMatchObject({
+      status: 'pending',
+      error: 'boom',
+    })
+  })
+
+  it('reports a deletion id with nothing to retry without touching anything', async () => {
+    const ctx = fakeCtx()
+    expect(await runProjects(['deletion', 'retry', '2147483000'], ctx)).toBe(1)
+    expect(ctx.errLines().join('\n')).toContain('no deletion request')
+  })
+
+  it('rejects a deletion subcommand that is neither get nor retry', async () => {
+    const ctx = fakeCtx()
+    expect(await runProjects(['deletion', 'frobnicate', '1'], ctx)).toBe(2)
+    // json mode (a non-TTY stdout), so the message arrives inside an object
+    // rather than as bare prose.
+    const { error } = JSON.parse(ctx.errLines()[0] as string) as { error: string }
+    expect(error).toContain('expected "get" or "retry"')
   })
 
   it('rejects an unknown subcommand with usage on stderr and exit 2', async () => {

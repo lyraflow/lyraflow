@@ -389,12 +389,16 @@ from the CLI alike, because nothing else about the action is reversible.
 
 It runs as a background job rather than a single request: ClickHouse holds a
 project's events across partitions in three tables and two more that need
-asynchronous mutations, which takes minutes on a large project. Lyraflow stops
-accepting events for the project immediately, tears ClickHouse down, confirms
-nothing is left, and only then removes the project from Postgres — in that order,
-so a half-finished delete can be retried rather than leaving data nothing will
-ever sweep again. Settings shows the progress; `lyraflow projects deletion get <id>`
-reports the same thing.
+asynchronous mutations, which takes minutes on a large project. Confirming stops
+Lyraflow accepting events for the project, then the teardown waits for the last
+in-flight events to drain before it starts — about a minute on a default
+install, because each project's row is cached in memory for that long and a
+teardown that raced it would drop partitions those events were still landing in.
+Then it tears ClickHouse down, confirms nothing is left, and only then removes
+the project from Postgres — in that order, so a half-finished delete can be
+retried rather than leaving data nothing will ever sweep again. Settings shows
+the progress; `lyraflow projects deletion get <id>` reports the same thing, and
+`lyraflow projects deletion retry <id>` resumes one that gave up.
 
 **Volunteering the limit:** that is the whole UI. People and person profiles
 have **no** screens at all yet; reach them the way the rest of this document
@@ -520,11 +524,29 @@ One product across several domains: one project.
     lyraflow projects list
     lyraflow projects delete <slug> [--yes] [--queue]
     lyraflow projects deletion get <id>
+    lyraflow projects deletion retry <id>
 
 `delete` asks you to type the slug before it does anything. `--yes` skips the
 prompt for scripts; without it, a non-interactive stdin refuses rather than
 hanging. By default the CLI performs the teardown itself, so it works on an
 install whose server is stopped; `--queue` leaves it for the running server.
+
+It also pauses before starting, and says so. Lyraflow caches each project's
+row in memory for a minute, so for that long after you confirm, a running
+server can still be accepting events for the project out of a cache that has
+not heard about the deletion — and a teardown that started immediately would
+drop partitions those events are about to land in. The command waits that
+window out first. On a default install that is about a minute.
+
+**When a deletion fails.** A teardown that keeps failing stops being retried
+after five attempts and reports `failed`, with the reason in `deletion get`.
+The project is then in a half-finished state: it accepts no events, it is gone
+from every screen but Settings, and whatever survived the teardown is still in
+ClickHouse — where retention keeps sweeping it, so it is not invisible.
+`deletion retry <id>` puts the request back in the queue and the teardown
+starts again from the top, which is safe to repeat: every step of it is
+predicated on the project and dropping something already dropped does
+nothing.
 
 ### What is missing today
 

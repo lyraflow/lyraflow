@@ -1,6 +1,6 @@
 /**
- * `lyraflow projects <list|delete|deletion get>` — the instance-scoped
- * project management group.
+ * `lyraflow projects <list|delete|deletion get|deletion retry>` — the
+ * instance-scoped project management group.
  *
  * ALONE AMONG THE COMMAND GROUPS, THIS ONE TALKS TO THE DATABASES DIRECTLY
  * rather than through `CommandContext['client']`. The routes it mirrors are
@@ -141,7 +141,7 @@ export function resolveClaimDelayMs(): number {
 const PURGE_RETRY_PAUSE_MS = 2_000
 
 const USAGE =
-  'usage: lyraflow projects <list|delete|deletion> [args] [--yes] [--queue] [--json|--human]'
+  'usage: lyraflow projects <list|delete|deletion get <id>|deletion retry <id>> [args] [--yes] [--queue] [--json|--human]'
 
 const SPEC_BY_SUBCOMMAND: Record<string, ArgSpec> = {
   list: { booleans: ['json', 'human'] },
@@ -167,6 +167,7 @@ function isSubcommand(value: string): value is Subcommand {
  */
 interface DeletionStore {
   request: ProjectDeletionStore['request']
+  reopen: ProjectDeletionStore['reopen']
   claimById: ProjectDeletionStore['claimById']
   complete: ProjectDeletionStore['complete']
   fail: ProjectDeletionStore['fail']
@@ -481,6 +482,7 @@ async function runProjectsDelete(
  * computes (admin-routes.ts), read straight off `ProjectDeletionStore.get`
  * rather than through HTTP for the same reason every other command in this
  * group is direct-to-database. */
+
 async function runProjectsDeletionGet(
   idRaw: string,
   mode: Mode,
@@ -528,6 +530,60 @@ async function runProjectsDeletionGet(
     found.claimedAt !== null && Date.now() - found.claimedAt.getTime() < resolvePurgeLeaseMs()
   emitObject(
     { status: leased ? 'in_progress' : 'pending', requested_at, completed_at: null, error: null },
+    mode,
+    ctx.write,
+  )
+  return 0
+}
+
+/**
+ * `lyraflow projects deletion retry <id>` — the way back out of a
+ * permanently failed delete, and the only one short of hand-written SQL.
+ *
+ * A purge that exhausts its attempts is terminal in three directions at
+ * once: nothing claims the request any more, `projects delete` answers
+ * "already being deleted" rather than filing a fresh one, and `deleting_at`
+ * is never cleared, so ingest stays refused. Meanwhile whatever survived the
+ * partial teardown is still in ClickHouse. This zeroes the attempts and
+ * releases the lease, so the next worker tick — or the next
+ * `projects delete`-style in-process run — starts the teardown again from
+ * the top, which is safe because every step of it is idempotent.
+ *
+ * `last_error` is left alone on purpose (see `ProjectDeletionStore.reopen`):
+ * it is why the operator is here, and it is still the most recent thing that
+ * actually happened until something else does.
+ */
+async function runProjectsDeletionRetry(
+  idRaw: string,
+  mode: Mode,
+  ctx: AdminCommandContext,
+  makeStore: (pg: Pool) => DeletionStore,
+): Promise<number> {
+  const id = Number(idRaw)
+  if (!Number.isInteger(id) || id <= 0) {
+    return reportUsageError(new UsageError(`invalid deletion id: ${idRaw}`), mode, ctx)
+  }
+
+  const store = makeStore(ctx.pg)
+  const reopened = await store.reopen(id)
+  if (!reopened) {
+    // One message for both "no such row" and "already completed": a caller
+    // holding an id that names a finished deletion is asking to resume
+    // something that has nothing left to do, and a completed request is a
+    // tombstone rather than work.
+    ctx.writeErr(`no deletion request ${idRaw} to retry (unknown id, or it already completed)\n`)
+    return 1
+  }
+
+  emitObject(
+    {
+      id: reopened.id,
+      project_id: reopened.projectId,
+      slug: reopened.slug,
+      status: 'pending',
+      requested_at: reopened.requestedAt.toISOString(),
+      error: reopened.lastError,
+    },
     mode,
     ctx.write,
   )
@@ -624,16 +680,16 @@ export async function runProjects(
 
   // subcommand === 'deletion'
   const [sub2, id] = positionals
-  if (sub2 !== 'get') {
+  if (sub2 !== 'get' && sub2 !== 'retry') {
     return reportUsageError(
-      new UsageError(`unknown deletion subcommand — expected "get" (${USAGE})`),
+      new UsageError(`unknown deletion subcommand — expected "get" or "retry" (${USAGE})`),
       mode,
       parseCtx,
     )
   }
   if (id === undefined) {
     return reportUsageError(
-      new UsageError(`projects deletion get requires an id (${USAGE})`),
+      new UsageError(`projects deletion ${sub2} requires an id (${USAGE})`),
       mode,
       parseCtx,
     )
@@ -648,5 +704,7 @@ export async function runProjects(
     parseCtx,
   )
   if (code !== undefined) return code
-  return runProjectsDeletionGet(id, mode, ctx, makeStore)
+  return sub2 === 'retry'
+    ? runProjectsDeletionRetry(id, mode, ctx, makeStore)
+    : runProjectsDeletionGet(id, mode, ctx, makeStore)
 }

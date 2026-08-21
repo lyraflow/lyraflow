@@ -255,6 +255,55 @@ describe('ProjectDeletionStore', () => {
     })
   })
 
+  /**
+   * The dead end this exists to open. `claim()` refuses a request at
+   * `maxAttempts`, `request()` refuses to file a second one for a project
+   * already stamped `deleting_at`, and nothing clears that stamp — so
+   * without `reopen()` a five-times-failed purge is permanent, with whatever
+   * survived the teardown still in ClickHouse and ingest refused forever.
+   */
+  describe('reopen', () => {
+    it('makes an exhausted request claimable again on the next tick', async () => {
+      const project = await createProject(pg, 'Acme')
+      const { id } = (await store.request(project.id)) as { id: number }
+      await pg.query(
+        "UPDATE project_deletions SET attempts = 5, claimed_at = now(), last_error = 'boom' WHERE id = $1",
+        [id],
+      )
+      // The dead end, proven before it is opened.
+      expect(await store.claim({ leaseMs: 60_000, maxAttempts: 5, claimDelayMs: 0 })).toBeNull()
+
+      const reopened = await store.reopen(id)
+      expect(reopened).toMatchObject({ id, attempts: 0, claimedAt: null })
+      expect(await store.claim({ leaseMs: 60_000, maxAttempts: 5, claimDelayMs: 0 })).not.toBeNull()
+    })
+
+    /**
+     * Following `DeletionStore.reopen`'s precedent deliberately: the error is
+     * the only record of why the last attempt failed, it is what the status
+     * endpoint shows, and it is what the operator is acting on at the moment
+     * they run this. `complete()` clears it on success anyway.
+     */
+    it('leaves last_error in place', async () => {
+      const project = await createProject(pg, 'Acme')
+      const { id } = (await store.request(project.id)) as { id: number }
+      await store.fail(id, 'ClickHouse unreachable')
+      expect((await store.reopen(id))?.lastError).toBe('ClickHouse unreachable')
+    })
+
+    it('refuses a completed request, which is a tombstone rather than work', async () => {
+      const project = await createProject(pg, 'Acme')
+      const { id } = (await store.request(project.id)) as { id: number }
+      await store.complete(id)
+      expect(await store.reopen(id)).toBeNull()
+      expect((await store.get(id))?.completedAt).not.toBeNull()
+    })
+
+    it('answers null for an unknown id', async () => {
+      expect(await store.reopen(2_147_483_000)).toBeNull()
+    })
+  })
+
   it('truncates a pathological last_error', async () => {
     const project = await createProject(pg, 'Acme')
     const { id } = (await store.request(project.id)) as { id: number }

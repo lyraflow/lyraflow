@@ -250,6 +250,49 @@ export class ProjectDeletionStore {
   }
 
   /**
+   * THE WAY BACK INTO A HALF-PURGED PROJECT, and the only one there is.
+   *
+   * `DeletionStore.reopen` (privacy/deletion-store.ts) exists for exactly
+   * this class of dead end, and this is its project-shaped twin. Compose
+   * three things and a project can reach a state nothing else in this
+   * codebase can leave: `claim()` stops handing a request out past
+   * `maxAttempts`, `request()` answers `alreadyDeleting` so neither the route
+   * nor the CLI can file a second one, and `deleting_at` is stamped at
+   * request time and cleared by nothing. A purge that failed five times is
+   * therefore permanent — ingest refused forever, the status endpoint
+   * answering `failed` forever, and whatever survived the partial teardown
+   * still sitting in ClickHouse.
+   *
+   * `attempts = 0` and `claimed_at = NULL` together are what make the row
+   * claimable on the very next worker tick: zeroing attempts alone would
+   * leave it waiting out the remainder of a stale lease.
+   *
+   * `last_error` is deliberately LEFT in place, following that precedent
+   * exactly. It is the only record of why the previous attempt failed, the
+   * status endpoint surfaces it, and `complete()` clears it on success
+   * anyway — wiping it here would destroy the operator's diagnosis at the
+   * exact moment they are acting on it.
+   *
+   * `completed_at IS NULL` in the predicate: a finished deletion is a
+   * tombstone, not something to resume, and re-running a purge for a project
+   * id that has since been reissued is not a recovery, it is a second
+   * deletion.
+   *
+   * NOT project-scoped, for the same reason `get()` is not: by the time
+   * anyone needs this there may be no project row left to scope by.
+   */
+  async reopen(id: number): Promise<ProjectDeletionRequest | null> {
+    const r = await this.pool.query<Row>(
+      `UPDATE project_deletions
+          SET attempts = 0, claimed_at = NULL
+        WHERE id = $1 AND completed_at IS NULL
+        RETURNING *`,
+      [id],
+    )
+    return r.rows[0] ? toRequest(r.rows[0]) : null
+  }
+
+  /**
    * A TRANSIENT outcome, not a failure: the teardown ran and the verify step
    * found rows back again (`purgeProject` returning `deleted: false` — the
    * buffered-flush shape it documents). The teardown is idempotent, so the
