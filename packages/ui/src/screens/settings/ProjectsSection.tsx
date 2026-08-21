@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError } from '../../api/client.js'
 import type { ApiClient } from '../../api/client.js'
 import type { CreatedProject, Project } from '../../api/types.js'
@@ -29,9 +29,15 @@ function ProjectRow(props: {
   client: ApiClient
   onUpdated: (next: Project) => void
   onDeleted: (id: number) => void
-  onSessionStale?: () => void
+  /** Called when starting the delete itself 401s -- the admin's session
+   * expired mid-action. Matches the convention `Settings`'s own two fetches
+   * already use (`Settings.tsx`) and `SegmentDetail` follows for a mutation's
+   * 401: this goes to login, not to `onSessionStale`, which means something
+   * narrower (the project list emptied) and would otherwise misroute an
+   * ordinary expired-session case to the "server not responding" screen. */
+  onUnauthorized?: () => void
 }) {
-  const { project, client, onUpdated, onDeleted, onSessionStale } = props
+  const { project, client, onUpdated, onDeleted, onUnauthorized } = props
   const [renaming, setRenaming] = useState(false)
   const [draft, setDraft] = useState(project.name)
   const [busy, setBusy] = useState(false)
@@ -96,7 +102,7 @@ function ProjectRow(props: {
       onUpdated({ ...project, deleting_at: new Date().toISOString() })
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
-        onSessionStale?.()
+        onUnauthorized?.()
       } else if (err instanceof ApiError && err.status === 409) {
         setError(
           err.code === 'slug_mismatch'
@@ -364,11 +370,15 @@ export function ProjectsSection(props: {
   client: ApiClient
   /** Called when a completed deletion empties the project list -- see
    * `App.tsx`'s implementation for why the wizard-or-shell decision has to
-   * happen there rather than here. Threaded straight through to each row
-   * too, matching `onUnauthorized`'s own shape. */
+   * happen there rather than here. */
   onSessionStale?: () => void
+  /** Called on a 401 from any row's own delete request -- threaded through
+   * to each `ProjectRow`, matching `Settings`'s own two fetches. Kept
+   * distinct from `onSessionStale`: a 401 means the session expired and
+   * belongs on the login screen, not the "list emptied" re-fetch. */
+  onUnauthorized?: () => void
 }) {
-  const { client, onSessionStale } = props
+  const { client, onSessionStale, onUnauthorized } = props
   const { projects, addProject, updateProject, removeProject } = useProject()
 
   const [mode, setMode] = useState<Mode>('idle')
@@ -377,28 +387,37 @@ export function ProjectsSection(props: {
   const [createError, setCreateError] = useState<string | null>(null)
   const [createdProject, setCreatedProject] = useState<CreatedProject | null>(null)
 
+  // `handleDeleted` needs the CURRENT project list at the moment a deletion
+  // completes, not one captured when the delete started -- the only other
+  // project could itself have been deleted in the meantime. Reading it
+  // through a ref, updated here, rather than closing over `projects`
+  // directly: `projects` is `ProjectContext`'s own state array, and it gets
+  // a fresh reference on every `updateProject`/`addProject`/`removeProject`
+  // -- a rename, an archive, a restore, a create, or another row's deletion
+  // completing. `ProjectRow`'s poll effect depends on `onDeleted`'s
+  // identity, so if `handleDeleted` depended on `projects` directly, any of
+  // those unrelated changes would tear down and restart the `setInterval`
+  // for EVERY OTHER row currently mid-delete, resetting its 3-second clock.
+  // The ref lets this read the live list without `handleDeleted` itself
+  // changing identity when the list does.
+  const projectsRef = useRef(projects)
+  useEffect(() => {
+    projectsRef.current = projects
+  }, [projects])
+
   // A completed deletion that leaves other projects behind removes the row
   // as it always has. One that empties the list can't -- the shell above
   // has nothing left to show -- so it hands off to `onSessionStale` instead
-  // of `removeProject`, never both. `projects.length === 1` reads the
-  // CURRENT, authoritative list from context at the moment the poll lands,
-  // not a value captured when the delete started -- the only other project
-  // could itself have been deleted in the meantime.
-  //
-  // Memoized on `[projects, removeProject, onSessionStale]` rather than a
-  // fresh closure every render: `ProjectRow`'s own poll effect depends on
-  // this function's identity, and an unrelated re-render here (opening the
-  // "New project" form, another row saving a rename) must not reset an
-  // in-flight row's poll timer.
+  // of `removeProject`, never both.
   const handleDeleted = useCallback(
     (id: number) => {
-      if (projects.length === 1) {
+      if (projectsRef.current.length === 1) {
         onSessionStale?.()
       } else {
         removeProject(id)
       }
     },
-    [projects, removeProject, onSessionStale],
+    [removeProject, onSessionStale],
   )
 
   function openForm() {
@@ -465,7 +484,7 @@ export function ProjectsSection(props: {
               client={client}
               onUpdated={(next) => updateProject(next.id, next)}
               onDeleted={handleDeleted}
-              onSessionStale={onSessionStale}
+              onUnauthorized={onUnauthorized}
             />
           ))}
         </ul>

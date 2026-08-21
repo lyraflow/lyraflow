@@ -116,7 +116,11 @@ export function Settings(props: {
           if (activeId != null) updateProject(activeId, patch)
         }}
       />
-      <ProjectsSection client={client} onSessionStale={onSessionStale} />
+      <ProjectsSection
+        client={client}
+        onSessionStale={onSessionStale}
+        onUnauthorized={onUnauthorized}
+      />
     </div>
   )
 }

@@ -4,6 +4,7 @@ import { useState } from 'react'
 import type { ReactNode } from 'react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ApiError } from '../../api/client.js'
 import type { ApiClient } from '../../api/client.js'
 import type { Project, ProjectDeletion } from '../../api/types.js'
 import { ProjectProvider, useProject } from '../../app/ProjectContext.js'
@@ -378,5 +379,72 @@ describe('ProjectsSection — delete', () => {
     await vi.advanceTimersByTimeAsync(0)
 
     expect(screen.getByTestId('count').textContent).toBe('1')
+  })
+
+  // The 401 branch of `startDelete` is a DIFFERENT condition from a
+  // completed deletion emptying the list: the admin's own session expired,
+  // the same routine, recoverable case `Settings`'s own two fetches already
+  // report as `onUnauthorized`. Reporting it as `onSessionStale` instead
+  // would re-fetch the session, 401 again because it really is gone, and
+  // land on "server not responding" -- this pins it going to the login
+  // screen's own signal instead.
+  it('reports a 401 starting a delete as an expired session, not as the list emptying', async () => {
+    client.deleteProject = vi.fn(async () => {
+      throw new ApiError(401, 'no_session')
+    })
+    const onUnauthorized = vi.fn()
+    const onSessionStale = vi.fn()
+    render(
+      <ProjectsSection
+        client={client}
+        onUnauthorized={onUnauthorized}
+        onSessionStale={onSessionStale}
+      />,
+      { wrapper: withProjects([acme]) },
+    )
+    await confirmDelete('acme')
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalledTimes(1))
+    expect(onSessionStale).not.toHaveBeenCalled()
+  })
+
+  // Regression: `handleDeleted` used to depend directly on `projects`,
+  // which is `ProjectContext`'s own state array and gets a fresh reference
+  // on every `updateProject` call -- including a rename on a DIFFERENT row.
+  // `ProjectRow`'s poll effect depends on `onDeleted`'s identity, so that
+  // unrelated rename tore down and restarted the `setInterval` for a row
+  // that was mid-delete, resetting its 3-second clock. Pinned by starting
+  // a delete on `acme`, renaming `other` partway through the first poll
+  // interval, and checking the original tick still lands on schedule
+  // rather than being pushed out by a second interval.
+  it("does not reset another row's poll timer when an unrelated rename lands mid-delete", async () => {
+    client.deleteProject = vi.fn(async () => ({ id: 7, project_id: acme.id, status: 'pending' }))
+    client.projectDeletion = vi.fn(async () => ({
+      status: 'in_progress' as const,
+      requested_at: NOW,
+      completed_at: null,
+    }))
+    client.updateProject = vi.fn(async (id: number, patch: { name?: string }) => ({
+      ...other,
+      id,
+      ...(patch.name === undefined ? {} : { name: patch.name }),
+    }))
+    render(<ProjectsSection client={client} />, { wrapper: withProjects([acme, other]) })
+    await confirmDelete('acme')
+    expect(await screen.findByText('deleting')).toBeInTheDocument()
+
+    // Partway through the first 3s poll interval -- renaming `other` here
+    // must not be what decides whether `acme`'s next poll lands on time.
+    await vi.advanceTimersByTimeAsync(2000)
+    await user.click(within(row('Other Co')).getByRole('button', { name: 'Rename' }))
+    await user.clear(screen.getByLabelText('New name for Other Co'))
+    await user.type(screen.getByLabelText('New name for Other Co'), 'Renamed Co')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(client.updateProject).toHaveBeenCalledTimes(1))
+
+    // The remaining 1s of the ORIGINAL 3s window: if the poll effect had
+    // been torn down and restarted by the rename, this would not be enough
+    // time left for a fresh 3s interval to fire.
+    await vi.advanceTimersByTimeAsync(1000)
+    await waitFor(() => expect(client.projectDeletion).toHaveBeenCalledTimes(1))
   })
 })
