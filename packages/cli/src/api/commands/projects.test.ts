@@ -10,7 +10,9 @@ import {
   migrate,
 } from '@lyraflow/db'
 import { loadConfig } from '@lyraflow/server/dist/config.js'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { ProjectDeletionStore } from '@lyraflow/server/dist/project/deletion-store.js'
+import type { purgeProject } from '@lyraflow/server/dist/project/purge.js'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { AdminCommandContext } from './projects.js'
 import { PROJECT_PURGE_LEASE_MS, PROJECT_PURGE_MAX_ATTEMPTS, runProjects } from './projects.js'
 
@@ -107,6 +109,36 @@ function fakeCtx(
   }
 }
 
+/**
+ * Wraps a REAL `ProjectDeletionStore` (so `request`/`claimById`/`get` do
+ * real, correct database work) while making `complete`/`fail` observable —
+ * `runProjectsDelete`'s only two collaborators-by-side-effect that "the row
+ * is gone" cannot distinguish from "never called at all" (the row being
+ * gone, for a successful purge, is `purgeProject`'s own doing, not
+ * `complete()`'s). Used together with an injected `purge` to drive the
+ * claim-loses-the-race branch and both `deleted: false` outcomes directly.
+ */
+function spiedStore(pool: Pool) {
+  const real = new ProjectDeletionStore(pool)
+  const complete = vi.fn((id: number) => real.complete(id))
+  const fail = vi.fn((id: number, error: string) => real.fail(id, error))
+  const claimById = vi.fn((id: number, opts: { leaseMs: number; maxAttempts: number }) =>
+    real.claimById(id, opts),
+  )
+  return {
+    complete,
+    fail,
+    claimById,
+    makeStore: () => ({
+      request: (id: number) => real.request(id),
+      claimById,
+      complete,
+      fail,
+      get: (id: number) => real.get(id),
+    }),
+  }
+}
+
 beforeAll(async () => {
   await migrate({
     pg,
@@ -181,15 +213,24 @@ describe('runProjects', () => {
     expect(await runProjects(['delete', 'acme'], ctx)).toBe(1)
     const row = await pg.query('SELECT deleting_at FROM projects WHERE id = $1', [project.id])
     expect(row.rows[0].deleting_at).toBeNull()
-    expect((await pg.query('SELECT count(*) FROM project_deletions')).rows[0].count).toBe('0')
+    expect(
+      (await pg.query('SELECT count(*) FROM project_deletions WHERE project_id = $1', [project.id]))
+        .rows[0].count,
+    ).toBe('0')
   })
 
   it('refuses to run unattended without --yes and writes no row', async () => {
-    await createProject(pg, 'Acme')
-    const ctx = fakeCtx({ stdinIsTty: false })
+    const project = await createProject(pg, 'Acme')
+    // stdoutIsTty: true is deliberate — a `!ctx.stdoutIsTty` implementation
+    // (checking the wrong stream) must fail this exact assertion instead of
+    // accidentally passing it; the guard this pins is on STDIN alone.
+    const ctx = fakeCtx({ stdinIsTty: false, stdoutIsTty: true })
     expect(await runProjects(['delete', 'acme'], ctx)).toBe(2)
     expect(ctx.errLines().join('\n')).toContain('--yes')
-    expect((await pg.query('SELECT count(*) FROM project_deletions')).rows[0].count).toBe('0')
+    expect(
+      (await pg.query('SELECT count(*) FROM project_deletions WHERE project_id = $1', [project.id]))
+        .rows[0].count,
+    ).toBe('0')
   })
 
   it('--yes skips the prompt even at a terminal', async () => {
@@ -225,7 +266,10 @@ describe('runProjects', () => {
     ])
     const ctx = fakeCtx({ stdinIsTty: true })
     expect(await runProjects(['delete', 'acme', '--yes'], ctx)).toBe(1)
-    expect((await pg.query('SELECT count(*) FROM project_deletions')).rows[0].count).toBe('1')
+    expect(
+      (await pg.query('SELECT count(*) FROM project_deletions WHERE project_id = $1', [project.id]))
+        .rows[0].count,
+    ).toBe('1')
   })
 
   it('reads a deletion status by id', async () => {
@@ -241,10 +285,188 @@ describe('runProjects', () => {
     expect(project.slug).toBe('acme')
   })
 
+  // THE REGRESSION FOR THE CRITICAL: a `store.claim()` call (the worker's
+  // own "whatever is oldest, queue-wide" query) here would silently
+  // complete OLDER's request while purging TARGET's project — marking a
+  // different project's deletion done while its data survives intact. This
+  // is real, end to end: no stubs, real Postgres, real ClickHouse.
+  it('claims only the request it filed, never an older pending request from another project', async () => {
+    const older = await createProject(pg, 'Older')
+    const queueCtx = fakeCtx({ stdinIsTty: true })
+    expect(await runProjects(['delete', older.slug, '--yes', '--queue'], queueCtx)).toBe(0)
+    // Backdate it so it is provably the OLDEST claimable row in the whole
+    // table — exactly the row `store.claim()` (the worker's query) would
+    // prefer over anything filed after it.
+    await pg.query(
+      "UPDATE project_deletions SET requested_at = now() - interval '1 hour' WHERE project_id = $1",
+      [older.id],
+    )
+
+    const target = await createProject(pg, 'Target')
+    const ctx = fakeCtx({ stdinIsTty: true, answers: [target.slug] })
+    expect(await runProjects(['delete', target.slug], ctx)).toBe(0)
+
+    // target is fully gone.
+    expect((await pg.query('SELECT id FROM projects WHERE id = $1', [target.id])).rowCount).toBe(0)
+
+    // older's project row survives, and its own request was never touched —
+    // never claimed, never completed, never failed, attempts still zero.
+    expect((await pg.query('SELECT id FROM projects WHERE id = $1', [older.id])).rowCount).toBe(1)
+    const olderReq = await pg.query(
+      'SELECT completed_at, claimed_at, attempts FROM project_deletions WHERE project_id = $1',
+      [older.id],
+    )
+    expect(olderReq.rows[0]).toMatchObject({ completed_at: null, claimed_at: null, attempts: 0 })
+  })
+
+  it('exits 1 and deletes nothing when the confirmation prompt itself rejects', async () => {
+    const project = await createProject(pg, 'Acme')
+    const ctx = fakeCtx({ stdinIsTty: true })
+    ctx.prompt = () => Promise.reject(new Error('stream exploded'))
+    expect(await runProjects(['delete', 'acme'], ctx)).toBe(1)
+    expect(ctx.errLines().join('\n')).toContain('the confirmation prompt failed')
+    const row = await pg.query('SELECT deleting_at FROM projects WHERE id = $1', [project.id])
+    expect(row.rows[0].deleting_at).toBeNull()
+    expect(
+      (await pg.query('SELECT count(*) FROM project_deletions WHERE project_id = $1', [project.id]))
+        .rows[0].count,
+    ).toBe('0')
+  })
+
+  it('reports pending with the last error after a failed attempt', async () => {
+    const ctx = fakeCtx({ stdinIsTty: true })
+    await createProject(pg, 'Acme')
+    await runProjects(['delete', 'acme', '--yes', '--queue'], ctx)
+    const id = Number(JSON.parse(ctx.lines()[0] as string).id)
+    await pg.query('UPDATE project_deletions SET last_error = $2, attempts = 1 WHERE id = $1', [
+      id,
+      'boom',
+    ])
+    const read = fakeCtx()
+    expect(await runProjects(['deletion', 'get', String(id), '--json'], read)).toBe(0)
+    expect(JSON.parse(read.lines()[0] as string)).toMatchObject({
+      status: 'pending',
+      error: 'boom',
+    })
+  })
+
+  it('reports failed once attempts are exhausted', async () => {
+    const ctx = fakeCtx({ stdinIsTty: true })
+    await createProject(pg, 'Acme')
+    await runProjects(['delete', 'acme', '--yes', '--queue'], ctx)
+    const id = Number(JSON.parse(ctx.lines()[0] as string).id)
+    await pg.query(
+      'UPDATE project_deletions SET attempts = $2, last_error = $3, claimed_at = NULL WHERE id = $1',
+      [id, PROJECT_PURGE_MAX_ATTEMPTS, 'gave up'],
+    )
+    const read = fakeCtx()
+    expect(await runProjects(['deletion', 'get', String(id), '--json'], read)).toBe(0)
+    expect(JSON.parse(read.lines()[0] as string)).toMatchObject({
+      status: 'failed',
+      error: 'gave up',
+    })
+  })
+
+  it('reports in_progress while the claim lease is live', async () => {
+    const ctx = fakeCtx({ stdinIsTty: true })
+    await createProject(pg, 'Acme')
+    await runProjects(['delete', 'acme', '--yes', '--queue'], ctx)
+    const id = Number(JSON.parse(ctx.lines()[0] as string).id)
+    await pg.query('UPDATE project_deletions SET claimed_at = now(), attempts = 1 WHERE id = $1', [
+      id,
+    ])
+    const read = fakeCtx()
+    expect(await runProjects(['deletion', 'get', String(id), '--json'], read)).toBe(0)
+    expect(JSON.parse(read.lines()[0] as string)).toMatchObject({ status: 'in_progress' })
+  })
+
   it('rejects an unknown subcommand with usage on stderr and exit 2', async () => {
     const ctx = fakeCtx()
     expect(await runProjects(['frobnicate'], ctx)).toBe(2)
     expect(ctx.errLines().join('\n')).toContain('usage: lyraflow projects')
     expect(ctx.lines()).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The seams `ProjectsDeps` exists for: `claim`, the `!request` branch, the
+// retry pause, the `deleted: false` -> `fail` -> exit 1 path, and `complete`
+// -- collectively exercised by nothing beyond "the row is gone" before this,
+// which is exactly the shape that let the Critical (completing a request
+// this process never filed) ship with twelve green tests.
+// ---------------------------------------------------------------------------
+describe('runProjects — injected deps (the claim race, the retry, and the store writes)', () => {
+  it('leaves the request queued, untouched, when claimById cannot claim it', async () => {
+    const project = await createProject(pg, 'Acme')
+    const { claimById, makeStore } = spiedStore(pg)
+    claimById.mockImplementation(async () => null)
+    const purge = vi.fn(async () => ({ deleted: true, remaining: {} }))
+    const ctx = fakeCtx({ stdinIsTty: true, answers: ['acme'] })
+
+    const code = await runProjects(['delete', 'acme'], ctx, {
+      purge: purge as unknown as typeof purgeProject,
+      makeStore,
+    })
+
+    expect(code).toBe(1)
+    expect(claimById).toHaveBeenCalledTimes(1)
+    expect(purge).not.toHaveBeenCalled()
+    expect(ctx.errLines().join('\n')).toContain('could not be claimed here')
+    const req = await pg.query(
+      'SELECT completed_at, claimed_at, attempts FROM project_deletions WHERE project_id = $1',
+      [project.id],
+    )
+    expect(req.rows[0]).toMatchObject({ completed_at: null, claimed_at: null, attempts: 0 })
+  })
+
+  it('retries once, then fails the request and leaves it pending, when purge reports rows reappeared twice', async () => {
+    const project = await createProject(pg, 'Acme')
+    const { fail, complete, makeStore } = spiedStore(pg)
+    const purge = vi.fn(async () => ({ deleted: false, remaining: { events: 3 } }))
+    const ctx = fakeCtx({ stdinIsTty: true, answers: ['acme'] })
+
+    const code = await runProjects(['delete', 'acme'], ctx, {
+      purge: purge as unknown as typeof purgeProject,
+      makeStore,
+    })
+
+    expect(code).toBe(1)
+    expect(purge).toHaveBeenCalledTimes(2)
+    expect(fail).toHaveBeenCalledTimes(1)
+    expect(complete).not.toHaveBeenCalled()
+    expect(ctx.errLines().join('\n')).toContain('rows reappeared')
+    const req = await pg.query(
+      'SELECT completed_at, last_error FROM project_deletions WHERE project_id = $1',
+      [project.id],
+    )
+    expect(req.rows[0].completed_at).toBeNull()
+    expect(req.rows[0].last_error).toContain('rows reappeared during purge')
+  })
+
+  it('recovers on retry: completes the request when the second purge attempt succeeds', async () => {
+    const project = await createProject(pg, 'Acme')
+    const { fail, complete, makeStore } = spiedStore(pg)
+    let calls = 0
+    const purge = vi.fn(async () => {
+      calls++
+      return calls === 1
+        ? { deleted: false, remaining: { events: 1 } }
+        : { deleted: true, remaining: {} }
+    })
+    const ctx = fakeCtx({ stdinIsTty: true, answers: ['acme'] })
+
+    const code = await runProjects(['delete', 'acme'], ctx, {
+      purge: purge as unknown as typeof purgeProject,
+      makeStore,
+    })
+
+    expect(code).toBe(0)
+    expect(purge).toHaveBeenCalledTimes(2)
+    expect(complete).toHaveBeenCalledTimes(1)
+    expect(fail).not.toHaveBeenCalled()
+    const req = await pg.query('SELECT completed_at FROM project_deletions WHERE project_id = $1', [
+      project.id,
+    ])
+    expect(req.rows[0].completed_at).not.toBeNull()
   })
 })

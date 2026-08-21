@@ -31,7 +31,12 @@ import {
 } from '@lyraflow/server/dist/project/purge.js'
 import { type ArgSpec, UsageError, hasRawFlag, parseCommandArgs } from '../args.js'
 import { type Column, type Mode, emitObject, emitRecords, resolveMode } from '../output.js'
-import { checkNoPositionals, reportParseFailure, reportUsageError } from './command-support.js'
+import {
+  checkNoPositionals,
+  isEpipe,
+  reportParseFailure,
+  reportUsageError,
+} from './command-support.js'
 
 /**
  * The direct-database counterpart of `CommandContext` — see the module
@@ -61,9 +66,42 @@ export interface AdminCommandContext {
  * would let the CLI and the server worker both hold the same request at
  * once; the lease is what makes that race safe, and only if both sides
  * agree on its length.
+ *
+ * These are the FALLBACKS, not the whole story — see `resolvePurgeLeaseMs`/
+ * `resolvePurgeMaxAttempts` below, which read the same env vars `config.ts`
+ * reads before falling back to these. A tuned install (one that set
+ * `LYRAFLOW_PROJECT_PURGE_LEASE_MS`/`_MAX_ATTEMPTS` away from the shipped
+ * default) must have this CLI agree with the server it is talking to, not
+ * silently claim under a lease the server itself no longer uses.
  */
 export const PROJECT_PURGE_LEASE_MS = 1_800_000
 export const PROJECT_PURGE_MAX_ATTEMPTS = 5
+
+/**
+ * Mirrors `config.ts`'s own `num()`: empty/unset reads as "use the
+ * fallback", anything present that doesn't parse as a finite number is a
+ * loud failure rather than a silently-ignored override.
+ */
+function envNumber(key: string, fallback: number): number {
+  const raw = process.env[key]
+  if (raw === undefined || raw === '') return fallback
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`${key} must be a number, got "${raw}"`)
+  }
+  return parsed
+}
+
+/** The lease/attempts this process actually claims under — `config.ts`'s
+ * own env vars, so an install that tuned the server's knobs away from the
+ * shipped default gets a CLI that agrees with it, falling back to the same
+ * defaults `PROJECT_PURGE_LEASE_MS`/`PROJECT_PURGE_MAX_ATTEMPTS` name. */
+function resolvePurgeLeaseMs(): number {
+  return envNumber('LYRAFLOW_PROJECT_PURGE_LEASE_MS', PROJECT_PURGE_LEASE_MS)
+}
+function resolvePurgeMaxAttempts(): number {
+  return envNumber('LYRAFLOW_PROJECT_PURGE_MAX_ATTEMPTS', PROJECT_PURGE_MAX_ATTEMPTS)
+}
 
 /**
  * How long `runProjectsDelete` waits between the first `purgeProject` call
@@ -89,6 +127,36 @@ type Subcommand = (typeof SUBCOMMANDS)[number]
 
 function isSubcommand(value: string): value is Subcommand {
   return (SUBCOMMANDS as readonly string[]).includes(value)
+}
+
+/**
+ * The subset of `ProjectDeletionStore` this file calls — narrowed to an
+ * interface (rather than the class itself) so a test can inject a fake
+ * that delegates most calls to a real store and overrides exactly one, to
+ * drive a path real timing can't reliably reach (the claim losing a race,
+ * a purge reporting `deleted: false`). Real dispatch never overrides this;
+ * `makeStore`'s default is a real `ProjectDeletionStore`, which satisfies
+ * this shape as-is.
+ */
+interface DeletionStore {
+  request: ProjectDeletionStore['request']
+  claimById: ProjectDeletionStore['claimById']
+  complete: ProjectDeletionStore['complete']
+  fail: ProjectDeletionStore['fail']
+  get: ProjectDeletionStore['get']
+}
+
+/**
+ * Test-only seams for the two collaborators `runProjectsDelete`/
+ * `runProjectsDeletionGet` otherwise import at module scope and cannot be
+ * observed from outside: which store backs `request`/`claimById`/
+ * `complete`/`fail`/`get`, and what `purgeProject` itself does. Both
+ * default to the real implementations — real dispatch (index.ts) never
+ * passes this parameter at all.
+ */
+export interface ProjectsDeps {
+  purge?: typeof purgeProject
+  makeStore?: (pg: Pool) => DeletionStore
 }
 
 /** GET /v1/projects's own row shape (admin-routes.ts), plus the derived
@@ -184,12 +252,25 @@ function writeProgress(p: PurgeProgress, mode: Mode, ctx: AdminCommandContext): 
  * `ProjectDeletionStore.request` (which alone decides `not_found` /
  * `alreadyDeleting` / accepted), then either queue it for the server
  * worker or claim and run it here.
+ *
+ * CLAIMS BY ID, NEVER `store.claim()`. `claim()` is the WORKER'S query —
+ * "whatever is oldest and claimable, queue-wide" — and this command just
+ * filed one SPECIFIC request a moment ago. Calling the worker's `claim()`
+ * here would silently complete or fail WHATEVER ROW happened to be oldest
+ * (an older `--queue`d request, one filed from the UI while the server was
+ * stopped, one whose lease aged out after a crash) while purging THIS
+ * project — marking a different project's deletion done while its data
+ * survives intact, and leaving this project's own request claimable
+ * forever. `store.claimById(result.id, ...)` is the fix: it can only ever
+ * take the row this call itself just inserted.
  */
 async function runProjectsDelete(
   slug: string,
   flags: Record<string, string | boolean>,
   mode: Mode,
   ctx: AdminCommandContext,
+  purge: typeof purgeProject,
+  makeStore: (pg: Pool) => DeletionStore,
 ): Promise<number> {
   const yes = flags.yes === true
   const queue = flags.queue === true
@@ -226,7 +307,19 @@ async function runProjectsDelete(
     ctx.writeErr(
       `This permanently destroys ${count} events for "${row.name}" (${row.slug}).\nIts data cannot be recovered from anything but a backup, and there is no undo.\n`,
     )
-    const answer = await ctx.prompt('Type the slug to confirm: ')
+    // A REJECTED prompt is the confirmation mechanism itself failing — not
+    // an answer, and not something that should escape as an unhandled
+    // rejection. Same "fails safe, never deletes" rule a declined prompt
+    // gets below, mirroring `persons.ts`'s `runDelete` exactly (see this
+    // module's own docstring: the rules match that file's on purpose).
+    let answer: string | null
+    try {
+      answer = await ctx.prompt('Type the slug to confirm: ')
+    } catch (err) {
+      if (isEpipe(err)) return 0
+      ctx.writeErr('the confirmation prompt failed; the project was not deleted\n')
+      return 1
+    }
     // `!== row.slug`, not a truthiness check: `prompt` resolves to `null`
     // when it times out or the stream closes, and `null` must decline
     // rather than throw or (worse) coerce into a match.
@@ -236,7 +329,7 @@ async function runProjectsDelete(
     }
   }
 
-  const store = new ProjectDeletionStore(ctx.pg)
+  const store = makeStore(ctx.pg)
   const result = await store.request(projectId)
   if (result === 'not_found') {
     // A concurrent delete won the race between the SELECT above and this
@@ -261,27 +354,30 @@ async function runProjectsDelete(
     return 0
   }
 
-  const request = await store.claim({
-    leaseMs: PROJECT_PURGE_LEASE_MS,
-    maxAttempts: PROJECT_PURGE_MAX_ATTEMPTS,
+  const request = await store.claimById(result.id, {
+    leaseMs: resolvePurgeLeaseMs(),
+    maxAttempts: resolvePurgeMaxAttempts(),
   })
   if (!request) {
-    // The request this call itself just filed could not be claimed —
-    // another claimer (the server's own worker) took it first, in the
-    // window between request() and claim(). Not an error in the request:
-    // it is queued and will be completed, just not by this process.
+    // Real, if narrow: the server's own periodic worker runs `claim()` on
+    // the same table (whatever is oldest and claimable, queue-wide) and
+    // can take THIS EXACT row — certain to, if it is the only pending
+    // request; possible whenever it is the oldest one — in the window
+    // between `store.request()` returning above and this `claimById()`
+    // call. Not an error in the request itself: it is queued and will be
+    // completed, just not by this process.
     ctx.writeErr(
-      `request ${result.id} could not be claimed here (the server worker took it first); it is still queued\n`,
+      `request ${result.id} could not be claimed here (the server worker claimed it in the moment before this call); it is still queued and will be completed\n`,
     )
     return 1
   }
 
   const onProgress = (p: PurgeProgress): void => writeProgress(p, mode, ctx)
 
-  let purgeResult = await purgeProject({ ch: ctx.ch, pg: ctx.pg, projectId, onProgress })
+  let purgeResult = await purge({ ch: ctx.ch, pg: ctx.pg, projectId, onProgress })
   if (!purgeResult.deleted) {
     await new Promise<void>((resolve) => setTimeout(resolve, PURGE_RETRY_PAUSE_MS))
-    purgeResult = await purgeProject({ ch: ctx.ch, pg: ctx.pg, projectId, onProgress })
+    purgeResult = await purge({ ch: ctx.ch, pg: ctx.pg, projectId, onProgress })
   }
   if (!purgeResult.deleted) {
     const detail = Object.entries(purgeResult.remaining)
@@ -312,13 +408,14 @@ async function runProjectsDeletionGet(
   idRaw: string,
   mode: Mode,
   ctx: AdminCommandContext,
+  makeStore: (pg: Pool) => DeletionStore,
 ): Promise<number> {
   const id = Number(idRaw)
   if (!Number.isInteger(id) || id <= 0) {
     return reportUsageError(new UsageError(`invalid deletion id: ${idRaw}`), mode, ctx)
   }
 
-  const store = new ProjectDeletionStore(ctx.pg)
+  const store = makeStore(ctx.pg)
   const found: ProjectDeletionRequest | null = await store.get(id)
   if (!found) {
     ctx.writeErr(`no such deletion request: ${idRaw}\n`)
@@ -334,7 +431,7 @@ async function runProjectsDeletionGet(
     )
     return 0
   }
-  if (found.attempts >= PROJECT_PURGE_MAX_ATTEMPTS) {
+  if (found.attempts >= resolvePurgeMaxAttempts()) {
     emitObject(
       { status: 'failed', requested_at, completed_at: null, error: found.lastError },
       mode,
@@ -351,7 +448,7 @@ async function runProjectsDeletionGet(
     return 0
   }
   const leased =
-    found.claimedAt !== null && Date.now() - found.claimedAt.getTime() < PROJECT_PURGE_LEASE_MS
+    found.claimedAt !== null && Date.now() - found.claimedAt.getTime() < resolvePurgeLeaseMs()
   emitObject(
     { status: leased ? 'in_progress' : 'pending', requested_at, completed_at: null, error: null },
     mode,
@@ -366,8 +463,19 @@ async function runProjectsDeletionGet(
  *
  * Returns 0 success, 1 failure or a declined confirmation, 2 a usage error
  * or a refusal to prompt an unattended stdin.
+ *
+ * `deps` is test-only — see `ProjectsDeps`'s own docstring. Real dispatch
+ * (index.ts) calls this with two arguments and gets the real store and the
+ * real `purgeProject`.
  */
-export async function runProjects(argv: string[], ctx: AdminCommandContext): Promise<number> {
+export async function runProjects(
+  argv: string[],
+  ctx: AdminCommandContext,
+  deps: ProjectsDeps = {},
+): Promise<number> {
+  const purge = deps.purge ?? purgeProject
+  const makeStore = deps.makeStore ?? ((pg: Pool) => new ProjectDeletionStore(pg))
+
   const parseCtx = { writeErr: ctx.writeErr, isTty: ctx.stdoutIsTty }
 
   const [subcommand, ...rest] = argv
@@ -434,7 +542,7 @@ export async function runProjects(argv: string[], ctx: AdminCommandContext): Pro
       parseCtx,
     )
     if (code !== undefined) return code
-    return runProjectsDelete(slug, flags, mode, ctx)
+    return runProjectsDelete(slug, flags, mode, ctx, purge, makeStore)
   }
 
   // subcommand === 'deletion'
@@ -463,5 +571,5 @@ export async function runProjects(argv: string[], ctx: AdminCommandContext): Pro
     parseCtx,
   )
   if (code !== undefined) return code
-  return runProjectsDeletionGet(id, mode, ctx)
+  return runProjectsDeletionGet(id, mode, ctx, makeStore)
 }

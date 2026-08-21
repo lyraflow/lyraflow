@@ -127,6 +127,57 @@ describe('ProjectDeletionStore', () => {
     expect(await store.claim({ leaseMs: 60_000, maxAttempts: 5 })).toBeNull()
   })
 
+  describe('claimById', () => {
+    it('claims the named request and increments attempts', async () => {
+      const project = await createProject(pg, 'Acme')
+      const { id } = (await store.request(project.id)) as { id: number }
+      const claimed = await store.claimById(id, { leaseMs: 60_000, maxAttempts: 5 })
+      expect(claimed?.id).toBe(id)
+      expect(claimed?.attempts).toBe(1)
+    })
+
+    it('returns null when the named request is already claimed inside the lease', async () => {
+      const project = await createProject(pg, 'Acme')
+      const { id } = (await store.request(project.id)) as { id: number }
+      await store.claimById(id, { leaseMs: 60_000, maxAttempts: 5 })
+      expect(await store.claimById(id, { leaseMs: 60_000, maxAttempts: 5 })).toBeNull()
+    })
+
+    it('returns null for the named request past maxAttempts', async () => {
+      const project = await createProject(pg, 'Acme')
+      const { id } = (await store.request(project.id)) as { id: number }
+      await pg.query('UPDATE project_deletions SET attempts = 5, claimed_at = NULL WHERE id = $1', [
+        id,
+      ])
+      expect(await store.claimById(id, { leaseMs: 60_000, maxAttempts: 5 })).toBeNull()
+    })
+
+    // THE PIN: an older, unrelated, perfectly claimable request must never
+    // be the one this returns -- that gap is what let `projects delete`
+    // (the CLI) complete a request it never filed while purging a
+    // different project's data. `claim()`'s own `ORDER BY requested_at`
+    // would hand back `older` here; `claimById` must not.
+    it('claims only the named request, never an older pending request from another project', async () => {
+      const older = await createProject(pg, 'Older')
+      const olderReq = (await store.request(older.id)) as { id: number }
+      // Backdate it so it is provably the oldest claimable row in the table.
+      await pg.query(
+        "UPDATE project_deletions SET requested_at = now() - interval '1 hour' WHERE id = $1",
+        [olderReq.id],
+      )
+
+      const target = await createProject(pg, 'Target')
+      const targetReq = (await store.request(target.id)) as { id: number }
+
+      const claimed = await store.claimById(targetReq.id, { leaseMs: 60_000, maxAttempts: 5 })
+      expect(claimed?.id).toBe(targetReq.id)
+      expect(claimed?.projectId).toBe(target.id)
+
+      const untouched = await store.get(olderReq.id)
+      expect(untouched).toMatchObject({ claimedAt: null, attempts: 0, completedAt: null })
+    })
+  })
+
   it('truncates a pathological last_error', async () => {
     const project = await createProject(pg, 'Acme')
     const { id } = (await store.request(project.id)) as { id: number }

@@ -57,6 +57,23 @@ const CLAIM_SQL = `
    )
    RETURNING *`
 
+/** `CLAIM_SQL`'s sibling for `claimById` -- same guards (not completed, under
+ * `maxAttempts`, not currently leased), scoped to one id instead of picking
+ * the oldest candidate. No `ORDER BY`/`LIMIT`: `id` is the primary key, so
+ * the inner SELECT matches at most one row already. */
+const CLAIM_BY_ID_SQL = `
+  UPDATE project_deletions
+     SET claimed_at = now(), attempts = attempts + 1
+   WHERE id = (
+     SELECT id FROM project_deletions
+      WHERE id = $1
+        AND completed_at IS NULL
+        AND attempts < $2
+        AND (claimed_at IS NULL OR claimed_at < now() - make_interval(secs => $3))
+      FOR UPDATE SKIP LOCKED
+   )
+   RETURNING *`
+
 /**
  * The Postgres-backed queue behind project deletion: stamps a project as
  * deleting and files its purge request atomically, reads a request's
@@ -166,6 +183,38 @@ export class ProjectDeletionStore {
     maxAttempts: number
   }): Promise<ProjectDeletionRequest | null> {
     const r = await this.pool.query<Row>(CLAIM_SQL, [opts.maxAttempts, opts.leaseMs / 1000])
+    return r.rows[0] ? toRequest(r.rows[0]) : null
+  }
+
+  /**
+   * Claims exactly one request BY ID, under the same lease semantics as
+   * `claim()` -- one statement, `FOR UPDATE SKIP LOCKED`, `attempts =
+   * attempts + 1`, refusing a row already claimed inside the lease window
+   * or at/past `maxAttempts`. The one difference from `claim()` is the
+   * WHERE clause: this never looks past the named row, not even to report
+   * that a DIFFERENT (older) request exists.
+   *
+   * Exists beside `claim()` for two different callers with two different
+   * jobs. `claim()` is a WORKER draining the queue -- it has no request in
+   * mind, so "whatever is oldest and claimable" is exactly right. A caller
+   * that just filed ONE specific request (a CLI invocation, say) must only
+   * ever take that request: it purges the project THAT request names, and
+   * calling `complete`/`fail` on a DIFFERENT id -- whatever `claim()`
+   * happened to return -- marks somebody else's deletion done while their
+   * data survives, and leaves the caller's own request claimable forever.
+   * `claim()`'s `ORDER BY requested_at LIMIT 1` has no way to express "but
+   * only if it's this one"; this method is that missing guarantee, not a
+   * copy-paste of `claim()` with an extra filter bolted on after the fact.
+   */
+  async claimById(
+    id: number,
+    opts: { leaseMs: number; maxAttempts: number },
+  ): Promise<ProjectDeletionRequest | null> {
+    const r = await this.pool.query<Row>(CLAIM_BY_ID_SQL, [
+      id,
+      opts.maxAttempts,
+      opts.leaseMs / 1000,
+    ])
     return r.rows[0] ? toRequest(r.rows[0]) : null
   }
 
