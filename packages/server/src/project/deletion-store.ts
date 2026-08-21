@@ -1,0 +1,196 @@
+import type { Pool } from '@lyraflow/db'
+
+export interface ProjectDeletionRequest {
+  id: number
+  projectId: number
+  slug: string
+  name: string
+  requestedAt: Date
+  claimedAt: Date | null
+  completedAt: Date | null
+  attempts: number
+  lastError: string | null
+}
+
+interface Row {
+  id: string
+  project_id: string
+  slug: string
+  name: string
+  requested_at: Date
+  claimed_at: Date | null
+  completed_at: Date | null
+  attempts: number
+  last_error: string | null
+}
+
+function toRequest(row: Row): ProjectDeletionRequest {
+  return {
+    id: Number(row.id),
+    projectId: Number(row.project_id),
+    slug: row.slug,
+    name: row.name,
+    requestedAt: row.requested_at,
+    claimedAt: row.claimed_at,
+    completedAt: row.completed_at,
+    attempts: row.attempts,
+    lastError: row.last_error,
+  }
+}
+
+/** Same bound, and for the same reason, as `DeletionStore`'s: `last_error`
+ * carries a caught exception's message and is re-read by the status endpoint
+ * on every poll. */
+const MAX_LAST_ERROR_LENGTH = 2000
+
+const CLAIM_SQL = `
+  UPDATE project_deletions
+     SET claimed_at = now(), attempts = attempts + 1
+   WHERE id = (
+     SELECT id FROM project_deletions
+      WHERE completed_at IS NULL
+        AND attempts < $1
+        AND (claimed_at IS NULL OR claimed_at < now() - make_interval(secs => $2))
+      ORDER BY requested_at
+      LIMIT 1
+      FOR UPDATE SKIP LOCKED
+   )
+   RETURNING *`
+
+/**
+ * The Postgres-backed queue behind project deletion: stamps a project as
+ * deleting and files its purge request atomically, reads a request's
+ * status, and hands one claimable request to a purge worker under a lease.
+ */
+export class ProjectDeletionStore {
+  constructor(private readonly pool: Pool) {}
+
+  /**
+   * The `deleting_at` stamp and the queue row, together or neither.
+   *
+   * Split them and a crash between the two gives either a project marked for
+   * deletion that nothing will ever drain, or a queued purge of a project
+   * still accepting events. Neither is recoverable by retry once the route
+   * has answered 202.
+   *
+   * The UPDATE's own `WHERE deleting_at IS NULL` is what makes a concurrent
+   * second request lose rather than queue a duplicate: the loser's UPDATE
+   * matches no row.
+   */
+  async request(
+    projectId: number,
+  ): Promise<{ id: number } | 'not_found' | { alreadyDeleting: number }> {
+    const client = await this.pool.connect()
+    // Set only if ROLLBACK itself fails, below, and passed to
+    // `client.release()` in `finally` — see that catch block for why.
+    let releaseErr: Error | undefined
+    try {
+      await client.query('BEGIN')
+      const updated = await client.query<{ slug: string; name: string }>(
+        `UPDATE projects SET deleting_at = now()
+          WHERE id = $1 AND deleting_at IS NULL
+      RETURNING slug, name`,
+        [projectId],
+      )
+      const row = updated.rows[0]
+      if (!row) {
+        await client.query('ROLLBACK')
+        const existing = await this.pool.query<{ id: string }>(
+          `SELECT id FROM project_deletions
+            WHERE project_id = $1 AND completed_at IS NULL
+            ORDER BY requested_at LIMIT 1`,
+          [projectId],
+        )
+        const found = existing.rows[0]
+        return found ? { alreadyDeleting: Number(found.id) } : 'not_found'
+      }
+      const inserted = await client.query<{ id: string }>(
+        'INSERT INTO project_deletions (project_id, slug, name) VALUES ($1, $2, $3) RETURNING id',
+        [projectId, row.slug, row.name],
+      )
+      await client.query('COMMIT')
+      return { id: Number(inserted.rows[0]?.id) }
+    } catch (err) {
+      // ROLLBACK itself can fail (e.g. a dead connection); that must not
+      // replace the original error, which is the one that explains what
+      // went wrong — it is always what this method throws.
+      //
+      // But a rollback failure still has to be dealt with, and
+      // `client.release()` with NO argument does not do that: it returns
+      // the connection to the pool's IDLE list regardless of whether the
+      // transaction was ever rolled back. A connection released that way
+      // after a failed ROLLBACK goes back into circulation still inside an
+      // aborted transaction, and every query any later caller sends over it
+      // fails with "current transaction is aborted, commands ignored until
+      // end of transaction block" — permanently, for as long as the pool
+      // keeps handing that connection out. `client.release(err)`, called
+      // with a truthy argument, is what makes the pool DESTROY the
+      // connection instead of recycling it, which is what `finally` does
+      // below whenever `releaseErr` got set here.
+      try {
+        await client.query('ROLLBACK')
+      } catch (rollbackErr) {
+        releaseErr = rollbackErr instanceof Error ? rollbackErr : new Error(String(rollbackErr))
+      }
+      throw err
+    } finally {
+      client.release(releaseErr)
+    }
+  }
+
+  /**
+   * NOT project-scoped, unlike a routine `:id` lookup elsewhere in this
+   * codebase. There is no project left to scope by once the purge
+   * completes — that is the point of the missing foreign key — and this
+   * store's status route is session-only and instance-scoped anyway.
+   */
+  async get(id: number): Promise<ProjectDeletionRequest | null> {
+    const r = await this.pool.query<Row>(
+      `SELECT id, project_id, slug, name, requested_at, claimed_at, completed_at, attempts, last_error
+         FROM project_deletions WHERE id = $1`,
+      [id],
+    )
+    return r.rows[0] ? toRequest(r.rows[0]) : null
+  }
+
+  /**
+   * Takes one claimable request under a lease.
+   *
+   * One statement, so two claimers (the server's worker and a CLI draining
+   * its own request) cannot take the same row: the inner SELECT locks its
+   * pick with FOR UPDATE SKIP LOCKED, and a concurrent claimer skips past it
+   * to the next candidate rather than blocking on it.
+   */
+  async claim(opts: {
+    leaseMs: number
+    maxAttempts: number
+  }): Promise<ProjectDeletionRequest | null> {
+    const r = await this.pool.query<Row>(CLAIM_SQL, [opts.maxAttempts, opts.leaseMs / 1000])
+    return r.rows[0] ? toRequest(r.rows[0]) : null
+  }
+
+  /** Marks a request done and clears any error a previous attempt left behind. */
+  async complete(id: number): Promise<void> {
+    await this.pool.query(
+      'UPDATE project_deletions SET completed_at = now(), last_error = NULL WHERE id = $1',
+      [id],
+    )
+  }
+
+  /**
+   * Records why an attempt failed, leaving the request claimable again once
+   * its lease ages out (or immediately unclaimable, once `attempts` has
+   * reached `claim`'s `maxAttempts`).
+   *
+   * `error` is a caught exception's `.message`: caller-influenced, and this
+   * row is re-read by the status endpoint on every poll, so it is truncated
+   * before it reaches SQL rather than trusted to already be a reasonable
+   * size.
+   */
+  async fail(id: number, error: string): Promise<void> {
+    await this.pool.query('UPDATE project_deletions SET last_error = $2 WHERE id = $1', [
+      id,
+      error.slice(0, MAX_LAST_ERROR_LENGTH),
+    ])
+  }
+}
