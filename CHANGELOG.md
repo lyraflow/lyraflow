@@ -21,6 +21,20 @@ here as it happened rather than tagged retroactively, for the same reason 0.1.0
 is: a tag created after the fact names a moment nobody could have fetched. Its
 one fix is contained in 0.3.0.
 
+## Unreleased
+
+### Added
+
+- **Projects can be deleted, from Settings and from the CLI.** Deleting destroys
+  every event, person and report a project holds, in both databases, and asks you
+  to type the project's slug first. It runs as a background job: ingest stops
+  immediately, ClickHouse is torn down, the result is verified, and only then is
+  the project removed from Postgres — the order that makes a half-finished delete
+  retryable instead of leaving orphaned partitions
+  ([#39](https://github.com/lyraflow/lyraflow/issues/39)). `lyraflow projects list`
+  and `lyraflow projects delete <slug>` are the CLI half
+  ([#60](https://github.com/lyraflow/lyraflow/issues/60) in part).
+
 ## 0.8.0
 
 A release about being able to see and operate what is already there. Event rows
