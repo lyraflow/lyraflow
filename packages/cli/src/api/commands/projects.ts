@@ -272,6 +272,19 @@ async function runProjectsDelete(
   purge: typeof purgeProject,
   makeStore: (pg: Pool) => DeletionStore,
 ): Promise<number> {
+  // Resolved once, up front — BEFORE anything below writes anything.
+  // `envNumber` throws on a malformed `LYRAFLOW_PROJECT_PURGE_LEASE_MS`/
+  // `_MAX_ATTEMPTS`, and `runProjects` has no catch around this call (only
+  // index.ts's `finally`, which closes the pool and rethrows). Resolving
+  // these after `store.request()` had already stamped `deleting_at` and
+  // inserted the queue row meant that exact throw would escape with the
+  // project stamped deleting and a request pending — a raw stack trace on
+  // an operator's terminal, the same shape Minor 5 exists to prevent for a
+  // rejected prompt. Resolving here means a degenerate config fails before
+  // the confirmation prompt is even shown, let alone anything is written.
+  const leaseMs = resolvePurgeLeaseMs()
+  const maxAttempts = resolvePurgeMaxAttempts()
+
   const yes = flags.yes === true
   const queue = flags.queue === true
 
@@ -354,10 +367,7 @@ async function runProjectsDelete(
     return 0
   }
 
-  const request = await store.claimById(result.id, {
-    leaseMs: resolvePurgeLeaseMs(),
-    maxAttempts: resolvePurgeMaxAttempts(),
-  })
+  const request = await store.claimById(result.id, { leaseMs, maxAttempts })
   if (!request) {
     // Real, if narrow: the server's own periodic worker runs `claim()` on
     // the same table (whatever is oldest and claimable, queue-wide) and

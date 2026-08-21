@@ -380,6 +380,20 @@ describe('runProjects', () => {
     expect(JSON.parse(read.lines()[0] as string)).toMatchObject({ status: 'in_progress' })
   })
 
+  it('reports completed with completed_at populated', async () => {
+    const ctx = fakeCtx({ stdinIsTty: true })
+    await createProject(pg, 'Acme')
+    await runProjects(['delete', 'acme', '--yes', '--queue'], ctx)
+    const id = Number(JSON.parse(ctx.lines()[0] as string).id)
+    await pg.query('UPDATE project_deletions SET completed_at = now() WHERE id = $1', [id])
+    const read = fakeCtx()
+    expect(await runProjects(['deletion', 'get', String(id), '--json'], read)).toBe(0)
+    const parsed = JSON.parse(read.lines()[0] as string)
+    expect(parsed).toMatchObject({ status: 'completed' })
+    expect(parsed.completed_at).not.toBeNull()
+    expect(typeof parsed.completed_at).toBe('string')
+  })
+
   it('rejects an unknown subcommand with usage on stderr and exit 2', async () => {
     const ctx = fakeCtx()
     expect(await runProjects(['frobnicate'], ctx)).toBe(2)
