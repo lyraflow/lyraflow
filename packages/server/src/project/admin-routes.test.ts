@@ -495,6 +495,7 @@ describe('a session inside its renewal window, used through GET /v1/projects', (
       deletions: store,
       maxAttempts: 5,
       leaseMs: 1_800_000,
+      clearSegmentCache: () => {},
     })
     await local.ready()
 
@@ -712,6 +713,58 @@ describe('DELETE /v1/projects/:id', () => {
     // A poll target: caching this would let a client miss every state
     // change until the entry expired.
     expect(res.headers['cache-control']).toBe('no-store')
+  })
+
+  /**
+   * The segment cache is the third path that changes what a preview can
+   * return, beside `DELETE /v1/persons/:id` and the retention sweep — and it
+   * was the one with no call site. `SegmentCache`'s TTL is 30 seconds, so
+   * without this a preview could keep serving a destroyed project's member
+   * rows (person ids, traits, first/last seen) out of a snapshot taken
+   * before the delete, after the delete reported accepted.
+   *
+   * Asserted against the app's OWN `SegmentCache` instance, seeded and read
+   * directly: a spy would prove a function was called, and the defect this
+   * guards against is equally reachable by calling a lookalike instance that
+   * nothing else reads.
+   */
+  it("drops the project's cached segment previews", async () => {
+    const project = await createProject(pg, 'Acme')
+    const cache = app.deps.segmentCache
+    const key = `${project.id}:seg-1:page-1`
+    const entry = { count: 1, members: [], asOf: new Date().toISOString() }
+    cache.set(key, entry, project.id, cache.generation(project.id))
+    expect(cache.get(key)).toBeDefined()
+
+    expect((await del(project)).statusCode).toBe(202)
+    expect(cache.get(key)).toBeUndefined()
+  })
+
+  /**
+   * And only when something actually changed. A refused delete has destroyed
+   * nothing, so throwing away a live project's cached previews would be pure
+   * cost — the same rule the retention sweep follows in dropping the cache
+   * only for a partition that was REALLY dropped.
+   */
+  it('leaves the cache alone when the delete is refused', async () => {
+    const project = await createProject(pg, 'Acme')
+    const cache = app.deps.segmentCache
+    const key = `${project.id}:seg-2:page-1`
+    cache.set(
+      key,
+      { count: 1, members: [], asOf: new Date().toISOString() },
+      project.id,
+      cache.generation(project.id),
+    )
+
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/projects/${project.id}`,
+      headers: sessionHeaders,
+      payload: { slug: 'not-the-slug' },
+    })
+    expect(res.statusCode).toBe(409)
+    expect(cache.get(key)).toBeDefined()
   })
 
   it('409s a slug that does not match, stamping nothing and queueing nothing', async () => {

@@ -19,6 +19,14 @@ export interface AdminProjectDeps {
   maxAttempts: number
   /** The SAME configured value ProjectPurgeWorker's claim() uses — see GET /v1/project-deletions/:id. */
   leaseMs: number
+  /**
+   * Drops every cached segment preview for a project, at the moment its data
+   * stops being what a cached preview says it is. The SAME `SegmentCache`
+   * `DELETE /v1/persons/:id` and the retention sweep clear through — a
+   * lookalike built here would leave the entries those two can see
+   * untouched. See the DELETE route below for the window it closes.
+   */
+  clearSegmentCache: (projectId: number) => void
 }
 
 const CreateBody = z.object({ name: z.string().min(1).max(200) })
@@ -57,7 +65,8 @@ function parseId(raw: string): number | null {
  * backing routes for the coming web UI.
  */
 export function registerAdminProjectRoutes(app: FastifyInstance, deps: AdminProjectDeps): void {
-  const { pg, sessions, projects, readiness, deletions, maxAttempts, leaseMs } = deps
+  const { pg, sessions, projects, readiness, deletions, maxAttempts, leaseMs, clearSegmentCache } =
+    deps
 
   /**
    * Session-only, and deliberately NOT routed through auth/bridge.ts. These
@@ -307,7 +316,28 @@ export function registerAdminProjectRoutes(app: FastifyInstance, deps: AdminProj
     // MUST come after the write, for the reason PATCH documents: the write-key
     // authenticator reads `deletingAt` off this cache, so skipping it keeps
     // admitting events into partitions this request is about to drop.
+    //
+    // It closes the window for THIS PROCESS ONLY, which is worth being exact
+    // about: another app process's cache is untouched by it, and the CLI can
+    // reach no cache at all. What actually bounds those is the claim delay
+    // (`purgeClaimDelayMs`, config.ts) — no purge may start until the whole
+    // cache horizon has passed. This call makes the refusal immediate here
+    // rather than eventual; it does not make it universal.
     projects.invalidate()
+
+    // The third path that changes what a segment preview could return, and
+    // the reason `app.ts`'s retention comment asks for this call. A preview
+    // hit within `SegmentCache`'s 30s TTL would otherwise keep serving this
+    // project's member rows — person ids, traits, first/last seen — out of a
+    // snapshot taken before the project was destroyed. Wrapped for the same
+    // reason `DELETE /v1/persons/:id` wraps its own call: the deletion is
+    // already committed, and a future change to `clearProject` must not be
+    // able to turn an accepted request into a 500.
+    try {
+      clearSegmentCache(id)
+    } catch (err) {
+      req.log.error({ err, projectId: id }, 'segment cache invalidation failed')
+    }
 
     reply.header('cache-control', 'no-store')
     return reply.code(202).send({ id: result.id, project_id: id, status: 'pending' })

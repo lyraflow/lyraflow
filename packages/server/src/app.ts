@@ -411,6 +411,9 @@ export function buildApp(input: {
     deletions: projectDeletions,
     maxAttempts: config.projectPurgeMaxAttempts,
     leaseMs: config.projectPurgeLeaseMs,
+    // The shared instance, not a new one — see `segmentCache`'s own comment
+    // above and `AdminProjectDeps.clearSegmentCache`.
+    clearSegmentCache: (projectId) => segmentCache.clearProject(projectId),
   })
   // One shared object, not one built per registration: registerExportRoute
   // takes the exact same PrivacyDeps registerPrivacyRoutes does (export.ts's
