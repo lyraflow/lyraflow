@@ -141,7 +141,11 @@ export async function purgeProject(opts: {
 
   for (const table of MUTATED) {
     // mutations_sync = 1 is what turns this from "I asked" into "it is
-    // gone" — ALTER ... DELETE is asynchronous by default.
+    // gone" — ALTER ... DELETE is asynchronous by default. This setting is
+    // load-bearing and UNPINNED: a mutation over these small test fixtures
+    // can finish before a verify read regardless of this flag, so no cheap
+    // test in purge.test.ts can deterministically fail if it were dropped.
+    // Do not read the test suite's silence on this line as coverage.
     await ch.command({
       query: `ALTER TABLE ${table} DELETE WHERE project_id = {p:UInt32}`,
       query_params: { p: projectId },

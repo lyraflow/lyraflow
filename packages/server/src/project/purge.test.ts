@@ -234,9 +234,16 @@ async function cleanup(): Promise<void> {
       await dropPartitionsFor(table, compound, ids)
     }
     const list = ids.join(',')
-    await ch.command({ query: `ALTER TABLE event_schema DELETE WHERE project_id IN (${list})` })
+    // mutations_sync = 1: these tables now hold this file's own rows (F1),
+    // so a cleanup that returns before the mutation actually finishes would
+    // leave the next test's fixtures racing them.
+    await ch.command({
+      query: `ALTER TABLE event_schema DELETE WHERE project_id IN (${list})`,
+      clickhouse_settings: { mutations_sync: '1' },
+    })
     await ch.command({
       query: `ALTER TABLE events_dead_letter DELETE WHERE project_id IN (${list})`,
+      clickhouse_settings: { mutations_sync: '1' },
     })
   }
   await pg.query('DELETE FROM projects WHERE slug LIKE $1', [`${PREFIX}-%`])
@@ -295,22 +302,25 @@ describe('purgeProject', () => {
     expect((await pg.query('SELECT id FROM projects WHERE id = $1', [keeper.id])).rowCount).toBe(1)
   })
 
-  // THE STORE-ORDER PIN. Reversing the last two steps of purgeProject fails
-  // this test and no other. This is #39's regression test.
+  // THE STORE-ORDER PIN. This pins that the Postgres row survives for the
+  // WHOLE ClickHouse teardown, through the verify read too, with no
+  // unobserved window in between -- not merely that it survives while
+  // ClickHouse teardown is still in progress. #39's regression test.
   //
   // `onProgress` alone cannot see the gap this test is actually about: its
   // fifth and final call fires once ClickHouse teardown is done, and the
   // verify read plus the Postgres DELETE both run AFTER that call with no
   // observation point of their own -- an `onProgress`-only version of this
   // test cannot tell "DELETE runs after the verify read" from "DELETE runs
-  // right after teardown, skipping the verify read entirely", and a
-  // mutation that moves the DELETE to sit directly above the verify loop
-  // proved exactly that (it failed only the verify-pin test below, not this
-  // one). `chSpy` closes that gap: every `ch.query()` call purgeProject
-  // makes -- `listPartitions` during teardown, `countRows` during the
-  // verify read -- also samples whether the Postgres row is still there, so
-  // the previously-unobserved window between teardown and the DELETE is
-  // covered too.
+  // right after teardown, skipping the verify read entirely". `chSpy` closes
+  // that gap: every `ch.query()` call purgeProject makes -- `listPartitions`
+  // during teardown, `countRows` during the verify read -- also samples
+  // whether the Postgres row is still there, so the previously-unobserved
+  // window between teardown and the DELETE is covered too. The brief's
+  // literal Step 5.1 mutation (DELETE moved to sit directly above the
+  // verify loop) fails THIS test together with "refuses to delete the
+  // Postgres row when rows reappear mid-purge" below -- not this test
+  // alone, and not that other test alone either.
   it('keeps the Postgres row while ClickHouse still holds rows', async () => {
     const project = await createProject(pg, 'Acme')
     await insertEvents(ch, project.id, 2)
