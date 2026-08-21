@@ -187,7 +187,7 @@ export function ProjectProvider(props: {
     // The active project may be the one that just vanished. Falling back to
     // the first survivor keeps every screen scoped to a project that exists;
     // `null` is reachable only when nothing survives, which is `App.tsx`'s
-    // wizard case (Task 8).
+    // wizard case, a later task.
     setActiveIdState((prev) => (prev === id ? null : prev))
   }, [])
 

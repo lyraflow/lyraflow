@@ -1,10 +1,13 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import { userEvent } from '@testing-library/user-event'
+import { useState } from 'react'
 import type { ReactNode } from 'react'
+import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '../../api/client.js'
 import type { Project, ProjectDeletion } from '../../api/types.js'
-import { ProjectProvider } from '../../app/ProjectContext.js'
+import { ProjectProvider, useProject } from '../../app/ProjectContext.js'
+import { Shell } from '../../app/Shell.js'
 import { ProjectsSection } from './ProjectsSection.js'
 
 function project(over: Partial<Project> = {}): Project {
@@ -298,5 +301,82 @@ describe('ProjectsSection — delete', () => {
     })
     expect(screen.getByText('deleting')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Rename' })).toBeDisabled()
+  })
+
+  // A delete started in THIS tab must close the header switcher to the
+  // project immediately, on the 202 -- not only once a poll happens to
+  // catch up. Otherwise the switcher keeps offering a project mid-teardown
+  // for the whole 3s (or longer) window before the first poll tick, which
+  // is exactly the failure `Shell.tsx`'s own filter exists to prevent.
+  it('closes the switcher to the project the moment a delete is confirmed, before any poll has run', async () => {
+    render(
+      <MemoryRouter initialEntries={['/settings']}>
+        <ProjectProvider projects={[acme, other]} initialId={acme.id}>
+          <Shell email="a@example.com" onLogout={() => {}}>
+            <ProjectsSection client={client} />
+          </Shell>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    await confirmDelete('acme')
+    // `client.projectDeletion`'s default (beforeEach) never resolves to
+    // 'completed', and no timer is advanced here -- this is the state
+    // BEFORE the first poll tick, the window the switcher must already
+    // reflect.
+    await user.click(screen.getByRole('button', { name: /Acme Corp/ }))
+    expect(screen.queryByRole('option', { name: /Acme Corp/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('option', { name: /Other Co/ })).toBeInTheDocument()
+  })
+
+  // Pins the poll effect's `if (cancelled) return` guard specifically.
+  // `clearInterval` (also run on unmount) only stops FUTURE ticks -- it
+  // does not cancel a callback invocation already in flight, awaiting a
+  // response that has not landed yet. Without the flag, a response that
+  // resolves after unmount would still call `onDeleted`, mutating a
+  // context that has outlived this row.
+  it('ignores a poll response that resolves after the row unmounted mid-poll', async () => {
+    client.deleteProject = vi.fn(async () => ({ id: 7, project_id: acme.id, status: 'pending' }))
+    let resolvePoll: (v: ProjectDeletion) => void = () => {}
+    client.projectDeletion = vi.fn(
+      () =>
+        new Promise<ProjectDeletion>((resolve) => {
+          resolvePoll = resolve
+        }),
+    )
+
+    function ProjectCount() {
+      const { projects } = useProject()
+      return <span data-testid="count">{projects.length}</span>
+    }
+
+    function Harness() {
+      const [show, setShow] = useState(true)
+      return (
+        <>
+          <ProjectCount />
+          <button type="button" onClick={() => setShow(false)}>
+            hide
+          </button>
+          {show && <ProjectsSection client={client} />}
+        </>
+      )
+    }
+
+    render(
+      <ProjectProvider projects={[acme]} initialId={acme.id}>
+        <Harness />
+      </ProjectProvider>,
+    )
+    await confirmDelete('acme')
+    // Fires the poll's one tick; `client.projectDeletion`'s promise is now
+    // in flight and will not settle until `resolvePoll` is called below.
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(client.projectDeletion).toHaveBeenCalledTimes(1)
+
+    await user.click(screen.getByRole('button', { name: 'hide' }))
+    resolvePoll({ status: 'completed', requested_at: NOW, completed_at: NOW })
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(screen.getByTestId('count').textContent).toBe('1')
   })
 })

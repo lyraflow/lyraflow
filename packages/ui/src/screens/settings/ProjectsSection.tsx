@@ -83,6 +83,17 @@ function ProjectRow(props: {
       setDeletionId(res.id)
       setConfirmDelete(false)
       setTyped('')
+      // Merges into context immediately, on the 202 -- not once the first
+      // poll happens to land. The header switcher (`Shell.tsx`) filters on
+      // `deleting_at` from context, not on this row's own local state, so
+      // without this the switcher would keep offering the project for the
+      // whole poll interval, exactly the risk its own filter exists to
+      // close. Same precedent `save()` above follows for a rename/archive:
+      // the write's own answer merges in, never a re-fetch. The DELETE
+      // response itself carries no row to merge (`{ id, project_id, status
+      // }`, not a `Project`), so the timestamp is stamped client-side --
+      // its exact value doesn't matter, only that it is non-null.
+      onUpdated({ ...project, deleting_at: new Date().toISOString() })
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         onSessionStale?.()
