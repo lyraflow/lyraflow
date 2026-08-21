@@ -5,6 +5,8 @@ export interface ProjectPurgeWorkerOptions {
   purge: (projectId: number) => Promise<{ deleted: boolean; remaining: Record<string, number> }>
   complete: (id: number) => Promise<void>
   fail: (id: number, error: string) => Promise<void>
+  /** The transient outcome — see `ProjectDeletionStore.defer` and `runOnce`. */
+  defer: (id: number, note: string) => Promise<void>
   intervalMs: number
   leaseMs: number
   maxAttempts: number
@@ -23,7 +25,8 @@ export interface ProjectPurgeWorkerOptions {
  * `stop()` not awaiting work in flight). It differs in one place: `purge`
  * can report `deleted: false` when rows reappeared between the teardown and
  * the verify read (a buffered event flushed after its partition was
- * dropped) — see `runOnce` for how that branch is handled.
+ * dropped). That outcome is TRANSIENT and has its own path — `defer`, not
+ * `fail` — see `runOnce`.
  */
 export class ProjectPurgeWorker {
   #timer: NodeJS.Timeout | null = null
@@ -64,7 +67,7 @@ export class ProjectPurgeWorker {
    * takes the process down. Every await is inside `try { await … } catch` —
    * not `p.catch()`, which cannot absorb a synchronous throw from the callee.
    */
-  async runOnce(): Promise<'idle' | 'purged' | 'failed'> {
+  async runOnce(): Promise<'idle' | 'purged' | 'deferred' | 'failed'> {
     if (this.#stopped || this.#inFlight) return 'idle'
     this.#inFlight = true
     let claimed: ProjectDeletionRequest | null = null
@@ -78,14 +81,18 @@ export class ProjectPurgeWorker {
       const result = await this.opts.purge(claimed.projectId)
       if (!result.deleted) {
         // Rows reappeared between the teardown and the verify read — the
-        // buffered-flush shape purge.ts describes. NOT complete(): the request
-        // stays claimable so the next pass redoes the teardown. Recorded through
-        // fail() so the status endpoint can say why it is taking another pass.
+        // buffered-flush shape purge.ts describes. NOT complete(), and NOT
+        // fail() either: this is the expected outcome of racing a live
+        // install, so it goes to defer(), which releases the lease for the
+        // NEXT TICK and gives the attempt back. fail() would hold the lease
+        // for its full duration (half an hour by default) and spend one of
+        // five attempts on a race that resolves in a second. A purge that
+        // THREW is the other thing and still goes to fail(), below.
         const detail = Object.entries(result.remaining)
           .map(([table, n]) => `${table}=${n}`)
           .join(', ')
-        await this.opts.fail(claimed.id, `rows reappeared during purge (${detail})`)
-        return 'failed'
+        await this.opts.defer(claimed.id, `rows reappeared during purge (${detail})`)
+        return 'deferred'
       }
       await this.opts.complete(claimed.id)
       return 'purged'

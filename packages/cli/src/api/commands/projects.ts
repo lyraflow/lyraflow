@@ -170,6 +170,7 @@ interface DeletionStore {
   claimById: ProjectDeletionStore['claimById']
   complete: ProjectDeletionStore['complete']
   fail: ProjectDeletionStore['fail']
+  defer: ProjectDeletionStore['defer']
   get: ProjectDeletionStore['get']
 }
 
@@ -448,13 +449,21 @@ async function runProjectsDelete(
     purgeResult = await purge({ ch: ctx.ch, pg: ctx.pg, projectId, onProgress })
   }
   if (!purgeResult.deleted) {
+    // `defer`, not `fail`: rows coming back is the expected outcome of racing
+    // a live install, and the teardown is idempotent. `fail` would hold the
+    // lease for its full length — half an hour by default — so nothing could
+    // touch the half-torn-down project until it aged out, and would spend one
+    // of five attempts doing it. `defer` releases the claim for the very next
+    // worker tick and gives the attempt back.
     const detail = Object.entries(purgeResult.remaining)
       .map(([table, n]) => `${table}=${n}`)
       .join(', ')
-    await store.fail(request.id, `rows reappeared during purge (${detail})`)
+    await store.defer(request.id, `rows reappeared during purge (${detail})`)
     ctx.writeErr(
       'rows reappeared while purging (a running server had buffered events); ' +
-        'the request is still queued and the server worker will finish it\n',
+        `the claim was released, so the server's purge worker picks request ${request.id} ` +
+        'up again on its next pass (LYRAFLOW_PROJECT_PURGE_INTERVAL_MS, 15s by default). ' +
+        `Check it with: lyraflow projects deletion get ${request.id}\n`,
     )
     return 1
   }

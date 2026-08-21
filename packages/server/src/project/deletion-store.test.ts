@@ -2,6 +2,7 @@ import { join } from 'node:path'
 import { type Pool, createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { ProjectDeletionStore } from './deletion-store.js'
+import { ProjectPurgeWorker } from './worker.js'
 
 const pg = createPgPool('postgres://lyraflow:lyraflow@localhost:5433/lyraflow_test')
 const ch = createChClient({
@@ -277,5 +278,112 @@ describe('ProjectDeletionStore', () => {
     await pg.query(
       'CREATE INDEX project_deletions_pending_idx ON project_deletions (requested_at) WHERE completed_at IS NULL',
     )
+  })
+})
+
+/**
+ * THE CADENCE PIN. `purgeProject` returning `deleted: false` is documented as
+ * "the next pass redoes the teardown", and the whole question is what "the
+ * next pass" means in wall-clock time. Through `fail()` it means the end of
+ * the lease — `projectPurgeLeaseMs`, half an hour by default — with the
+ * project half-destroyed for all of it, and five such races reaching the
+ * terminal `failed` state that only `reopen()` can leave. Through `defer()`
+ * it means the next worker tick, with the attempt given back.
+ *
+ * Driven through a REAL store rather than spies: the defect was entirely in
+ * what `fail()` writes (and does not write), which a mock `fail` cannot show.
+ * Only `purge` is injected, because a reappearance cannot be produced on
+ * demand from real ClickHouse.
+ */
+describe('ProjectPurgeWorker over a real ProjectDeletionStore', () => {
+  function makeWorker(opts: {
+    purge: (projectId: number) => Promise<{ deleted: boolean; remaining: Record<string, number> }>
+  }) {
+    return new ProjectPurgeWorker({
+      claim: (o) => store.claim({ ...o, claimDelayMs: 0 }),
+      purge: opts.purge,
+      complete: (id) => store.complete(id),
+      fail: (id, error) => store.fail(id, error),
+      defer: (id, note) => store.defer(id, note),
+      intervalMs: 60_000,
+      leaseMs: 1_800_000,
+      maxAttempts: 5,
+      onError: () => {},
+    })
+  }
+
+  it('re-claims a reappearance on the very next tick, without spending an attempt', async () => {
+    const project = await createProject(pg, 'Acme')
+    const { id } = (await store.request(project.id)) as { id: number }
+
+    let calls = 0
+    const worker = makeWorker({
+      purge: async (): Promise<{ deleted: boolean; remaining: Record<string, number> }> => {
+        calls++
+        return calls === 1
+          ? { deleted: false, remaining: { events: 2 } }
+          : { deleted: true, remaining: {} }
+      },
+    })
+
+    expect(await worker.runOnce()).toBe('deferred')
+
+    // Claimable again NOW, with nothing faked about the clock: no lease left
+    // to wait out, the attempt handed back, and the reason on record for the
+    // status endpoint to report.
+    const after = await store.get(id)
+    expect(after).toMatchObject({ claimedAt: null, attempts: 0, completedAt: null })
+    expect(after?.lastError).toContain('rows reappeared during purge')
+
+    // The very next tick, with no time passing at all.
+    expect(await worker.runOnce()).toBe('purged')
+    expect(calls).toBe(2)
+    expect((await store.get(id))?.completedAt).not.toBeNull()
+  })
+
+  /**
+   * The other half of the same decision: a reappearance must not walk the
+   * request towards the terminal state. Five in a row leave it exactly as
+   * claimable as the first one did — which is what makes a busy project
+   * safe to delete.
+   */
+  it('never exhausts the attempt budget on repeated reappearances', async () => {
+    const project = await createProject(pg, 'Acme')
+    const { id } = (await store.request(project.id)) as { id: number }
+    const worker = makeWorker({
+      purge: async () => ({ deleted: false, remaining: { events: 1 } }),
+    })
+
+    for (let i = 0; i < 6; i++) expect(await worker.runOnce()).toBe('deferred')
+
+    const after = await store.get(id)
+    expect(after?.attempts).toBe(0)
+    expect(after?.completedAt).toBeNull()
+    // Still claimable — the state a request past maxAttempts is NOT in.
+    expect(
+      await store.claim({ leaseMs: 1_800_000, maxAttempts: 5, claimDelayMs: 0 }),
+    ).not.toBeNull()
+  })
+
+  /**
+   * `fail()` is untouched by all of the above, and must stay that way: a
+   * genuinely broken purge holds its lease so it retries slowly, rather than
+   * spinning through its whole budget in a minute.
+   */
+  it('leaves a thrown purge on fail(), lease held and attempt spent', async () => {
+    const project = await createProject(pg, 'Acme')
+    const { id } = (await store.request(project.id)) as { id: number }
+    const worker = makeWorker({
+      purge: async () => {
+        throw new Error('ClickHouse unreachable')
+      },
+    })
+
+    expect(await worker.runOnce()).toBe('failed')
+    const after = await store.get(id)
+    expect(after?.attempts).toBe(1)
+    expect(after?.claimedAt).not.toBeNull()
+    expect(after?.lastError).toContain('ClickHouse unreachable')
+    expect(await store.claim({ leaseMs: 1_800_000, maxAttempts: 5, claimDelayMs: 0 })).toBeNull()
   })
 })

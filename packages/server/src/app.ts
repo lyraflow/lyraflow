@@ -240,6 +240,7 @@ export function buildApp(input: {
     purge: (projectId) => purgeProject({ ch, pg, projectId }),
     complete: (id) => projectDeletions.complete(id),
     fail: (id, error) => projectDeletions.fail(id, error),
+    defer: (id, note) => projectDeletions.defer(id, note),
     intervalMs: config.projectPurgeIntervalMs,
     leaseMs: config.projectPurgeLeaseMs,
     maxAttempts: config.projectPurgeMaxAttempts,

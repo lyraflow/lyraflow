@@ -250,6 +250,50 @@ export class ProjectDeletionStore {
   }
 
   /**
+   * A TRANSIENT outcome, not a failure: the teardown ran and the verify step
+   * found rows back again (`purgeProject` returning `deleted: false` — the
+   * buffered-flush shape it documents). The teardown is idempotent, so the
+   * answer is simply to do it again, immediately.
+   *
+   * All three writes matter, and each for its own reason:
+   *
+   * - `claimed_at = NULL` is what makes "the next pass redoes the teardown"
+   *   mean the next WORKER TICK rather than the end of the lease. Routing
+   *   this through `fail()` instead leaves the lease held, and
+   *   `projectPurgeLeaseMs` is half an hour: a project sits visibly
+   *   half-destroyed for thirty minutes over a race that resolves in a
+   *   second.
+   * - `attempts - 1` gives the attempt back. `claim()` incremented it on the
+   *   way in, and a reappearance is an expected outcome of a live install,
+   *   not evidence the request is poisoned. Left counting up, a project
+   *   whose events keep arriving walks itself to the terminal `failed` state
+   *   — which nothing but `reopen()` can leave — for doing exactly what it
+   *   was designed to do.
+   * - `last_error` is still recorded, because the status endpoint is the
+   *   only place an operator can see WHY a delete is taking another pass.
+   *
+   * `GREATEST(..., 0)` rather than a bare subtraction: nothing should be able
+   * to drive this below zero, and a negative attempt count would silently
+   * widen the retry budget instead of restoring it.
+   *
+   * DELIBERATELY NOT A CHANGE TO `fail()`. Clearing the lease there too would
+   * make a genuinely broken purge — an unreachable ClickHouse, say — retry as
+   * fast as the worker ticks, burning every attempt in a minute and reaching
+   * the terminal state before an operator could see the first error. The two
+   * outcomes need opposite cadences, so they get two methods.
+   */
+  async defer(id: number, note: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE project_deletions
+          SET claimed_at = NULL,
+              attempts = GREATEST(attempts - 1, 0),
+              last_error = $2
+        WHERE id = $1`,
+      [id, note.slice(0, MAX_LAST_ERROR_LENGTH)],
+    )
+  }
+
+  /**
    * Records why an attempt failed, leaving the request claimable again once
    * its lease ages out (or immediately unclaimable, once `attempts` has
    * reached `claim`'s `maxAttempts`).

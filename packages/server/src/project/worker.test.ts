@@ -20,6 +20,7 @@ function makeWorker(overrides: Partial<ProjectPurgeWorkerOptions> = {}) {
     purge: async () => ({ deleted: true, remaining: {} }),
     complete: async () => {},
     fail: async () => {},
+    defer: async () => {},
     intervalMs: 1000,
     leaseMs: 60_000,
     maxAttempts: 5,
@@ -39,15 +40,48 @@ describe('ProjectPurgeWorker', () => {
   // The pin that stops a partial teardown reporting success.
   it('does NOT complete a request whose purge left rows behind', async () => {
     const complete = vi.fn(async () => {})
-    const fail = vi.fn(async () => {})
+    const defer = vi.fn(async () => {})
     const worker = makeWorker({
       purge: async () => ({ deleted: false, remaining: { events: 3 } }),
       complete,
-      fail,
+      defer,
     })
-    expect(await worker.runOnce()).toBe('failed')
+    expect(await worker.runOnce()).toBe('deferred')
     expect(complete).not.toHaveBeenCalled()
-    expect(fail).toHaveBeenCalledWith(request.id, expect.stringContaining('events=3'))
+    expect(defer).toHaveBeenCalledWith(request.id, expect.stringContaining('events=3'))
+  })
+
+  /**
+   * The two `deleted: false` and `throw` outcomes must not share a path.
+   * `fail()` holds the lease for its whole duration (half an hour) and spends
+   * an attempt; a reappearance needs the opposite of both. Routing a
+   * reappearance through `fail()` is not a cosmetic difference — it is the
+   * project sitting half-destroyed for thirty minutes, and reaching the
+   * terminal `failed` state after five races.
+   */
+  it('routes a reappearance to defer and a thrown purge to fail, never the other way round', async () => {
+    const deferSpy = vi.fn(async () => {})
+    const failSpy = vi.fn(async () => {})
+
+    const reappeared = makeWorker({
+      purge: async () => ({ deleted: false, remaining: { events: 1 } }),
+      defer: deferSpy,
+      fail: failSpy,
+    })
+    expect(await reappeared.runOnce()).toBe('deferred')
+    expect(failSpy).not.toHaveBeenCalled()
+
+    deferSpy.mockClear()
+    const threw = makeWorker({
+      purge: async () => {
+        throw new Error('ClickHouse unreachable')
+      },
+      defer: deferSpy,
+      fail: failSpy,
+    })
+    expect(await threw.runOnce()).toBe('failed')
+    expect(deferSpy).not.toHaveBeenCalled()
+    expect(failSpy).toHaveBeenCalledTimes(1)
   })
 
   it('never rejects when purge throws synchronously', async () => {

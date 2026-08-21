@@ -127,6 +127,7 @@ function spiedStore(pool: Pool) {
   const real = new ProjectDeletionStore(pool)
   const complete = vi.fn((id: number) => real.complete(id))
   const fail = vi.fn((id: number, error: string) => real.fail(id, error))
+  const defer = vi.fn((id: number, note: string) => real.defer(id, note))
   const claimById = vi.fn(
     (id: number, opts: { leaseMs: number; maxAttempts: number; claimDelayMs: number }) =>
       real.claimById(id, opts),
@@ -134,12 +135,14 @@ function spiedStore(pool: Pool) {
   return {
     complete,
     fail,
+    defer,
     claimById,
     makeStore: () => ({
       request: (id: number) => real.request(id),
       claimById,
       complete,
       fail,
+      defer,
       get: (id: number) => real.get(id),
     }),
   }
@@ -479,9 +482,18 @@ describe('runProjects — injected deps (the claim race, the retry, and the stor
     expect(req.rows[0]).toMatchObject({ completed_at: null, claimed_at: null, attempts: 0 })
   })
 
-  it('retries once, then fails the request and leaves it pending, when purge reports rows reappeared twice', async () => {
+  /**
+   * A reappearance hands the request BACK to the queue rather than failing
+   * it: `defer`, not `fail`. Through `fail` the row keeps `claimed_at`, so
+   * nothing may touch this half-torn-down project until the lease ages out —
+   * thirty minutes by default — which also made the message this command
+   * printed ("the server worker will finish it") wrong by three orders of
+   * magnitude. The row state below is the whole assertion: no lease, no
+   * attempt spent, and the reason on record.
+   */
+  it('hands the request back to the queue, unclaimed, when purge reports rows reappeared twice', async () => {
     const project = await createProject(pg, 'Acme')
-    const { fail, complete, makeStore } = spiedStore(pg)
+    const { fail, defer, complete, makeStore } = spiedStore(pg)
     const purge = vi.fn(async () => ({ deleted: false, remaining: { events: 3 } }))
     const ctx = fakeCtx({ stdinIsTty: true, answers: ['acme'] })
 
@@ -493,14 +505,17 @@ describe('runProjects — injected deps (the claim race, the retry, and the stor
 
     expect(code).toBe(1)
     expect(purge).toHaveBeenCalledTimes(2)
-    expect(fail).toHaveBeenCalledTimes(1)
+    expect(defer).toHaveBeenCalledTimes(1)
+    expect(fail).not.toHaveBeenCalled()
     expect(complete).not.toHaveBeenCalled()
     expect(ctx.errLines().join('\n')).toContain('rows reappeared')
+    // The corrected promise: the next pass, not the end of the lease.
+    expect(ctx.errLines().join('\n')).toContain('next pass')
     const req = await pg.query(
-      'SELECT completed_at, last_error FROM project_deletions WHERE project_id = $1',
+      'SELECT completed_at, claimed_at, attempts, last_error FROM project_deletions WHERE project_id = $1',
       [project.id],
     )
-    expect(req.rows[0].completed_at).toBeNull()
+    expect(req.rows[0]).toMatchObject({ completed_at: null, claimed_at: null, attempts: 0 })
     expect(req.rows[0].last_error).toContain('rows reappeared during purge')
   })
 
