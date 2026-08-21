@@ -221,9 +221,9 @@ export function buildApp(input: {
   })
 
   // Exactly ONE ProjectDeletionStore, for the same reason there is exactly
-  // one SuppressionStore/DeletionStore/PurgeWorker: Task 5's routes consume
-  // this same instance, and a second construction site would let a request
-  // accepted through one and claimed through the other drift apart.
+  // one SuppressionStore/DeletionStore/PurgeWorker: the admin routes below
+  // consume this same instance, and a second construction site would let a
+  // request accepted through one and claimed through the other drift apart.
   const projectDeletions = new ProjectDeletionStore(pg)
   const projectPurge = new ProjectPurgeWorker({
     claim: () =>

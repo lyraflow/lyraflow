@@ -157,12 +157,17 @@ export function ProjectProvider(props: {
   // own updater, not the filtered one `setProjects`'s updater computes.
   // This is what actually resolves that `null` to the first survivor, the
   // moment one exists: every screen stays scoped to a project that exists,
-  // and `null` only ever persists when nothing survives (`App.tsx`'s
-  // wizard case, a later task). Watching internal `projects`/`activeId`
-  // rather than the `props.initialId` the effect above tracks -- a removal
-  // changes neither of those props.
+  // and `null` only ever persists when nothing survives -- which is the
+  // wizard branch `App.tsx` chooses above this provider. Watching internal
+  // `projects`/`activeId` rather than the `props.initialId` the effect above
+  // tracks -- a removal changes neither of those props.
+  //
+  // A project being DELETED is not a survivor. `Shell.tsx`'s switcher filters
+  // `deleting_at !== null` out, so falling back to one would leave the app
+  // scoped to a project the switcher refuses to offer -- no way to see which
+  // project is active and no way to change it. The two filters have to agree.
   useEffect(() => {
-    const first = projects[0]
+    const first = projects.find((p) => p.deleting_at === null)
     if (activeId === null && first !== undefined) {
       setActiveIdState(first.id)
     }
@@ -184,10 +189,10 @@ export function ProjectProvider(props: {
 
   const removeProject = useCallback((id: number) => {
     setProjects((prev) => prev.filter((p) => p.id !== id))
-    // The active project may be the one that just vanished. Falling back to
-    // the first survivor keeps every screen scoped to a project that exists;
-    // `null` is reachable only when nothing survives, which is `App.tsx`'s
-    // wizard case, a later task.
+    // The active project may be the one that just vanished. `null` here is
+    // resolved by the effect above, which picks the first survivor that is
+    // not itself being deleted; `null` persists only when nothing survives,
+    // which is the wizard branch `App.tsx` chooses above this provider.
     setActiveIdState((prev) => (prev === id ? null : prev))
   }, [])
 

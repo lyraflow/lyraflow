@@ -126,6 +126,13 @@ function ProjectRow(props: {
   // tick. Only a `failed` STATUS is a failure. Cleared on unmount and
   // whenever there is nothing to poll, so a closed tab or a row that never
   // started a delete never runs this timer.
+  //
+  // A 401 IS THE ONE EXCEPTION, and it is routed exactly where `startDelete`
+  // routes its own: an expired session is not a hiccup, it will not resolve
+  // on the next tick, and treating it as one means this timer retries a
+  // request that can only ever 401, every three seconds, for as long as the
+  // tab stays open -- while the screen shows nothing to explain why the row
+  // never moves.
   useEffect(() => {
     if (deletionId === null) return
     let cancelled = false
@@ -140,15 +147,21 @@ function ProjectRow(props: {
           clearInterval(timer)
           setError(status.error ?? 'The deletion did not finish.')
         }
-      } catch {
-        // See the comment above: a poll failure is not a deletion failure.
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 401) {
+          clearInterval(timer)
+          if (!cancelled) onUnauthorized?.()
+          return
+        }
+        // See the comment above: any other poll failure is not a deletion
+        // failure.
       }
     }, 3000)
     return () => {
       cancelled = true
       clearInterval(timer)
     }
-  }, [deletionId, client, project.id, onDeleted])
+  }, [deletionId, client, project.id, onDeleted, onUnauthorized])
 
   return (
     <li className="flex min-w-0 flex-col gap-1 py-2">

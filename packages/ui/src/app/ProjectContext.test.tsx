@@ -233,4 +233,33 @@ describe('ProjectProvider removeProject', () => {
     expect(view.ctx().projects).toEqual([])
     expect(view.ctx().activeId).toBeNull()
   })
+
+  /**
+   * `Shell.tsx`'s switcher filters `deleting_at !== null` out of the list it
+   * offers. Falling back to a deleting project here would leave the app
+   * scoped to one the switcher refuses to show -- nothing naming the active
+   * project, and no way to change it from the header. The two filters have to
+   * agree, so this asserts the fallback SKIPS a deleting project rather than
+   * taking `projects[0]`.
+   */
+  it('removeProject skips a deleting project when it re-resolves', async () => {
+    const dying = { ...project(2, 'Dying'), deleting_at: '2026-08-21T10:00:00.000Z' }
+    const healthy = project(3, 'Healthy')
+    const view = renderWithProvider([acme, dying, healthy], acme.id)
+    act(() => view.ctx().removeProject(acme.id))
+    expect(view.ctx().projects.map((p) => p.id)).toEqual([dying.id, healthy.id])
+    expect(view.ctx().activeId).toBe(healthy.id)
+  })
+
+  /**
+   * And `null` is the right answer when every survivor is being deleted:
+   * there is no project the switcher would offer, so scoping to one would be
+   * inventing a choice the operator cannot see or undo.
+   */
+  it('leaves activeId null when every survivor is being deleted', async () => {
+    const dying = { ...project(2, 'Dying'), deleting_at: '2026-08-21T10:00:00.000Z' }
+    const view = renderWithProvider([acme, dying], acme.id)
+    act(() => view.ctx().removeProject(acme.id))
+    expect(view.ctx().activeId).toBeNull()
+  })
 })

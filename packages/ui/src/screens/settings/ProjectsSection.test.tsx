@@ -407,6 +407,65 @@ describe('ProjectsSection — delete', () => {
     expect(onSessionStale).not.toHaveBeenCalled()
   })
 
+  /**
+   * The poll's `catch` treated every failure as a network hiccup, including a
+   * 401. An expired session does not resolve on the next tick, so the timer
+   * retried a request that could only ever 401, every three seconds, for as
+   * long as the tab stayed open -- with nothing on screen explaining why the
+   * row never moved. `startDelete` already routes a 401 to `onUnauthorized`;
+   * the poll now does the same, and stops.
+   */
+  it('reports a 401 from the poll as an expired session, and stops polling', async () => {
+    client.deleteProject = vi.fn(async () => ({ id: 7, project_id: acme.id, status: 'pending' }))
+    client.projectDeletion = vi.fn(async () => {
+      throw new ApiError(401, 'no_session')
+    })
+    const onUnauthorized = vi.fn()
+    const onSessionStale = vi.fn()
+    render(
+      <ProjectsSection
+        client={client}
+        onUnauthorized={onUnauthorized}
+        onSessionStale={onSessionStale}
+      />,
+      { wrapper: withProjects([acme]) },
+    )
+    await confirmDelete('acme')
+    await vi.advanceTimersByTimeAsync(3500)
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalledTimes(1))
+    expect(onSessionStale).not.toHaveBeenCalled()
+
+    // And it really stopped: a 401 that keeps polling would keep counting up
+    // here, which is the half of this the callback alone does not prove.
+    const callsAfterFirst = (client.projectDeletion as ReturnType<typeof vi.fn>).mock.calls.length
+    await vi.advanceTimersByTimeAsync(12_000)
+    expect((client.projectDeletion as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(
+      callsAfterFirst,
+    )
+  })
+
+  /**
+   * A non-401 poll failure keeps its old behaviour, and this is what stops
+   * the fix above from being written as "stop polling on any error": the
+   * teardown runs server-side whether or not this tab is watching, so a 5xx
+   * or a dropped connection must leave the row deleting and try again.
+   */
+  it('keeps polling through a poll failure that is not a 401', async () => {
+    client.deleteProject = vi.fn(async () => ({ id: 7, project_id: acme.id, status: 'pending' }))
+    const onUnauthorized = vi.fn()
+    client.projectDeletion = vi
+      .fn()
+      .mockRejectedValueOnce(new ApiError(503, 'unavailable'))
+      .mockResolvedValue({ status: 'completed', requested_at: NOW, completed_at: NOW })
+    render(<ProjectsSection client={client} onUnauthorized={onUnauthorized} />, {
+      wrapper: withProjects([acme, other]),
+    })
+    await confirmDelete('acme')
+    await vi.advanceTimersByTimeAsync(7000)
+    await waitFor(() => expect(screen.queryByText('acme')).not.toBeInTheDocument())
+    expect(onUnauthorized).not.toHaveBeenCalled()
+  })
+
   // Regression: `handleDeleted` used to depend directly on `projects`,
   // which is `ProjectContext`'s own state array and gets a fresh reference
   // on every `updateProject` call -- including a rename on a DIFFERENT row.
