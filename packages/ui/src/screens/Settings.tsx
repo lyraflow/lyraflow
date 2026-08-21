@@ -26,8 +26,13 @@ export function Settings(props: {
    * `onUnauthorized` prop.
    */
   onUnauthorized?: () => void
+  /** Called when a completed deletion in `ProjectsSection` empties the
+   * project list -- passed straight through, matching `onUnauthorized`'s
+   * own shape. See `App.tsx`'s implementation for why the decision lives
+   * there rather than in this screen. */
+  onSessionStale?: () => void
 }) {
-  const { client, onUnauthorized } = props
+  const { client, onUnauthorized, onSessionStale } = props
   const { activeId, projects, updateProject } = useProject()
   // The identity fields (write key) come from their own fetch below --
   // `ProjectIdentity` doesn't carry retention/quota. Those live on the
@@ -111,7 +116,7 @@ export function Settings(props: {
           if (activeId != null) updateProject(activeId, patch)
         }}
       />
-      <ProjectsSection client={client} />
+      <ProjectsSection client={client} onSessionStale={onSessionStale} />
     </div>
   )
 }

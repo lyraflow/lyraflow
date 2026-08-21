@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { ApiError } from '../../api/client.js'
 import type { ApiClient } from '../../api/client.js'
 import type { CreatedProject, Project } from '../../api/types.js'
@@ -360,8 +360,15 @@ function ProjectRow(props: {
  * before that PATCH landed -- would win a whole-list replace even though
  * `updateProject`'s merge already applied the newer value.
  */
-export function ProjectsSection(props: { client: ApiClient }) {
-  const { client } = props
+export function ProjectsSection(props: {
+  client: ApiClient
+  /** Called when a completed deletion empties the project list -- see
+   * `App.tsx`'s implementation for why the wizard-or-shell decision has to
+   * happen there rather than here. Threaded straight through to each row
+   * too, matching `onUnauthorized`'s own shape. */
+  onSessionStale?: () => void
+}) {
+  const { client, onSessionStale } = props
   const { projects, addProject, updateProject, removeProject } = useProject()
 
   const [mode, setMode] = useState<Mode>('idle')
@@ -369,6 +376,30 @@ export function ProjectsSection(props: { client: ApiClient }) {
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
   const [createdProject, setCreatedProject] = useState<CreatedProject | null>(null)
+
+  // A completed deletion that leaves other projects behind removes the row
+  // as it always has. One that empties the list can't -- the shell above
+  // has nothing left to show -- so it hands off to `onSessionStale` instead
+  // of `removeProject`, never both. `projects.length === 1` reads the
+  // CURRENT, authoritative list from context at the moment the poll lands,
+  // not a value captured when the delete started -- the only other project
+  // could itself have been deleted in the meantime.
+  //
+  // Memoized on `[projects, removeProject, onSessionStale]` rather than a
+  // fresh closure every render: `ProjectRow`'s own poll effect depends on
+  // this function's identity, and an unrelated re-render here (opening the
+  // "New project" form, another row saving a rename) must not reset an
+  // in-flight row's poll timer.
+  const handleDeleted = useCallback(
+    (id: number) => {
+      if (projects.length === 1) {
+        onSessionStale?.()
+      } else {
+        removeProject(id)
+      }
+    },
+    [projects, removeProject, onSessionStale],
+  )
 
   function openForm() {
     setCreateError(null)
@@ -433,7 +464,8 @@ export function ProjectsSection(props: { client: ApiClient }) {
               project={p}
               client={client}
               onUpdated={(next) => updateProject(next.id, next)}
-              onDeleted={removeProject}
+              onDeleted={handleDeleted}
+              onSessionStale={onSessionStale}
             />
           ))}
         </ul>
