@@ -35,6 +35,12 @@ const DEL_PREFIX = `${PREFIX}-del`
 let app: FastifyInstance
 let cookie = ''
 let sessionHeaders: Record<string, string>
+// The SAME configured value app.ts wires ProjectPurgeWorker and
+// registerAdminProjectRoutes with (the default, since this suite's
+// loadConfig call sets no override) -- captured here rather than hardcoded
+// so the `failed` branch test below can't silently drift from whatever the
+// app under test actually enforces.
+let maxAttempts: number
 const uiHeaderOnly = { 'x-lyraflow-ui': '1' }
 
 // Same store DELETE /v1/projects/:id and GET /v1/project-deletions/:id
@@ -98,6 +104,7 @@ beforeAll(async () => {
     LYRAFLOW_CLICKHOUSE_PASSWORD: CH.password,
     LYRAFLOW_CLICKHOUSE_DB: CH.database,
   } as NodeJS.ProcessEnv)
+  maxAttempts = config.projectPurgeMaxAttempts
   const readiness = new Readiness()
   readiness.markReady()
   app = buildApp({ config, pg, ch, readiness })
@@ -328,9 +335,14 @@ describe('POST /v1/projects', () => {
       'created_at',
       'retention_months',
       'monthly_event_quota',
+      'deleting_at',
     ]) {
       expect(body[field]).toEqual(fromList?.[field])
     }
+    // Not merely equal to GET's (both undefined would pass that loop) --
+    // present and explicitly null, the same way `disabled_at` already is
+    // just above in the real response.
+    expect(body.deleting_at).toBeNull()
 
     await pg.query('DELETE FROM projects WHERE slug = $1', ['admin-routes-full-shape'])
   })
@@ -697,6 +709,9 @@ describe('DELETE /v1/projects/:id', () => {
     })
     expect(res.statusCode).toBe(202)
     expect(res.json()).toMatchObject({ project_id: project.id, status: 'pending' })
+    // A poll target: caching this would let a client miss every state
+    // change until the entry expired.
+    expect(res.headers['cache-control']).toBe('no-store')
   })
 
   it('409s a slug that does not match, stamping nothing and queueing nothing', async () => {
@@ -747,6 +762,24 @@ describe('DELETE /v1/projects/:id', () => {
     expect(res.json()).toEqual({ error: 'invalid_id' })
   })
 
+  // `Number('0')` and `Number('-1')` are both valid, in-range numbers --
+  // `!Number.isInteger(id)` alone would never catch either, and only the
+  // separate `id <= 0` half of the guard does. Without it these reach the
+  // database as a bind parameter that matches no row rather than a 400.
+  it.each([
+    ['zero', '0'],
+    ['negative', '-1'],
+  ])('400s an out-of-range id: %s', async (_name, raw) => {
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/projects/${raw}`,
+      headers: sessionHeaders,
+      payload: { slug: 'acme' },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'invalid_id' })
+  })
+
   it('400s a body with no slug', async () => {
     const project = await createProject(pg, 'Acme')
     const res = await app.inject({
@@ -790,6 +823,9 @@ describe('GET /v1/project-deletions/:id', () => {
       headers: sessionHeaders,
     })
     expect(res.json()).toMatchObject({ status: 'pending', completed_at: null })
+    // The route a UI polls -- a cached response is the failure that matters
+    // here, more than on most others.
+    expect(res.headers['cache-control']).toBe('no-store')
   })
 
   // The pin that proves the missing foreign key on project_deletions is
@@ -806,5 +842,109 @@ describe('GET /v1/project-deletions/:id', () => {
       headers: sessionHeaders,
     })
     expect(res.json().status).toBe('completed')
+  })
+
+  // This route is instance-scoped and reports `last_error`, raw failure
+  // text from the purge worker -- an ungated regression here exposes every
+  // deletion request on the install, not just the caller's own. Mirrors the
+  // DELETE route's equivalent test.
+  it('401s without a session', async () => {
+    const project = await createProject(pg, 'Acme')
+    const { id } = (await del(project)).json()
+    const res = await app.inject({
+      method: 'GET',
+      url: `/v1/project-deletions/${id}`,
+      headers: uiHeaderOnly,
+    })
+    expect(res.statusCode).toBe(401)
+    expect(res.json()).toEqual({ error: 'invalid_session' })
+  })
+
+  it('400s a non-numeric id', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/v1/project-deletions/abc',
+      headers: sessionHeaders,
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'invalid_id' })
+  })
+
+  it.each([
+    ['zero', '0'],
+    ['negative', '-1'],
+  ])('400s an out-of-range id: %s', async (_name, raw) => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/v1/project-deletions/${raw}`,
+      headers: sessionHeaders,
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'invalid_id' })
+  })
+
+  it('404s an id naming no deletion request', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/v1/project-deletions/999999',
+      headers: sessionHeaders,
+    })
+    expect(res.statusCode).toBe(404)
+    expect(res.json()).toEqual({ error: 'deletion_not_found' })
+  })
+
+  // The order pin: `last_error` must be read as `pending` (with the error
+  // surfaced) BEFORE the lease check below, or a request that failed its
+  // last attempt but is not yet dead reports the wrong state. `store.fail`
+  // alone does not exercise this -- it never touches `claimed_at`, so the
+  // lease check would evaluate false either way and the ordering would not
+  // matter. The real state this guards against is a worker's claim() (sets
+  // `claimed_at` to now, within the lease) followed by its fail() (sets
+  // `last_error`, leaves `claimed_at` alone -- see fail()'s own docstring),
+  // stamped directly here rather than through claim() for the reason the
+  // in_progress test below explains.
+  it('reports pending with the error after a failed attempt, ahead of the lease check', async () => {
+    const project = await createProject(pg, 'Acme')
+    const { id } = (await del(project)).json()
+    await pg.query('UPDATE project_deletions SET claimed_at = now() WHERE id = $1', [id])
+    await store.fail(id, 'boom')
+    const res = await app.inject({
+      method: 'GET',
+      url: `/v1/project-deletions/${id}`,
+      headers: sessionHeaders,
+    })
+    expect(res.json()).toMatchObject({ status: 'pending', error: 'boom' })
+  })
+
+  it('reports failed once attempts reach the configured max', async () => {
+    const project = await createProject(pg, 'Acme')
+    const { id } = (await del(project)).json()
+    await pg.query('UPDATE project_deletions SET attempts = $2 WHERE id = $1', [id, maxAttempts])
+    const res = await app.inject({
+      method: 'GET',
+      url: `/v1/project-deletions/${id}`,
+      headers: sessionHeaders,
+    })
+    expect(res.json()).toMatchObject({ status: 'failed', completed_at: null })
+  })
+
+  // NOT `store.claim(...)`: `claim` is deliberately global (not scoped to
+  // one request -- see its own docstring), and by this point in the suite
+  // several earlier tests' requests are still sitting in the queue,
+  // unclaimed and unfailed. `claim` would hand back whichever of THOSE is
+  // oldest, leaving THIS test's own row untouched and its assertion
+  // asserting the wrong id's state. Stamping `claimed_at` directly is the
+  // same technique deletion-store.test.ts's own claim tests use for the
+  // opposite case (an expired lease).
+  it('reports in_progress for a request a worker has currently claimed', async () => {
+    const project = await createProject(pg, 'Acme')
+    const { id } = (await del(project)).json()
+    await pg.query('UPDATE project_deletions SET claimed_at = now() WHERE id = $1', [id])
+    const res = await app.inject({
+      method: 'GET',
+      url: `/v1/project-deletions/${id}`,
+      headers: sessionHeaders,
+    })
+    expect(res.json()).toMatchObject({ status: 'in_progress', completed_at: null })
   })
 })

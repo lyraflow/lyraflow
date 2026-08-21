@@ -38,6 +38,20 @@ const UpdateBody = z.object({
 const DeleteBody = z.object({ slug: z.string().min(1) })
 
 /**
+ * `Number('12abc')` is NaN and `Number('')` is 0, so both the shape and the
+ * range are checked -- a bare parse would send `NaN` to Postgres as a bind
+ * parameter and fail as a 500 rather than a 400. Extracted once a third
+ * route needed the identical check (PATCH, DELETE, GET
+ * /v1/project-deletions/:id) -- `privacy/routes.ts`'s `parseDeletionId` is
+ * the same idea; kept local here since every call site in this file answers
+ * the same `invalid_id` body, unlike that one.
+ */
+function parseId(raw: string): number | null {
+  const id = Number(raw)
+  return Number.isInteger(id) && id > 0 ? id : null
+}
+
+/**
  * The instance-scoped admin surface: which projects exist, and creating a
  * new one. Both are the project switcher's and the create-project flow's
  * backing routes for the coming web UI.
@@ -133,11 +147,8 @@ export function registerAdminProjectRoutes(app: FastifyInstance, deps: AdminProj
   app.patch<{ Params: { id: string } }>('/v1/projects/:id', async (req, reply) => {
     if (!(await requireSession(req, reply))) return
 
-    const id = Number(req.params.id)
-    // `Number('12abc')` is NaN and `Number('')` is 0, so both the shape and
-    // the range are checked -- a bare parse would send `NaN` to Postgres as
-    // a bind parameter and fail as a 500 rather than a 400.
-    if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_id' })
+    const id = parseId(req.params.id)
+    if (id === null) return reply.code(400).send({ error: 'invalid_id' })
 
     const body = UpdateBody.safeParse(req.body)
     if (!body.success) return reply.code(400).send({ error: 'invalid_body' })
@@ -247,8 +258,11 @@ export function registerAdminProjectRoutes(app: FastifyInstance, deps: AdminProj
       // present anyway so this response is the same shape GET /v1/projects
       // returns -- the UI appends this row to that list (#89) and a missing
       // field would make the new row the only one whose archive state is
-      // `undefined` rather than "active".
+      // `undefined` rather than "active". `deleting_at` for the same reason:
+      // a missing field here would make this the one project in the UI's
+      // list whose deletion state reads `undefined` instead of a real value.
       disabled_at: null,
+      deleting_at: null,
       write_key: created.writeKey,
       server_key: created.serverKey,
     })
@@ -273,8 +287,8 @@ export function registerAdminProjectRoutes(app: FastifyInstance, deps: AdminProj
   app.delete<{ Params: { id: string } }>('/v1/projects/:id', async (req, reply) => {
     if (!(await requireSession(req, reply))) return
 
-    const id = Number(req.params.id)
-    if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_id' })
+    const id = parseId(req.params.id)
+    if (id === null) return reply.code(400).send({ error: 'invalid_id' })
 
     const body = DeleteBody.safeParse(req.body)
     if (!body.success) return reply.code(400).send({ error: 'invalid_body' })
@@ -306,8 +320,8 @@ export function registerAdminProjectRoutes(app: FastifyInstance, deps: AdminProj
   app.get<{ Params: { id: string } }>('/v1/project-deletions/:id', async (req, reply) => {
     if (!(await requireSession(req, reply))) return
 
-    const id = Number(req.params.id)
-    if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_id' })
+    const id = parseId(req.params.id)
+    if (id === null) return reply.code(400).send({ error: 'invalid_id' })
 
     const found = await deletions.get(id)
     if (!found) return reply.code(404).send({ error: 'deletion_not_found' })
