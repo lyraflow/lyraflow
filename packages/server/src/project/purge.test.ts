@@ -1,6 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
-import { type Pool, createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
+import {
+  type ClickHouseClient,
+  type Pool,
+  createChClient,
+  createPgPool,
+  loadMigrations,
+  migrate,
+} from '@lyraflow/db'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { PURGE_TABLES, purgeProject } from './purge.js'
 
@@ -35,10 +42,22 @@ async function createProject(db: Pool, name: string): Promise<{ id: number }> {
 
 /**
  * `n` events for `projectId`, each with its own id/identity/timestamp so
- * none collapse under `events`' ReplacingMergeTree. Inserting into `events`
- * is enough to populate `device_index` and `event_schema` too, through their
- * materialized views (device_index_mv, event_schema_str_mv) -- this file
- * never writes to either target table directly.
+ * none collapse under `events`' ReplacingMergeTree, and each carrying a
+ * non-empty `properties` / `properties_num` map. Inserting into `events` is
+ * enough to populate `device_index` AND `event_schema` too, through their
+ * materialized views (device_index_mv, event_schema_str_mv,
+ * event_schema_num_mv) -- this file never writes to either target table
+ * directly.
+ *
+ * The non-empty maps are load-bearing, not incidental: `event_schema_str_mv`
+ * / `event_schema_num_mv` (002_events.sql) are
+ * `ARRAY JOIN mapKeys(properties)` / `mapKeys(properties_num)`, and an ARRAY
+ * JOIN over an empty map produces zero rows, not one row with an empty key.
+ * An earlier version of this fixture used `{}` for both, which left
+ * `event_schema` permanently unpopulated by every test in this file --
+ * `event_schema`'s own whole-table `ALTER ... DELETE` was never exercised at
+ * all, caught only because a reviewer confirmed the empty-ARRAY-JOIN
+ * behaviour against the live test ClickHouse.
  */
 async function insertEvents(chClient: typeof ch, projectId: number, n: number): Promise<void> {
   const now = Date.now()
@@ -54,9 +73,32 @@ async function insertEvents(chClient: typeof ch, projectId: number, n: number): 
       timestamp: new Date(now + i * 1000).toISOString().replace('T', ' ').replace('Z', ''),
       received_at: new Date(now + i * 1000).toISOString().replace('T', ' ').replace('Z', ''),
       trusted: 0,
-      properties: {},
-      properties_num: {},
+      properties: { kind: PREFIX },
+      properties_num: { n: i },
     })),
+  })
+}
+
+/**
+ * A row in `events_dead_letter`, which nothing else in this file writes to
+ * -- unlike `events`, nothing populates it through a materialized view, so
+ * without this fixture `events_dead_letter` is never non-empty anywhere in
+ * this file and its whole-table `ALTER ... DELETE` (purge.ts's `MUTATED`
+ * loop) goes entirely unpinned.
+ */
+async function insertDeadLetter(chClient: typeof ch, projectId: number): Promise<void> {
+  await chClient.insert({
+    table: 'events_dead_letter',
+    format: 'JSONEachRow',
+    values: [
+      {
+        project_id: projectId,
+        received_at: new Date().toISOString().replace('T', ' ').replace('Z', ''),
+        reason: 'invalid_payload',
+        detail: `${PREFIX} fixture`,
+        payload: JSON.stringify({ event: 'broken' }),
+      },
+    ],
   })
 }
 
@@ -116,6 +158,54 @@ async function countsFor(chClient: typeof ch, projectId: number): Promise<Record
   return out
 }
 
+const CLEANUP_PARTITIONED = [
+  { table: 'events', compound: true },
+  { table: 'device_index', compound: true },
+  { table: 'person_traits', compound: false },
+] as const
+
+/**
+ * Drops every partition `table` holds for any id in `ids`, in one
+ * `system.parts` read rather than one per id -- cleanup can be asked to
+ * clear a handful of leftover projects at once and the read cost should not
+ * scale with how many. Mirrors purge.ts's own `listPartitions`/drop shape,
+ * duplicated here rather than imported: this is test-only cleanup code, not
+ * the thing under test.
+ */
+async function dropPartitionsFor(
+  table: string,
+  compound: boolean,
+  ids: readonly number[],
+): Promise<void> {
+  if (ids.length === 0) return
+  const idSet = new Set(ids)
+  const rs = await ch.query({
+    query: `SELECT DISTINCT partition FROM system.parts
+             WHERE database = currentDatabase() AND table = {table:String} AND active`,
+    query_params: { table },
+    format: 'JSONEachRow',
+  })
+  for (const row of await rs.json<{ partition: string }>()) {
+    const match = compound
+      ? /^\((\d+),\s*(\d+)\)$/.exec(row.partition)
+      : /^(\d+)$/.exec(row.partition)
+    if (!match) continue
+    const id = Number(match[1])
+    if (!idSet.has(id)) continue
+    await ch.command(
+      compound
+        ? {
+            query: `ALTER TABLE ${table} DROP PARTITION tuple({p:UInt32}, {m:UInt32})`,
+            query_params: { p: id, m: Number(match[2]) },
+          }
+        : {
+            query: `ALTER TABLE ${table} DROP PARTITION {p:UInt32}`,
+            query_params: { p: id },
+          },
+    )
+  }
+}
+
 /** Cleans both stores of every project this file created, looked up by
  * prefix rather than trusting in-memory ids -- a run that died mid-suite
  * leaves ClickHouse rows behind under an old project id that nothing else
@@ -123,17 +213,31 @@ async function countsFor(chClient: typeof ch, projectId: number): Promise<Record
  * `afterAll`, so the file is safe to run standalone more than once in a row
  * -- the same non-negotiable privacy/purge.test.ts states for its own
  * cleanup, and it applies here for the same reason: this file's whole point
- * is to delete rows out from under a shared test database. */
+ * is to delete rows out from under a shared test database.
+ *
+ * `events`, `device_index` and `person_traits` are dropped by PARTITION
+ * (`dropPartitionsFor`), not `ALTER ... DELETE`: a mutation predicated on a
+ * column that is not part of the partition key forces ClickHouse to rewrite
+ * every active part of the table, and these three are shared with every
+ * other suite in the run. `event_schema` and `events_dead_letter` carry no
+ * partition on `project_id` at all, so there is no drop available for
+ * either -- `ALTER ... DELETE` is the only option, kept scoped to exactly
+ * this file's own ids rather than ever run unscoped against the whole
+ * table. */
 async function cleanup(): Promise<void> {
   const existing = await pg.query<{ id: string }>('SELECT id FROM projects WHERE slug LIKE $1', [
     `${PREFIX}-%`,
   ])
   const ids = existing.rows.map((r) => Number(r.id))
   if (ids.length > 0) {
-    const list = ids.join(',')
-    for (const table of PURGE_TABLES) {
-      await ch.command({ query: `ALTER TABLE ${table} DELETE WHERE project_id IN (${list})` })
+    for (const { table, compound } of CLEANUP_PARTITIONED) {
+      await dropPartitionsFor(table, compound, ids)
     }
+    const list = ids.join(',')
+    await ch.command({ query: `ALTER TABLE event_schema DELETE WHERE project_id IN (${list})` })
+    await ch.command({
+      query: `ALTER TABLE events_dead_letter DELETE WHERE project_id IN (${list})`,
+    })
   }
   await pg.query('DELETE FROM projects WHERE slug LIKE $1', [`${PREFIX}-%`])
 }
@@ -158,6 +262,7 @@ describe('purgeProject', () => {
   it('removes every trace of the project from both stores', async () => {
     const project = await createProject(pg, 'Acme')
     await insertEvents(ch, project.id, 3)
+    await insertDeadLetter(ch, project.id)
     const result = await purgeProject({ ch, pg, projectId: project.id })
     expect(result.deleted).toBe(true)
     for (const table of PURGE_TABLES) {
@@ -171,21 +276,59 @@ describe('purgeProject', () => {
     const doomed = await createProject(pg, 'Doomed')
     const keeper = await createProject(pg, 'Keeper')
     await insertEvents(ch, doomed.id, 3)
+    await insertDeadLetter(ch, doomed.id)
     await insertEvents(ch, keeper.id, 4)
+    await insertDeadLetter(ch, keeper.id)
     const before = await countsFor(ch, keeper.id)
-    await purgeProject({ ch, pg, projectId: doomed.id })
+    const result = await purgeProject({ ch, pg, projectId: doomed.id })
+
+    // The doomed project was actually purged, not merely left out of the
+    // keeper's own count -- a total no-op would pass the two assertions
+    // below this one just as well.
+    expect(result.deleted).toBe(true)
+    for (const table of PURGE_TABLES) {
+      expect(await countFor(ch, table, doomed.id)).toBe(0)
+    }
+    expect((await pg.query('SELECT id FROM projects WHERE id = $1', [doomed.id])).rowCount).toBe(0)
+
     expect(await countsFor(ch, keeper.id)).toEqual(before)
     expect((await pg.query('SELECT id FROM projects WHERE id = $1', [keeper.id])).rowCount).toBe(1)
   })
 
   // THE STORE-ORDER PIN. Reversing the last two steps of purgeProject fails
   // this test and no other. This is #39's regression test.
+  //
+  // `onProgress` alone cannot see the gap this test is actually about: its
+  // fifth and final call fires once ClickHouse teardown is done, and the
+  // verify read plus the Postgres DELETE both run AFTER that call with no
+  // observation point of their own -- an `onProgress`-only version of this
+  // test cannot tell "DELETE runs after the verify read" from "DELETE runs
+  // right after teardown, skipping the verify read entirely", and a
+  // mutation that moves the DELETE to sit directly above the verify loop
+  // proved exactly that (it failed only the verify-pin test below, not this
+  // one). `chSpy` closes that gap: every `ch.query()` call purgeProject
+  // makes -- `listPartitions` during teardown, `countRows` during the
+  // verify read -- also samples whether the Postgres row is still there, so
+  // the previously-unobserved window between teardown and the DELETE is
+  // covered too.
   it('keeps the Postgres row while ClickHouse still holds rows', async () => {
     const project = await createProject(pg, 'Acme')
     await insertEvents(ch, project.id, 2)
     const seen: boolean[] = []
+    const observed: boolean[] = []
+    const chSpy = new Proxy(ch, {
+      get: (target, prop) =>
+        prop === 'query'
+          ? async (params: Parameters<ClickHouseClient['query']>[0]) => {
+              const rows = await pg.query('SELECT id FROM projects WHERE id = $1', [project.id])
+              observed.push(rows.rowCount === 1)
+              return target.query(params)
+            }
+          : Reflect.get(target, prop),
+    }) as ClickHouseClient
+
     await purgeProject({
-      ch,
+      ch: chSpy,
       pg,
       projectId: project.id,
       onProgress: async () => {
@@ -194,6 +337,11 @@ describe('purgeProject', () => {
       },
     })
     expect(seen.every(Boolean)).toBe(true)
+    // The gap `onProgress` cannot see: at least the three `listPartitions`
+    // reads and the five `countRows` reads of the verify loop, all with the
+    // Postgres row still present at the moment each one ran.
+    expect(observed.length).toBeGreaterThan(0)
+    expect(observed.every(Boolean)).toBe(true)
   })
 
   // THE VERIFY PIN. This is the buffered-flush shape: a row accepted before
@@ -221,14 +369,17 @@ describe('purgeProject', () => {
     // And the second pass converges, because nothing is writing any more.
     const second = await purgeProject({ ch, pg, projectId: project.id })
     expect(second.deleted).toBe(true)
+    expect((await pg.query('SELECT id FROM projects WHERE id = $1', [project.id])).rowCount).toBe(0)
   })
 
   it('is a no-op the second time', async () => {
     const project = await createProject(pg, 'Acme')
     await insertEvents(ch, project.id, 2)
-    await purgeProject({ ch, pg, projectId: project.id })
+    const first = await purgeProject({ ch, pg, projectId: project.id })
+    expect(first.deleted).toBe(true)
     const again = await purgeProject({ ch, pg, projectId: project.id })
     expect(again.deleted).toBe(true)
+    expect((await pg.query('SELECT id FROM projects WHERE id = $1', [project.id])).rowCount).toBe(0)
   })
 
   it('drops a single-key partition table as well as the tuple-key ones', async () => {
