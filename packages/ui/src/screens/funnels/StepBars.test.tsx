@@ -1,5 +1,6 @@
 import { render, screen, within } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import userEvent from '@testing-library/user-event'
+import { describe, expect, it, vi } from 'vitest'
 import type { FunnelStep } from '../../api/types.js'
 import { StepBars } from './StepBars.js'
 
@@ -210,5 +211,38 @@ describe('StepBars narrowing', () => {
     render(<StepBars result={RESULT} definition={[DEFINITION[0] as FunnelStep]} />)
     expect(screen.getByTestId('funnel-step-1-where')).toBeInTheDocument()
     expect(screen.queryByTestId('funnel-step-2-where')).toBeNull()
+  })
+})
+
+describe('StepBars selection', () => {
+  it("calls onSelectStep with the step's 1-indexed index when its row is clicked", async () => {
+    const user = userEvent.setup()
+    const onSelectStep = vi.fn()
+    render(<StepBars result={RESULT} onSelectStep={onSelectStep} />)
+    await user.click(screen.getByTestId('funnel-step-2'))
+    expect(onSelectStep).toHaveBeenCalledTimes(1)
+    expect(onSelectStep).toHaveBeenCalledWith(2)
+  })
+
+  it('marks only the selected step as pressed, via aria-pressed rather than colour alone', () => {
+    render(<StepBars result={RESULT} selectedStep={2} onSelectStep={() => {}} />)
+    expect(screen.getByTestId('funnel-step-1')).toHaveAttribute('aria-pressed', 'false')
+    expect(screen.getByTestId('funnel-step-2')).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByTestId('funnel-step-3')).toHaveAttribute('aria-pressed', 'false')
+  })
+
+  it('names each step row with what it does and which step it means -- the event name alone is ambiguous when two steps share it', () => {
+    render(<StepBars result={RESULT} onSelectStep={() => {}} />)
+    expect(screen.getByTestId('funnel-step-2')).toHaveAccessibleName(
+      'Show people at step 2: signup_started',
+    )
+  })
+
+  it('renders every row as a plain, unfocusable block without onSelectStep -- the builder preview has no funnel id to list people for', () => {
+    render(<StepBars result={RESULT} />)
+    expect(screen.queryAllByRole('button')).toHaveLength(0)
+    const step = screen.getByTestId('funnel-step-2')
+    expect(step.tagName).not.toBe('BUTTON')
+    expect(step).not.toHaveAttribute('aria-pressed')
   })
 })

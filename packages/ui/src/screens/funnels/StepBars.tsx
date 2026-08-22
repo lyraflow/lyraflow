@@ -72,8 +72,18 @@ export function StepBars(props: {
    * too. Optional: `result` alone is still a complete rendering, and this
    * component stays usable by a caller that has numbers and no definition. */
   definition?: readonly FunnelStep[] | null
+  /** The step whose people are currently shown beneath the chart, by its
+   * 1-indexed `index` -- the same number `onSelectStep` reports and the
+   * API's `step` parameter expects. */
+  selectedStep?: number | null
+  /** Reports which step was clicked, by its 1-indexed `index`. Omitted by a
+   * caller with nothing to do about a click -- `FunnelBuilder`'s preview
+   * renders an unsaved definition with no funnel id, so there is no people
+   * list it could open. Without this, a step row renders as an inert block:
+   * no button, no focus stop, no `aria-pressed`. */
+  onSelectStep?: (step: number) => void
 }) {
-  const { result, definition } = props
+  const { result, definition, selectedStep, onSelectStep } = props
   return (
     <div className="flex min-w-0 flex-col gap-1">
       {result.steps.map((step, i) => {
@@ -81,6 +91,38 @@ export function StepBars(props: {
         const where = whereFor(definition, i, step.event)
         const width =
           result.entered === 0 ? 0 : Math.round((step.people / result.entered) * 10000) / 100
+        const rowContent = (
+          <>
+            <div className="flex min-w-0 items-baseline justify-between gap-2">
+              <span className="min-w-0 truncate text-sm font-medium">
+                {step.index}. {step.event}
+              </span>
+              <span className="shrink-0 text-sm tabular-nums text-muted-foreground">
+                {formatCount(step.people)} · {formatPercent(step.from_start)}
+              </span>
+            </div>
+            {/* Between the step's own name and its own bar, deliberately.
+             * The line below a step block is the NEXT step's drop row, so
+             * a clause placed after the bar would sit against it; here it
+             * is bracketed by two things that already belong to this step
+             * and cannot be read as narrowing another one. */}
+            {where != null && (
+              <p
+                data-testid={`funnel-step-${step.index}-where`}
+                className="min-w-0 break-words text-xs text-muted-foreground"
+              >
+                where {where}
+              </p>
+            )}
+            <div className="h-2 w-full overflow-hidden rounded-sm bg-muted">
+              <div
+                data-testid="bar-fill"
+                className="h-full rounded-sm bg-primary"
+                style={{ width: `${width}%` }}
+              />
+            </div>
+          </>
+        )
         return (
           <div key={step.index} className="flex min-w-0 flex-col gap-1">
             {previous && result.entered !== 0 && (
@@ -92,36 +134,32 @@ export function StepBars(props: {
                 {formatCount(previous.people - step.people)} dropped)
               </div>
             )}
-            <div data-testid={`funnel-step-${step.index}`} className="flex min-w-0 flex-col gap-1">
-              <div className="flex min-w-0 items-baseline justify-between gap-2">
-                <span className="min-w-0 truncate text-sm font-medium">
-                  {step.index}. {step.event}
-                </span>
-                <span className="shrink-0 text-sm tabular-nums text-muted-foreground">
-                  {formatCount(step.people)} · {formatPercent(step.from_start)}
-                </span>
+            {/* A real `<button>`, not a `<div>` with an onClick -- this row
+             * becomes the primary control for the people list beneath the
+             * chart (a later screen), and a click handler on a non-button
+             * element is unreachable by keyboard and invisible to assistive
+             * technology. Rendered as a plain block instead, with no
+             * `onClick`, no `aria-pressed` and no focus stop, when the
+             * caller passed no `onSelectStep` -- see the prop doc above. */}
+            {onSelectStep != null ? (
+              <button
+                type="button"
+                data-testid={`funnel-step-${step.index}`}
+                aria-pressed={selectedStep === step.index}
+                aria-label={`Show people at step ${step.index}: ${step.event}`}
+                onClick={() => onSelectStep(step.index)}
+                className="flex min-w-0 flex-col gap-1 rounded-sm border-0 bg-transparent p-1 text-left hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-pressed:bg-accent"
+              >
+                {rowContent}
+              </button>
+            ) : (
+              <div
+                data-testid={`funnel-step-${step.index}`}
+                className="flex min-w-0 flex-col gap-1 p-1"
+              >
+                {rowContent}
               </div>
-              {/* Between the step's own name and its own bar, deliberately.
-               * The line below a step block is the NEXT step's drop row, so
-               * a clause placed after the bar would sit against it; here it
-               * is bracketed by two things that already belong to this step
-               * and cannot be read as narrowing another one. */}
-              {where != null && (
-                <p
-                  data-testid={`funnel-step-${step.index}-where`}
-                  className="min-w-0 break-words text-xs text-muted-foreground"
-                >
-                  where {where}
-                </p>
-              )}
-              <div className="h-2 w-full overflow-hidden rounded-sm bg-muted">
-                <div
-                  data-testid="bar-fill"
-                  className="h-full rounded-sm bg-primary"
-                  style={{ width: `${width}%` }}
-                />
-              </div>
-            </div>
+            )}
           </div>
         )
       })}
