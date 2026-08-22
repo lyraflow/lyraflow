@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -245,6 +245,93 @@ describe('FunnelDetail', () => {
     expect(screen.getByRole('button', { name: /^run$/i })).toBeEnabled()
   })
 
+  it('says in words which range is shown and which one Run would load', async () => {
+    // Dimming was the ONLY signal, and it is not one a reader can act on: it
+    // says something is off without saying what, or that anything is required
+    // of them. Reported as "the UI blurs but never refreshes", which is an
+    // accurate description of being told nothing.
+    const client = fakeClient()
+    renderDetail(client)
+    await screen.findByTestId('funnel-step-1')
+
+    expect(screen.queryByTestId('funnel-stale-notice')).toBeNull()
+
+    await userEvent.selectOptions(screen.getByLabelText(/range/i), '30')
+
+    const notice = screen.getByTestId('funnel-stale-notice')
+    // BOTH ranges, and this is the point: one number alone reads as a label
+    // rather than as a mismatch, and the mismatch is the whole message.
+    expect(notice).toHaveTextContent('the last 7 days')
+    expect(notice).toHaveTextContent('the last 30 days')
+
+    // Then a SECOND range, and this half is what makes the test mean
+    // anything. A hardcoded "Showing the last 7 days. Run to load the last
+    // 30 days." passes everything above it -- proved by stubbing exactly
+    // that -- because 7 and 30 are the mount default and the first thing a
+    // test reaches for. The singular is picked deliberately: it is the one
+    // phrasing the picker's own label ("Last 1 day") does not share, so it
+    // cannot be satisfied by echoing the option that was selected either.
+    await userEvent.selectOptions(screen.getByLabelText(/range/i), '1')
+    expect(notice).toHaveTextContent('the last 7 days')
+    expect(notice).toHaveTextContent('Run to load the last day')
+    expect(notice).not.toHaveTextContent('the last 30 days')
+    expect(notice).not.toHaveTextContent('the last 1 day')
+  })
+
+  it('clears the notice once the new range has actually been run', async () => {
+    const client = fakeClient()
+    renderDetail(client)
+    await screen.findByTestId('funnel-step-1')
+    await userEvent.selectOptions(screen.getByLabelText(/range/i), '30')
+    expect(screen.getByTestId('funnel-stale-notice')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: /^run$/i }))
+
+    await waitFor(() => expect(screen.queryByTestId('funnel-stale-notice')).toBeNull())
+  })
+
+  it('asks for a relative range as a relative range, never as a bare `since`', async () => {
+    // Reported: "Last 90 days" + Run answered `the range may span at most 90
+    // days`. The cap allows exactly 90; the request was over it because the
+    // two ends of the range came from two clocks. `since: <this machine's
+    // now> - 90d` with no `until` leaves the server to default `until` from
+    // ITS clock, strictly later by at least the request's flight time, so
+    // the span was 90 days plus a little -- and a little past a hard maximum
+    // is past it. Every range below the maximum absorbed the overshoot
+    // silently, which is why only 90 ever failed.
+    //
+    // `days` is the whole fix on this side: the server derives both ends
+    // from one reading of one clock.
+    const client = fakeClient()
+    renderDetail(client)
+    await screen.findByTestId('funnel-step-1')
+
+    await userEvent.selectOptions(screen.getByLabelText(/range/i), '90')
+    await userEvent.click(screen.getByRole('button', { name: /^run$/i }))
+
+    await waitFor(() => expect(client.runFunnel).toHaveBeenCalledTimes(2))
+    const body = client.runFunnel.mock.calls[1]?.[2]
+    expect(body).toEqual({ days: 90 })
+    // Named individually. `toEqual` above already excludes them, but these
+    // two lines are what a reader sees, and the bug was precisely a `since`
+    // sent without an `until`.
+    expect(body).not.toHaveProperty('since')
+    expect(body).not.toHaveProperty('until')
+  })
+
+  it('puts Run beside the range picker, not at the far edge of the row', async () => {
+    // The control that fixes the staleness has to be where the change was
+    // made. It previously sat at the opposite end of a justify-between row --
+    // about 1400px away on a wide screen, which is why "press Run" was not
+    // discovered.
+    renderDetail(fakeClient())
+    await screen.findByTestId('funnel-step-1')
+
+    const controls = screen.getByTestId('funnel-range-controls')
+    expect(within(controls).getByLabelText(/range/i)).toBeInTheDocument()
+    expect(within(controls).getByRole('button', { name: /^run$/i })).toBeInTheDocument()
+  })
+
   // I1 (whole-branch review): `FunnelRunResult.range` was declared and never
   // read anywhere in the branch -- the subtitle came from `days`, the picker's
   // own state, which moves the instant a new range is picked, before any run
@@ -282,7 +369,10 @@ describe('FunnelDetail', () => {
       expect(screen.getByTestId('funnel-result')).toHaveAttribute('data-stale', 'false'),
     )
     expect(client.runFunnel).toHaveBeenCalledTimes(2)
-    expect(client.runFunnel.mock.calls[1]?.[2]).toMatchObject({ since: expect.any(String) })
+    // The range the second run asked for, not merely that it asked: this is
+    // the assertion that would have caught the run going out with the range
+    // the picker had moved away from.
+    expect(client.runFunnel.mock.calls[1]?.[2]).toEqual({ days: 30 })
   })
 
   // C1 (CRITICAL, whole-branch review): repro was opening the funnel,
@@ -381,7 +471,7 @@ describe('FunnelDetail', () => {
     // calls the client at all and just renders a hardcoded "2 minutes ago"
     // satisfies the assertion above unchanged. This is the one line that
     // distinguishes a genuine fetched `as_of` from a hardcoded string.
-    expect(client.runFunnel).toHaveBeenCalledWith(1, FUNNEL.id, { since: expect.any(String) })
+    expect(client.runFunnel).toHaveBeenCalledWith(1, FUNNEL.id, { days: 7 })
   })
 
   it('maps a 422 to an actionable message, not the outage banner', async () => {

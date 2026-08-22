@@ -1659,8 +1659,27 @@ curl -X POST https://analytics.example.com/v1/funnels/3/run \
   -d '{ "since": "2026-08-01T00:00:00Z", "until": "2026-08-08T00:00:00Z" }'
 ```
 
-Omit both and you get the last seven days. The response always echoes the
-range it actually used:
+Omit both and you get the last seven days.
+
+For a range relative to now, send `days` instead of a `since`:
+
+```sh
+curl -X POST https://analytics.example.com/v1/funnels/3/run \
+  -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY" \
+  -H 'content-type: application/json' \
+  -d '{ "days": 90 }'
+```
+
+**Prefer `days` over a bare `since` for a relative range.** They are not
+equivalent. `since` with no `until` leaves the server to fill in `until` from
+its own clock, which is later than yours by however long the request took to
+arrive, so the span you get is slightly longer than the one you asked for. A
+range may span at most 90 days, so `"days": 90` is accepted and a `since` of
+90 days ago is not. `days` cannot be combined with `since` or `until` — a body
+carrying both is refused rather than resolved by a precedence rule you would
+have to know about.
+
+The response always echoes the range it actually used:
 
 ```json
 {

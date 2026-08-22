@@ -5,6 +5,8 @@ import {
   formatPercent,
   formatRangeDays,
   formatRelative,
+  rangeDays,
+  rangePhrase,
   stepChain,
   stepLabel,
 } from './format.js'
@@ -131,5 +133,37 @@ describe('stepChain', () => {
 
   it('renders a chain of un-narrowed steps exactly as it always did', () => {
     expect(stepChain([{ event: 'a' }, { event: 'b' }])).toBe('a → b')
+  })
+})
+
+describe('rangePhrase', () => {
+  it('reads inside a sentence, where the label does not', () => {
+    // `formatRangeDays` is a label and is capitalised. Dropped mid-sentence it
+    // produces "Showing Last 7 days", which is the reason this exists.
+    expect(rangePhrase(7)).toBe('the last 7 days')
+    expect(`Showing ${rangePhrase(30)}.`).toBe('Showing the last 30 days.')
+  })
+
+  it('says "the last day", not "the last 1 day"', () => {
+    // The picker says "Last 1 day" because a list wants parallel options. A
+    // sentence wants grammar.
+    expect(rangePhrase(1)).toBe('the last day')
+  })
+
+  it('carries an unparseable range through as words rather than as null', () => {
+    expect(rangePhrase(null)).toBe('an unknown range')
+    expect(rangePhrase(rangeDays({ since: 'nonsense', until: 'also nonsense' }))).toBe(
+      'an unknown range',
+    )
+  })
+
+  it('counts the same days the label counts', () => {
+    // Split from formatRangeDays precisely so the two cannot drift; a range
+    // described one way in a label and another in a sentence is worse than
+    // either alone.
+    const range = { since: '2026-08-01T00:00:00Z', until: '2026-08-08T00:00:00Z' }
+    expect(rangeDays(range)).toBe(7)
+    expect(formatRangeDays(range)).toContain('7')
+    expect(rangePhrase(rangeDays(range))).toContain('7')
   })
 })

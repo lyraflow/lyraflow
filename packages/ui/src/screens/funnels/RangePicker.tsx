@@ -10,22 +10,6 @@ export type RangeDays = (typeof RANGE_DAY_OPTIONS)[number]
 /** The range a funnel is run against on open, before any explicit choice. */
 export const DEFAULT_RANGE_DAYS: RangeDays = 7
 
-const DAY_MS = 24 * 60 * 60 * 1000
-
-/**
- * `since` as an ISO string, `days` back from `now`. `until` is deliberately
- * never sent -- the caller (`FunnelDetail`) omits it from the request body
- * so the server defaults it to "now", rather than this computing a second,
- * client-clock-skewed "now" of its own.
- *
- * `now` is a parameter, not `new Date()`, for the same reason
- * `format.ts#formatRelative` takes one: a pure function a test can pin by
- * value.
- */
-export function sinceIsoForDays(days: number, now: Date): string {
-  return new Date(now.getTime() - days * DAY_MS).toISOString()
-}
-
 /**
  * A plain native `<select>`, not the Radix combobox used elsewhere in this
  * app -- deliberately. A range choice here must NOT trigger a re-run by

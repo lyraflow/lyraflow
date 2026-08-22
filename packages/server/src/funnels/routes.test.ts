@@ -202,6 +202,72 @@ describe('funnel routes', () => {
     expect(res.json().range).toEqual(range)
   })
 
+  it('accepts the 90-day maximum asked for as a relative range', async () => {
+    // Reported from the UI: picking "Last 90 days" and pressing Run answered
+    // `the range may span at most 90 days`, for every user, every time.
+    //
+    // The cap is not the bug -- `validateRange` uses `>`, so a span of
+    // exactly 90 days is legal. The bug was that the two ends of the range
+    // came from two different clocks. A client expressing "the last 90 days"
+    // could only say `since: <its own now> - 90d` and let `until` default,
+    // and the default is the SERVER's now, which is strictly later by at
+    // least the request's own flight time. The span was therefore always
+    // 90 days plus a few milliseconds, and a few milliseconds over a hard
+    // maximum is over it.
+    //
+    // `days` states the relative range as a relative range, so both ends
+    // are derived from one reading of one clock.
+    const created = await call('POST', '/v1/funnels', { name: 'signup', ...signup })
+    const res = await call('POST', `/v1/funnels/${created.json().id}/run`, { days: 90 })
+    expect(res.statusCode).toBe(200)
+    const { since, until } = res.json().range
+    expect(new Date(until).getTime() - new Date(since).getTime()).toBe(90 * 86_400_000)
+  })
+
+  it('still rejects a range that genuinely exceeds the maximum', async () => {
+    // The fix must not become a way around the cap. 91 is refused whichever
+    // way it is spelled.
+    const created = await call('POST', '/v1/funnels', { name: 'signup', ...signup })
+    const id = created.json().id
+    const relative = await call('POST', `/v1/funnels/${id}/run`, { days: 91 })
+    expect(relative.statusCode).toBe(400)
+    expect(relative.json().error).toMatch(/at most 90 days/)
+
+    const absolute = await call('POST', `/v1/funnels/${id}/run`, {
+      since: '2026-01-01T00:00:00.000Z',
+      until: '2026-06-01T00:00:00.000Z',
+    })
+    expect(absolute.statusCode).toBe(400)
+  })
+
+  it('refuses a relative range mixed with an absolute one rather than picking a winner', async () => {
+    // Either could reasonably be meant. A silent precedence rule is how a
+    // caller ends up reading a window it did not ask for and cannot see it
+    // did not ask for.
+    const created = await call('POST', '/v1/funnels', { name: 'signup', ...signup })
+    const res = await call('POST', `/v1/funnels/${created.json().id}/run`, {
+      days: 30,
+      since: '2026-08-07T00:00:00.000Z',
+    })
+    expect(res.statusCode).toBe(400)
+  })
+
+  it('reads the clock once, so the two ends of a relative range cannot disagree', async () => {
+    // The whole defect in one property. Two ends derived from two readings
+    // differ by however long passed between them; the assertion below is
+    // exact rather than approximate precisely because one reading cannot
+    // drift from itself.
+    //
+    // 13, not 7: 7 is the default this route falls back to when it does not
+    // understand the body at all, so a test using it passes just as well
+    // against a build that ignores `days` entirely -- which is exactly what
+    // it did before the fix.
+    const created = await call('POST', '/v1/funnels', { name: 'signup', ...signup })
+    const res = await call('POST', `/v1/funnels/${created.json().id}/run`, { days: 13 })
+    const { since, until } = res.json().range
+    expect(new Date(until).getTime() - new Date(since).getTime()).toBe(13 * 86_400_000)
+  })
+
   it('returns identical warnings from preview and run for the same definition', async () => {
     // #21 is open because the saved-segment run omits warnings the ad-hoc
     // preview returns. Both paths must end in one derivation.

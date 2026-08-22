@@ -8,12 +8,12 @@ import { ROUTES, funnelEditPath } from '../app/Router.js'
 import { Button } from '../components/ui/button.js'
 import { FunnelFlowOrBars } from './funnels/FunnelFlowOrBars.js'
 import type { RangeDays } from './funnels/RangePicker.js'
-import { DEFAULT_RANGE_DAYS, RangePicker, sinceIsoForDays } from './funnels/RangePicker.js'
+import { DEFAULT_RANGE_DAYS, RangePicker } from './funnels/RangePicker.js'
 import type { StepPeopleSeedCounts } from './funnels/StepPeople.js'
 import { StepPeople } from './funnels/StepPeople.js'
 import { WarningPanel } from './funnels/WarningPanel.js'
 import { describeError } from './funnels/errors.js'
-import { formatRangeDays, formatRelative } from './funnels/format.js'
+import { formatRangeDays, formatRelative, rangeDays, rangePhrase } from './funnels/format.js'
 
 /**
  * The reached/dropped counts for step `step`, computed from the run result
@@ -199,9 +199,9 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
       const answerId = ++answerIdRef.current
       setRunning(true)
       setRunError(null)
-      const since = sinceIsoForDays(runDays, new Date())
+
       client
-        .runFunnel(activeId, validId, { since })
+        .runFunnel(activeId, validId, { days: runDays })
         .then((r) => {
           // Discarded outright, not merely left dimmed, for any response
           // that no longer answers the question on screen: it is not an
@@ -503,11 +503,33 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
         )
       )}
 
-      <div className="flex flex-wrap items-center justify-between gap-2">
+      {/* Run sits BESIDE the range picker, not at the far end of the row.
+       * It used to be pushed there by `justify-between`, roughly 1400px away
+       * on a wide screen — so a reader changed the range, saw the numbers
+       * dim, and had no reason to look at the opposite edge for the control
+       * that would fix it. Reported as "the UI blurs but never refreshes",
+       * which is what being told nothing looks like. */}
+      <div data-testid="funnel-range-controls" className="flex flex-wrap items-center gap-2">
         <RangePicker days={days} onChange={handleRangeChange} />
         <Button size="sm" onClick={() => runNow(days)} disabled={running}>
           Run
         </Button>
+        {/* Said in words, because dimming alone is not something a reader can
+         * act on: it reports that something is off without saying what, or
+         * that anything is required of them.
+         *
+         * BOTH ranges are named. One alone reads as a label; the mismatch
+         * between them is the entire message, and it is what makes "Run"
+         * mean something rather than being a button that is always there.
+         *
+         * The shown range comes from `result.range` — what the server
+         * actually answered — never from `days`, which is the picker's own
+         * state and has already moved to the range nobody has run yet. */}
+        {stale && result != null && (
+          <p data-testid="funnel-stale-notice" className="text-sm text-muted-foreground">
+            Showing {rangePhrase(rangeDays(result.range))}. Run to load {rangePhrase(days)}.
+          </p>
+        )}
       </div>
 
       {/* Ruling (targeted re-review): gating this on `runError == null` too

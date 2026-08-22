@@ -54,12 +54,39 @@ function plural(n: number, unit: string): string {
  * actually computed for 30, because the picker can move after the request
  * that produced the numbers on screen was already in flight.
  */
-export function formatRangeDays(range: { since: string; until: string }): string {
+/** How many whole days a range spans, or `null` when either bound does not
+ * parse. Split out of `formatRangeDays` so the two phrasings below cannot
+ * disagree about the arithmetic — the label and the sentence describe the
+ * same range and must count it the same way. */
+export function rangeDays(range: { since: string; until: string }): number | null {
   const since = new Date(range.since).getTime()
   const until = new Date(range.until).getTime()
-  if (Number.isNaN(since) || Number.isNaN(until)) return 'unknown range'
-  const days = Math.round((until - since) / DAY)
+  if (Number.isNaN(since) || Number.isNaN(until)) return null
+  return Math.round((until - since) / DAY)
+}
+
+export function formatRangeDays(range: { since: string; until: string }): string {
+  const days = rangeDays(range)
+  if (days === null) return 'unknown range'
   return `Last ${days} day${days === 1 ? '' : 's'}`
+}
+
+/**
+ * The same range as a clause that reads inside a sentence.
+ *
+ * `formatRangeDays` is a LABEL — capitalised, standing alone under a chart or
+ * in a dropdown. Dropped mid-sentence it produces "Showing Last 7 days",
+ * which is why this exists rather than the caller lowercasing by hand and
+ * getting "unknown range" wrong at the edge.
+ *
+ * One day is "the last day", not "the last 1 day": a range picker offering
+ * "Last 1 day" is a list where the parallel matters more than the grammar,
+ * and a sentence is the opposite case.
+ */
+export function rangePhrase(days: number | null): string {
+  if (days === null) return 'an unknown range'
+  if (days === 1) return 'the last day'
+  return `the last ${days} days`
 }
 
 /** `now` is a parameter, not `new Date()`, so this is a pure function a test
