@@ -283,9 +283,24 @@ describe('step audiences', () => {
     // person can have zero behaviours but never zero identity), so its SQL
     // always starts `WITH`; an event placeholder list never does. Measured
     // against the actual `compileSegment` output, not assumed from its shape.
+    //
+    // The marker distinguishes a GATE from an UNGATED funnel -- it does not
+    // distinguish an audience gate from a real `segmentPersonSql`, which is
+    // ALSO `compileSegment` output and therefore ALSO opens `WITH`. This
+    // fixture passes no `segmentPersonSql`, which is the only reason the
+    // outer assertion below means "no audience gate leaked out here" rather
+    // than being vacuous. A funnel that legitimately carries both a step
+    // audience and a `segment_id` restriction WILL show `IN (WITH` in both
+    // places -- see 'keeps a step audience inside windowFunnel even when a
+    // segment restriction is also present' below, which pins that
+    // combination with a distinguishable stub instead of this marker.
     const windowFunnelArgs = c.sql.slice(c.sql.indexOf('windowFunnel'), c.sql.indexOf('AS level'))
     expect(windowFunnelArgs).toContain('IN (WITH')
-    // ...and NOT next to `level > 0`, where segment_id's filter lives.
+    // ...and NOT next to `level > 0`, where segment_id's filter lives. Costs
+    // nothing to keep even though it is not what would catch a step-audience
+    // guard breaking (mutation 1 in the task report) -- this fixture has no
+    // segment filter of any kind, so the outer slice containing the marker
+    // at all would mean the gate leaked out, whatever put it there.
     const outer = c.sql.slice(c.sql.indexOf('WHERE level > 0'))
     expect(outer).not.toContain('IN (WITH')
   })
@@ -293,6 +308,35 @@ describe('step audiences', () => {
   it('compiles a definition with no audience to exactly the SQL it did before', () => {
     const withNone = compileFunnel({ ...base, definition: twoSteps })
     expect(withNone.sql).not.toContain('IN (WITH')
+  })
+
+  it('keeps a step audience inside windowFunnel even when a segment restriction is also present', () => {
+    // `segmentPersonSql` is real `compileSegment` output in production
+    // (`packages/server/src/funnels/routes.ts`), so it ALSO opens `WITH` --
+    // the `IN (WITH` marker alone cannot tell the two apart here. Stubbed
+    // with the plain-SELECT convention `compile.test.ts` already uses for a
+    // segment restriction (see 'restricts to a segment population when one
+    // is supplied' above), which does NOT open `WITH` and is therefore
+    // separable from a real audience gate by text alone.
+    const c = compileFunnel({
+      ...base,
+      definition: {
+        steps: [{ event: 'a' }, { event: 'b', audience }],
+        window_seconds: 3600,
+      },
+      segmentPersonSql: 'SELECT person_id FROM whatever',
+    })
+    const windowFunnelArgs = c.sql.slice(c.sql.indexOf('windowFunnel'), c.sql.indexOf('AS level'))
+    const outer = c.sql.slice(c.sql.indexOf('WHERE level > 0'))
+    // The audience gate is inside windowFunnel's arguments...
+    expect(windowFunnelArgs).toContain('IN (WITH')
+    // ...and the segment filter is beside `level > 0`...
+    expect(outer).toContain('SELECT person_id FROM whatever')
+    // ...and neither displaced the other: the segment filter did not also
+    // land inside windowFunnel, and the audience gate did not also land
+    // beside `level > 0`.
+    expect(windowFunnelArgs).not.toContain('SELECT person_id FROM whatever')
+    expect(outer).not.toContain('IN (WITH')
   })
 
   it('threads ONE parameter sequence through every audience', () => {
