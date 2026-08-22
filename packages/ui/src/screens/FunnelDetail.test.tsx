@@ -290,6 +290,35 @@ describe('FunnelDetail', () => {
     await waitFor(() => expect(screen.queryByTestId('funnel-stale-notice')).toBeNull())
   })
 
+  it('asks for a relative range as a relative range, never as a bare `since`', async () => {
+    // Reported: "Last 90 days" + Run answered `the range may span at most 90
+    // days`. The cap allows exactly 90; the request was over it because the
+    // two ends of the range came from two clocks. `since: <this machine's
+    // now> - 90d` with no `until` leaves the server to default `until` from
+    // ITS clock, strictly later by at least the request's flight time, so
+    // the span was 90 days plus a little -- and a little past a hard maximum
+    // is past it. Every range below the maximum absorbed the overshoot
+    // silently, which is why only 90 ever failed.
+    //
+    // `days` is the whole fix on this side: the server derives both ends
+    // from one reading of one clock.
+    const client = fakeClient()
+    renderDetail(client)
+    await screen.findByTestId('funnel-step-1')
+
+    await userEvent.selectOptions(screen.getByLabelText(/range/i), '90')
+    await userEvent.click(screen.getByRole('button', { name: /^run$/i }))
+
+    await waitFor(() => expect(client.runFunnel).toHaveBeenCalledTimes(2))
+    const body = client.runFunnel.mock.calls[1]?.[2]
+    expect(body).toEqual({ days: 90 })
+    // Named individually. `toEqual` above already excludes them, but these
+    // two lines are what a reader sees, and the bug was precisely a `since`
+    // sent without an `until`.
+    expect(body).not.toHaveProperty('since')
+    expect(body).not.toHaveProperty('until')
+  })
+
   it('puts Run beside the range picker, not at the far edge of the row', async () => {
     // The control that fixes the staleness has to be where the change was
     // made. It previously sat at the opposite end of a justify-between row --
@@ -340,7 +369,10 @@ describe('FunnelDetail', () => {
       expect(screen.getByTestId('funnel-result')).toHaveAttribute('data-stale', 'false'),
     )
     expect(client.runFunnel).toHaveBeenCalledTimes(2)
-    expect(client.runFunnel.mock.calls[1]?.[2]).toMatchObject({ since: expect.any(String) })
+    // The range the second run asked for, not merely that it asked: this is
+    // the assertion that would have caught the run going out with the range
+    // the picker had moved away from.
+    expect(client.runFunnel.mock.calls[1]?.[2]).toEqual({ days: 30 })
   })
 
   // C1 (CRITICAL, whole-branch review): repro was opening the funnel,
@@ -439,7 +471,7 @@ describe('FunnelDetail', () => {
     // calls the client at all and just renders a hardcoded "2 minutes ago"
     // satisfies the assertion above unchanged. This is the one line that
     // distinguishes a genuine fetched `as_of` from a hardcoded string.
-    expect(client.runFunnel).toHaveBeenCalledWith(1, FUNNEL.id, { since: expect.any(String) })
+    expect(client.runFunnel).toHaveBeenCalledWith(1, FUNNEL.id, { days: 7 })
   })
 
   it('maps a 422 to an actionable message, not the outage banner', async () => {

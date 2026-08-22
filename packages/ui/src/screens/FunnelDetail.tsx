@@ -8,7 +8,7 @@ import { ROUTES, funnelEditPath } from '../app/Router.js'
 import { Button } from '../components/ui/button.js'
 import { FunnelFlowOrBars } from './funnels/FunnelFlowOrBars.js'
 import type { RangeDays } from './funnels/RangePicker.js'
-import { DEFAULT_RANGE_DAYS, RangePicker, sinceIsoForDays } from './funnels/RangePicker.js'
+import { DEFAULT_RANGE_DAYS, RangePicker } from './funnels/RangePicker.js'
 import type { StepPeopleSeedCounts } from './funnels/StepPeople.js'
 import { StepPeople } from './funnels/StepPeople.js'
 import { WarningPanel } from './funnels/WarningPanel.js'
@@ -199,9 +199,9 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
       const answerId = ++answerIdRef.current
       setRunning(true)
       setRunError(null)
-      const since = sinceIsoForDays(runDays, new Date())
+
       client
-        .runFunnel(activeId, validId, { since })
+        .runFunnel(activeId, validId, { days: runDays })
         .then((r) => {
           // Discarded outright, not merely left dimmed, for any response
           // that no longer answers the question on screen: it is not an

@@ -294,7 +294,19 @@ export interface FunnelRunResult extends FunnelResult {
   warnings: CostWarning[]
 }
 
+/**
+ * A run's range, stated one of two ways and never both -- the server refuses
+ * a body carrying `days` alongside either absolute bound rather than picking
+ * a winner.
+ *
+ * Prefer `days` for a relative range. `since` alone cannot express one
+ * correctly: `until` then defaults to the SERVER's clock while `since` came
+ * from this one, and the resulting span is longer than the client asked for
+ * by however long the request took to arrive. At the 90-day maximum that
+ * overshoot is the difference between the largest legal range and a 400.
+ */
 export interface RangeBody {
+  days?: number
   since?: string
   until?: string
 }

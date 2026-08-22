@@ -101,10 +101,22 @@ const PatchBody = z.object({
  * `since`/`until` are per-run, never stored — the window belongs to the
  * funnel, the range to the question being asked this time.
  */
-const RangeBody = z.object({
-  since: z.string().datetime().optional(),
-  until: z.string().datetime().optional(),
-})
+const RangeBody = z
+  .object({
+    // A RELATIVE range: the last `days` days, both ends derived from one
+    // reading of this server's clock. It exists because a client cannot
+    // express a relative range through `since` alone without straddling two
+    // clocks -- see `resolveRange` for what that cost.
+    days: z.number().int().positive().optional(),
+    since: z.string().datetime().optional(),
+    until: z.string().datetime().optional(),
+  })
+  // Refused rather than resolved by precedence. Either could reasonably be
+  // what the caller meant, and whichever one lost would produce a window
+  // they did not ask for and have no way to notice they did not ask for.
+  .refine((b) => b.days === undefined || (b.since === undefined && b.until === undefined), {
+    message: '`days` cannot be combined with `since` or `until`',
+  })
 
 const DropoffBody = z.object({
   // 1-indexed, matching the `index` in a run response.
@@ -145,7 +157,19 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
   function resolveRange(body: unknown): { since: Date; until: Date } | null {
     const parsed = RangeBody.safeParse(body ?? {})
     if (!parsed.success) return null
-    const until = parsed.data.until ? new Date(parsed.data.until) : new Date()
+    // ONE `new Date()`, and every branch below measures from it. This is the
+    // whole of the fix for "Last 90 days" answering `the range may span at
+    // most 90 days`: a client can only express a relative range as `since:
+    // <now> - 90d`, and when `until` then defaulted to a SECOND reading of a
+    // DIFFERENT machine's clock, the span was 90 days plus the request's
+    // flight time. The cap allows exactly 90 and refuses anything past it,
+    // so the one range a picker offering "Last 90 days" can produce was the
+    // one range the server would never accept.
+    const now = new Date()
+    if (parsed.data.days !== undefined) {
+      return { since: new Date(now.getTime() - parsed.data.days * 86_400_000), until: now }
+    }
+    const until = parsed.data.until ? new Date(parsed.data.until) : now
     const since = parsed.data.since
       ? new Date(parsed.data.since)
       : new Date(until.getTime() - DEFAULT_RANGE_MS)
