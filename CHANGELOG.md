@@ -25,6 +25,18 @@ one fix is contained in 0.3.0.
 
 ### Added
 
+- **`POST /v1/funnels/:id/people` lists who reached a step, not only who
+  dropped there.** Its required `mode` — `reached` (`level >= step`, the
+  population behind the chart's own number) or `dropped` (`level = step`,
+  the same list `/dropoff` already gave) — has no default: the two differ by
+  a factor of three on a real funnel, and whichever way a default fell, the
+  other reading is what a caller would get by accident. At a funnel's last
+  step, `dropped` is not empty — someone who converted has nowhere further to
+  be counted at, so they are returned there too, exactly as `/dropoff` has
+  always answered that step. `/dropoff` itself is unchanged, kept for
+  compatibility. The funnel screen picks this up too: click a step and a
+  Reached/Dropped panel opens beneath the chart, reusing the same bounded
+  member list Segments already shows.
 - **A funnel step can gate who advances past it, not just which event
   counts.** A step's new `audience` is a segment filter tree — the same
   `FilterNode` grammar `POST /v1/segments` takes — checked against the person
