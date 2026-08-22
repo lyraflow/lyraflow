@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHmac, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { FUNNEL_DEFINITION_VERSION } from '@lyraflow/core'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
@@ -51,6 +51,32 @@ const call = (
     },
     payload: payload as never,
   })
+
+/**
+ * Hand-builds a validly SIGNED wire cursor under an arbitrary label, without
+ * reaching into the route module at all -- it recomputes exactly what
+ * `makeWalkCursorCodec` (walk-cursor.ts) would produce from public inputs
+ * (the label) and one value the server already keeps
+ * (`hashServerKey(SERVER_KEY)`, the same `project.serverKeyHash` the route
+ * resolves via `authenticate`). Same technique as `segments/routes.test.ts`'s
+ * `signedWireCursor`, parameterised over the label so this file can mint a
+ * cursor under EITHER route's label and prove the other route refuses it --
+ * not because it is malformed, but because the label does not match.
+ */
+function signedWireCursor(
+  label: string,
+  lastSeen: string,
+  personId: string,
+  asOf: string,
+  pagesServed: number,
+): string {
+  const key = createHmac('sha256', hashServerKey(SERVER_KEY)).update(label).digest()
+  const payload = JSON.stringify([lastSeen, personId, asOf, pagesServed])
+  const signature = createHmac('sha256', key).update(payload).digest('base64url')
+  return Buffer.from(JSON.stringify([lastSeen, personId, asOf, pagesServed, signature])).toString(
+    'base64url',
+  )
+}
 
 beforeAll(async () => {
   await migrate({
@@ -357,5 +383,137 @@ describe('funnel routes', () => {
       ),
     )
     for (const r of results) expect(r.statusCode).toBe(200)
+  })
+})
+
+describe('funnel people route', () => {
+  it('returns 200 with members, next_cursor, window_exhausted and person_count', async () => {
+    const created = await call('POST', '/v1/funnels', { name: `people-${randomUUID()}`, ...signup })
+    const res = await call('POST', `/v1/funnels/${created.json().id}/people`, {
+      step: 1,
+      mode: 'reached',
+    })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(Array.isArray(body.members)).toBe(true)
+    expect(body).toHaveProperty('next_cursor')
+    expect(body).toHaveProperty('window_exhausted')
+    expect(typeof body.person_count).toBe('number')
+  })
+
+  it('requires mode -- a missing mode is a 400, not a default population', async () => {
+    // The two populations differ by a factor of three on a real funnel;
+    // whichever way a default fell, the other reading is what a caller who
+    // forgot `mode` would get by accident.
+    const created = await call('POST', '/v1/funnels', {
+      name: `people-no-mode-${randomUUID()}`,
+      ...signup,
+    })
+    const res = await call('POST', `/v1/funnels/${created.json().id}/people`, { step: 1 })
+    expect(res.statusCode).toBe(400)
+  })
+
+  it('rejects an unrecognised mode', async () => {
+    const created = await call('POST', '/v1/funnels', {
+      name: `people-bad-mode-${randomUUID()}`,
+      ...signup,
+    })
+    const res = await call('POST', `/v1/funnels/${created.json().id}/people`, {
+      step: 1,
+      mode: 'sideways',
+    })
+    expect(res.statusCode).toBe(400)
+  })
+
+  it('rejects a step outside the funnel, naming the valid range', async () => {
+    // `signup` has 2 steps. Step 0 fails Zod's `positive()` before the route
+    // ever sees it (same as `/dropoff`'s own `step`), so it 400s generically;
+    // step 3 reaches the route's own range check, which must name the range
+    // the same way `/dropoff`'s does -- a 0-indexed caller would otherwise
+    // silently read step 3's people as step 2's.
+    const created = await call('POST', '/v1/funnels', {
+      name: `people-range-${randomUUID()}`,
+      ...signup,
+    })
+    const id = created.json().id
+    const zero = await call('POST', `/v1/funnels/${id}/people`, { step: 0, mode: 'reached' })
+    expect(zero.statusCode).toBe(400)
+    const tooHigh = await call('POST', `/v1/funnels/${id}/people`, { step: 3, mode: 'reached' })
+    expect(tooHigh.statusCode).toBe(400)
+    expect(tooHigh.json().error).toBe('step must be between 1 and 2')
+  })
+
+  it('rejects a cursor minted by the other route, in both directions, and accepts its own', async () => {
+    const created = await call('POST', '/v1/funnels', {
+      name: `people-cursor-${randomUUID()}`,
+      ...signup,
+    })
+    const id = created.json().id
+    const asOf = new Date().toISOString()
+    const peopleCursor = signedWireCursor(
+      'lyraflow.funnel-people-cursor.v1',
+      '2026-08-01 00:00:00.000',
+      'p1',
+      asOf,
+      0,
+    )
+    const dropoffCursor = signedWireCursor(
+      'lyraflow.funnel-dropoff-cursor.v1',
+      '2026-08-01 00:00:00.000',
+      'p1',
+      asOf,
+      0,
+    )
+
+    // A /people cursor replayed against /dropoff...
+    const peopleOnDropoff = await call('POST', `/v1/funnels/${id}/dropoff`, {
+      step: 1,
+      cursor: peopleCursor,
+    })
+    expect(peopleOnDropoff.statusCode).toBe(400)
+
+    // ...and a /dropoff cursor replayed against /people. Both directions,
+    // because a codec shared by accident in either direction would only
+    // fail one of these two assertions.
+    const dropoffOnPeople = await call('POST', `/v1/funnels/${id}/people`, {
+      step: 1,
+      mode: 'reached',
+      cursor: dropoffCursor,
+    })
+    expect(dropoffOnPeople.statusCode).toBe(400)
+
+    // Each cursor IS valid on its own route -- proving the 400s above are
+    // about the label, not about the cursor being malformed in general (if
+    // the codecs were shared, all four of these calls would return 200).
+    const ownDropoff = await call('POST', `/v1/funnels/${id}/dropoff`, {
+      step: 1,
+      cursor: dropoffCursor,
+    })
+    expect(ownDropoff.statusCode).toBe(200)
+    const ownPeople = await call('POST', `/v1/funnels/${id}/people`, {
+      step: 1,
+      mode: 'reached',
+      cursor: peopleCursor,
+    })
+    expect(ownPeople.statusCode).toBe(200)
+  })
+
+  it("leaves /dropoff's response body exactly as it was", async () => {
+    const created = await call('POST', '/v1/funnels', {
+      name: `dropoff-shape-${randomUUID()}`,
+      ...signup,
+    })
+    const res = await call('POST', `/v1/funnels/${created.json().id}/dropoff`, { step: 1 })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    // The exact key set, not merely a 200 -- a shared query path (`/people`
+    // now compiles through the same `compileFor`) is exactly the thing that
+    // grows a response an extra key by accident.
+    expect(Object.keys(body).sort()).toEqual(
+      ['as_of', 'next_cursor', 'people', 'range', 'step', 'window_exhausted'].sort(),
+    )
+    expect(Array.isArray(body.people)).toBe(true)
+    // No seeded ClickHouse rows in this file (see semantics.test.ts for
+    // that) -- a row's own shape, with real data, is pinned there.
   })
 })

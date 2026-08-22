@@ -455,6 +455,140 @@ describe('funnel semantics', () => {
     expect(res.statusCode).toBe(400)
   })
 
+  it("leaves /dropoff's row shape unchanged now that /people shares its compile path", async () => {
+    // Task 3's whole risk: `/people`'s `select: 'members'` joins `base` and
+    // `traits`, and `/dropoff` now runs through the very same `compileFor`.
+    // A row from `/dropoff` must still be the bare (person_id, entered_at)
+    // pair it always was -- no traits key, however it got there.
+    const p = who('dropoff-shape')
+    await send([track(p, 'landed', ago(20 * HOUR))])
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v1/funnels',
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: {
+        name: `dropoff-shape-${randomUUID()}`,
+        steps: STEPS,
+        window_seconds: WINDOW,
+      } as never,
+    })
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/funnels/${created.json().id}/dropoff`,
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: { step: 1, since: RANGE.since, until: new Date().toISOString() } as never,
+    })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(Object.keys(body).sort()).toEqual(
+      ['as_of', 'next_cursor', 'people', 'range', 'step', 'window_exhausted'].sort(),
+    )
+    const row = body.people.find((r: { person_id: string }) => r.person_id === p)
+    expect(row).toBeDefined()
+    expect(Object.keys(row).sort()).toEqual(['entered_at', 'person_id'])
+  })
+
+  it("computes /people's person_count fresh, never from the funnel run's cached steps[i].people", async () => {
+    // MemberList's own comment: comparing a stale count against a page
+    // length is exactly how "that is everyone" gets printed over a
+    // truncated preview. This proves it by changing the population AFTER
+    // caching a run and confirming /people sees the change -- a route that
+    // took its count from that cached run would still report the old
+    // number.
+    const first = who('count-fresh-a')
+    await send([
+      track(first, 'landed', ago(20 * HOUR)),
+      track(first, 'clicked', ago(20 * HOUR - MINUTE)),
+    ])
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v1/funnels',
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: {
+        name: `count-fresh-${randomUUID()}`,
+        steps: STEPS,
+        window_seconds: WINDOW,
+      } as never,
+    })
+    const id = created.json().id
+
+    const ran = await app.inject({
+      method: 'POST',
+      url: `/v1/funnels/${id}/run`,
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: { since: RANGE.since, until: new Date().toISOString() } as never,
+    })
+    expect(ran.statusCode).toBe(200)
+    const stale = ran.json().steps[1].people
+
+    const second = who('count-fresh-b')
+    await send([
+      track(second, 'landed', ago(19 * HOUR)),
+      track(second, 'clicked', ago(19 * HOUR - MINUTE)),
+    ])
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/funnels/${id}/people`,
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: {
+        step: 2,
+        mode: 'reached',
+        since: RANGE.since,
+        until: new Date().toISOString(),
+      } as never,
+    })
+    expect(res.statusCode).toBe(200)
+    // The run cached ONE person at step 2; the second person landed after
+    // that run, so a fresh count must see two -- a count reusing the
+    // cached run would still report `stale`.
+    expect(res.json().person_count).toBe(stale + 1)
+  })
+
+  it('reports person_count for the WHOLE population, not the page length -- proved by a population past MEMBER_PAGE_SIZE', async () => {
+    // A DIFFERENT way `person_count` could be wrong: deriving it from
+    // `members.length` rather than a real count query passes every other
+    // test in this file, because every other fixture's population fits on
+    // one page. Own step names, isolated from every other fixture in this
+    // file sharing the plain `landed`/`clicked`/`converted` events.
+    const landed = `count-page-landed-${randomUUID()}`
+    const clicked = `count-page-clicked-${randomUUID()}`
+    const people = MEMBER_PAGE_SIZE + 5
+    const batch: object[] = []
+    for (let i = 0; i < people; i++) {
+      const anon = `sem-count-page-${i}`
+      batch.push(track(anon, landed, ago(18 * HOUR)), track(anon, clicked, ago(18 * HOUR - 500)))
+    }
+    for (let i = 0; i < batch.length; i += 400) await send(batch.slice(i, i + 400))
+
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v1/funnels',
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: {
+        name: `count-page-${randomUUID()}`,
+        steps: [{ event: landed }, { event: clicked }],
+        window_seconds: WINDOW,
+      } as never,
+    })
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/funnels/${created.json().id}/people`,
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: {
+        step: 2,
+        mode: 'reached',
+        since: RANGE.since,
+        until: new Date().toISOString(),
+      } as never,
+    })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.members).toHaveLength(MEMBER_PAGE_SIZE)
+    // The page is capped; the count must not be.
+    expect(body.person_count).toBe(people)
+  })
+
   describe('step audiences', () => {
     /** `count(event) <op> n` over the last day -- the shape every test here uses. */
     const searchedCount = (operator: '=' | '>=', value: number) => ({
