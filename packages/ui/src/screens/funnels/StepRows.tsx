@@ -130,9 +130,38 @@ export function StepRows(props: {
    * steps: step 1's `steps.0.filter.children[0]` and step 2's
    * `steps.1.filter.children[0]` both resolve to the editor path `[0]`, so
    * an unfiltered list renders every warning on every step.
+   *
+   * A bare `steps.<i>.filter`, with nothing after it, is retargeted to
+   * `steps.<i>.filter.children[0]` -- `costWarnings` (`segments/validate.ts`)
+   * only ever raises a warning on a `behavior` LEAF it walks into; a group
+   * node never raises one on its own root. So a warning whose path is
+   * exactly the bare root can only describe a condition that was, at the
+   * point the warning was computed, the AUDIENCE'S ENTIRE root -- the same
+   * bare leaf `normaliseRoot` wraps into a one-child group at the seeding
+   * effect, moving it to editor path `[0]`. Left unretargeted, that
+   * warning's path resolves to `[]`, which addresses the wrapping group --
+   * a `GroupCard`, which renders no text for a warning addressed to
+   * itself -- so the warning would simply vanish rather than land on the
+   * condition it names.
+   *
+   * Gated on THIS STEP'S audience already being a `group` in STATE, not
+   * merely in what gets rendered: normalising only for display (handing
+   * `TreeEditor` a freshly-wrapped value without writing the wrapped shape
+   * back) would leave `step.audience` a bare leaf here too, and retargeting
+   * regardless would paper over that seam rather than depend on it being
+   * closed at the seeding effect, where `FunnelBuilder`'s own doc comment
+   * says it must be.
    */
   function stepWarnings(i: number): CostWarning[] {
-    return warnings.filter((w) => w.path.startsWith(`steps.${i}.`))
+    const prefix = `steps.${i}.`
+    const audience = steps[i]?.audience
+    return warnings
+      .filter((w) => w.path.startsWith(prefix))
+      .map((w) =>
+        w.path === `${prefix}filter` && audience?.kind === 'group'
+          ? { ...w, path: `${prefix}filter.children[0]` }
+          : w,
+      )
   }
 
   function addStep() {

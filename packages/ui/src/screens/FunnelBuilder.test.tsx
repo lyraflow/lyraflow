@@ -812,3 +812,155 @@ describe('FunnelBuilder -- the identity its state describes', () => {
     })
   })
 })
+
+/** A saved funnel whose step-1 audience is a BARE LEAF -- the shape the API
+ * allows and `GroupCard` cannot render. Only reachable through the API, which
+ * is exactly why the edit screen has to cope with it. */
+const FUNNEL_BARE_LEAF_AUDIENCE = {
+  ...FUNNEL,
+  steps: [
+    {
+      event: 'page_view',
+      audience: {
+        kind: 'behavior',
+        event: 'docs_search',
+        aggregate: 'count',
+        window: { kind: 'ever' },
+        operator: '=',
+        value: 1,
+      },
+    },
+    { event: 'signup_completed' },
+  ],
+}
+
+describe('audiences', () => {
+  it('refuses Save while a step’s audience is half-filled', async () => {
+    renderBuilder()
+    await fillTwoSteps()
+    await userEvent.type(screen.getByLabelText('Name'), 'gated')
+    // The seeded draft is a `trait` with an empty key -- a legitimate
+    // EDITING state and an illegitimate STORAGE state. Save must refuse
+    // rather than hand the server a tree it will 400.
+    await userEvent.click(screen.getByRole('button', { name: 'Add audience to step 1' }))
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+  })
+
+  it('refuses Preview on the same draft, for the same reason', async () => {
+    renderBuilder()
+    await fillTwoSteps()
+    await userEvent.click(screen.getByRole('button', { name: 'Add audience to step 1' }))
+    // Preview is gated too. Unlike the NAME field -- which only Save needs,
+    // because previewing an unnamed funnel is a normal order of operations --
+    // an incomplete tree is a guaranteed 400 on either request.
+    expect(screen.getByRole('button', { name: 'Preview' })).toBeDisabled()
+  })
+
+  it('re-enables both once the audience is complete', async () => {
+    renderBuilder()
+    await fillTwoSteps()
+    await userEvent.type(screen.getByLabelText('Name'), 'gated')
+    await userEvent.click(screen.getByRole('button', { name: 'Add audience to step 1' }))
+    // Fill the seeded trait's key -- the one field standing between the
+    // draft and a tree the AST accepts.
+    await userEvent.type(screen.getByLabelText('Trait'), 'plan')
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Preview' })).toBeEnabled()
+  })
+
+  it('sends the audience to the server on save', async () => {
+    const client = fakeBuilderClient()
+    renderBuilder(client)
+    await fillTwoSteps()
+    await userEvent.type(screen.getByLabelText('Name'), 'gated')
+    await userEvent.click(screen.getByRole('button', { name: 'Add audience to step 1' }))
+    await userEvent.type(screen.getByLabelText('Trait'), 'plan')
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+    // `createFunnel(projectId, name, definition)` -- THREE arguments
+    // (`api/client.ts:112`), so the definition is the third.
+    const call = client.createFunnel.mock.calls[0]
+    if (!call) throw new Error('createFunnel was not called')
+    const [, , definition] = call
+    expect(definition.steps[0].audience).toEqual({
+      kind: 'group',
+      op: 'and',
+      children: [{ kind: 'trait', key: 'plan', operator: '=', value: '' }],
+    })
+  })
+
+  it('says what an audience’s window is measured from', async () => {
+    renderBuilder()
+    // Stated where the control is, unconditionally -- a caveat that appears
+    // only after the mistake is available to be made arrives late.
+    //
+    // `findByText`, not `getByText`: this test makes no other assertion to
+    // await, and `SegmentPicker`'s own effect (`segments()`) still resolves
+    // after this test function returns otherwise, landing its `act(...)`
+    // warning on whichever test runs next.
+    expect(await screen.findByText(/measured from now/i)).toBeInTheDocument()
+  })
+
+  it('opens a funnel whose stored audience is a bare leaf', async () => {
+    const client = fakeBuilderClient({ funnel: vi.fn(async () => FUNNEL_BARE_LEAF_AUDIENCE) })
+    renderBuilder(client, FUNNEL_BARE_LEAF_AUDIENCE.id)
+    // `GroupCard` addresses a group and throws on a bare leaf. Without
+    // `normaliseRoot` at the seeding point this screen is a blank page for
+    // any funnel the API wrote.
+    expect(await screen.findByTestId('step-1-audience')).toBeInTheDocument()
+  })
+
+  it('resolves a warning against the condition it names, not its wrapper', async () => {
+    const client = fakeBuilderClient({
+      funnel: vi.fn(async () => FUNNEL_BARE_LEAF_AUDIENCE),
+      previewFunnel: vi.fn(async () => ({
+        ...RUN,
+        warnings: [
+          {
+            path: 'steps.0.filter',
+            reason:
+              'the `docs_search` condition uses an `ever` window, which scans all history rather than a bounded window',
+          },
+        ],
+      })),
+    })
+    renderBuilder(client, FUNNEL_BARE_LEAF_AUDIENCE.id)
+    await screen.findByTestId('step-1-audience')
+    await userEvent.click(screen.getByRole('button', { name: 'Preview' }))
+    // `funnelCostWarnings` ran against the tree the SERVER holds -- a bare
+    // leaf at `steps.0.filter`, which resolves to editor path []. The load
+    // normalised it to [0]. If the normalisation happened at RENDER instead,
+    // the two disagree and this warning lands on the wrapping group.
+    const row = await screen.findByTestId('condition-0')
+    expect(within(row).getByText(/scans all history/)).toBeInTheDocument()
+  })
+
+  it('shows a step’s warning on that step alone', async () => {
+    const client = fakeBuilderClient({
+      previewFunnel: vi.fn(async () => ({
+        ...RUN,
+        warnings: [
+          {
+            path: 'steps.0.filter.children[0]',
+            reason:
+              'the `x` condition uses an `ever` window, which scans all history rather than a bounded window',
+          },
+        ],
+      })),
+    })
+    renderBuilder(client)
+    await fillTwoSteps()
+    await userEvent.click(screen.getByRole('button', { name: 'Add audience to step 1' }))
+    await userEvent.type(screen.getByLabelText('Trait'), 'plan')
+    await userEvent.click(screen.getByRole('button', { name: 'Add audience to step 2' }))
+    await userEvent.type(screen.getAllByLabelText('Trait')[1] as HTMLElement, 'plan')
+    await userEvent.click(screen.getByRole('button', { name: 'Preview' }))
+    // Both audiences' first condition sits at editor path [0], so an
+    // unfiltered list renders this on both steps.
+    expect(
+      within(await screen.findByTestId('step-1-audience')).getByText(/scans all history/),
+    ).toBeInTheDocument()
+    expect(
+      within(screen.getByTestId('step-2-audience')).queryByText(/scans all history/),
+    ).not.toBeInTheDocument()
+  })
+})
