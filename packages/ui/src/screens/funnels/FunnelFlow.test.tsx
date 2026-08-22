@@ -152,6 +152,40 @@ describe('FunnelFlow', () => {
     expect(screen.queryByTestId('flow-step-1-where')).not.toBeInTheDocument()
   })
 
+  it('labels each ribbon with from_previous, not from_start', () => {
+    // The number on a ribbon belongs to the TRANSITION it is drawn on. Step 3
+    // below is 40% of the previous step and 20% of the start; the ribbon into
+    // it must read 40%, while the number UNDER it reads 20%. Swapping them
+    // makes the chart say the same thing twice and look like it said two.
+    render(
+      <FunnelFlow
+        result={result({
+          entered: 100,
+          converted: 20,
+          conversion_rate: 0.2,
+          steps: [
+            step({ index: 1, event: 'a', people: 100, from_previous: 1, from_start: 1 }),
+            step({ index: 2, event: 'b', people: 50, from_previous: 0.5, from_start: 0.5 }),
+            step({ index: 3, event: 'c', people: 20, from_previous: 0.4, from_start: 0.2 }),
+          ],
+        })}
+      />,
+    )
+    expect(screen.getByTestId('flow-rate-2')).toHaveTextContent('40.0%')
+    expect(screen.getByTestId('flow-step-3')).toHaveTextContent('20.0%')
+  })
+
+  it('draws one rate label per ribbon, never one for the first step', () => {
+    // Step 1 has no incoming transition; a label there would have to be
+    // from_previous = 1, i.e. a permanent "100%" that means nothing.
+    render(<FunnelFlow result={result()} />)
+    // 25.0%, which is this fixture's step-2 `from_previous` -- not the 64.9%
+    // from the screenshot that prompted this feature.
+    expect(screen.getByTestId('flow-rate-1')).toHaveTextContent('25.0%')
+    expect(screen.queryByTestId('flow-rate-0')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('flow-rate-2')).not.toBeInTheDocument()
+  })
+
   it('fills ribbons from their own token rather than a bar colour at reduced opacity', () => {
     // FOUND BY RENDERING IT, not by reading it. The first version drew each
     // ribbon as its source bar's colour at `opacity: 0.4`; blending a

@@ -1,4 +1,4 @@
-import type { FunnelRunResult, FunnelStep } from '../../api/types.js'
+import type { FunnelRunResult, FunnelStep, StepResult } from '../../api/types.js'
 import { wherePhrase } from '../segments/vocabulary.js'
 import {
   BAR_WIDTH,
@@ -8,6 +8,7 @@ import {
   biggestLeak,
   plotWidth,
   rampIndex,
+  ribbonLabelY,
   ribbonPath,
 } from './flowGeometry.js'
 import { formatCount, formatPercent } from './format.js'
@@ -120,43 +121,98 @@ export function FunnelFlow(props: {
           })}
         </div>
 
-        {/* `height` in pixels equal to the viewBox height, so the vertical
-         * scale is exactly 1 and only the horizontal axis stretches. Under a
-         * vertical stretch every `rx` distorts and a 4px corner becomes
-         * whatever the container's aspect ratio makes it. */}
-        <svg
-          role="img"
-          aria-label={`Funnel flow: ${steps.map((s) => `${s.event} ${formatPercent(s.from_start)}`).join(', ')}`}
-          viewBox={`0 0 ${plotWidth(total)} ${PLOT_HEIGHT}`}
-          preserveAspectRatio="none"
-          width="100%"
-          height={PLOT_HEIGHT}
-          className="block"
-        >
-          <title>Funnel flow</title>
-          {/* Ribbons first, so a bar's own edge always sits on top of the
-           * ribbon meeting it rather than being overdrawn by it. */}
-          {steps.slice(0, -1).map((s, i) => (
-            <path
-              key={`ribbon-${s.index}`}
-              data-testid={`flow-ribbon-${s.index}`}
-              d={ribbonPath(heights[i] as number, heights[i + 1] as number, i)}
-              fill="var(--chart-funnel-ribbon)"
-            />
-          ))}
-          {steps.map((s, i) => (
-            <rect
-              key={`bar-${s.index}`}
-              data-testid={`flow-bar-${s.index}`}
-              x={barX(i)}
-              y={PLOT_HEIGHT - (heights[i] as number)}
-              width={BAR_WIDTH}
-              height={heights[i] as number}
-              rx={4}
-              fill={`var(--chart-funnel-${rampIndex(i, total)})`}
-            />
-          ))}
-        </svg>
+        <div className="relative">
+          {/* `height` in pixels equal to the viewBox height, so the vertical
+           * scale is exactly 1 and only the horizontal axis stretches. Under a
+           * vertical stretch every `rx` distorts and a 4px corner becomes
+           * whatever the container's aspect ratio makes it. */}
+          <svg
+            role="img"
+            aria-label={`Funnel flow: ${steps.map((s) => `${s.event} ${formatPercent(s.from_start)}`).join(', ')}`}
+            viewBox={`0 0 ${plotWidth(total)} ${PLOT_HEIGHT}`}
+            preserveAspectRatio="none"
+            width="100%"
+            height={PLOT_HEIGHT}
+            className="block"
+          >
+            <title>Funnel flow</title>
+            {/* Ribbons first, so a bar's own edge always sits on top of the
+             * ribbon meeting it rather than being overdrawn by it. */}
+            {steps.slice(0, -1).map((s, i) => (
+              <path
+                key={`ribbon-${s.index}`}
+                data-testid={`flow-ribbon-${s.index}`}
+                d={ribbonPath(heights[i] as number, heights[i + 1] as number, i)}
+                fill="var(--chart-funnel-ribbon)"
+              />
+            ))}
+            {steps.map((s, i) => (
+              <rect
+                key={`bar-${s.index}`}
+                data-testid={`flow-bar-${s.index}`}
+                x={barX(i)}
+                y={PLOT_HEIGHT - (heights[i] as number)}
+                width={BAR_WIDTH}
+                height={heights[i] as number}
+                rx={4}
+                fill={`var(--chart-funnel-${rampIndex(i, total)})`}
+              />
+            ))}
+          </svg>
+
+          {/* The step-to-step rate, sitting on the ribbon it describes.
+           *
+           * HTML absolutely over the plot, never an SVG `<text>`: the plot
+           * stretches horizontally, so a glyph inside it would stretch too.
+           *
+           * A ribbon's centre falls exactly on the boundary between two
+           * slots -- `barX(i) + BAR_WIDTH` to `barX(i + 1)` is centred on
+           * `(i + 1) * SLOT_WIDTH` -- so a label spanning those two grid
+           * columns and centred within the span lands on the ribbon without
+           * measuring anything at runtime.
+           *
+           * `from_previous`, NOT `from_start`: the number belongs to the
+           * TRANSITION it is drawn on -- how many of the previous step's
+           * people made it across. The cumulative share is already the big
+           * number under each bar; repeating it here would say the same
+           * thing twice while looking like it said something new.
+           *
+           * `text-foreground` over the ribbon fill measures 11.62:1 in light
+           * and 8.44:1 in dark -- computed, not eyeballed -- and it is the
+           * ordinary text token in both modes, so a label lifted above a
+           * thin ribbon onto the surface keeps the validated pairing.
+           *
+           * `aria-hidden`: the SVG's own `aria-label` already reads the
+           * funnel as a sentence, and a screen reader meeting these spans
+           * separately would hear a row of bare percentages with nothing
+           * saying which transition each belongs to. */}
+          <div
+            className="pointer-events-none absolute inset-0 grid"
+            style={columns}
+            aria-hidden="true"
+          >
+            {steps.slice(0, -1).map((s, i) => (
+              <span
+                key={`rate-${s.index}`}
+                data-testid={`flow-rate-${s.index}`}
+                className="justify-self-center self-start text-xs font-medium tabular-nums text-foreground"
+                style={{
+                  /* `gridRow: 1` on EVERY label, and it is not decorative.
+                   * Their column spans overlap by one, so auto-placement
+                   * pushes each one onto a fresh row -- the labels came out
+                   * stacked down the page, the later ones outside the card
+                   * entirely. Pinning the row makes them overlay the plot,
+                   * which is the whole point of an absolute overlay. */
+                  gridRow: 1,
+                  gridColumn: `${i + 1} / span 2`,
+                  marginTop: `${ribbonLabelY(heights[i] as number, heights[i + 1] as number)}px`,
+                }}
+              >
+                {formatPercent((steps[i + 1] as StepResult).from_previous)}
+              </span>
+            ))}
+          </div>
+        </div>
 
         {/* `from_start` as the headline and the count beneath it: the share is
          * what the bar height already drew, so it reads as a label rather than

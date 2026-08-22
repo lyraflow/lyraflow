@@ -104,6 +104,43 @@ export function ribbonPath(fromHeight: number, toHeight: number, fromStep: numbe
   ].join(' ')
 }
 
+/** Roughly one `text-xs` line box, used to centre the ribbon's label on the
+ * ribbon rather than hanging it from its own top edge. */
+export const LABEL_HEIGHT = 16
+/** Below this the ribbon is thinner than a line of text, and a label inside
+ * it would spill over both edges onto the surface. */
+const LABEL_FITS_ABOVE = 24
+
+/**
+ * Where the step-to-step rate sits on its ribbon, as a distance from the top
+ * of the plot.
+ *
+ * The label is HTML overlaid on the SVG, never an SVG `<text>`: the plot
+ * stretches horizontally (`preserveAspectRatio="none"`), so a glyph inside
+ * it would stretch with it. `PLOT_HEIGHT` is also the pixel height, so this
+ * number is a CSS offset without any conversion.
+ *
+ * The cubic in `ribbonPath` has both control points at the horizontal
+ * midpoint, which makes its y-component a 1D Bezier with P0=P1 and P2=P3 --
+ * so at the centre the curve is exactly the mean of the two ends. No
+ * sampling needed, and the label cannot drift off the curve it names.
+ *
+ * A THIN ribbon puts the label above itself instead of inside. Two bars that
+ * both converted almost nobody leave a wedge thinner than a line of text,
+ * and a label centred in it spills over both edges -- half on the ribbon,
+ * half on the surface, legible against neither. Above the wedge it sits on
+ * the surface, where the ordinary text token is already the validated
+ * pairing.
+ */
+export function ribbonLabelY(fromHeight: number, toHeight: number): number {
+  const topAtCentre = PLOT_HEIGHT - (fromHeight + toHeight) / 2
+  const thickness = PLOT_HEIGHT - topAtCentre
+  if (thickness >= LABEL_FITS_ABOVE) {
+    return Math.round(topAtCentre + thickness / 2 - LABEL_HEIGHT / 2)
+  }
+  return Math.max(0, Math.round(topAtCentre - LABEL_HEIGHT - 2))
+}
+
 /**
  * The step that loses the largest share of the one before it.
  *

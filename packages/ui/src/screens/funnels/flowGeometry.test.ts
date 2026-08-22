@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { StepResult } from '../../api/types.js'
 import {
   BAR_WIDTH,
+  LABEL_HEIGHT,
   MIN_BAR_HEIGHT,
   PLOT_HEIGHT,
   RAMP_STEPS,
@@ -10,6 +11,7 @@ import {
   biggestLeak,
   plotWidth,
   rampIndex,
+  ribbonLabelY,
   ribbonPath,
 } from './flowGeometry.js'
 
@@ -95,6 +97,42 @@ describe('ribbonPath', () => {
 
   it('emits no NaN for a zero-entrant funnel', () => {
     expect(ribbonPath(barHeight(0, 0), barHeight(0, 0), 0)).not.toContain('NaN')
+  })
+})
+
+describe('ribbonLabelY', () => {
+  it('centres the label on the ribbon at its own midpoint', () => {
+    // Both bars full height: the ribbon is a full-height slab, so its middle
+    // is the plot's middle, less half a line box.
+    expect(ribbonLabelY(PLOT_HEIGHT, PLOT_HEIGHT)).toBe(PLOT_HEIGHT / 2 - LABEL_HEIGHT / 2)
+  })
+
+  it('uses the mean of the two ends, which is exactly where the curve is', () => {
+    // ribbonPath's cubic has both control points at the horizontal midpoint,
+    // making its y-component a 1D Bezier with P0=P1 and P2=P3 -- so the
+    // curve at the centre IS the mean. If this drifts, the label stops
+    // sitting on the ribbon it names.
+    const from = 180
+    const to = 60
+    const topAtCentre = PLOT_HEIGHT - (from + to) / 2 // 60
+    const thickness = PLOT_HEIGHT - topAtCentre // 120
+    expect(ribbonLabelY(from, to)).toBe(topAtCentre + thickness / 2 - LABEL_HEIGHT / 2)
+  })
+
+  it('lifts the label above a ribbon too thin to hold it', () => {
+    // Two near-empty steps leave a wedge thinner than a line of text. A
+    // centred label would spill over both edges and be legible against
+    // neither the ribbon nor the surface.
+    const y = ribbonLabelY(4, 4)
+    expect(y).toBeLessThan(PLOT_HEIGHT - 4 - LABEL_HEIGHT)
+    expect(y).toBeGreaterThanOrEqual(0)
+  })
+
+  it('never returns a negative offset', () => {
+    // A negative top would push the label out of the plot and, in a
+    // scrolling card, out of view entirely.
+    expect(ribbonLabelY(PLOT_HEIGHT, PLOT_HEIGHT - 1)).toBeGreaterThanOrEqual(0)
+    expect(ribbonLabelY(0, 0)).toBeGreaterThanOrEqual(0)
   })
 })
 
