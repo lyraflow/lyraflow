@@ -1214,7 +1214,10 @@ curl -s http://localhost:3000/v1/segments/preview \
       "last_seen": "2026-08-06T09:30:00.000Z", "country": "US", "region": "CA",
       "city": "San Francisco", "device_type": "desktop", "os": "macOS",
       "browser": "Chrome", "referrer": "https://google.com",
-      "utm_source": "google", "utm_medium": "cpc", "utm_campaign": "launch" }
+      "utm_source": "google", "utm_medium": "cpc", "utm_campaign": "launch",
+      "traits": { "plan": "trial", "company": "Acme" },
+      "traits_num": { "seats": 12 },
+      "trait_total": 3 }
   ],
   "next_cursor": "eyJ...base64url...",
   "window_exhausted": false
@@ -1225,8 +1228,14 @@ Each member row carries `person_id`, `first_seen`, `last_seen`, and the ten
 `context` fields (see *Node types* below) at their **current** value — not the
 `first_touch` one, even for the four fields that are only ever recorded as
 first-touch (see the caveat below `context` for why `latest` reads the same
-value there). Traits are not returned: a per-person map of arbitrary size,
-multiplied by a hundred rows, is unbounded by construction.
+value there).
+
+It also carries that person's **traits**, split by type the way they are
+stored: strings in `traits`, numbers in `traits_num`. At most 50 of each are
+returned, in key order — a per-person map is of arbitrary size, and a hundred
+rows of one would be unbounded by construction. `trait_total` is how many that
+person actually has, so a truncated map is visible as truncated rather than
+read as complete.
 
 Pages are 100 rows, ordered `last_seen` descending. Pass the previous
 response's `next_cursor` back as `cursor` to continue:
