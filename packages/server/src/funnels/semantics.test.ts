@@ -1422,6 +1422,63 @@ describe('funnel semantics', () => {
     })
 
     /**
+     * THE COMPLEMENT OF THE TEST ABOVE: DISTINCT INSTANTS, so the SORT
+     * DIRECTION is observable.
+     *
+     * The tie fixture above is right to put every entrant at one instant --
+     * that is the only shape that consults the keyset's tie-breaker. But it
+     * has a blind spot, and so does every other `/people` fixture in this
+     * file, because they all share that instant too: with every `entered_at`
+     * equal, `ORDER BY entered_at DESC` and `ASC` return the same rows in the
+     * same order, and the direction is pinned by nothing. Flipping it left all
+     * 33 tests green.
+     *
+     * It is not cosmetic. The keyset resumes with `entered_at < cursor`, which
+     * is only a continuation of a DESCENDING walk. Under `ASC` the cursor
+     * carries the LARGEST instant seen, so page two re-serves the start of the
+     * same population: the walk repeats rows instead of advancing.
+     *
+     * One minute apart, which is also this file's spacing rule -- `WINDOW` is
+     * 3600, so hour-spaced entrants would sit on the window boundary.
+     */
+    it('pages `reached` in one direction when every entrant has a DISTINCT instant', async () => {
+      const s1 = `sp-i1-${randomUUID()}`
+      const population = MEMBER_PAGE_SIZE + 5
+      const ids = Array.from(
+        { length: population },
+        (_, i) => `sp-order-${String(i).padStart(3, '0')}-${randomUUID()}`,
+      )
+      // Every entrant a minute apart, newest first, and all of them inside
+      // RANGE: 105 minutes back from 20 hours ago is still well short of
+      // `since`.
+      const batch = ids.map((p, i) => track(p, s1, ago(20 * HOUR + i * MINUTE)))
+      for (let i = 0; i < batch.length; i += 400) await send(batch.slice(i, i + 400))
+      const id = await createFunnel([{ event: s1 }, unreachedStep()])
+
+      const seen: string[] = []
+      let cursor: string | null = null
+      for (let page = 0; page < 10; page++) {
+        const body: PeoplePage = await peoplePage(id, 1, 'reached', cursor ? { cursor } : {})
+        expect(body.person_count).toBe(population)
+        seen.push(...body.members.map((m) => m.person_id))
+        cursor = body.next_cursor
+        if (!cursor) break
+      }
+      expect(seen.length).toBeGreaterThan(MEMBER_PAGE_SIZE)
+      // Both halves are needed and neither is redundant. A walk sorted the
+      // wrong way round re-serves people it has already sent, so it fails the
+      // duplicate check; one that also drops the tail fails the set check.
+      expect(new Set(seen).size).toBe(seen.length)
+      expect([...seen].sort()).toEqual([...ids].sort())
+      // And the direction read straight off page one rather than inferred
+      // from the walk: newest entrant first, which is what the keyset's `<`
+      // is a continuation of. `ids` was seeded newest-first, so this is the
+      // seeding order unchanged.
+      const firstPage = await peoplePage(id, 1, 'reached')
+      expect(firstPage.members.map((m) => m.person_id)).toEqual(ids.slice(0, MEMBER_PAGE_SIZE))
+    })
+
+    /**
      * MY OWN MUTATION -- a STEP AUDIENCE read through `/people`, which is the
      * one combination nothing else in this plan or this file puts together.
      *
