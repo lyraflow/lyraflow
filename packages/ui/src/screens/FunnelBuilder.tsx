@@ -8,8 +8,8 @@ import { ROUTES, funnelPath } from '../app/Router.js'
 import { Button } from '../components/ui/button.js'
 import { Input } from '../components/ui/input.js'
 import { Label } from '../components/ui/label.js'
+import { FunnelFlowOrBars } from './funnels/FunnelFlowOrBars.js'
 import { SegmentPicker } from './funnels/SegmentPicker.js'
-import { StepBars } from './funnels/StepBars.js'
 import { StepRows } from './funnels/StepRows.js'
 import { WarningPanel } from './funnels/WarningPanel.js'
 import type { WindowUnit } from './funnels/WindowField.js'
@@ -452,12 +452,12 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
               {formatRelative(previewResult.as_of, new Date())}
             </span>
           </p>
-          {/* The form's CURRENT steps. `StepBars` checks each position's
+          {/* The form's CURRENT steps. Both renderings check each position's
            * event name against the result's own before showing a clause,
            * so editing a step after previewing drops the narrowing rather
            * than labelling last preview's numbers with this edit's
            * predicates. */}
-          <StepBars result={previewResult} definition={steps} />
+          <FunnelFlowOrBars result={previewResult} definition={steps} />
         </div>
       )}
     </div>
