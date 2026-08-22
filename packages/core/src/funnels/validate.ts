@@ -1,7 +1,6 @@
 import { AST_VERSION } from '../segments/ast.js'
 import {
   type CostWarning,
-  MAX_BEHAVIOR_NODES,
   SegmentValidationError,
   costWarnings,
   countBehaviourNodes,
