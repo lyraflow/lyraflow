@@ -21,7 +21,7 @@ here as it happened rather than tagged retroactively, for the same reason 0.1.0
 is: a tag created after the fact names a moment nobody could have fetched. Its
 one fix is contained in 0.3.0.
 
-## Unreleased
+## 0.9.0 — 2026-08-22
 
 ### Added
 
@@ -59,6 +59,32 @@ one fix is contained in 0.3.0.
   ([#39](https://github.com/lyraflow/lyraflow/issues/39)). `lyraflow projects list`
   and `lyraflow projects delete <slug>` are the CLI half
   ([#60](https://github.com/lyraflow/lyraflow/issues/60) in part).
+
+### Changed
+
+- **A funnel result reads as a flow rather than a stack of bars.** One bar
+  per stage left the reader to subtract; a tapering ribbon between two stages
+  draws the loss where it happened, and carries that step's conversion rate
+  on it. Beneath the chart, a sentence names the biggest leak — the step
+  losing the largest share of the one before it — because "this funnel is
+  slow to convert" is not actionable and "Checkout loses 55% of the previous
+  step" is. Stage colour is one hue in monotone lightness steps rather than a
+  set of distinct hues: funnel stages have an order that changes the meaning
+  if you swap them, and a hue ordering does not survive colour-blindness. The
+  ramp spans seven steps, not eight, because that is the widest span of the
+  copper ramp whose palest member still clears 2:1 on each mode's surface —
+  measured, not chosen. Below the `md` breakpoint the previous stacked bars
+  render instead: eight steps across 390px is 48px each, which holds neither
+  an event name nor a count nor a percentage.
+- **The funnel builder gives each step a card of its own.** A step's event,
+  its `where` predicates and its audience previously sat at the same visual
+  level as the next step's, so where one step ended was answered by reading
+  rather than by an edge. Past four steps, a stored funnel opens with its
+  finished steps collapsed to a one-line summary; anything unfinished stays
+  open, because a collapsed row would hide the one field standing between an
+  operator and a saveable funnel. Collapse is decided when the form loads and
+  never changes because you typed — a step folding shut the moment it became
+  valid would move the form under the cursor mid-edit.
 
 ## 0.8.0
 
