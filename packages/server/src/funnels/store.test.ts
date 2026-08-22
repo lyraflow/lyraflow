@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import type { FunnelDefinition } from '@lyraflow/core'
+import { FUNNEL_DEFINITION_VERSION, type FunnelDefinition } from '@lyraflow/core'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { DuplicateFunnelNameError, FunnelStore, StoredDefinitionError } from './store.js'
@@ -69,7 +69,7 @@ describe('FunnelStore', () => {
     expect(found?.steps).toHaveLength(2)
     expect(found?.steps[0]?.where?.[0]?.value).toBe('/')
     expect(found?.windowSeconds).toBe(604800)
-    expect(found?.definitionVersion).toBe(1)
+    expect(found?.definitionVersion).toBe(FUNNEL_DEFINITION_VERSION)
   })
 
   it('finds a funnel by name, which is how the CLI addresses one', async () => {

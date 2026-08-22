@@ -1,3 +1,4 @@
+import { FUNNEL_DEFINITION_VERSION } from '@lyraflow/core'
 import { beforeAll, describe, expect, it } from 'vitest'
 
 /**
@@ -98,7 +99,7 @@ describe('production bundle', () => {
     // this subpath would, and by then the failure is a white screen rather
     // than a red test. Same guard as the two above, one module earlier.
     const ast = await import('@lyraflow/core/funnels/ast.js')
-    expect(ast.FUNNEL_DEFINITION_VERSION).toBe(1)
+    expect(ast.FUNNEL_DEFINITION_VERSION).toBe(FUNNEL_DEFINITION_VERSION)
     expect(typeof ast.FunnelStep.parse).toBe('function')
   })
 })
