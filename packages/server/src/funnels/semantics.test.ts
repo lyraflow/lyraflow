@@ -488,7 +488,7 @@ describe('funnel semantics', () => {
     expect(Object.keys(row).sort()).toEqual(['entered_at', 'person_id'])
   })
 
-  it("computes /people's person_count fresh, never from the funnel run's cached steps[i].people", async () => {
+  it("computes /people's person_count fresh within a SINGLE request, never from the funnel run's cached steps[i].people", async () => {
     // MemberList's own comment: comparing a stale count against a page
     // length is exactly how "that is everyone" gets printed over a
     // truncated preview. This proves it by changing the population AFTER
@@ -587,6 +587,84 @@ describe('funnel semantics', () => {
     expect(body.members).toHaveLength(MEMBER_PAGE_SIZE)
     // The page is capped; the count must not be.
     expect(body.person_count).toBe(people)
+  })
+
+  it("keeps /people's person_count identical across the pages of one cursor walk, even when a person's second qualifying event lands between the two requests", async () => {
+    // The gap the single-request test above cannot see: entry is gated by
+    // `until`, fixed identically on both requests below, so a fixture that
+    // only varies WHO ENTERS never exercises whether the count query
+    // actually reuses the cursor's pinned `asOf` on page 2 rather than a
+    // fresh `now()` -- both give the same answer when nothing about
+    // CONTINUATION changes between requests (compile.ts:140-152, 204-206).
+    // This fixture changes continuation instead: one extra person reaches
+    // level 1 before page 1, then reaches level 2 in the gap between the
+    // two requests, with a real wall-clock timestamp. A count query that
+    // re-derives `now` per request would see that event fall inside its
+    // scan on page 2 and report one person more than page 1 did.
+    const landed = `cross-page-landed-${randomUUID()}`
+    const clicked = `cross-page-clicked-${randomUUID()}`
+    // Real-clock-relative, not the file's `ago()`/NOW -- this fixture needs
+    // `until + window` to stay ahead of the ACTUAL wall clock at BOTH
+    // requests, which only holds if `until` tracks the real clock too.
+    const since = new Date(Date.now() - 3 * HOUR).toISOString()
+    const until = new Date(Date.now() - 1000).toISOString()
+    const enteredAt = new Date(Date.now() - 2 * MINUTE).toISOString()
+    const reachedAt = new Date(Date.now() - 90_000).toISOString()
+
+    const population = MEMBER_PAGE_SIZE + 5
+    const batch: object[] = []
+    for (let i = 0; i < population; i++) {
+      const anon = `sem-cross-page-${i}`
+      batch.push(track(anon, landed, enteredAt), track(anon, clicked, reachedAt))
+    }
+    // Reaches level 1 only, before page 1 -- not part of the level-2
+    // population either page should count YET.
+    const continuationId = `sem-cross-page-continuation-${randomUUID()}`
+    batch.push(track(continuationId, landed, enteredAt))
+    for (let i = 0; i < batch.length; i += 400) await send(batch.slice(i, i + 400))
+
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v1/funnels',
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: {
+        name: `cross-page-${randomUUID()}`,
+        steps: [{ event: landed }, { event: clicked }],
+        window_seconds: WINDOW,
+      } as never,
+    })
+    const id = created.json().id
+
+    const page1 = await app.inject({
+      method: 'POST',
+      url: `/v1/funnels/${id}/people`,
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: { step: 2, mode: 'reached', since, until } as never,
+    })
+    expect(page1.statusCode).toBe(200)
+    const page1Body = page1.json()
+    expect(page1Body.members).toHaveLength(MEMBER_PAGE_SIZE)
+    expect(page1Body.person_count).toBe(population)
+    expect(typeof page1Body.next_cursor).toBe('string')
+
+    // The continuation person's SECOND qualifying event -- strictly between
+    // the two requests, timestamped with whatever the wall clock actually
+    // is right now, which is necessarily after page 1's pinned asOf.
+    await send([track(continuationId, clicked, new Date().toISOString())])
+
+    const page2 = await app.inject({
+      method: 'POST',
+      url: `/v1/funnels/${id}/people`,
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: { step: 2, mode: 'reached', since, until, cursor: page1Body.next_cursor } as never,
+    })
+    expect(page2.statusCode).toBe(200)
+    const page2Body = page2.json()
+    expect(page2Body.members).toHaveLength(population - MEMBER_PAGE_SIZE)
+    // The count must not move between pages of the SAME walk -- a count
+    // that re-derives `now` per request would report one more here.
+    expect(page2Body.person_count).toBe(page1Body.person_count)
+    expect(page2Body.person_count).toBe(population)
   })
 
   describe('step audiences', () => {
