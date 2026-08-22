@@ -99,7 +99,7 @@ function boundedTraitMap(kind: 'string' | 'number'): string {
   return `CAST((${keys}, arrayMap(k -> ${source}[k], ${keys})), 'Map(String, ${chType})')`
 }
 
-function memberProjection(): string {
+export function memberProjection(): string {
   const context = CONTEXT_FIELDS.map((f) => `${CONTEXT_COLUMNS[f].latest} AS ${f}`)
   return [
     'person_id',
@@ -115,6 +115,43 @@ function memberProjection(): string {
     // as a string is a count someone compares with `>` against a number.
     'toUInt32(length(t_has_num)) AS trait_total',
   ].join(',\n  ')
+}
+
+/**
+ * The per-person trait maps, as a CTE.
+ *
+ * Exported for the same reason `wherePredicate` is: two engines compile it --
+ * the segment members walk and the funnel people walk -- and a second copy
+ * would drift first at `t_has_num`, the flag that decides whether a trait is
+ * read as a number or a string. A person whose `plan` trait reads `"3"` in
+ * one list and `3` in the other is the kind of disagreement nobody notices
+ * until a comparison silently stops matching.
+ *
+ * `now()` as the timestamp is deliberate and unchanged: traits carry no
+ * meaningful event time, and resolving them at the current instant is the
+ * correct reading of "this person's traits today".
+ */
+export function traitsCte(opts: { database: string; projectId: number; params: Params }): string {
+  const { database, projectId, params } = opts
+  return `traits AS (
+    SELECT
+      ${resolvedPersonExpr({ database, alias: 'tr' })} AS ${RESOLVED_PERSON_ALIAS},
+      CAST((groupArray(trait_key), groupArray(m_value_str)), 'Map(String, String)')  AS t_str,
+      CAST((groupArray(trait_key), groupArray(m_value_num)), 'Map(String, Float64)') AS t_num,
+      CAST((groupArray(trait_key), groupArray(m_has_num)),   'Map(String, UInt8)')   AS t_has_num
+    FROM (
+      SELECT
+        anonymous_id, user_id, project_id, trait_key,
+        argMaxMerge(value_str) AS m_value_str,
+        argMaxMerge(value_num) AS m_value_num,
+        argMaxMerge(has_num)   AS m_has_num,
+        now() AS timestamp
+      FROM person_traits
+      WHERE project_id = ${params.add(projectId, 'UInt32')}
+      GROUP BY project_id, anonymous_id, user_id, trait_key
+    ) AS tr
+    GROUP BY ${RESOLVED_PERSON_ALIAS}
+  )`
 }
 
 /**
@@ -179,29 +216,10 @@ export function compileSegment(opts: {
   // here — the predicates read them as t_str[key] / t_num[key].
   //
   // person_traits is keyed by raw identity, exactly like device_index, so the
-  // rows have to be resolved to a person before they can be grouped. `now()
-  // AS timestamp` exists because resolvedPersonExpr reads a column of that
-  // name: traits carry no meaningful event time, and resolving them at the
-  // current instant is the correct reading of "this person's traits today".
-  const traits = `traits AS (
-    SELECT
-      ${resolvedPersonExpr({ database, alias: 'tr' })} AS ${RESOLVED_PERSON_ALIAS},
-      CAST((groupArray(trait_key), groupArray(m_value_str)), 'Map(String, String)')  AS t_str,
-      CAST((groupArray(trait_key), groupArray(m_value_num)), 'Map(String, Float64)') AS t_num,
-      CAST((groupArray(trait_key), groupArray(m_has_num)),   'Map(String, UInt8)')   AS t_has_num
-    FROM (
-      SELECT
-        anonymous_id, user_id, project_id, trait_key,
-        argMaxMerge(value_str) AS m_value_str,
-        argMaxMerge(value_num) AS m_value_num,
-        argMaxMerge(has_num)   AS m_has_num,
-        now() AS timestamp
-      FROM person_traits
-      WHERE project_id = ${params.add(projectId, 'UInt32')}
-      GROUP BY project_id, anonymous_id, user_id, trait_key
-    ) AS tr
-    GROUP BY ${RESOLVED_PERSON_ALIAS}
-  )`
+  // rows have to be resolved to a person before they can be grouped. See
+  // `traitsCte`'s own doc comment for why it is exported and for the `now()`
+  // note.
+  const traits = traitsCte({ database, projectId, params })
 
   const ctes = [base, traits, pass.cte].filter((c): c is string => c !== null).join(',\n  ')
 
