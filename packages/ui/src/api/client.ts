@@ -5,6 +5,8 @@ import type {
   EventsQuery,
   Funnel,
   FunnelDefinition,
+  FunnelPeoplePage,
+  FunnelPeopleQuery,
   FunnelRunResult,
   FunnelStep,
   PreviewOptions,
@@ -128,6 +130,13 @@ export interface ApiClient {
     range: RangeBody,
   ): Promise<FunnelRunResult>
   runFunnel(projectId: number, id: number, range: RangeBody): Promise<FunnelRunResult>
+  /**
+   * The people at one step -- either everyone who reached it or only those
+   * who stopped there, per `body.mode`. Its own signed cursor label on the
+   * server, so a page fetched for one mode cannot be replayed against the
+   * other.
+   */
+  funnelPeople(projectId: number, id: number, body: FunnelPeopleQuery): Promise<FunnelPeoplePage>
   segments(projectId: number): Promise<Segment[]>
   segment(projectId: number, id: number): Promise<Segment>
   createSegment(
@@ -354,6 +363,8 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
       ),
     runFunnel: (projectId, id, range) =>
       call(`/v1/funnels/${id}/run`, { method: 'POST', body: JSON.stringify(range) }, projectId),
+    funnelPeople: (projectId, id, body) =>
+      call(`/v1/funnels/${id}/people`, { method: 'POST', body: JSON.stringify(body) }, projectId),
     segments: async (projectId) =>
       (await call<{ segments: Segment[] }>('/v1/segments', {}, projectId)).segments,
     segment: (projectId, id) => call(`/v1/segments/${id}`, {}, projectId),
