@@ -152,6 +152,30 @@ describe('FunnelFlow', () => {
     expect(screen.queryByTestId('flow-step-1-where')).not.toBeInTheDocument()
   })
 
+  it('fills ribbons from their own token rather than a bar colour at reduced opacity', () => {
+    // FOUND BY RENDERING IT, not by reading it. The first version drew each
+    // ribbon as its source bar's colour at `opacity: 0.4`; blending a
+    // saturated copper toward the surface desaturates it, and the ribbons
+    // came out visibly GREY in light and olive in dark. Opacity over a
+    // surface the component does not know the colour of is the trap; a token
+    // that already IS the blend is the fix.
+    const { container } = render(<FunnelFlow result={result()} />)
+    const ribbon = screen.getByTestId('flow-ribbon-1')
+    expect(ribbon).toHaveAttribute('fill', 'var(--chart-funnel-ribbon)')
+    expect(ribbon).not.toHaveAttribute('opacity')
+    expect(container.innerHTML).not.toContain('opacity')
+  })
+
+  it('caps the plot so a two-step funnel does not draw two enormous blocks', () => {
+    // Also found by rendering: uncapped, two steps spread across a wide card
+    // put each bar at ~240px, which reads as two blocks rather than a flow.
+    // A cap, not a width -- the plot still shrinks to whatever room it gets.
+    render(<FunnelFlow result={result()} />)
+    expect(screen.getByTestId('funnel-flow').querySelector('[style*="max-width"]')).toHaveStyle({
+      maxWidth: '400px',
+    })
+  })
+
   it('keeps every step inside the seven colours the stylesheet defines', () => {
     // An eight-step funnel is legal (MAX_FUNNEL_STEPS) and the validated ramp
     // has seven steps. A `--chart-funnel-8` would resolve to nothing and the

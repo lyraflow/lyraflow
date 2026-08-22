@@ -82,84 +82,95 @@ export function FunnelFlow(props: {
   const heights = steps.map((s) => barHeight(s.people, result.entered))
   const leak = biggestLeak(steps, result.entered)
   const columns = { gridTemplateColumns: `repeat(${Math.max(1, total)}, minmax(0, 1fr))` }
+  /* A cap, not a width: the plot still shrinks to whatever room it is given.
+   * Without it a two-step funnel spreads two bars across the whole card and
+   * each one lands ~240px wide, which reads as two blocks rather than as a
+   * flow. Per-step rather than absolute so a six-step funnel still fills a
+   * wide screen. */
+  const plot = { maxWidth: `${Math.max(1, total) * 200}px` }
 
   return (
     <div data-testid="funnel-flow" className="flex min-w-0 flex-col gap-2">
-      {/* Stage names, above the plot as in a column chart -- the reader
-       * needs to know what a bar IS before they read how tall it is. */}
-      <div className="grid gap-1" style={columns}>
-        {steps.map((s, i) => {
-          const where = whereFor(definition, i, s.event)
-          return (
-            <div key={s.index} className="min-w-0 px-1 text-center">
-              <p className="truncate text-sm font-medium" title={s.event}>
-                {s.event}
-              </p>
-              {where != null && (
-                <p
-                  data-testid={`flow-step-${s.index}-where`}
-                  className="truncate text-xs text-muted-foreground"
-                  title={`where ${where}`}
-                >
-                  where {where}
+      {/* The cap wraps the PLOT only. Wrapping the sentences below it too
+       * was the first attempt and it re-flowed "loses 35.1% of the previous
+       * step" onto two lines inside a card with 800px of empty space beside
+       * it -- a chart constraint has no business setting prose measure. */}
+      <div className="mx-auto flex w-full min-w-0 flex-col gap-2" style={plot}>
+        {/* Stage names, above the plot as in a column chart -- the reader
+         * needs to know what a bar IS before they read how tall it is. */}
+        <div className="grid gap-1" style={columns}>
+          {steps.map((s, i) => {
+            const where = whereFor(definition, i, s.event)
+            return (
+              <div key={s.index} className="min-w-0 px-1 text-center">
+                <p className="truncate text-sm font-medium" title={s.event}>
+                  {s.event}
                 </p>
-              )}
+                {where != null && (
+                  <p
+                    data-testid={`flow-step-${s.index}-where`}
+                    className="truncate text-xs text-muted-foreground"
+                    title={`where ${where}`}
+                  >
+                    where {where}
+                  </p>
+                )}
+              </div>
+            )
+          })}
+        </div>
+
+        {/* `height` in pixels equal to the viewBox height, so the vertical
+         * scale is exactly 1 and only the horizontal axis stretches. Under a
+         * vertical stretch every `rx` distorts and a 4px corner becomes
+         * whatever the container's aspect ratio makes it. */}
+        <svg
+          role="img"
+          aria-label={`Funnel flow: ${steps.map((s) => `${s.event} ${formatPercent(s.from_start)}`).join(', ')}`}
+          viewBox={`0 0 ${plotWidth(total)} ${PLOT_HEIGHT}`}
+          preserveAspectRatio="none"
+          width="100%"
+          height={PLOT_HEIGHT}
+          className="block"
+        >
+          <title>Funnel flow</title>
+          {/* Ribbons first, so a bar's own edge always sits on top of the
+           * ribbon meeting it rather than being overdrawn by it. */}
+          {steps.slice(0, -1).map((s, i) => (
+            <path
+              key={`ribbon-${s.index}`}
+              data-testid={`flow-ribbon-${s.index}`}
+              d={ribbonPath(heights[i] as number, heights[i + 1] as number, i)}
+              fill="var(--chart-funnel-ribbon)"
+            />
+          ))}
+          {steps.map((s, i) => (
+            <rect
+              key={`bar-${s.index}`}
+              data-testid={`flow-bar-${s.index}`}
+              x={barX(i)}
+              y={PLOT_HEIGHT - (heights[i] as number)}
+              width={BAR_WIDTH}
+              height={heights[i] as number}
+              rx={4}
+              fill={`var(--chart-funnel-${rampIndex(i, total)})`}
+            />
+          ))}
+        </svg>
+
+        {/* `from_start` as the headline and the count beneath it: the share is
+         * what the bar height already drew, so it reads as a label rather than
+         * as new information, and the absolute number is what an operator
+         * copies into a ticket. Both in text tokens, never in the series
+         * colour -- the bar above carries identity. */}
+        <div className="grid gap-1" style={columns}>
+          {steps.map((s) => (
+            <div key={s.index} data-testid={`flow-step-${s.index}`} className="min-w-0 text-center">
+              <p className="text-base font-semibold tabular-nums">{formatPercent(s.from_start)}</p>
+              <p className="text-xs tabular-nums text-muted-foreground">{formatCount(s.people)}</p>
             </div>
-          )
-        })}
-      </div>
-
-      {/* `height` in pixels equal to the viewBox height, so the vertical
-       * scale is exactly 1 and only the horizontal axis stretches. Under a
-       * vertical stretch every `rx` distorts and a 4px corner becomes
-       * whatever the container's aspect ratio makes it. */}
-      <svg
-        role="img"
-        aria-label={`Funnel flow: ${steps.map((s) => `${s.event} ${formatPercent(s.from_start)}`).join(', ')}`}
-        viewBox={`0 0 ${plotWidth(total)} ${PLOT_HEIGHT}`}
-        preserveAspectRatio="none"
-        width="100%"
-        height={PLOT_HEIGHT}
-        className="block"
-      >
-        <title>Funnel flow</title>
-        {/* Ribbons first, so a bar's own edge always sits on top of the
-         * ribbon meeting it rather than being overdrawn by it. */}
-        {steps.slice(0, -1).map((s, i) => (
-          <path
-            key={`ribbon-${s.index}`}
-            data-testid={`flow-ribbon-${s.index}`}
-            d={ribbonPath(heights[i] as number, heights[i + 1] as number, i)}
-            fill={`var(--chart-funnel-${rampIndex(i, total)})`}
-            opacity={0.4}
-          />
-        ))}
-        {steps.map((s, i) => (
-          <rect
-            key={`bar-${s.index}`}
-            data-testid={`flow-bar-${s.index}`}
-            x={barX(i)}
-            y={PLOT_HEIGHT - (heights[i] as number)}
-            width={BAR_WIDTH}
-            height={heights[i] as number}
-            rx={4}
-            fill={`var(--chart-funnel-${rampIndex(i, total)})`}
-          />
-        ))}
-      </svg>
-
-      {/* `from_start` as the headline and the count beneath it: the share is
-       * what the bar height already drew, so it reads as a label rather than
-       * as new information, and the absolute number is what an operator
-       * copies into a ticket. Both in text tokens, never in the series
-       * colour -- the bar above carries identity. */}
-      <div className="grid gap-1" style={columns}>
-        {steps.map((s) => (
-          <div key={s.index} data-testid={`flow-step-${s.index}`} className="min-w-0 text-center">
-            <p className="text-base font-semibold tabular-nums">{formatPercent(s.from_start)}</p>
-            <p className="text-xs tabular-nums text-muted-foreground">{formatCount(s.people)}</p>
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
 
       {leak != null && (
