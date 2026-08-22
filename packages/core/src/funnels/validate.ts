@@ -1,4 +1,12 @@
-import type { CostWarning } from '../segments/validate.js'
+import { AST_VERSION } from '../segments/ast.js'
+import {
+  type CostWarning,
+  MAX_BEHAVIOR_NODES,
+  SegmentValidationError,
+  costWarnings,
+  countBehaviourNodes,
+  validateTree,
+} from '../segments/validate.js'
 import type { FunnelDefinition } from './ast.js'
 
 /**
@@ -30,12 +38,34 @@ const HIGH_VOLUME_EVENTS = new Set(['$page', '$identify'])
 export class FunnelValidationError extends Error {
   constructor(
     message: string,
-    readonly code: 'steps' | 'window' | 'range',
+    readonly code: 'steps' | 'window' | 'range' | 'audience',
   ) {
     super(message)
     this.name = 'FunnelValidationError'
   }
 }
+
+/**
+ * Total behaviour nodes across every step audience in ONE funnel.
+ *
+ * Per-tree caps cannot see this. A tree may hold `MAX_BEHAVIOR_NODES` (25)
+ * and a funnel `MAX_FUNNEL_STEPS` (8), so eight individually legal audiences
+ * are 200 conditional aggregates in a single run.
+ *
+ * COVERS THE EMBEDDED AUDIENCES ONLY. `validateFunnel` is a pure function
+ * over the definition and the tree behind `segment_id` lives in another
+ * table; reaching it would make validation async at both call sites. That
+ * tree is separately capped at `MAX_BEHAVIOR_NODES` when the segment was
+ * saved, so one run's true worst case is this value PLUS
+ * `MAX_BEHAVIOR_NODES` — 50 at the number below, against 200 with no cap at
+ * all.
+ *
+ * 25 is a starting value, chosen as "one segment's worth for the whole
+ * funnel" and to be confirmed by measuring a funnel at the cap against a
+ * live ClickHouse. Lower it if that measurement says so. Do not raise it
+ * without one.
+ */
+export const MAX_FUNNEL_BEHAVIOR_NODES = 25
 
 /**
  * Definition-level caps, checked at CREATE time as well as at run time.
@@ -53,6 +83,29 @@ export function validateFunnel(def: FunnelDefinition): void {
     throw new FunnelValidationError(
       `the conversion window may be at most ${MAX_WINDOW_SECONDS} seconds (30 days)`,
       'window',
+    )
+  }
+  let behaviours = 0
+  def.steps.forEach((step, i) => {
+    if (step.audience === undefined) return
+    try {
+      // Through the SEGMENT validator, not a funnel-shaped copy: depth, node
+      // count and per-tree behaviour count must mean the same thing in both
+      // places, and the only way to guarantee that is one implementation.
+      validateTree({ ast_version: AST_VERSION, filter: step.audience })
+    } catch (err) {
+      if (!(err instanceof SegmentValidationError)) throw err
+      // Re-thrown as a funnel error NAMING THE STEP. The segment message says
+      // what is wrong with the tree; without the step, an operator with eight
+      // of them has to find which one by bisection.
+      throw new FunnelValidationError(`step ${i + 1}: ${err.message}`, 'audience')
+    }
+    behaviours += countBehaviourNodes(step.audience)
+  })
+  if (behaviours > MAX_FUNNEL_BEHAVIOR_NODES) {
+    throw new FunnelValidationError(
+      `the step audiences hold ${behaviours} behavioural conditions in total; a funnel may have at most ${MAX_FUNNEL_BEHAVIOR_NODES}`,
+      'audience',
     )
   }
 }
@@ -86,6 +139,17 @@ export function funnelCostWarnings(
         path: `steps.${i}`,
         reason: `the \`${step.event}\` step matches a high-volume event, so this funnel scans far more rows than one over distinct custom events`,
       })
+    }
+    if (step.audience !== undefined) {
+      // Prefixed with the step, NOT rewritten. `costWarnings` emits
+      // `filter.children[0]`; the UI's `costWarningPath` resolves a path by
+      // matching `children[N]` segments only, so the prefix is ignored there
+      // by construction and the warning still lands on the right row. The
+      // prefix exists so the funnel can tell two steps' warnings apart --
+      // both resolve to the same editor path otherwise.
+      for (const w of costWarnings({ ast_version: AST_VERSION, filter: step.audience })) {
+        out.push({ path: `steps.${i}.${w.path}`, reason: w.reason })
+      }
     }
   })
   if (range.until.getTime() - range.since.getTime() >= MAX_RANGE_DAYS * MS_PER_DAY) {

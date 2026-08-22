@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
+import type { FilterNode } from '../segments/ast.js'
 import type { FunnelDefinition } from './ast.js'
 import {
   FunnelValidationError,
+  MAX_FUNNEL_BEHAVIOR_NODES,
   MAX_FUNNEL_STEPS,
   MAX_WINDOW_SECONDS,
   funnelCostWarnings,
@@ -115,5 +117,105 @@ describe('funnelCostWarnings', () => {
       wide,
     )
     expect(w.some((x) => x.path === 'range')).toBe(true)
+  })
+})
+
+/** A behaviour node with a bounded window — the cheap shape. */
+const behaviour = (event: string): FilterNode => ({
+  kind: 'behavior',
+  event,
+  aggregate: 'count',
+  window: { kind: 'last', n: 14, unit: 'days' },
+  operator: '=',
+  value: 1,
+})
+
+/** A behaviour node with an `ever` window — the shape that warns. */
+const everBehaviour = (event: string): FilterNode => ({
+  kind: 'behavior',
+  event,
+  aggregate: 'count',
+  window: { kind: 'ever' },
+  operator: '=',
+  value: 1,
+})
+
+const group = (children: FilterNode[]): FilterNode => ({ kind: 'group', op: 'and', children })
+
+describe('audiences', () => {
+  it('accepts a definition whose steps carry audiences', () => {
+    expect(() =>
+      validateFunnel({
+        steps: [
+          { event: 'a', audience: behaviour('docs_search') },
+          { event: 'b', audience: group([behaviour('x'), behaviour('y')]) },
+        ],
+        window_seconds: 3600,
+      }),
+    ).not.toThrow()
+  })
+
+  it('rejects a definition whose audiences exceed the funnel-wide behaviour cap', () => {
+    // Two steps, each holding more than half the cap: legal per tree
+    // (MAX_BEHAVIOR_NODES is 25), illegal for the funnel.
+    const many = (n: number) => group(Array.from({ length: n }, (_, i) => behaviour(`e${i}`)))
+    let thrown: unknown
+    try {
+      validateFunnel({
+        steps: [
+          { event: 'a', audience: many(20) },
+          { event: 'b', audience: many(20) },
+        ],
+        window_seconds: 3600,
+      })
+    } catch (err) {
+      thrown = err
+    }
+    expect(thrown).toBeInstanceOf(FunnelValidationError)
+    expect((thrown as FunnelValidationError).code).toBe('audience')
+    expect((thrown as FunnelValidationError).message).toContain(String(MAX_FUNNEL_BEHAVIOR_NODES))
+  })
+
+  it('rejects an audience that breaks the per-tree caps, naming the step', () => {
+    // A tree nested past MAX_TREE_DEPTH (10). Built as nested groups.
+    let deep: FilterNode = behaviour('x')
+    for (let i = 0; i < 12; i++) deep = group([deep])
+    let thrown: unknown
+    try {
+      validateFunnel({
+        steps: [{ event: 'a' }, { event: 'b', audience: deep }],
+        window_seconds: 3600,
+      })
+    } catch (err) {
+      thrown = err
+    }
+    expect(thrown).toBeInstanceOf(FunnelValidationError)
+    expect((thrown as FunnelValidationError).code).toBe('audience')
+    // The step must be named -- "this funnel is invalid" is not actionable.
+    expect((thrown as FunnelValidationError).message).toContain('step 2')
+  })
+
+  it('reports an audience cost warning against the step that carries it', () => {
+    const warnings = funnelCostWarnings(
+      {
+        steps: [{ event: 'a' }, { event: 'b', audience: everBehaviour('docs_search') }],
+        window_seconds: 3600,
+      },
+      { since: new Date('2026-08-01T00:00:00Z'), until: new Date('2026-08-08T00:00:00Z') },
+    )
+    const ever = warnings.find((w) => w.reason.includes('`ever` window'))
+    expect(ever).toBeDefined()
+    // Prefixed with the step, and the index in BRACKETS -- that is the format
+    // validate.ts's walk emits and the UI's costWarningPath parses.
+    expect(ever?.path).toBe('steps.1.filter')
+  })
+
+  it('leaves a definition with no audience producing exactly the warnings it did before', () => {
+    const def = { steps: [{ event: 'a' }, { event: 'b' }], window_seconds: 3600 }
+    const range = {
+      since: new Date('2026-08-01T00:00:00Z'),
+      until: new Date('2026-08-08T00:00:00Z'),
+    }
+    expect(funnelCostWarnings(def, range)).toEqual([])
   })
 })

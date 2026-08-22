@@ -6,6 +6,7 @@ import {
   MAX_TREE_NODES,
   SegmentValidationError,
   costWarnings,
+  countBehaviourNodes,
   validateTree,
 } from './validate.js'
 
@@ -125,5 +126,37 @@ describe('costWarnings', () => {
         }),
       ),
     ).toEqual([])
+  })
+})
+
+describe('countBehaviourNodes', () => {
+  it('counts behaviour nodes at every depth, and nothing else', () => {
+    const tree: FilterNode = {
+      kind: 'group',
+      op: 'and',
+      children: [
+        { kind: 'trait', key: 'plan', operator: '=', value: 'pro' },
+        {
+          kind: 'not',
+          child: {
+            kind: 'behavior',
+            event: 'a',
+            aggregate: 'count',
+            window: { kind: 'ever' },
+            operator: '=',
+            value: 1,
+          },
+        },
+        {
+          kind: 'behavior',
+          event: 'b',
+          aggregate: 'count',
+          window: { kind: 'ever' },
+          operator: '=',
+          value: 1,
+        },
+      ],
+    }
+    expect(countBehaviourNodes(tree)).toBe(2)
   })
 })
