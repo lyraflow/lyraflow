@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
@@ -16,6 +16,8 @@ import type { WindowUnit } from './funnels/WindowField.js'
 import { WindowField, secondsToWindowInput, toWindowSeconds } from './funnels/WindowField.js'
 import { describeError } from './funnels/errors.js'
 import { formatRangeDays, formatRelative } from './funnels/format.js'
+import { normaliseRoot } from './segments/TreeEditor.js'
+import { completeness } from './segments/warnings.js'
 
 /** A brand-new funnel's starting step list -- one empty step. `StepRows`'
  * own two-step floor governs removal, not the initial count: an operator
@@ -177,7 +179,24 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
       .then((f) => {
         if (cancelled) return
         setName(f.name)
-        setSteps(f.steps.length > 0 ? f.steps : NEW_STEPS)
+        // Normalised HERE, at the one point a stored definition enters this
+        // screen's state -- the same place and for the same reason
+        // `SegmentBuilder` does it (see `normaliseRoot`'s own doc comment).
+        //
+        // A funnel written by the API may carry a bare `behavior`,
+        // `trait`, `context`, `lifecycle` or `not` at an audience's root;
+        // `GroupCard` addresses a group and would throw on it. Normalising
+        // at RENDER instead would be the actual trap: it moves the leaf
+        // from editor path `[]` to `[0]` while `funnelCostWarnings` -- which
+        // ran against the tree the server holds -- still reports `[]`, so
+        // the warning lands on the wrapper rather than on the condition it
+        // names. One tree on screen, another the paths came from.
+        const seeded = f.steps.length > 0 ? f.steps : NEW_STEPS
+        setSteps(
+          seeded.map((s) =>
+            s.audience === undefined ? s : { ...s, audience: normaliseRoot(s.audience) },
+          ),
+        )
         const win = secondsToWindowInput(f.window_seconds)
         setWindowValue(win.value)
         setWindowUnit(win.unit)
@@ -204,7 +223,30 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
 
   const windowSeconds = toWindowSeconds(windowValue, windowUnit)
   const stepsValid = steps.length >= 2 && steps.every((s) => s.event.trim() !== '')
-  const canSubmit = stepsValid && windowSeconds != null && activeId != null
+  /**
+   * Every step audience's completeness, in one pass.
+   *
+   * From core's own schema via `completeness` (`segments/warnings.ts`), not
+   * a second hand-written notion of "filled in" -- a second definition of
+   * validity is exactly what drifts from the one the server enforces, and
+   * the field that drifts is one nobody thought about (a `count` aggregate
+   * that must carry no property; a `last` window capped at 3650).
+   *
+   * `.incomplete` goes down to `StepRows` so the sentence lands on the row
+   * that is actually incomplete rather than in a banner up here.
+   */
+  const audiences = useMemo(() => {
+    const incomplete: Record<number, number[][]> = {}
+    let allComplete = true
+    steps.forEach((s, i) => {
+      if (s.audience === undefined) return
+      const c = completeness(s.audience)
+      if (!c.complete) allComplete = false
+      incomplete[i] = c.incomplete
+    })
+    return { allComplete, incomplete }
+  }, [steps])
+  const canSubmit = stepsValid && audiences.allComplete && windowSeconds != null && activeId != null
   // The server's `CreateBody` is `z.string().min(1).max(200)` -- a name of
   // only spaces passes THAT check (`min(1)` counts the spaces) but is not a
   // name, so this trims before comparing rather than only checking
@@ -345,8 +387,16 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
           steps={steps}
           onChange={setSteps}
           onUnauthorized={onUnauthorized}
+          warnings={previewResult?.warnings ?? []}
+          incomplete={audiences.incomplete}
         />
       )}
+
+      <p className="text-sm text-muted-foreground">
+        A step condition’s window is measured from now, not from when each person entered the
+        funnel. Over an older date range that judges someone against today rather than against their
+        own first step.
+      </p>
 
       <WindowField
         value={windowValue}

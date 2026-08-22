@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
+import { FUNNEL_DEFINITION_VERSION } from '@lyraflow/core'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
@@ -112,7 +113,7 @@ describe('funnel routes', () => {
     const created = await call('POST', '/v1/funnels', { name: 'signup', ...signup })
     expect(created.statusCode).toBe(201)
     const id = created.json().id
-    expect(created.json().definition_version).toBe(1)
+    expect(created.json().definition_version).toBe(FUNNEL_DEFINITION_VERSION)
     expect(created.json().stale).toBe(false)
 
     expect((await call('GET', '/v1/funnels')).json().funnels).toHaveLength(1)
@@ -305,7 +306,7 @@ describe('funnel routes', () => {
     ])
     const res = await call('GET', `/v1/funnels/${created.json().id}`)
     expect(res.statusCode).toBe(400)
-    expect(res.json().definition_version).toBe(1)
+    expect(res.json().definition_version).toBe(FUNNEL_DEFINITION_VERSION)
     // The list still renders, marking the bad row rather than 400ing wholesale.
     const listed = await call('GET', '/v1/funnels')
     expect(listed.statusCode).toBe(200)

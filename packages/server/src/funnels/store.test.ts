@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import type { FunnelDefinition } from '@lyraflow/core'
+import { FUNNEL_DEFINITION_VERSION, type FunnelDefinition } from '@lyraflow/core'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { DuplicateFunnelNameError, FunnelStore, StoredDefinitionError } from './store.js'
@@ -62,6 +62,15 @@ const RANGE = {
   until: new Date('2026-08-08T00:00:00.000Z'),
 }
 
+const behaviour = (event: string) => ({
+  kind: 'behavior' as const,
+  event,
+  aggregate: 'count' as const,
+  window: { kind: 'last' as const, n: 14, unit: 'days' as const },
+  operator: '=' as const,
+  value: 1,
+})
+
 describe('FunnelStore', () => {
   it('creates and reads back a definition', async () => {
     const created = await store.create(projectId, 'signup', signup)
@@ -69,7 +78,7 @@ describe('FunnelStore', () => {
     expect(found?.steps).toHaveLength(2)
     expect(found?.steps[0]?.where?.[0]?.value).toBe('/')
     expect(found?.windowSeconds).toBe(604800)
-    expect(found?.definitionVersion).toBe(1)
+    expect(found?.definitionVersion).toBe(FUNNEL_DEFINITION_VERSION)
   })
 
   it('finds a funnel by name, which is how the CLI addresses one', async () => {
@@ -375,6 +384,147 @@ describe('FunnelStore', () => {
     expect(after?.lastEntered).toBe(51)
     expect(after?.lastConverted).toBe(7)
     expect(after?.lastEvaluatedAt).not.toBeNull()
+  })
+
+  describe('audience equality', () => {
+    it('treats an audience-only edit as a change, so the cached counters are cleared', async () => {
+      const created = await store.create(projectId, 'audience-edit', {
+        steps: [{ event: 'a' }, { event: 'b' }],
+        window_seconds: 3600,
+      })
+      // Seed the cache the way a run does, so there is something to clear.
+      // `RANGE` and this call shape are the file's own -- `recordRun` requires
+      // `at` and a range (#91).
+      await store.recordRun(projectId, created.id, {
+        entered: 10,
+        converted: 3,
+        at: new Date(),
+        range: RANGE,
+      })
+
+      await store.update(projectId, created.id, {
+        steps: [{ event: 'a' }, { event: 'b', audience: behaviour('docs_search') }],
+      })
+
+      const after = await store.get(projectId, created.id)
+      // A stored count describes the definition it was computed from. Leaving
+      // it after an edit makes the funnels list render a confident number for
+      // a funnel that no longer exists.
+      expect(after?.lastEntered).toBeNull()
+      expect(after?.lastConverted).toBeNull()
+      expect(after?.lastEvaluatedAt).toBeNull()
+    })
+
+    it('treats a re-save of the same audience as no change', async () => {
+      const steps = [{ event: 'a' }, { event: 'b', audience: behaviour('docs_search') }]
+      const created = await store.create(projectId, 'audience-resave', {
+        steps,
+        window_seconds: 3600,
+      })
+      // `RANGE` and this call shape are the file's own -- `recordRun` requires
+      // `at` and a range (#91).
+      await store.recordRun(projectId, created.id, {
+        entered: 10,
+        converted: 3,
+        at: new Date(),
+        range: RANGE,
+      })
+      // The UI sends the whole definition on every save, so an unchanged
+      // audience arriving again must not be mistaken for an edit.
+      await store.update(projectId, created.id, { steps: JSON.parse(JSON.stringify(steps)) })
+      const after = await store.get(projectId, created.id)
+      expect(after?.lastEntered).toBe(10)
+    })
+
+    it('treats an absent `where` and an explicit empty `where` as the same behaviour node', async () => {
+      // A behaviour node's `where` is optional, same as a step's own. The UI
+      // form and a jsonb round-trip do not promise to agree on omitting it
+      // versus sending `[]` -- both mean "no predicates" -- so the two must
+      // compare equal here the same way `stepsEqual` already treats a step's
+      // `where` below, or an edit that never touched the audience clears the
+      // cache anyway.
+      const created = await store.create(projectId, 'audience-where-probe', {
+        steps: [{ event: 'a' }, { event: 'b', audience: behaviour('docs_search') }],
+        window_seconds: 3600,
+      })
+      await store.recordRun(projectId, created.id, {
+        entered: 10,
+        converted: 3,
+        at: new Date(),
+        range: RANGE,
+      })
+      await store.update(projectId, created.id, {
+        steps: [
+          { event: 'a' },
+          { event: 'b', audience: { ...behaviour('docs_search'), where: [] } },
+        ],
+      })
+      const after = await store.get(projectId, created.id)
+      expect(after?.lastEntered).toBe(10)
+    })
+
+    it('distinguishes two audiences that differ only deep in the tree', async () => {
+      const tree = (n: number) => ({
+        kind: 'group' as const,
+        op: 'and' as const,
+        children: [{ ...behaviour('docs_search'), value: n }],
+      })
+      const created = await store.create(projectId, 'audience-deep', {
+        steps: [{ event: 'a' }, { event: 'b', audience: tree(1) }],
+        window_seconds: 3600,
+      })
+      // `RANGE` and this call shape are the file's own -- `recordRun` requires
+      // `at` and a range (#91).
+      await store.recordRun(projectId, created.id, {
+        entered: 10,
+        converted: 3,
+        at: new Date(),
+        range: RANGE,
+      })
+      await store.update(projectId, created.id, {
+        steps: [{ event: 'a' }, { event: 'b', audience: tree(2) }],
+      })
+      const after = await store.get(projectId, created.id)
+      expect(after?.lastEntered).toBeNull()
+    })
+  })
+})
+
+describe('update stamps definition_version on a real steps change', () => {
+  it('bumps a v1 row to the current version once an audience is patched in', async () => {
+    const created = await store.create(projectId, 'stamp-version', {
+      steps: [{ event: 'a' }, { event: 'b' }],
+      window_seconds: 3600,
+    })
+    // Seed the row the way a pre-branch funnel actually looks: written before
+    // step audiences existed, so it still claims version 1.
+    await pg.query('UPDATE funnels SET definition_version = 1 WHERE id = $1', [created.id])
+    expect((await store.get(projectId, created.id))?.definitionVersion).toBe(1)
+
+    await store.update(projectId, created.id, {
+      steps: [{ event: 'a' }, { event: 'b', audience: behaviour('docs_search') }],
+    })
+
+    const after = await store.get(projectId, created.id)
+    // The row now carries an embedded, separately-versioned FilterNode. A
+    // migration scanning `definition_version >= 2` must find it -- which is
+    // exactly what this assertion is standing in for.
+    expect(after?.definitionVersion).toBe(FUNNEL_DEFINITION_VERSION)
+    expect(after?.definitionVersion).toBeGreaterThanOrEqual(2)
+  })
+
+  it('leaves the version alone on a patch that never touches steps', async () => {
+    const created = await store.create(projectId, 'stamp-version-rename', {
+      steps: [{ event: 'a' }, { event: 'b' }],
+      window_seconds: 3600,
+    })
+    await pg.query('UPDATE funnels SET definition_version = 1 WHERE id = $1', [created.id])
+
+    await store.update(projectId, created.id, { name: 'stamp-version-renamed' })
+
+    // A rename did not change what the definition measures, so it must not
+    // claim a version the stored tree was never re-parsed against.
+    expect((await store.get(projectId, created.id))?.definitionVersion).toBe(1)
   })
 })
 

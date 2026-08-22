@@ -1263,6 +1263,12 @@ ten `where` predicates. They are ANDed together and applied to each event
 BEFORE it is aggregated, so they say *which* events count, not what the person
 is like.
 
+A funnel step shares more than that shape with a `behavior` now: it may also
+carry a whole `audience` condition tree — the same `FilterNode` grammar this
+section documents, gating which *person* may advance past the step rather
+than which *event* counts. See *Funnels* above for the distinction and the
+per-funnel cap on it.
+
 A predicate names one of two things, and it says which:
 
 ```json
@@ -1557,22 +1563,47 @@ curl -X POST https://analytics.example.com/v1/funnels \
     "steps": [
       { "event": "$page", "where": [{ "property": "path", "operator": "=", "value": "/" }] },
       { "event": "login_click" },
-      { "event": "signed_up", "where": [{ "property": "method", "operator": "=", "value": "email" }] }
+      { "event": "signed_up", "where": [{ "property": "method", "operator": "=", "value": "email" }],
+        "audience": { "kind": "behavior", "event": "$page", "aggregate": "count", "operator": ">=",
+          "value": 3, "window": { "kind": "last", "n": 30, "unit": "days" } } }
     ]
   }'
 ```
 
-A **step** is one event, optionally constrained by predicates on that event's
-own properties or attributes. `where` is exactly the shape a segment behaviour
-uses —
+A **step** is one event, plus two independent things you can constrain about
+it. `where` narrows **which occurrence** of the event counts — a property of
+the event itself, exactly the shape a segment behaviour uses —
 `{ property, operator, value }`, with `operator` one of `=`, `!=`, `>`, `>=`,
 `<`, `<=`, `between` — so you write a predicate the same way in both places.
 Predicates matter more than they look: a page-view funnel is several `$page`
 steps that differ only by `path`.
 
+`audience` narrows **which person** may advance past the step — a claim about
+them, not about the event. It is a segment `FilterNode` tree verbatim, the
+same grammar `POST /v1/segments` takes (see *Node types* below), and it is
+optional per step. A person who fails it is not removed from the report — they
+are still counted at the step they did reach, just not advanced past this one.
+That is the difference from the funnel's own `segment_id`: a person outside
+the funnel's segment never appears in the report at all, while a person who
+fails a step's `audience` still shows up, one step short. Both exist because
+those are different questions — "should this person be in this report at all"
+versus "does this person, having reached step 2, look the way step 3 requires
+before they can be counted at step 3."
+
+A step's `audience` tree is capped like any segment tree, but there is also a
+**funnel-wide** cap: the behavioural conditions across every step's `audience`
+in one funnel may total at most 25
+(`MAX_FUNNEL_BEHAVIOR_NODES`, `packages/core/src/funnels/validate.ts`). That
+covers the embedded audiences only — the tree behind `segment_id` is a
+separate segment, capped separately at 25 behavioural nodes of its own when it
+was saved — so one run's real worst case is up to 50 behavioural conditions,
+not 25. A trait-only audience costs nothing against that cap but still adds
+its own subquery, one per step at most — bounded by the eight-step ceiling
+above, not by `MAX_FUNNEL_BEHAVIOR_NODES`.
+
 Two steps minimum, eight maximum.
 
-### The two clocks
+### The three clocks
 
 This is the part worth reading twice, because getting it wrong makes a funnel
 quietly report the wrong number.
@@ -1582,6 +1613,13 @@ quietly report the wrong number.
 - **`since` and `until` belong to the question**, and are supplied per run,
   never stored. They bound **who enters** the funnel — a person enters by
   matching step 1 inside that range.
+- **A step's `audience` window belongs to the person, measured from now.**
+  Its `last` window (like a segment's) looks back from the moment the funnel
+  runs, not from the run's `since`/`until` and not from when that person
+  entered. Run the same funnel over an older range and a step's `audience` is
+  still judging people against **today**, not against the range you asked
+  about or the day they took step 1 — the Web UI's funnel builder says this
+  on screen for the same reason it is said here.
 
 Because those are different things, a run **observes conversions past the end
 of the range**: someone who entered an hour before `until` still gets their

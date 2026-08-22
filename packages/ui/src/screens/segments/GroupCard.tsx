@@ -25,7 +25,7 @@ import {
  * (`ConditionRow`'s own `defaultLeaf` doc comment has the full rule). This
  * is not a node the server would accept, and it is not meant to be: the
  * alternative is seeding a plausible key the operator never chose. */
-function newCondition(): FilterNode {
+export function newCondition(): FilterNode {
   return { kind: 'trait', key: '', operator: '=', value: '' }
 }
 

@@ -68,6 +68,21 @@ export function validateTree(q: SegmentQuery): void {
   }
 }
 
+/**
+ * Behaviour nodes anywhere in one tree.
+ *
+ * Exported so the funnel validator's own cap counts EXACTLY the nodes
+ * `MAX_BEHAVIOR_NODES` counts. A second hand-written walk over there is how
+ * one of the two ends up disagreeing about whether a `not`-wrapped behaviour
+ * counts, and the disagreement would surface as a funnel that validates and
+ * then outruns its own budget.
+ */
+export function countBehaviourNodes(filter: FilterNode): number {
+  let n = 0
+  for (const { node } of walk(filter, 'filter', 0)) if (node.kind === 'behavior') n++
+  return n
+}
+
 export interface CostWarning {
   /** Dotted path to the node, so the builder can highlight it. */
   path: string

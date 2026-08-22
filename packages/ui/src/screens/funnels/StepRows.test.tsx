@@ -1,4 +1,5 @@
 import type { FunnelStep } from '@lyraflow/core/funnels/ast.js'
+import type { CostWarning } from '@lyraflow/core/segments/validate.js'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
@@ -11,6 +12,27 @@ function fakeClient(): ApiClient {
     schemaEvents: vi.fn(async () => []),
     schemaProperties: vi.fn(async () => []),
   } as unknown as ApiClient
+}
+
+/** Shared render harness for the audience tests below -- every other test
+ * in this file passes every prop explicitly because each one is the thing
+ * under test somewhere in the file, but the audience tests only ever vary
+ * `steps`, `onChange` and `warnings`. Defaulting the rest here is what
+ * keeps those tests reading as "what changed", not "what every prop was". */
+function renderStepRows(overrides: {
+  steps: FunnelStep[]
+  onChange?: (steps: FunnelStep[]) => void
+  warnings?: CostWarning[]
+}) {
+  return render(
+    <StepRows
+      client={fakeClient()}
+      projectId={1}
+      steps={overrides.steps}
+      onChange={overrides.onChange ?? vi.fn()}
+      warnings={overrides.warnings}
+    />,
+  )
 }
 
 /** TWO steps, each carrying TWO predicates -- the shape every predicate
@@ -350,5 +372,115 @@ describe('StepRows -- invented mutations', () => {
       />,
     )
     expect(screen.getByRole('button', { name: /remove step 1/i })).toBeEnabled()
+  })
+})
+
+const behaviour = {
+  kind: 'behavior' as const,
+  event: 'docs_search',
+  aggregate: 'count' as const,
+  window: { kind: 'last' as const, n: 14, unit: 'days' as const },
+  operator: '=' as const,
+  value: 1,
+}
+
+describe('audiences', () => {
+  it('offers no audience editor until the step asks for one', () => {
+    renderStepRows({ steps: [{ event: 'a' }, { event: 'b' }] })
+    // Eight always-rendered tree editors would bury the event field, which
+    // is still the step's primary content.
+    expect(screen.queryByTestId('group-')).not.toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: /add audience to step/i })).toHaveLength(2)
+  })
+
+  it('seeds an empty AND group when a step adds an audience', async () => {
+    const onChange = vi.fn()
+    renderStepRows({ steps: [{ event: 'a' }, { event: 'b' }], onChange })
+    await userEvent.click(screen.getByRole('button', { name: 'Add audience to step 1' }))
+    // Seeded with ONE default condition, never empty -- `GroupCard`'s own
+    // `newGroup` comment says why: a group with zero children is invalid
+    // against `children.min(1)` the instant it exists, and "the server
+    // rejects it at save time" is a guard that fires after the fact rather
+    // than a rule that keeps the state unreachable. Reusing `newCondition`
+    // rather than restating it keeps "Add audience" and "Add condition"
+    // agreeing on what a freshly-added condition looks like.
+    expect(onChange).toHaveBeenCalledWith([
+      {
+        event: 'a',
+        audience: {
+          kind: 'group',
+          op: 'and',
+          children: [{ kind: 'trait', key: '', operator: '=', value: '' }],
+        },
+      },
+      { event: 'b' },
+    ])
+  })
+
+  it('drops the key entirely when a step’s audience is removed', async () => {
+    const onChange = vi.fn()
+    renderStepRows({
+      // Group-rooted, like every audience `StepRows` ever renders --
+      // `step.audience` is documented as ALREADY NORMALISED by the time it
+      // reaches this component (`FunnelBuilder` does it on load, Task 6).
+      // A bare leaf here would crash `GroupCard`, which is exactly the
+      // seam `normaliseRoot`'s own doc comment describes: this component
+      // deliberately does not normalise at render, so a fixture that is
+      // not already normalised is not a state it is ever handed.
+      steps: [
+        { event: 'a', audience: { kind: 'group', op: 'and', children: [behaviour] } },
+        { event: 'b' },
+      ],
+      onChange,
+    })
+    await userEvent.click(screen.getByRole('button', { name: 'Remove audience from step 1' }))
+    // The KEY is dropped, not set to undefined -- `audience` is
+    // `.optional()`, so "absent" is the shape a step that never had one is
+    // stored with, and a step whose condition was removed must round-trip
+    // to exactly that. Same rule `updateWhere` already follows.
+    expect(onChange).toHaveBeenCalledWith([{ event: 'a' }, { event: 'b' }])
+    expect(Object.keys(onChange.mock.lastCall?.[0]?.[0] ?? {})).toEqual(['event'])
+  })
+
+  it('shows a step’s own warning on that step, and not on its neighbour', () => {
+    // Group-rooted, same reason as the removal test above: `step.audience`
+    // reaches `StepRows` already normalised, so each condition sits one
+    // level below the root, at editor path `[0]` -- `filter.children[0]`
+    // in `costWarnings`' own dotted path, `steps.<i>.filter.children[0]`
+    // once `funnelCostWarnings` prefixes it.
+    renderStepRows({
+      steps: [
+        {
+          event: 'a',
+          audience: {
+            kind: 'group',
+            op: 'and',
+            children: [{ ...behaviour, window: { kind: 'ever' } }],
+          },
+        },
+        {
+          event: 'b',
+          audience: {
+            kind: 'group',
+            op: 'and',
+            children: [{ ...behaviour, window: { kind: 'last', n: 7, unit: 'days' } }],
+          },
+        },
+      ],
+      warnings: [
+        {
+          path: 'steps.0.filter.children[0]',
+          reason:
+            'the `docs_search` condition uses an `ever` window, which scans all history rather than a bounded window',
+        },
+      ],
+    })
+    // Both steps' conditions sit at editor path [0] -- so handing the whole
+    // funnel's list to every step would render this on both. Filtering by
+    // the `steps.<i>.` prefix is what keeps it on step 1.
+    const step1 = screen.getByTestId('step-1-audience')
+    const step2 = screen.getByTestId('step-2-audience')
+    expect(within(step1).getByText(/scans all history/)).toBeInTheDocument()
+    expect(within(step2).queryByText(/scans all history/)).not.toBeInTheDocument()
   })
 })

@@ -1,5 +1,6 @@
 import {
   FUNNEL_DEFINITION_VERSION,
+  type FilterNode,
   type FunnelDefinition,
   FunnelStep,
   type WherePredicate,
@@ -93,6 +94,94 @@ function valueEqual(a: WherePredicate['value'], b: WherePredicate['value']): boo
 }
 
 /**
+ * One `where` predicate against another. Lifted out of `stepsEqual` so a
+ * behaviour node's own `where` array -- inside an `audience` -- is compared
+ * by exactly the same rule, rather than a second copy of it.
+ */
+function wherePredicatesEqual(p: WherePredicate, q: WherePredicate | undefined): boolean {
+  if (!q) return false
+  // Through `wherePredicateField`, so a predicate on the PROPERTY named
+  // `path` is never equal to one on the COLUMN named `path`. Comparing
+  // the names alone would call an edit between those two "no change" and
+  // skip the write, leaving the stored definition disagreeing with what
+  // the operator just saved.
+  const fieldP = wherePredicateField(p)
+  const fieldQ = wherePredicateField(q)
+  return (
+    fieldP.source === fieldQ.source &&
+    fieldP.name === fieldQ.name &&
+    p.operator === q.operator &&
+    valueEqual(p.value, q.value)
+  )
+}
+
+/**
+ * Structural equality for two audiences (a segment `FilterNode` tree hung off
+ * a step, gating who may advance past it).
+ *
+ * Recursive and field-by-field, NOT `JSON.stringify` -- for exactly the
+ * reason `stepsEqual` already gives for `where` values: a tree parsed from
+ * the incoming request and one round-tripped through Postgres jsonb are not
+ * guaranteed to serialise their object keys in the same order even when
+ * every field agrees, and a key-order-sensitive comparison would keep the
+ * bug while looking fixed.
+ *
+ * Child ORDER is significant, same as `where` and `steps` order: this
+ * compares two definitions for exact equality, not for equivalence. `and`
+ * over [A, B] and over [B, A] mean the same thing and are not the same
+ * definition.
+ *
+ * Everything that is not a `group` or a `not` is a leaf (`trait`, `context`,
+ * `lifecycle`, `behavior`). Leaves are compared by the UNION of both sides'
+ * own JSON keys, not a hand-listed field list per kind, so a field added to
+ * `Behavior` later cannot silently stop being compared -- the failure mode
+ * this whole function exists to prevent. The union, not each side's own key
+ * set alone: `where` is optional on a `Behavior`, and an incoming tree that
+ * omits it and one that carries an explicit `where: []` both mean "no
+ * predicates" -- the same equivalence `stepsEqual` already gives a step's
+ * own `where` below. Requiring the two key sets to match exactly would call
+ * that pair "different" over a distinction that carries no meaning, and
+ * clear a cache an edit never touched.
+ */
+function audienceEqual(a: FilterNode | undefined, b: FilterNode | undefined): boolean {
+  if (a === undefined || b === undefined) return a === b
+  if (a.kind !== b.kind) return false
+  if (a.kind === 'group' && b.kind === 'group') {
+    return (
+      a.op === b.op &&
+      a.children.length === b.children.length &&
+      a.children.every((child, i) => audienceEqual(child, b.children[i]))
+    )
+  }
+  if (a.kind === 'not' && b.kind === 'not') return audienceEqual(a.child, b.child)
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)])
+  return [...keys].every((k) => {
+    const va = (a as Record<string, unknown>)[k]
+    const vb = (b as Record<string, unknown>)[k]
+    if (k === 'value')
+      return valueEqual(va as WherePredicate['value'], vb as WherePredicate['value'])
+    if (k === 'where') {
+      const wa = (va ?? []) as WherePredicate[]
+      const wb = (vb ?? []) as WherePredicate[]
+      return wa.length === wb.length && wa.every((p, i) => wherePredicatesEqual(p, wb[i]))
+    }
+    if (va !== null && vb !== null && typeof va === 'object' && typeof vb === 'object') {
+      // `window` -- a flat object of scalars in every variant.
+      const oa = va as Record<string, unknown>
+      const ob = vb as Record<string, unknown>
+      const oka = Object.keys(oa).sort()
+      const okb = Object.keys(ob).sort()
+      return (
+        oka.length === okb.length &&
+        oka.every((n, i) => n === okb[i]) &&
+        oka.every((n) => oa[n] === ob[n])
+      )
+    }
+    return va === vb
+  })
+}
+
+/**
  * Field-by-field, not `JSON.stringify` equality: a value parsed from the
  * incoming request and a value round-tripped through Postgres jsonb are not
  * guaranteed to serialise their object keys in the same order even when
@@ -106,26 +195,11 @@ function stepsEqual(a: FunnelStep[], b: FunnelStep[]): boolean {
   return a.every((stepA, i) => {
     const stepB = b[i]
     if (!stepB || stepA.event !== stepB.event) return false
+    if (!audienceEqual(stepA.audience, stepB.audience)) return false
     const whereA = stepA.where ?? []
     const whereB = stepB.where ?? []
     if (whereA.length !== whereB.length) return false
-    return whereA.every((p, j) => {
-      const q = whereB[j]
-      if (!q) return false
-      // Through `wherePredicateField`, so a predicate on the PROPERTY named
-      // `path` is never equal to one on the COLUMN named `path`. Comparing
-      // the names alone would call an edit between those two "no change" and
-      // skip the write, leaving the stored definition disagreeing with what
-      // the operator just saved.
-      const fieldP = wherePredicateField(p)
-      const fieldQ = wherePredicateField(q)
-      return (
-        fieldP.source === fieldQ.source &&
-        fieldP.name === fieldQ.name &&
-        p.operator === q.operator &&
-        valueEqual(p.value, q.value)
-      )
-    })
+    return whereA.every((p, j) => wherePredicatesEqual(p, whereB[j]))
   })
 }
 
@@ -343,6 +417,12 @@ export class FunnelStore {
    * things: a number sets it, `null` clears the restriction, and `undefined`
    * leaves it alone. Collapsing null and undefined would make "remove the
    * segment" unexpressible through PATCH.
+   *
+   * A patch that writes `steps` also stamps `definition_version` to the
+   * current `FUNNEL_DEFINITION_VERSION` — the stored tree is now whatever
+   * this build parsed and wrote, whether or not the row's old value already
+   * matched. A patch that only renames, or only touches window/segment,
+   * leaves the version alone: the definition did not change.
    */
   async update(
     projectId: number,
@@ -391,6 +471,7 @@ export class FunnelStore {
         `UPDATE funnels SET
            name              = COALESCE($3, name),
            steps             = COALESCE($4::jsonb, steps),
+           definition_version = CASE WHEN $4::jsonb IS NULL THEN definition_version ELSE $9 END,
            window_seconds    = COALESCE($5, window_seconds),
            segment_id        = CASE WHEN $6 THEN $7 ELSE segment_id END,
            last_entered      = CASE WHEN $8 THEN NULL ELSE last_entered END,
@@ -418,6 +499,7 @@ export class FunnelStore {
           patch.segmentId !== undefined,
           patch.segmentId ?? null,
           resetsSummary,
+          FUNNEL_DEFINITION_VERSION,
         ],
       )
       await client.query('COMMIT')

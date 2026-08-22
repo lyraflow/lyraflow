@@ -25,6 +25,19 @@ one fix is contained in 0.3.0.
 
 ### Added
 
+- **A funnel step can gate who advances past it, not just which event
+  counts.** A step's new `audience` is a segment filter tree — the same
+  `FilterNode` grammar `POST /v1/segments` takes — checked against the person
+  at that step, distinct from `where`, which still narrows which occurrence
+  of the event counts. A person who fails a step's `audience` is not removed
+  from the report the way the funnel's own `segment_id` would remove them;
+  they are counted at the step they did reach and no further. The window
+  inside a step's `audience` is anchored to **now**, exactly as a segment's
+  is — over an older date range that judges a person against today, not
+  against their own entry into the funnel, and the funnel builder states
+  this on screen. Behavioural conditions across every step's `audience` in
+  one funnel are capped at 25 in total
+  (`MAX_FUNNEL_BEHAVIOR_NODES`), on top of the existing per-tree cap.
 - **Projects can be deleted, from Settings and from the CLI.** Deleting destroys
   every event, person and report a project holds, in both databases, and asks you
   to type the project's slug first. It runs as a background job: ingest stops
