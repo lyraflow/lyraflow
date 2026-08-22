@@ -402,9 +402,9 @@ describe('Funnels list — pin proof', () => {
  * imported so this file's fixture doesn't reach across a test-only module
  * boundary for one helper. */
 async function fillTwoSteps() {
-  await userEvent.type(screen.getByLabelText('Step 1'), 'page_view')
+  await userEvent.type(screen.getByLabelText('Step 1 event'), 'page_view')
   await userEvent.click(screen.getByRole('button', { name: /add step/i }))
-  await userEvent.type(screen.getByLabelText('Step 2'), 'signup_completed')
+  await userEvent.type(screen.getByLabelText('Step 2 event'), 'signup_completed')
 }
 
 // On the previous plan the settings screen kept a private fetch while the

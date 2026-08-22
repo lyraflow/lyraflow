@@ -8,14 +8,15 @@ import { ROUTES, funnelPath } from '../app/Router.js'
 import { Button } from '../components/ui/button.js'
 import { Input } from '../components/ui/input.js'
 import { Label } from '../components/ui/label.js'
+import { FunnelFlowOrBars } from './funnels/FunnelFlowOrBars.js'
 import { SegmentPicker } from './funnels/SegmentPicker.js'
-import { StepBars } from './funnels/StepBars.js'
 import { StepRows } from './funnels/StepRows.js'
 import { WarningPanel } from './funnels/WarningPanel.js'
 import type { WindowUnit } from './funnels/WindowField.js'
 import { WindowField, secondsToWindowInput, toWindowSeconds } from './funnels/WindowField.js'
 import { describeError } from './funnels/errors.js'
 import { formatRangeDays, formatRelative } from './funnels/format.js'
+import { collapsedOnLoad } from './funnels/stepSummary.js'
 import { normaliseRoot } from './segments/TreeEditor.js'
 import { completeness } from './segments/warnings.js'
 
@@ -73,6 +74,22 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
 
   const [name, setName] = useState('')
   const [steps, setSteps] = useState<FunnelStep[]>(NEW_STEPS)
+  /**
+   * Which steps are collapsed to a one-line summary.
+   *
+   * Owned HERE rather than in `StepRows`, and that ownership is what makes
+   * the rule enforceable: collapse is decided when the form seeds and never
+   * changes because the operator typed. `StepRows` sees only prop changes,
+   * which fire on every keystroke, so it could not tell "a stored funnel
+   * just arrived" from "someone pressed a key" -- and a step that folded
+   * shut the instant it became valid would move the form under the cursor
+   * mid-edit.
+   *
+   * Indices, matching `steps`. Reorder and removal renumber them, which is
+   * handled where those happen rather than by tracking a per-step id nothing
+   * else in this form has.
+   */
+  const [collapsed, setCollapsed] = useState<readonly number[]>([])
   const [windowValue, setWindowValue] = useState(DEFAULT_WINDOW_VALUE)
   const [windowUnit, setWindowUnit] = useState<WindowUnit>(DEFAULT_WINDOW_UNIT)
   const [segmentId, setSegmentId] = useState<number | null>(null)
@@ -150,6 +167,7 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
     resetFormIdentityRef.current = formIdentity
     setName('')
     setSteps(NEW_STEPS)
+    setCollapsed([])
     setWindowValue(DEFAULT_WINDOW_VALUE)
     setWindowUnit(DEFAULT_WINDOW_UNIT)
     setSegmentId(null)
@@ -192,11 +210,16 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
         // the warning lands on the wrapper rather than on the condition it
         // names. One tree on screen, another the paths came from.
         const seeded = f.steps.length > 0 ? f.steps : NEW_STEPS
-        setSteps(
-          seeded.map((s) =>
-            s.audience === undefined ? s : { ...s, audience: normaliseRoot(s.audience) },
-          ),
+        const normalised = seeded.map((s) =>
+          s.audience === undefined ? s : { ...s, audience: normaliseRoot(s.audience) },
         )
+        setSteps(normalised)
+        // THE ONE PLACE collapse is decided. A stored funnel opens with its
+        // finished steps folded shut, so an eight-step definition is a list
+        // you can read rather than a page you scroll; anything unfinished
+        // stays open, because a collapsed row would hide the very field
+        // standing between the operator and a saveable funnel.
+        setCollapsed(collapsedOnLoad(normalised))
         const win = secondsToWindowInput(f.window_seconds)
         setWindowValue(win.value)
         setWindowUnit(win.unit)
@@ -389,6 +412,10 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
           onUnauthorized={onUnauthorized}
           warnings={previewResult?.warnings ?? []}
           incomplete={audiences.incomplete}
+          collapsed={collapsed}
+          onToggleCollapse={(i) =>
+            setCollapsed((prev) => (prev.includes(i) ? prev.filter((n) => n !== i) : [...prev, i]))
+          }
         />
       )}
 
@@ -452,12 +479,12 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
               {formatRelative(previewResult.as_of, new Date())}
             </span>
           </p>
-          {/* The form's CURRENT steps. `StepBars` checks each position's
+          {/* The form's CURRENT steps. Both renderings check each position's
            * event name against the result's own before showing a clause,
            * so editing a step after previewing drops the narrowing rather
            * than labelling last preview's numbers with this edit's
            * predicates. */}
-          <StepBars result={previewResult} definition={steps} />
+          <FunnelFlowOrBars result={previewResult} definition={steps} />
         </div>
       )}
     </div>

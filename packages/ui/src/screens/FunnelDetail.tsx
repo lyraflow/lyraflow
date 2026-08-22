@@ -6,9 +6,9 @@ import type { Funnel, FunnelRunResult, Segment } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
 import { ROUTES, funnelEditPath } from '../app/Router.js'
 import { Button } from '../components/ui/button.js'
+import { FunnelFlowOrBars } from './funnels/FunnelFlowOrBars.js'
 import type { RangeDays } from './funnels/RangePicker.js'
 import { DEFAULT_RANGE_DAYS, RangePicker, sinceIsoForDays } from './funnels/RangePicker.js'
-import { StepBars } from './funnels/StepBars.js'
 import { WarningPanel } from './funnels/WarningPanel.js'
 import { describeError } from './funnels/errors.js'
 import { formatRangeDays, formatRelative } from './funnels/format.js'
@@ -497,9 +497,9 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
           </p>
           {/* The definition's own steps, so a narrowed step reads as one.
            * `funnel` can legitimately still be null here -- the fetch and
-           * the run are independent requests -- and `StepBars` renders no
+           * the run are independent requests -- and `FunnelFlowOrBars` renders no
            * clause at all rather than one it cannot place. */}
-          <StepBars result={result} definition={funnel?.steps} />
+          <FunnelFlowOrBars result={result} definition={funnel?.steps} />
         </div>
       )}
     </div>

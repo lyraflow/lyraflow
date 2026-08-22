@@ -23,6 +23,8 @@ function renderStepRows(overrides: {
   steps: FunnelStep[]
   onChange?: (steps: FunnelStep[]) => void
   warnings?: CostWarning[]
+  collapsed?: number[]
+  onToggleCollapse?: (index: number) => void
 }) {
   return render(
     <StepRows
@@ -31,6 +33,8 @@ function renderStepRows(overrides: {
       steps={overrides.steps}
       onChange={overrides.onChange ?? vi.fn()}
       warnings={overrides.warnings}
+      collapsed={overrides.collapsed}
+      onToggleCollapse={overrides.onToggleCollapse}
     />,
   )
 }
@@ -71,8 +75,8 @@ describe('StepRows', () => {
         onChange={() => {}}
       />,
     )
-    expect(screen.getByLabelText('Step 1')).toHaveValue('a')
-    expect(screen.getByLabelText('Step 2')).toHaveValue('b')
+    expect(screen.getByLabelText('Step 1 event')).toHaveValue('a')
+    expect(screen.getByLabelText('Step 2 event')).toHaveValue('b')
   })
 
   it('adding a step appends one empty step at the end', async () => {
@@ -143,10 +147,10 @@ describe('StepRows', () => {
         onChange={onChange}
       />,
     )
-    expect(screen.getByLabelText('Step 1')).toBeEnabled()
-    expect(screen.getByLabelText('Step 2')).toBeEnabled()
+    expect(screen.getByLabelText('Step 1 event')).toBeEnabled()
+    expect(screen.getByLabelText('Step 2 event')).toBeEnabled()
 
-    await userEvent.type(screen.getByLabelText('Step 2'), 'x')
+    await userEvent.type(screen.getByLabelText('Step 2 event'), 'x')
     // Retyping the event KEEPS the predicates -- clearing them would be
     // data loss on a step the operator may be mid-edit on. What changes is
     // only which event `PropertyCombobox` scopes its suggestions to.
@@ -358,7 +362,7 @@ describe('StepRows -- invented mutations', () => {
         onUnauthorized={onUnauthorized}
       />,
     )
-    await userEvent.type(screen.getByLabelText('Step 1'), 'x')
+    await userEvent.type(screen.getByLabelText('Step 1 event'), 'x')
     await waitFor(() => expect(onUnauthorized).toHaveBeenCalled())
   })
 
@@ -383,6 +387,49 @@ const behaviour = {
   operator: '=' as const,
   value: 1,
 }
+
+describe('step cards', () => {
+  it('wraps each step in its own card', () => {
+    // The whole point: before this, a step's event, Where and audience sat
+    // at the same visual level as the NEXT step's, so "where does step 1
+    // end" was answered by reading rather than by an edge.
+    renderStepRows({ steps: [{ event: 'a' }, { event: 'b' }] })
+    expect(screen.getByTestId('step-card-1')).toBeInTheDocument()
+    expect(screen.getByTestId('step-card-2')).toBeInTheDocument()
+  })
+
+  it('hides a collapsed step’s fields and shows its summary instead', () => {
+    renderStepRows({
+      steps: [
+        { event: '$page', where: [{ property: 'path', operator: '=', value: '/docs' }] },
+        { event: 'b' },
+      ],
+      collapsed: [0],
+    })
+    expect(screen.getByTestId('step-1-summary')).toHaveTextContent('/docs')
+    expect(screen.queryByLabelText('Step 1 event')).not.toBeInTheDocument()
+    // Its neighbour is untouched.
+    expect(screen.getByLabelText('Step 2 event')).toBeInTheDocument()
+  })
+
+  it('gives each step’s event field a name of its own', () => {
+    // The card header says "Step 1", so the field reads as plain "Event" --
+    // but N steps would then put N controls named "Event" on one page,
+    // ambiguous to a screen reader and to any test addressing one by name.
+    renderStepRows({ steps: [{ event: 'a' }, { event: 'b' }] })
+    expect(screen.getByLabelText('Step 1 event')).toHaveValue('a')
+    expect(screen.getByLabelText('Step 2 event')).toHaveValue('b')
+  })
+
+  it('asks the caller to toggle, rather than collapsing on its own', async () => {
+    // Collapse is owned by the builder, which is what makes "decided at seed,
+    // never changed by typing" enforceable.
+    const onToggleCollapse = vi.fn()
+    renderStepRows({ steps: [{ event: 'a' }, { event: 'b' }], onToggleCollapse })
+    await userEvent.click(screen.getByRole('button', { name: 'Collapse step 1' }))
+    expect(onToggleCollapse).toHaveBeenCalledWith(0)
+  })
+})
 
 describe('audiences', () => {
   it('offers no audience editor until the step asks for one', () => {

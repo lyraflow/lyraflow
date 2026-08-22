@@ -1,6 +1,6 @@
 import type { FilterNode, Group, WherePredicate } from '@lyraflow/core/segments/ast.js'
 import type { CostWarning } from '@lyraflow/core/segments/validate.js'
-import { ArrowDown, ArrowUp, X } from 'lucide-react'
+import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, X } from 'lucide-react'
 import type { ApiClient } from '../../api/client.js'
 import type { FunnelStep } from '../../api/types.js'
 import { Button } from '../../components/ui/button.js'
@@ -8,6 +8,7 @@ import { newCondition } from '../segments/GroupCard.js'
 import { TreeEditor } from '../segments/TreeEditor.js'
 import { WherePredicates } from '../segments/WherePredicates.js'
 import { EventCombobox } from './EventCombobox.js'
+import { stepSummary } from './stepSummary.js'
 
 /** A funnel needs at least two steps to mean anything -- one step has no
  * "from" to convert from. Remove is refused once the list is at this floor,
@@ -73,6 +74,15 @@ export function StepRows(props: {
    * `completeness()`. Computed by the builder, which is where Save is
    * gated on it. */
   incomplete?: Record<number, number[][]>
+  /** Which steps are collapsed to a one-line summary.
+   *
+   * OWNED BY THE BUILDER, like `steps` itself, and that is the whole reason
+   * the rule "collapse is decided when the form seeds and never changes
+   * because you typed" can hold. Kept here instead, this component would
+   * have to guess when a stored funnel had arrived, and the only signals it
+   * has are prop changes -- which fire on every keystroke. */
+  collapsed?: readonly number[]
+  onToggleCollapse?: (index: number) => void
 }) {
   const {
     client,
@@ -82,6 +92,8 @@ export function StepRows(props: {
     onUnauthorized,
     warnings = [],
     incomplete = {},
+    collapsed = [],
+    onToggleCollapse,
   } = props
 
   function updateEvent(i: number, event: string) {
@@ -161,24 +173,45 @@ export function StepRows(props: {
         // that does not exist. A step whose event is not yet typed has no
         // scope to offer.
         const scopeEvent = step.event.trim() === '' ? undefined : step.event
+        const isCollapsed = collapsed.includes(i)
         return (
           <div
             // biome-ignore lint/suspicious/noArrayIndexKey: steps have no stable id of their own and this list is reordered/removed by index, matching that index is exactly the identity `moveStep`/`removeStep` need.
             key={i}
-            className="flex flex-col gap-1"
+            data-testid={`step-card-${i + 1}`}
+            className="flex flex-col gap-2 rounded-md border border-border bg-card p-3"
           >
-            <div className="flex items-end gap-2">
-              <div className="flex-1">
-                <EventCombobox
-                  client={client}
-                  projectId={projectId}
-                  value={step.event}
-                  onUnauthorized={onUnauthorized}
-                  onChange={(event) => updateEvent(i, event)}
-                  label={`Step ${i + 1}`}
-                />
-              </div>
-              <div className="flex gap-1 pb-1">
+            {/* The card is the fix. Before it, a step's event, its Where and
+             * its audience sat at the same visual level as the NEXT step's,
+             * so "where does step 1 end" was answered by reading rather than
+             * by an edge -- and the audience's own bordered tree read as a
+             * sibling of the step it belongs to rather than as part of it. */}
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                aria-expanded={!isCollapsed}
+                aria-label={`${isCollapsed ? 'Expand' : 'Collapse'} step ${i + 1}`}
+                onClick={() => onToggleCollapse?.(i)}
+              >
+                {isCollapsed ? (
+                  <ChevronRight className="h-4 w-4" />
+                ) : (
+                  <ChevronDown className="h-4 w-4" />
+                )}
+              </Button>
+              <span className="text-sm font-semibold">{`Step ${i + 1}`}</span>
+              {isCollapsed && (
+                <span
+                  data-testid={`step-${i + 1}-summary`}
+                  className="min-w-0 flex-1 truncate text-sm text-muted-foreground"
+                  title={stepSummary(step)}
+                >
+                  {stepSummary(step)}
+                </span>
+              )}
+              <div className={`flex gap-1 ${isCollapsed ? '' : 'ml-auto'}`}>
                 <Button
                   type="button"
                   variant="outline"
@@ -211,76 +244,90 @@ export function StepRows(props: {
                 </Button>
               </div>
             </div>
-            {/* `id` is this step's POSITION, which makes each row's test id
-             * (`step-2-where-0`) name both the step and the predicate. A
-             * single shared id would make "adds to the step you clicked"
-             * and "adds to step 1" indistinguishable -- from a test, and
-             * from a screen reader. */}
-            <WherePredicates
-              id={`step-${i + 1}`}
-              event={scopeEvent}
-              client={client}
-              projectId={projectId}
-              value={step.where}
-              onChange={(where) => updateWhere(i, where)}
-              onUnauthorized={onUnauthorized}
-            />
-            {/* "audience", not "condition". `GroupCard` renders its own
-             * "Add condition" button INSIDE the editor this control opens,
-             * and two buttons a few pixels apart whose accessible names
-             * differ only by a trailing "to step 1" is an ambiguity for a
-             * screen reader and for every test that addresses a button by
-             * name. The word also carries the distinction the field exists
-             * for: `where` narrows the occurrence, the audience narrows the
-             * person. */}
-            {step.audience === undefined ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="self-start"
-                onClick={() =>
-                  updateAudience(i, { kind: 'group', op: 'and', children: [newCondition()] })
-                }
-              >
-                {`Add audience to step ${i + 1}`}
-              </Button>
-            ) : (
-              <div data-testid={`step-${i + 1}-audience`} className="flex flex-col gap-2">
-                <p className="text-sm font-medium">Audience — who may advance past this step</p>
-                {/* `step.audience` is ALREADY NORMALISED -- `FunnelBuilder`
-                 * does it at the one point a stored funnel enters its
-                 * state, exactly as `SegmentBuilder` does (Task 6), and
-                 * every `TreeEditor` edit hands back a group-rooted node.
-                 *
-                 * DO NOT call `normaliseRoot` here. Normalising at render
-                 * reopens the precise seam its own doc comment describes:
-                 * `funnelCostWarnings` computes paths against the tree the
-                 * SERVER holds, and wrapping a bare leaf at render moves
-                 * that leaf from editor path `[]` to `[0]` while the
-                 * warning still resolves to `[]`. The warning then lands on
-                 * the group instead of the condition it names -- one tree
-                 * on screen, another one the paths were computed from,
-                 * reconciled nowhere. */}
-                <TreeEditor
-                  value={step.audience as Group}
-                  onChange={(next) => updateAudience(i, next)}
+
+            {!isCollapsed && (
+              <>
+                <EventCombobox
                   client={client}
                   projectId={projectId}
+                  value={step.event}
                   onUnauthorized={onUnauthorized}
-                  warnings={stepWarnings(i)}
-                  incomplete={incomplete[i] ?? []}
+                  onChange={(event) => updateEvent(i, event)}
+                  label="Event"
+                  accessibleName={`Step ${i + 1} event`}
                 />
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="self-start"
-                  onClick={() => updateAudience(i, undefined)}
-                >
-                  {`Remove audience from step ${i + 1}`}
-                </Button>
-              </div>
+                {/* `id` is this step's POSITION, which makes each row's test id
+                 * (`step-2-where-0`) name both the step and the predicate. A
+                 * single shared id would make "adds to the step you clicked"
+                 * and "adds to step 1" indistinguishable -- from a test, and
+                 * from a screen reader. */}
+                <WherePredicates
+                  id={`step-${i + 1}`}
+                  event={scopeEvent}
+                  client={client}
+                  projectId={projectId}
+                  value={step.where}
+                  onChange={(where) => updateWhere(i, where)}
+                  onUnauthorized={onUnauthorized}
+                />
+                {/* "audience", not "condition". `GroupCard` renders its own
+                 * "Add condition" button INSIDE the editor this control opens,
+                 * and two buttons a few pixels apart whose accessible names
+                 * differ only by a trailing "to step 1" is an ambiguity for a
+                 * screen reader and for every test that addresses a button by
+                 * name. The word also carries the distinction the field exists
+                 * for: `where` narrows the occurrence, the audience narrows the
+                 * person. */}
+                {step.audience === undefined ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="self-start"
+                    onClick={() =>
+                      updateAudience(i, { kind: 'group', op: 'and', children: [newCondition()] })
+                    }
+                  >
+                    {`Add audience to step ${i + 1}`}
+                  </Button>
+                ) : (
+                  <div data-testid={`step-${i + 1}-audience`} className="flex flex-col gap-2">
+                    <p className="text-sm font-medium">Audience — who may advance past this step</p>
+                    {/* `step.audience` is ALREADY NORMALISED -- `FunnelBuilder`
+                     * does it at the one point a stored funnel enters its
+                     * state, exactly as `SegmentBuilder` does (Task 6), and
+                     * every `TreeEditor` edit hands back a group-rooted node.
+                     *
+                     * DO NOT call `normaliseRoot` here. Normalising at render
+                     * reopens the precise seam its own doc comment describes:
+                     * `funnelCostWarnings` computes paths against the tree the
+                     * SERVER holds, and wrapping a bare leaf at render moves
+                     * that leaf from editor path `[]` to `[0]` while the
+                     * warning still resolves to `[]`. The warning then lands on
+                     * the group instead of the condition it names -- one tree
+                     * on screen, another one the paths were computed from,
+                     * reconciled nowhere. */}
+                    <TreeEditor
+                      value={step.audience as Group}
+                      onChange={(next) => updateAudience(i, next)}
+                      client={client}
+                      projectId={projectId}
+                      onUnauthorized={onUnauthorized}
+                      warnings={stepWarnings(i)}
+                      incomplete={incomplete[i] ?? []}
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="self-start"
+                      onClick={() => updateAudience(i, undefined)}
+                    >
+                      {`Remove audience from step ${i + 1}`}
+                    </Button>
+                  </div>
+                )}
+              </>
             )}
           </div>
         )
