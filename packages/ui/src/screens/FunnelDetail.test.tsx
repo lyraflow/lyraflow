@@ -109,7 +109,7 @@ const SEGMENT_DEFAULTS = {
   updated_at: '2026-01-01T00:00:00.000Z',
 }
 
-// Task 6's default: a step-selection test that never clicks "Show people"
+// Task 6's default: a step-selection test that never clicks into the list
 // doesn't exercise this at all, and one that does gets a minimal, valid
 // page back rather than an undefined-method crash.
 const PEOPLE_PAGE = {
@@ -1153,9 +1153,23 @@ describe('FunnelDetail — step selection wires the people panel', () => {
     }
   }
 
+  /** A people fetch that never settles.
+   *
+   * These three tests are about the counts DERIVED from the run -- the
+   * arithmetic in `seedCountsFor` and its final-step edge. The panel now
+   * loads without a click, so a resolved page would immediately override the
+   * selected mode's label with its own `person_count` (0 in the shared
+   * fixture) and the derivation would never be what is on screen. Pending
+   * the fetch isolates the thing under test; `StepPeople`'s own suite covers
+   * the override. */
+  const pendingPeople = () => vi.fn(() => new Promise<never>(() => {}))
+
   it('selects step 1 and seeds its reached/dropped counts once a result arrives, not before', async () => {
     const runDeferred = deferred<FunnelRunResult>()
-    const client = fakeClient({ runFunnel: vi.fn(() => runDeferred.promise) })
+    const client = fakeClient({
+      runFunnel: vi.fn(() => runDeferred.promise),
+      funnelPeople: pendingPeople(),
+    })
     renderDetail(client)
 
     // No result yet -- nothing to select, and no chart or people panel to
@@ -1177,8 +1191,8 @@ describe('FunnelDetail — step selection wires the people panel', () => {
     expect(screen.getByRole('button', { name: 'Dropped here (713)' })).toBeInTheDocument()
   })
 
-  it('clicking another step switches the selection, the seeded counts, and what "Show people" requests -- the final step\'s dropped count equals its reached count', async () => {
-    const client = fakeClient()
+  it("clicking another step switches the selection, the seeded counts, and what the panel requests -- the final step's dropped count equals its reached count", async () => {
+    const client = fakeClient({ funnelPeople: pendingPeople() })
     renderDetail(client)
     await screen.findByTestId('funnel-step-1')
 
@@ -1193,9 +1207,6 @@ describe('FunnelDetail — step selection wires the people panel', () => {
     expect(screen.getByRole('button', { name: 'Reached (491)' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Dropped here (491)' })).toBeInTheDocument()
 
-    // `/show people/i` alone also matches the flow/bars step buttons'
-    // `aria-label` ("Show people at step N: ...") -- exact name needed.
-    await userEvent.click(screen.getByRole('button', { name: 'Show people' }))
     await waitFor(() =>
       expect(client.funnelPeople).toHaveBeenCalledWith(
         1,
@@ -1260,7 +1271,7 @@ describe('FunnelDetail — step selection wires the people panel', () => {
     const runFunnel = vi.fn()
     runFunnel.mockResolvedValueOnce(RUN)
     runFunnel.mockResolvedValueOnce(run2)
-    const client = fakeClient({ runFunnel })
+    const client = fakeClient({ runFunnel, funnelPeople: pendingPeople() })
     renderDetail(client)
     await screen.findByTestId('funnel-step-1')
     expect(screen.getByRole('button', { name: 'Reached (1,204)' })).toBeInTheDocument()

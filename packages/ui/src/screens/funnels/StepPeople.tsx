@@ -115,6 +115,11 @@ export function StepPeople(props: {
       </div>
       <MemberList
         key={mode}
+        // The step click, or the toggle, WAS the request -- see
+        // `MemberList`'s own `autoLoad` doc. Without this the reader clicks
+        // a bar, then clicks "Show people", and does it again on every step
+        // and every mode switch, because this list is remounted each time.
+        autoLoad
         fetchPage={(cursor) =>
           client
             .funnelPeople(projectId, funnelId, {

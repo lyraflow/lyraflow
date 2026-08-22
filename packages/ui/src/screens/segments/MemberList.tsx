@@ -1,6 +1,6 @@
 import { CONTEXT_FIELDS } from '@lyraflow/core/segments/ast.js'
 import { MEMBER_PAGE_SIZE } from '@lyraflow/core/segments/limits.js'
-import { Fragment, useCallback, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import type { MemberRow } from '../../api/types.js'
 import type { DetailField } from '../../components/DetailList.js'
 import { DetailPanel, DetailSection, ExpandToggle, FieldList } from '../../components/DetailList.js'
@@ -252,10 +252,26 @@ function PersonDetail(props: { member: MemberRow; id: string }) {
   )
 }
 
-export function MemberList(props: { fetchPage: (cursor?: string) => Promise<MemberPage> }) {
-  const { fetchPage } = props
+export function MemberList(props: {
+  fetchPage: (cursor?: string) => Promise<MemberPage>
+  /**
+   * Fetch the first page on mount instead of waiting for a "Show people"
+   * click. **Off by default**, which keeps a segment preview behaving as it
+   * always has: a count is cheap and a member walk is not, so a segment does
+   * not fetch people "just because the count was" (this component's own doc
+   * comment above).
+   *
+   * The funnel people panel turns it on, because there the click has already
+   * happened -- an operator selected a step, or flipped reached/dropped, and
+   * that selection IS the request. Making them click again asks twice for
+   * one thing, and that panel is remounted on every step and mode change, so
+   * the second click came back every single time.
+   */
+  autoLoad?: boolean
+}) {
+  const { fetchPage, autoLoad = false } = props
 
-  const [shown, setShown] = useState(false)
+  const [shown, setShown] = useState(autoLoad)
   const [members, setMembers] = useState<MemberRow[]>([])
   // Keyed by `person_id`, never by row index: `Load more` appends a page and
   // a retry can replace the whole list, so an index would move the open
@@ -313,6 +329,28 @@ export function MemberList(props: { fetchPage: (cursor?: string) => Promise<Memb
     setShown(true)
     load(undefined, true)
   }, [load])
+
+  /**
+   * The auto-load, fired exactly once per mount.
+   *
+   * REF-GUARDED, not dependency-guarded, and that is not a style choice.
+   * `load` is a `useCallback` over `fetchPage`, and every caller builds
+   * `fetchPage` as an inline arrow -- so `load` has a fresh identity on
+   * every render. An effect that merely listed it as a dependency would
+   * re-run on each render it caused: an unbounded fetch loop against a paged
+   * endpoint. The ref makes "once per mount" a property of this component
+   * rather than of how carefully a caller memoises.
+   *
+   * Once per MOUNT is the right granularity because the funnel panel keys
+   * this component on the mode and is itself keyed on the step: changing
+   * either remounts, which is exactly when a fresh first page is wanted.
+   */
+  const autoLoadedRef = useRef(false)
+  useEffect(() => {
+    if (!autoLoad || autoLoadedRef.current) return
+    autoLoadedRef.current = true
+    load(undefined, true)
+  }, [autoLoad, load])
 
   const handleLoadMore = useCallback(() => {
     load(cursor, false)

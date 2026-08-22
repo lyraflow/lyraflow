@@ -39,19 +39,19 @@ function fakeClient(funnelPeople: Mock) {
 const BASE_PROPS = { projectId: 1, funnelId: 7, step: 2, range: RANGE }
 
 describe('StepPeople', () => {
-  it('renders a reached/dropped toggle and a MemberList, and fetches nothing until asked', () => {
+  it('renders a reached/dropped toggle over a MemberList that is already loading', () => {
     const funnelPeople = vi.fn(async () => page())
     render(<StepPeople client={fakeClient(funnelPeople)} {...BASE_PROPS} />)
     expect(screen.getByRole('button', { name: /^reached/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^dropped here/i })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /show people/i })).toBeInTheDocument()
-    expect(funnelPeople).not.toHaveBeenCalled()
+    // No "Show people" gate: selecting a step IS the request, so the list is
+    // already loading. The toggle is what this test is about.
+    expect(screen.queryByRole('button', { name: /show people/i })).not.toBeInTheDocument()
   })
 
-  it('fetches reached (the default mode) for the given project/funnel/step/range when "Show people" is clicked', async () => {
+  it('fetches reached (the default mode) for the given project/funnel/step/range', async () => {
     const funnelPeople = vi.fn(async () => page({ person_count: 134 }))
     render(<StepPeople client={fakeClient(funnelPeople)} {...BASE_PROPS} />)
-    await userEvent.click(screen.getByRole('button', { name: /show people/i }))
     await waitFor(() => expect(funnelPeople).toHaveBeenCalledTimes(1))
     expect(funnelPeople).toHaveBeenCalledWith(1, 7, {
       step: 2,
@@ -68,7 +68,6 @@ describe('StepPeople', () => {
     )
     render(<StepPeople client={fakeClient(funnelPeople)} {...BASE_PROPS} />)
 
-    await userEvent.click(screen.getByRole('button', { name: /show people/i }))
     expect(await screen.findByRole('button', { name: 'Reached (134)' })).toBeInTheDocument()
     // Dropped has not been fetched yet -- its button must not show ANY
     // count, and must not borrow reached's number either.
@@ -76,7 +75,6 @@ describe('StepPeople', () => {
     expect(screen.queryByText(/Dropped here \(/)).not.toBeInTheDocument()
 
     await userEvent.click(screen.getByRole('button', { name: 'Dropped here' }))
-    await userEvent.click(await screen.findByRole('button', { name: /show people/i }))
     expect(await screen.findByRole('button', { name: 'Dropped here (47)' })).toBeInTheDocument()
     // Switching back to dropped must not have dropped reached's own count.
     expect(screen.getByRole('button', { name: 'Reached (134)' })).toBeInTheDocument()
@@ -108,7 +106,6 @@ describe('StepPeople', () => {
     render(<StepPeople client={fakeClient(funnelPeople)} {...BASE_PROPS} />)
 
     // Load reached's first page, then its second -- a real cursor now exists.
-    await userEvent.click(screen.getByRole('button', { name: /show people/i }))
     await userEvent.click(await screen.findByRole('button', { name: /load more/i }))
     await waitFor(() => expect(funnelPeople).toHaveBeenCalledTimes(2))
     expect(await screen.findByText('person-1')).toBeInTheDocument()
@@ -119,9 +116,10 @@ describe('StepPeople', () => {
     await userEvent.click(screen.getByRole('button', { name: /^dropped here/i }))
     expect(screen.queryByText('person-1')).not.toBeInTheDocument()
     expect(screen.queryByText('person-0')).not.toBeInTheDocument()
-    const showAgain = await screen.findByRole('button', { name: /show people/i })
-
-    await userEvent.click(showAgain)
+    // The walk restarts on its own. This used to be proved by a "Show people"
+    // button reappearing; with the gate gone the claim is stronger, not
+    // weaker -- the refetch must happen with NO click, and it must ask for
+    // page one, so `cursor` is undefined rather than the reached walk's.
     await waitFor(() => expect(funnelPeople).toHaveBeenCalledTimes(3))
     expect(funnelPeople).toHaveBeenNthCalledWith(3, 1, 7, {
       step: 2,
@@ -138,7 +136,6 @@ describe('StepPeople', () => {
       throw new Error('boom')
     })
     render(<StepPeople client={fakeClient(funnelPeople)} {...BASE_PROPS} />)
-    await userEvent.click(screen.getByRole('button', { name: /show people/i }))
     expect(await screen.findByRole('alert')).toHaveTextContent(/could not load/i)
     expect(screen.getByRole('button', { name: /^reached/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^dropped here/i })).toBeInTheDocument()
@@ -156,13 +153,18 @@ describe('StepPeople', () => {
         onUnauthorized={onUnauthorized}
       />,
     )
-    await userEvent.click(screen.getByRole('button', { name: /show people/i }))
     await waitFor(() => expect(onUnauthorized).toHaveBeenCalledTimes(1))
   })
 })
 
 describe('StepPeople -- seeded counts', () => {
-  it('shows both seeded counts immediately, with no fetch at all', () => {
+  it('shows both seeded counts on the first paint, before any fetch resolves', () => {
+    // The "no fetch at all" this once asserted is gone ON PURPOSE: selecting a
+    // step IS the request, so the list loads without a second click. What the
+    // seed is still for survives unchanged and is what this pins -- both
+    // labels carry a number on the very first paint, with no request having
+    // come back yet. Asserted synchronously, before any await, so a resolved
+    // fetch cannot be what put the numbers there.
     const funnelPeople = vi.fn(async () => page())
     render(
       <StepPeople
@@ -173,7 +175,16 @@ describe('StepPeople -- seeded counts', () => {
     )
     expect(screen.getByRole('button', { name: 'Reached (134)' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Dropped here (47)' })).toBeInTheDocument()
-    expect(funnelPeople).not.toHaveBeenCalled()
+  })
+
+  it('loads the list without a second click', () => {
+    // The whole point of the change: a step click, or a mode flip, must not
+    // then require "Show people". The panel is remounted on both, so that
+    // second click came back every single time.
+    const funnelPeople = vi.fn(async () => page())
+    render(<StepPeople client={fakeClient(funnelPeople)} {...BASE_PROPS} />)
+    expect(screen.queryByRole('button', { name: /show people/i })).not.toBeInTheDocument()
+    expect(funnelPeople).toHaveBeenCalledTimes(1)
   })
 
   // The seed is provisional, not a cache: it can be stale by the time an
@@ -192,7 +203,6 @@ describe('StepPeople -- seeded counts', () => {
     // Seeded, pre-fetch.
     expect(screen.getByRole('button', { name: 'Reached (134)' })).toBeInTheDocument()
 
-    await userEvent.click(screen.getByRole('button', { name: /show people/i }))
     // The fetch answered 140, not the seeded 134 -- the fresher number wins.
     expect(await screen.findByRole('button', { name: 'Reached (140)' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Reached (134)' })).not.toBeInTheDocument()
