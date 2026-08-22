@@ -1,5 +1,6 @@
 import { render, screen, within } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import userEvent from '@testing-library/user-event'
+import { describe, expect, it, vi } from 'vitest'
 import type { FunnelRunResult, FunnelStep, StepResult } from '../../api/types.js'
 import { FunnelFlow } from './FunnelFlow.js'
 import { PLOT_HEIGHT } from './flowGeometry.js'
@@ -227,5 +228,54 @@ describe('FunnelFlow', () => {
     )
     expect(container.innerHTML).not.toContain('--chart-funnel-8')
     expect(container.innerHTML).toContain('--chart-funnel-7')
+  })
+})
+
+describe('FunnelFlow selection', () => {
+  it("calls onSelectStep with the step's 1-indexed index when its slot is clicked", async () => {
+    const user = userEvent.setup()
+    const onSelectStep = vi.fn()
+    render(<FunnelFlow result={result()} onSelectStep={onSelectStep} />)
+    await user.click(screen.getByTestId('flow-step-2-select'))
+    expect(onSelectStep).toHaveBeenCalledTimes(1)
+    expect(onSelectStep).toHaveBeenCalledWith(2)
+  })
+
+  it('marks only the selected step as pressed, via aria-pressed rather than colour alone', () => {
+    render(<FunnelFlow result={result()} selectedStep={2} onSelectStep={() => {}} />)
+    expect(screen.getByTestId('flow-step-1-select')).toHaveAttribute('aria-pressed', 'false')
+    expect(screen.getByTestId('flow-step-2-select')).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('names each step button with what it does and which step it means -- the event name alone is ambiguous when two steps share it', () => {
+    render(<FunnelFlow result={result()} onSelectStep={() => {}} />)
+    expect(screen.getByTestId('flow-step-2-select')).toHaveAccessibleName(
+      'Show people at step 2: docs_search',
+    )
+  })
+
+  it('renders no selection buttons, and nothing focusable, without onSelectStep -- the builder preview has no funnel id to list people for', () => {
+    render(<FunnelFlow result={result()} />)
+    expect(screen.queryAllByRole('button')).toHaveLength(0)
+  })
+
+  it('has no ancestor that disables pointer events -- any such ancestor makes the button permanently unclickable in a real browser, even though jsdom cannot detect that from a click alone', () => {
+    // A structural check that a button merely sits OUTSIDE the label overlay
+    // is a proxy for this, not the invariant itself: it is defeated by
+    // `pointer-events-none` landing on the new layer's OWN wrapper, which is
+    // still "outside" the label overlay yet still swallows every click. The
+    // real rule is about the whole ancestor chain, not one named container.
+    render(<FunnelFlow result={result()} onSelectStep={() => {}} />)
+    const button = screen.getByTestId('flow-step-1-select')
+    let node: Element | null = button.parentElement
+    let disabledBy: Element | null = null
+    while (node) {
+      if (/pointer-events-none/.test(node.className)) {
+        disabledBy = node
+        break
+      }
+      node = node.parentElement
+    }
+    expect(disabledBy).toBeNull()
   })
 })

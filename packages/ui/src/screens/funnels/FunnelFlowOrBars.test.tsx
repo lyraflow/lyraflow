@@ -60,6 +60,27 @@ describe('FunnelFlowOrBars', () => {
     expect(screen.queryByTestId('funnel-flow')).not.toBeInTheDocument()
   })
 
+  // Task 6: `FunnelDetail` passes `selectedStep`/`onSelectStep` all the way
+  // down to whichever of the two actually renders -- this was the one part
+  // of the wiring this file itself owns.
+  it('forwards selectedStep and onSelectStep to the flow rendering', () => {
+    stubMatchMedia(true)
+    const onSelectStep = vi.fn()
+    render(<FunnelFlowOrBars result={RESULT} selectedStep={2} onSelectStep={onSelectStep} />)
+    expect(screen.getByTestId('flow-step-2-select')).toHaveAttribute('aria-pressed', 'true')
+    screen.getByTestId('flow-step-1-select').click()
+    expect(onSelectStep).toHaveBeenCalledWith(1)
+  })
+
+  it('forwards selectedStep and onSelectStep to the bars rendering', () => {
+    stubMatchMedia(false)
+    const onSelectStep = vi.fn()
+    render(<FunnelFlowOrBars result={RESULT} selectedStep={2} onSelectStep={onSelectStep} />)
+    expect(screen.getByTestId('funnel-step-2')).toHaveAttribute('aria-pressed', 'true')
+    screen.getByTestId('funnel-step-1').click()
+    expect(onSelectStep).toHaveBeenCalledWith(1)
+  })
+
   it('renders exactly one of the two, never both', () => {
     // Rendering both and hiding one with CSS would read the funnel twice to
     // a screen reader and make every shared testid resolve to two elements.

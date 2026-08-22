@@ -1,6 +1,7 @@
 import type { CompiledQuery, FunnelResult, FunnelStep, LevelRow } from '@lyraflow/core'
 import { summarise } from '@lyraflow/core'
 import type { ClickHouseClient } from '@lyraflow/db'
+import type { MemberRow } from '../segments/cache.js'
 import { runCompiled } from '../segments/execute.js'
 
 /**
@@ -51,4 +52,29 @@ export async function runDropoff(opts: {
   compiled: CompiledQuery
 }): Promise<DropoffRow[]> {
   return runCompiled<DropoffRow>(opts.client, opts.compiled)
+}
+
+/**
+ * One member-shaped row from the `select: 'members'` projection — the same
+ * shape a segment members walk returns (see `MemberRow`), plus `entered_at`,
+ * which only a funnel's per-person pass produces. Reusing `MemberRow` rather
+ * than declaring a parallel type is what lets `MemberList` render this
+ * unchanged.
+ */
+export interface PeopleRow extends MemberRow {
+  entered_at: string
+}
+
+/**
+ * One page of the people who reached, or stopped at, a funnel step —
+ * traits and all. Goes through the same ceilings as every other compiled
+ * query — see `runCompiled`. `person_count` for the SAME `peopleAt` is a
+ * separate query (`select: 'count'`); this runner only ever sees rows, not
+ * a count, because a `'members'`-shaped compile has no `person_count` column.
+ */
+export async function runPeople(opts: {
+  client: ClickHouseClient
+  compiled: CompiledQuery
+}): Promise<PeopleRow[]> {
+  return runCompiled<PeopleRow>(opts.client, opts.compiled)
 }

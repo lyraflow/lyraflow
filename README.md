@@ -14,10 +14,10 @@ under Docker, and nothing leaves it.
 > **Early days.** v0.1 is the API and the operations behind it: ingest,
 > identity, segments, event reads, privacy, retention, quotas, and backup. A
 > web UI now sits on top of it — sign in, walk through a first-run wizard,
-> watch events arrive live, and edit a project's retention and quota — but
-> segments, people, person profiles and funnels still have **no screen**,
-> **API and CLI only**; see [Web UI](#web-ui) for exactly what exists and
-> what does not.
+> watch events arrive live, build and run funnels, build and edit segments,
+> and edit a project's retention and quota — but people and person profiles
+> still have **no screen**, **API and CLI only**; see [Web UI](#web-ui) for
+> exactly what exists and what does not.
 
 ## What it is good at
 
@@ -348,6 +348,10 @@ screens, reachable from the sidebar:
   stops showing the filter as though it applied, because the numbers alone
   look entirely normal.
 
+  Click a step and a Reached/Dropped panel opens beneath the chart — two
+  different populations, each counted on its own rather than assumed from the
+  bar above (see *Who reached a step, or stopped there* under Funnels below).
+
 - **Segments** — build a filter tree in the browser: `and`/`or` groups, traits,
   context, lifecycle bounds, and behaviours with their own `where` predicates.
   Preview it before saving — the person count and a bounded page of members,
@@ -404,9 +408,12 @@ the progress; `lyraflow projects deletion get <id>` reports the same thing, and
 have **no** screens at all yet; reach them the way the rest of this document
 shows, over the HTTP API or the CLI.
 
-The CLI is still more capable for funnels than the UI is. The per-step list of
-*which* people dropped is API- and CLI-only for now, since there is no person
-profile screen to open one from.
+The funnel screen's per-step people panel is backed by
+`POST /v1/funnels/:id/people` (see *Funnels* below) — the same bounded member
+list Segments uses, traits and all. It does not open a person profile from
+there, because there still isn't one (see above). The CLI has not caught up
+to this yet: `lyraflow funnels dropoff` still only walks the dropped
+population, so reading who *reached* a step is UI- and API-only for now.
 
 ## Tracking more than one site
 
@@ -1547,9 +1554,9 @@ paid" — and one question: how many people got through each one, and where did
 the rest stop.
 
 Funnels are **saved objects**. You create one, give it a name, and re-run it
-over whatever date range you care about. Funnels have no screen in the
-[Web UI](#web-ui) — this is the HTTP API and the CLI, like segments and
-people.
+over whatever date range you care about. There is a funnel screen in the
+[Web UI](#web-ui) too (see below) — this section documents the full HTTP API
+and the CLI, which is what that screen itself is built on.
 
 ### Defining one
 
@@ -1717,6 +1724,74 @@ Lists the people who reached step 2 and went no further. Steps are numbered
 from 1, matching `index` in the run response. Paged with an opaque cursor, and
 bounded the same way the segment members preview is — 100 per page, 1,000
 total. It is a preview of a population, not an export of it.
+
+`/dropoff` predates `/people` below and is **retained for compatibility,
+unchanged** — its own response shape, its own cursor label, so a caller that
+already scripts against it never sees a difference. It is not two ways of
+doing one thing: `/people` is the general endpoint, and `/dropoff` is the one
+call it happens to always make (`mode: "dropped"`).
+
+### Who reached a step, or stopped there
+
+```sh
+curl -X POST https://analytics.example.com/v1/funnels/3/people \
+  -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY" \
+  -H 'content-type: application/json' \
+  -d '{ "step": 2, "mode": "reached" }'
+```
+
+`mode` is **required** — there is no default. `reached` (`level >= step`,
+everyone who got at least that far) and `dropped` (`level = step`, everyone
+who stopped exactly there) differ by a factor of three on a real funnel, and
+whichever way a default fell, the other reading is what a caller would get by
+accident.
+
+`reached` is the population behind the number on the chart: step N's `people`
+in the run response above is exactly this count, at whatever instant the run
+was taken. `dropped` is deliberately a different, usually smaller, number —
+the same population `/dropoff` lists.
+
+One case looks wrong and is not: at the funnel's **last** step, `dropped` is
+not empty. A level means "got no further than this level" (see *How a person
+is counted* above), so someone who converted all the way through is *at* the
+last step's level too — there is no level past it to place them at instead.
+`mode: "dropped"` on the final step therefore returns the same people
+`mode: "reached"` does. This is not new behavior particular to `/people` —
+`/dropoff` has always answered the final step this way — `/people` just makes
+it visible as a "dropped" label sitting next to someone who converted.
+
+The response:
+
+```json
+{
+  "members": [
+    { "person_id": "user-42", "first_seen": "2026-07-01T00:00:00.000Z",
+      "last_seen": "2026-08-08T09:20:00.000Z", "entered_at": "2026-08-08T09:12:00.000Z",
+      "country": "US", "region": "CA", "city": "San Francisco", "device_type": "desktop",
+      "os": "macOS", "browser": "Chrome", "referrer": "https://google.com",
+      "utm_source": "google", "utm_medium": "cpc", "utm_campaign": "launch",
+      "traits": { "plan": "trial" }, "traits_num": {}, "trait_total": 1 }
+  ],
+  "person_count": 212,
+  "range": { "since": "2026-08-01T00:00:00.000Z", "until": "2026-08-08T00:00:00.000Z" },
+  "as_of": "2026-08-08T09:31:02.000Z",
+  "next_cursor": "eyJ...base64url...",
+  "window_exhausted": false
+}
+```
+
+`person_count` is its own query, taken at the same `as_of` the page is —
+never the run's cached step number, because a run and a `/people` call can
+land at different instants, and a stale count printed beside a fresh page is
+exactly the kind of mismatch that makes both look wrong. Paged and bounded
+the same way `/dropoff` and the segment members preview are: 100 per page,
+`window_exhausted: true` once 1,000 rows have been served, and a cursor that
+only replays against this route, never `/dropoff` or a segment walk.
+
+There is no CLI command for `/people` yet — see *From the CLI* below. The
+funnel screen in the [Web UI](#web-ui) does have it: click a step in a saved
+funnel and a Reached/Dropped toggle opens beneath the chart, each option
+carrying its own count.
 
 ### From the CLI
 

@@ -19,9 +19,9 @@ import type { Authenticate } from '../auth/bridge.js'
 import type { Project } from '../auth/project-cache.js'
 import { parseNumericId } from '../numeric-id.js'
 import { type WalkCursor, makeWalkCursorCodec } from '../query/walk-cursor.js'
-import { SegmentTimeoutError } from '../segments/execute.js'
+import { SegmentTimeoutError, runSegment } from '../segments/execute.js'
 import { SegmentStore, StoredTreeError } from '../segments/store.js'
-import { runDropoff, runFunnel } from './execute.js'
+import { runDropoff, runFunnel, runPeople } from './execute.js'
 import {
   DuplicateFunnelNameError,
   FunnelStore,
@@ -41,17 +41,28 @@ export interface FunnelDeps {
 const DEFAULT_RANGE_MS = 7 * 86_400_000
 
 /**
- * The furthest a caller may page through drop-offs. Same budget as the segment
- * members walk, and for the same reason: this endpoint previews a population,
- * it does not export one.
+ * The furthest a caller may page through a funnel-step population, whether
+ * that is `/dropoff` or `/people`. Same budget as the segment members walk,
+ * and for the same reason: these endpoints preview a population, they do not
+ * export one.
  */
-const MAX_DROPOFF_PAGES = Math.ceil(MEMBER_WINDOW_MAX / MEMBER_PAGE_SIZE)
+const MAX_PEOPLE_PAGES = Math.ceil(MEMBER_WINDOW_MAX / MEMBER_PAGE_SIZE)
 
 /**
  * Its own label, so a cursor minted for a segment walk cannot be replayed
  * against a funnel drop-off even within one project.
  */
 const walkCursors = makeWalkCursorCodec('lyraflow.funnel-dropoff-cursor.v1')
+
+/**
+ * Its own label too, distinct from `walkCursors` above — a cursor minted for
+ * `/people` pages a different `levelPredicate` (`reached` OR `dropped`) than
+ * `/dropoff` always pages (`dropped` only). Replaying one route's cursor
+ * against the other would resume a keyset walk computed over a different
+ * population, which is exactly the reasoning `walk-cursor.ts`'s own comment
+ * gives for the segments-vs-funnels split.
+ */
+const peopleCursors = makeWalkCursorCodec('lyraflow.funnel-people-cursor.v1')
 
 /** Wire shape — snake_case, like every other endpoint. */
 function toWire(f: StoredFunnel | ListedFunnel) {
@@ -103,6 +114,18 @@ const DropoffBody = z.object({
   until: z.string().datetime().optional(),
 })
 
+const PeopleBody = z.object({
+  // 1-indexed, matching the `index` in a run response.
+  step: z.number().int().positive(),
+  // No default: `reached` (level >= step) and `dropped` (level = step) differ
+  // by a factor of three on a real funnel, and whichever way a default fell,
+  // the other reading is what a caller gets by accident.
+  mode: z.enum(['reached', 'dropped']),
+  cursor: z.string().optional(),
+  since: z.string().datetime().optional(),
+  until: z.string().datetime().optional(),
+})
+
 /** See `numeric-id.ts`'s `parseNumericId` for the shape this enforces and why. */
 function parseId(raw: string): number | null {
   return parseNumericId(raw)
@@ -146,7 +169,12 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
     funnel: { steps: FunnelStep[]; windowSeconds: number; segmentId: number | null },
     range: { since: Date; until: Date },
     now: Date,
-    dropoffAt?: { step: number; cursor?: Cursor },
+    peopleAt?: {
+      step: number
+      mode: 'reached' | 'dropped'
+      select: 'ids' | 'members' | 'count'
+      cursor?: Cursor
+    },
   ): Promise<{ compiled: ReturnType<typeof compileFunnel>; extraWarnings: CostWarning[] }> {
     const params = new Params()
     const extraWarnings: CostWarning[] = []
@@ -190,7 +218,7 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
       now,
       params,
       segmentPersonSql,
-      dropoffAt,
+      peopleAt,
     })
     return { compiled, extraWarnings }
   }
@@ -493,11 +521,16 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
       // assembly of them.
       const { compiled } = await compileFor(project, funnel, range, asOf, {
         step: body.data.step,
+        // `/dropoff` has always meant "stopped exactly here" -- pinned
+        // explicitly rather than left to a default, same reasoning as
+        // `PeopleBody.mode` above.
+        mode: 'dropped',
+        select: 'ids',
         cursor: walk?.cursor,
       })
       const people = await runDropoff({ client: ch, compiled })
       const pagesServed = (walk?.pagesServed ?? 0) + 1
-      const windowExhausted = pagesServed >= MAX_DROPOFF_PAGES
+      const windowExhausted = pagesServed >= MAX_PEOPLE_PAGES
       const last = people.at(-1)
       const canOfferNext = people.length === MEMBER_PAGE_SIZE && !windowExhausted
       return reply.code(200).send({
@@ -508,6 +541,122 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
         next_cursor:
           canOfferNext && last
             ? walkCursors.encode(
+                {
+                  lastSeen: last.entered_at,
+                  personId: last.person_id,
+                  asOf: asOf.toISOString(),
+                },
+                pagesServed,
+                signingKey,
+              )
+            : null,
+        window_exhausted: windowExhausted,
+      })
+    } catch (err) {
+      if (err instanceof FunnelValidationError) {
+        return reply.code(400).send({ error: err.message, code: err.code })
+      }
+      if (err instanceof SegmentTimeoutError) return reply.code(422).send({ error: err.message })
+      throw err
+    }
+  })
+
+  /**
+   * The people at step N — either everyone who REACHED it (`level >= step`,
+   * the population a chart bar labelled with that step's count means) or
+   * everyone who STOPPED there (`level = step`, `/dropoff`'s population).
+   *
+   * Same preview contract as `/dropoff` and the segment members page: the
+   * same `MEMBER_PAGE_SIZE`, the same `MEMBER_WINDOW_MAX` ceiling, and its
+   * own signed cursor (`peopleCursors`, not `walkCursors`) so a walk's
+   * position cannot be forged or replayed against another route.
+   *
+   * `mode` has no default — see `PeopleBody` above.
+   */
+  app.post<{ Params: { id: string } }>('/v1/funnels/:id/people', async (req, reply) => {
+    const project = await authenticate(req, reply)
+    if (!project) return
+    const id = parseId(req.params.id)
+    if (id === null) return reply.code(400).send({ error: 'invalid_funnel_id' })
+
+    const body = PeopleBody.safeParse(req.body ?? {})
+    if (!body.success) return reply.code(400).send({ error: 'invalid people request' })
+    const range = resolveRange(req.body)
+    if (!range) return reply.code(400).send({ error: 'invalid range' })
+
+    let funnel: StoredFunnel | null
+    try {
+      funnel = await store.get(project.id, id)
+    } catch (err) {
+      if (err instanceof StoredDefinitionError) {
+        return reply
+          .code(400)
+          .send({ error: err.message, definition_version: err.definitionVersion })
+      }
+      throw err
+    }
+    if (!funnel) return reply.code(404).send({ error: 'funnel_not_found' })
+
+    // 1-indexed, matching the `index` in a run response and `/dropoff`'s own
+    // message -- a 0-indexed caller would otherwise silently read step 2's
+    // people as step 1's.
+    if (body.data.step > funnel.steps.length) {
+      return reply
+        .code(400)
+        .send({ error: `step must be between 1 and ${funnel.steps.length}`, code: 'step' })
+    }
+
+    const signingKey = peopleCursors.signingKey(project)
+    let walk: WalkCursor | undefined
+    try {
+      walk =
+        body.data.cursor === undefined
+          ? undefined
+          : peopleCursors.decode(body.data.cursor, signingKey)
+    } catch {
+      return reply.code(400).send({ error: 'invalid cursor' })
+    }
+
+    const now = new Date()
+    // Every page of one walk describes the same instant, carried in the
+    // cursor -- otherwise page 2 would be computed against a later `now`
+    // than page 1 and the two could disagree about who entered.
+    const asOf = walk ? new Date(walk.cursor.asOf) : now
+
+    try {
+      const { compiled } = await compileFor(project, funnel, range, asOf, {
+        step: body.data.step,
+        mode: body.data.mode,
+        select: 'members',
+        cursor: walk?.cursor,
+      })
+      const members = await runPeople({ client: ch, compiled })
+
+      // A SEPARATE compiled query, at the SAME `asOf` the page and cursor
+      // pin -- never the funnel run's own `steps[i].people`, which is the
+      // same number for `reached` but computed at a different instant.
+      // MemberList's own comment says why that gap matters: comparing a
+      // stale count against a page length is exactly how "that is everyone"
+      // gets printed over a truncated preview.
+      const { compiled: countCompiled } = await compileFor(project, funnel, range, asOf, {
+        step: body.data.step,
+        mode: body.data.mode,
+        select: 'count',
+      })
+      const personCount = await runSegment({ client: ch, compiled: countCompiled })
+
+      const pagesServed = (walk?.pagesServed ?? 0) + 1
+      const windowExhausted = pagesServed >= MAX_PEOPLE_PAGES
+      const last = members.at(-1)
+      const canOfferNext = members.length === MEMBER_PAGE_SIZE && !windowExhausted
+      return reply.code(200).send({
+        members,
+        person_count: personCount,
+        range: rangeWire(range),
+        as_of: asOf.toISOString(),
+        next_cursor:
+          canOfferNext && last
+            ? peopleCursors.encode(
                 {
                   lastSeen: last.entered_at,
                   personId: last.person_id,

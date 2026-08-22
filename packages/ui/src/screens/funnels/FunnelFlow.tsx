@@ -76,8 +76,18 @@ export function FunnelFlow(props: {
    * showing a bare event name a differently-predicated step would show too.
    * Optional: `result` alone is a complete rendering. */
   definition?: readonly FunnelStep[] | null
+  /** The step whose people are currently shown beneath the chart, by its
+   * 1-indexed `index` -- the same number `onSelectStep` reports and the
+   * API's `step` parameter expects. */
+  selectedStep?: number | null
+  /** Reports which step was clicked, by its 1-indexed `index`. Omitted by a
+   * caller with nothing to do about a click -- `FunnelBuilder`'s preview
+   * renders an unsaved definition with no funnel id, so there is no people
+   * list it could open. Without this, no step buttons render at all: no
+   * button, no focus stop, no hover affordance. */
+  onSelectStep?: (step: number) => void
 }) {
-  const { result, definition } = props
+  const { result, definition, selectedStep, onSelectStep } = props
   const steps = result.steps
   const total = steps.length
   const heights = steps.map((s) => barHeight(s.people, result.entered))
@@ -164,6 +174,39 @@ export function FunnelFlow(props: {
               />
             ))}
           </svg>
+
+          {/* One transparent, full-slot button per step -- its OWN layer,
+           * never inside the rate-label grid below. That grid is
+           * `pointer-events-none` wholesale (a label must never swallow a
+           * click meant for the ribbon or bar under it), so a button placed
+           * inside it would be permanently unclickable. This layer sits
+           * BENEATH the label layer in source order: sharing one grid would
+           * also collide the two at `gridRow: 1` -- labels span two columns
+           * each (they name a transition between two slots) and buttons span
+           * one, so placing them together would leave stacking order
+           * dependent on source position, which the label layer's own
+           * comment already relies on for something else (see below) and
+           * should not have to arbitrate here too.
+           *
+           * Rendered only with `onSelectStep` -- the builder preview has no
+           * funnel id to list people for, so nothing here must be
+           * interactive: no button, no focus stop, no hover affordance. */}
+          {onSelectStep != null && (
+            <div className="absolute inset-0 grid" style={columns}>
+              {steps.map((s, i) => (
+                <button
+                  key={`select-${s.index}`}
+                  type="button"
+                  data-testid={`flow-step-${s.index}-select`}
+                  aria-pressed={selectedStep === s.index}
+                  aria-label={`Show people at step ${s.index}: ${s.event}`}
+                  onClick={() => onSelectStep(s.index)}
+                  className="h-full w-full rounded-sm border-0 bg-transparent p-0 hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset aria-pressed:bg-accent/20"
+                  style={{ gridRow: 1, gridColumn: i + 1 }}
+                />
+              ))}
+            </div>
+          )}
 
           {/* The step-to-step rate, sitting on the ribbon it describes.
            *

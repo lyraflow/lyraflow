@@ -299,6 +299,38 @@ export interface RangeBody {
   until?: string
 }
 
+/**
+ * `POST /v1/funnels/:id/people`'s request body. `mode` has no default,
+ * matching the server -- `reached` (level >= step) and `dropped` (level =
+ * step) differ by a large factor on a real funnel, and whichever default
+ * was picked, the other reading is the one a caller would get by accident.
+ */
+export interface FunnelPeopleQuery {
+  step: number
+  mode: 'reached' | 'dropped'
+  since?: string
+  until?: string
+  cursor?: string
+}
+
+/**
+ * `POST /v1/funnels/:id/people`'s response. Same walk shape as segments'
+ * `MemberPage` (`screens/segments/MemberList.tsx`) -- `members`,
+ * `next_cursor`, `window_exhausted`, `person_count` -- which is what lets
+ * `MemberList` be reused unchanged for a funnel step's people. `as_of` and
+ * `range` are extra: the segment route has no equivalent because it has no
+ * `since`/`until` to resolve, but this one does, the same way a funnel run
+ * does.
+ */
+export interface FunnelPeoplePage {
+  members: MemberRow[]
+  next_cursor: string | null
+  window_exhausted: boolean
+  person_count: number
+  as_of: string
+  range: { since: string; until: string }
+}
+
 /** `GET /v1/segments` and `GET /v1/segments/:id`.
  *
  * `last_count` and `last_evaluated_at` are a CACHE, not a fact -- written

@@ -441,4 +441,49 @@ describe('MemberList — person detail', () => {
     // handler, or the panel would open and close in one press.
     expect(toggleFor('demo-live-0025')).toHaveAttribute('aria-expanded', 'true')
   })
+
+  describe('autoLoad', () => {
+    it('waits for a click by default, so a segment preview still fetches nothing', () => {
+      // The default is the guard this component was written with: a count is
+      // cheap, a member walk is not, and a segment must not fetch people
+      // "just because the count was".
+      const fetchPage = vi.fn()
+      render(<MemberList fetchPage={fetchPage} />)
+      expect(screen.getByRole('button', { name: /show people/i })).toBeInTheDocument()
+      expect(fetchPage).not.toHaveBeenCalled()
+    })
+
+    it('fetches on mount when the caller says the click already happened', async () => {
+      const fetchPage = vi.fn(async () => ({
+        members: page(1),
+        next_cursor: null,
+        window_exhausted: false,
+        person_count: 1,
+      }))
+      render(<MemberList fetchPage={fetchPage} autoLoad />)
+      expect(await screen.findByText('person-0')).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: /show people/i })).not.toBeInTheDocument()
+    })
+
+    it('fetches exactly ONCE however many times it re-renders', async () => {
+      // THE TEST THIS FEATURE NEEDS. `load` is a useCallback over `fetchPage`,
+      // and every real caller builds `fetchPage` as an inline arrow -- so
+      // `load` has a fresh identity on every render. An effect that merely
+      // depended on it would re-run on each render it caused: an unbounded
+      // fetch loop against a paged endpoint, invisible to a test that only
+      // renders once.
+      const fetchPage = vi.fn(async () => ({
+        members: page(1),
+        next_cursor: null,
+        window_exhausted: false,
+        person_count: 1,
+      }))
+      const { rerender } = render(<MemberList fetchPage={() => fetchPage()} autoLoad />)
+      expect(await screen.findByText('person-0')).toBeInTheDocument()
+      for (let i = 0; i < 5; i++) {
+        rerender(<MemberList fetchPage={() => fetchPage()} autoLoad />)
+      }
+      await waitFor(() => expect(fetchPage).toHaveBeenCalledTimes(1))
+    })
+  })
 })

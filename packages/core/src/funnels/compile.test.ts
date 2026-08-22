@@ -390,3 +390,104 @@ describe('step audiences', () => {
     ).toThrow(FunnelValidationError)
   })
 })
+
+describe('peopleAt', () => {
+  const base2 = {
+    ...base,
+    definition: { steps: [{ event: 'a' }, { event: 'b' }], window_seconds: 3600 },
+  }
+
+  it('asks for everyone who reached the step, not only those who stopped there', () => {
+    const c = compileFunnel({ ...base2, peopleAt: { step: 1, mode: 'reached', select: 'ids' } })
+    expect(c.sql).toMatch(/level >= \{p\d+:UInt32\}/)
+    expect(c.sql).not.toMatch(/level = \{p\d+:UInt32\}/)
+  })
+
+  it('asks for only those who stopped there in dropped mode', () => {
+    const c = compileFunnel({ ...base2, peopleAt: { step: 1, mode: 'dropped', select: 'ids' } })
+    expect(c.sql).toMatch(/level = \{p\d+:UInt32\}/)
+    expect(c.sql).not.toMatch(/level >= \{p\d+:UInt32\}/)
+  })
+
+  it('compiles the ids shape without joining traits at all', () => {
+    // `/dropoff` must keep compiling what it compiles today. A traits join it
+    // never asked for is a second scan of person_traits on every existing
+    // caller's request.
+    const c = compileFunnel({ ...base2, peopleAt: { step: 1, mode: 'dropped', select: 'ids' } })
+    expect(c.sql).not.toContain('person_traits')
+    expect(c.sql).not.toContain('trait_total')
+  })
+
+  it('compiles the members shape with both CTEs the projection needs', () => {
+    // memberProjection selects first_seen/last_seen and the context columns,
+    // which come from `base` -- NOT from traits. Joining only traits yields a
+    // query that references columns nothing in it produces.
+    //
+    // `toContain('first_seen')` alone is a vacuous pin here: memberProjection
+    // emits that bare column name in its SELECT list unconditionally, so the
+    // text is present whether or not `base` is actually joined -- caught by
+    // running the mutation in Step 6 of the task brief, which this test as
+    // originally written did not fail against. Pinning the JOIN clause and
+    // the CTE definition itself is what actually exercises the guard.
+    const c = compileFunnel({ ...base2, peopleAt: { step: 1, mode: 'reached', select: 'members' } })
+    expect(c.sql).toContain('trait_total')
+    expect(c.sql).toContain('person_traits')
+    expect(c.sql).toContain('first_seen')
+    expect(c.sql).toContain('entered_at')
+    expect(c.sql).toContain('base AS (')
+    expect(c.sql).toContain('LEFT JOIN base USING (person_id)')
+  })
+
+  it('keeps the keyset lexicographic in both modes', () => {
+    // Collapsing to `entered_at <` alone skips every remaining person sharing
+    // the boundary row's instant -- silently, and only under load.
+    for (const mode of ['reached', 'dropped'] as const) {
+      const c = compileFunnel({
+        ...base2,
+        peopleAt: {
+          step: 1,
+          mode,
+          select: 'ids',
+          cursor: {
+            lastSeen: '2026-08-20 00:00:00.000',
+            personId: 'p9',
+            asOf: '2026-08-21T00:00:00.000Z',
+          },
+        },
+      })
+      expect(c.sql).toContain('entered_at <')
+      expect(c.sql).toContain('OR (entered_at =')
+    }
+  })
+
+  it('compiles a count shape with no cursor, no joins and no LIMIT', () => {
+    // The next task's count must be computed in the SAME request as the
+    // page, never taken from the funnel run's own steps[i].people -- which
+    // was computed at a different instant. This is the single predicate
+    // that feature turns on, so the count branch must reuse it rather than
+    // duplicate it.
+    const c = compileFunnel({
+      ...base2,
+      peopleAt: {
+        step: 1,
+        mode: 'reached',
+        select: 'count',
+        cursor: {
+          lastSeen: '2026-08-20 00:00:00.000',
+          personId: 'p9',
+          asOf: '2026-08-21T00:00:00.000Z',
+        },
+      },
+    })
+    expect(c.sql).toContain('SELECT count() AS person_count')
+    expect(c.sql).toMatch(/level >= \{p\d+:UInt32\}/)
+    expect(c.sql).not.toContain('person_traits')
+    // The dedup idiom's own `LIMIT 1 BY ...` is unrelated and legitimately
+    // present -- what must be absent is a PAGE limit.
+    expect(c.sql).not.toMatch(/LIMIT \d+\s*$/)
+    expect(c.sql).not.toContain('ORDER BY')
+    // The cursor must be ignored entirely for a count -- no keyset, no join.
+    expect(c.sql).not.toContain('entered_at <')
+    expect(c.sql).not.toContain("'2026-08-20 00:00:00.000'")
+  })
+})

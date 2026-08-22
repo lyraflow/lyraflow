@@ -109,6 +109,18 @@ const SEGMENT_DEFAULTS = {
   updated_at: '2026-01-01T00:00:00.000Z',
 }
 
+// Task 6's default: a step-selection test that never clicks into the list
+// doesn't exercise this at all, and one that does gets a minimal, valid
+// page back rather than an undefined-method crash.
+const PEOPLE_PAGE = {
+  members: [],
+  next_cursor: null,
+  window_exhausted: true,
+  person_count: 0,
+  as_of: '2026-08-15T11:58:00.000Z',
+  range: { since: '2026-08-08T00:00:00.000Z', until: '2026-08-15T00:00:00.000Z' },
+}
+
 function fakeClient(over: Record<string, unknown> = {}) {
   return {
     funnel: vi.fn(async () => FUNNEL),
@@ -118,12 +130,14 @@ function fakeClient(over: Record<string, unknown> = {}) {
     // segment lookup for real (every fixture funnel but the segment-filter
     // ones below has `segment_id: null`, so state 1 never calls it at all).
     segments: vi.fn(async () => []),
+    funnelPeople: vi.fn(async () => PEOPLE_PAGE),
     ...over,
   } as unknown as ApiClient & {
     funnel: Mock
     runFunnel: Mock
     deleteFunnel: Mock
     segments: Mock
+    funnelPeople: Mock
   }
 }
 
@@ -1090,5 +1104,181 @@ describe('FunnelDetail — segments response identity survives a project switch 
     // The stale project-1 response must never have applied, even after
     // project 2's own resolves -- not before, not after.
     expect(screen.queryByText(/Alpha Paying customers/)).toBeNull()
+  })
+})
+
+// Task 6: `FunnelDetail` owns `selectedStep`, wires it to `FunnelFlowOrBars`
+// (the click side) AND to `StepPeople` (the panel side), and derives that
+// panel's seeded reached/dropped counts from the run result it already
+// holds rather than issuing a request for them.
+describe('FunnelDetail — step selection wires the people panel', () => {
+  function fourStepFunnel(): Funnel {
+    return {
+      ...FUNNEL,
+      steps: [{ event: 'a' }, { event: 'b' }, { event: 'c' }, { event: 'd' }],
+    }
+  }
+
+  function fourStepRun(): FunnelRunResult {
+    return {
+      entered: 1000,
+      converted: 100,
+      conversion_rate: 0.1,
+      partial_window_entrants: 0,
+      range: { since: '2026-08-08T00:00:00.000Z', until: '2026-08-15T00:00:00.000Z' },
+      as_of: '2026-08-15T11:58:00.000Z',
+      warnings: [],
+      steps: [
+        { index: 1, event: 'a', people: 1000, from_previous: 1, from_start: 1 },
+        { index: 2, event: 'b', people: 500, from_previous: 0.5, from_start: 0.5 },
+        { index: 3, event: 'c', people: 300, from_previous: 0.6, from_start: 0.3 },
+        { index: 4, event: 'd', people: 100, from_previous: 0.3333, from_start: 0.1 },
+      ],
+    }
+  }
+
+  function twoStepRun(): FunnelRunResult {
+    return {
+      entered: 1000,
+      converted: 400,
+      conversion_rate: 0.4,
+      partial_window_entrants: 0,
+      range: { since: '2026-08-08T00:00:00.000Z', until: '2026-08-15T00:00:00.000Z' },
+      as_of: '2026-08-15T12:30:00.000Z',
+      warnings: [],
+      steps: [
+        { index: 1, event: 'a', people: 1000, from_previous: 1, from_start: 1 },
+        { index: 2, event: 'b', people: 400, from_previous: 0.4, from_start: 0.4 },
+      ],
+    }
+  }
+
+  /** A people fetch that never settles.
+   *
+   * These three tests are about the counts DERIVED from the run -- the
+   * arithmetic in `seedCountsFor` and its final-step edge. The panel now
+   * loads without a click, so a resolved page would immediately override the
+   * selected mode's label with its own `person_count` (0 in the shared
+   * fixture) and the derivation would never be what is on screen. Pending
+   * the fetch isolates the thing under test; `StepPeople`'s own suite covers
+   * the override. */
+  const pendingPeople = () => vi.fn(() => new Promise<never>(() => {}))
+
+  it('selects step 1 and seeds its reached/dropped counts once a result arrives, not before', async () => {
+    const runDeferred = deferred<FunnelRunResult>()
+    const client = fakeClient({
+      runFunnel: vi.fn(() => runDeferred.promise),
+      funnelPeople: pendingPeople(),
+    })
+    renderDetail(client)
+
+    // No result yet -- nothing to select, and no chart or people panel to
+    // select it on.
+    expect(screen.queryByTestId('funnel-result')).toBeNull()
+    expect(screen.queryByRole('button', { name: /^reached/i })).toBeNull()
+
+    await act(async () => {
+      runDeferred.resolve(RUN)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(screen.getByTestId('funnel-step-1')).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByTestId('funnel-step-2')).toHaveAttribute('aria-pressed', 'false')
+    // reached(1) = steps[0].people = 1204; dropped(1) = steps[0].people -
+    // steps[1].people = 1204 - 491 = 713 (levels.ts:75-90).
+    expect(screen.getByRole('button', { name: 'Reached (1,204)' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Dropped here (713)' })).toBeInTheDocument()
+  })
+
+  it("clicking another step switches the selection, the seeded counts, and what the panel requests -- the final step's dropped count equals its reached count", async () => {
+    const client = fakeClient({ funnelPeople: pendingPeople() })
+    renderDetail(client)
+    await screen.findByTestId('funnel-step-1')
+
+    await userEvent.click(screen.getByTestId('funnel-step-2'))
+
+    expect(screen.getByTestId('funnel-step-1')).toHaveAttribute('aria-pressed', 'false')
+    expect(screen.getByTestId('funnel-step-2')).toHaveAttribute('aria-pressed', 'true')
+    // Step 2 is RUN's final step -- dropped(2) = steps[1].people -
+    // (steps[2]?.people ?? 0) = 491 - 0 = 491, the SAME as reached(2). The
+    // formula looks wrong here and is right: `atLeast[len+1]` is 0
+    // (levels.ts:75-90), so the final step's dropped count equals reached.
+    expect(screen.getByRole('button', { name: 'Reached (491)' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Dropped here (491)' })).toBeInTheDocument()
+
+    await waitFor(() =>
+      expect(client.funnelPeople).toHaveBeenCalledWith(
+        1,
+        FUNNEL.id,
+        expect.objectContaining({ step: 2, mode: 'reached' }),
+      ),
+    )
+  })
+
+  it('keeps the selected step across an explicit re-run of the same funnel', async () => {
+    const client = fakeClient()
+    renderDetail(client)
+    await screen.findByTestId('funnel-step-1')
+    await userEvent.click(screen.getByTestId('funnel-step-2'))
+    expect(screen.getByTestId('funnel-step-2')).toHaveAttribute('aria-pressed', 'true')
+
+    await userEvent.click(screen.getByRole('button', { name: /^run$/i }))
+    await waitFor(() => expect(client.runFunnel).toHaveBeenCalledTimes(2))
+
+    // Still step 2 -- a naive implementation that resets the selection to 1
+    // on EVERY landed result would pass the clamp test below while failing
+    // this one, which is exactly why the two are pinned separately.
+    expect(screen.getByTestId('funnel-step-2')).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByTestId('funnel-step-1')).toHaveAttribute('aria-pressed', 'false')
+  })
+
+  it('clamps the selection to step 1 when a re-run returns fewer steps than are currently selected', async () => {
+    const runFunnel = vi.fn()
+    runFunnel.mockResolvedValueOnce(fourStepRun())
+    runFunnel.mockResolvedValueOnce(twoStepRun())
+    const client = fakeClient({ funnel: vi.fn(async () => fourStepFunnel()), runFunnel })
+    renderDetail(client)
+    await screen.findByTestId('funnel-step-1')
+
+    await userEvent.click(screen.getByTestId('funnel-step-4'))
+    expect(screen.getByTestId('funnel-step-4')).toHaveAttribute('aria-pressed', 'true')
+
+    await userEvent.click(screen.getByRole('button', { name: /^run$/i }))
+    await waitFor(() => expect(runFunnel).toHaveBeenCalledTimes(2))
+
+    // The funnel is now 2 steps -- step 4 no longer exists, and the
+    // selection must not silently keep pointing at a step that isn't there
+    // any more (it would request `step: 4` of a 2-step funnel).
+    expect(screen.queryByTestId('funnel-step-4')).toBeNull()
+    expect(screen.getByTestId('funnel-step-1')).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByTestId('funnel-step-2')).toHaveAttribute('aria-pressed', 'false')
+  })
+
+  it('reseeds the panel from a fresh run, even when the selected step stays the same', async () => {
+    // StepPeople's own doc comment: its seed is read once, at mount -- a
+    // caller that wants a later change reflected passes a FRESH instance.
+    // Without that, a re-run landing new numbers under the SAME selected
+    // step would leave the panel showing the previous run's counts.
+    const run2: FunnelRunResult = {
+      ...RUN,
+      as_of: '2026-08-15T12:30:00.000Z',
+      steps: [
+        { index: 1, event: 'page_view', people: 2000, from_previous: 1, from_start: 1 },
+        { index: 2, event: 'signup_completed', people: 800, from_previous: 0.4, from_start: 0.4 },
+      ],
+    }
+    const runFunnel = vi.fn()
+    runFunnel.mockResolvedValueOnce(RUN)
+    runFunnel.mockResolvedValueOnce(run2)
+    const client = fakeClient({ runFunnel, funnelPeople: pendingPeople() })
+    renderDetail(client)
+    await screen.findByTestId('funnel-step-1')
+    expect(screen.getByRole('button', { name: 'Reached (1,204)' })).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: /^run$/i }))
+    await waitFor(() => expect(runFunnel).toHaveBeenCalledTimes(2))
+
+    expect(screen.getByRole('button', { name: 'Reached (2,000)' })).toBeInTheDocument()
   })
 })

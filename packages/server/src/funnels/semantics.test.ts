@@ -8,6 +8,7 @@ import { buildApp } from '../app.js'
 import { hashServerKey } from '../auth/project-cache.js'
 import { loadConfig } from '../config.js'
 import { Readiness } from '../health.js'
+import { type PgDictionarySource, ensureIdentityDictionaries } from '../identity/dictionaries.js'
 
 /**
  * What a funnel MEANS, proved against a real ClickHouse.
@@ -106,6 +107,19 @@ const who = (name: string) => `sem-${name}`
  * pre-identify world — which looks exactly like an engine that cannot resolve
  * identity at all.
  */
+/**
+ * How the ClickHouse *server* reaches Postgres to populate the identity
+ * dictionaries -- its own container network, not this process's host-mapped
+ * `localhost:5433`. Same shape as `person.test.ts` and `resolve.test.ts`.
+ */
+const pgSource: PgDictionarySource = {
+  host: 'postgres',
+  port: 5432,
+  user: 'lyraflow',
+  password: 'lyraflow',
+  database: CH.database,
+}
+
 async function reloadIdentityDictionaries(): Promise<void> {
   await ch.command({ query: `SYSTEM RELOAD DICTIONARY ${CH.database}.identity_bindings` })
   await ch.command({ query: `SYSTEM RELOAD DICTIONARY ${CH.database}.person_aliases` })
@@ -118,6 +132,23 @@ beforeAll(async () => {
     migrations: loadMigrations(join(import.meta.dirname, '../../../db/migrations')),
     appSchemaVersion: 999,
   })
+  // CREATE the identity dictionaries, not merely reload them.
+  //
+  // Every read in this file resolves a person through `identity_bindings`,
+  // and `reloadIdentityDictionaries` below issues `SYSTEM RELOAD DICTIONARY`,
+  // which requires one that already exists. This file never created them --
+  // it inherited them from whichever other suite had run against the same
+  // database first, and on a machine where the test database persists
+  // between runs that is always true, so the gap was invisible.
+  //
+  // It is not true of a fresh database. CI creates one per run, so whether
+  // this file passed depended on the order vitest happened to pick: land
+  // before every suite that calls `ensureIdentityDictionaries` and all 34
+  // tests here fail at once with "Dictionary not found" and a 503, including
+  // the ones that predate this feature by months. Creating them here makes
+  // this file independent of that order, which is what every other suite
+  // needing them already does.
+  await ensureIdentityDictionaries(ch, pgSource)
   await pg.query('DELETE FROM projects WHERE slug = $1', ['funnel-semantics'])
   const p = await pg.query<{ id: string }>(
     `INSERT INTO projects (name, slug, write_key, server_key_hash)
@@ -146,6 +177,23 @@ afterAll(async () => {
   await ch.command({
     query: `ALTER TABLE events DELETE WHERE project_id = ${projectId}`,
   })
+  // CREATE the identity dictionaries, not merely reload them.
+  //
+  // Every read in this file resolves a person through `identity_bindings`,
+  // and `reloadIdentityDictionaries` below issues `SYSTEM RELOAD DICTIONARY`,
+  // which requires one that already exists. This file never created them --
+  // it inherited them from whichever other suite had run against the same
+  // database first, and on a machine where the test database persists
+  // between runs that is always true, so the gap was invisible.
+  //
+  // It is not true of a fresh database. CI creates one per run, so whether
+  // this file passed depended on the order vitest happened to pick: land
+  // before every suite that calls `ensureIdentityDictionaries` and all 34
+  // tests here fail at once with "Dictionary not found" and a 503, including
+  // the ones that predate this feature by months. Creating them here makes
+  // this file independent of that order, which is what every other suite
+  // needing them already does.
+  await ensureIdentityDictionaries(ch, pgSource)
   await pg.query('DELETE FROM projects WHERE slug = $1', ['funnel-semantics'])
   await pg.end()
   await ch.close()
@@ -453,6 +501,218 @@ describe('funnel semantics', () => {
       } as never,
     })
     expect(res.statusCode).toBe(400)
+  })
+
+  it("leaves /dropoff's row shape unchanged now that /people shares its compile path", async () => {
+    // Task 3's whole risk: `/people`'s `select: 'members'` joins `base` and
+    // `traits`, and `/dropoff` now runs through the very same `compileFor`.
+    // A row from `/dropoff` must still be the bare (person_id, entered_at)
+    // pair it always was -- no traits key, however it got there.
+    const p = who('dropoff-shape')
+    await send([track(p, 'landed', ago(20 * HOUR))])
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v1/funnels',
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: {
+        name: `dropoff-shape-${randomUUID()}`,
+        steps: STEPS,
+        window_seconds: WINDOW,
+      } as never,
+    })
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/funnels/${created.json().id}/dropoff`,
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: { step: 1, since: RANGE.since, until: new Date().toISOString() } as never,
+    })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(Object.keys(body).sort()).toEqual(
+      ['as_of', 'next_cursor', 'people', 'range', 'step', 'window_exhausted'].sort(),
+    )
+    const row = body.people.find((r: { person_id: string }) => r.person_id === p)
+    expect(row).toBeDefined()
+    expect(Object.keys(row).sort()).toEqual(['entered_at', 'person_id'])
+  })
+
+  it("computes /people's person_count fresh within a SINGLE request, never from the funnel run's cached steps[i].people", async () => {
+    // MemberList's own comment: comparing a stale count against a page
+    // length is exactly how "that is everyone" gets printed over a
+    // truncated preview. This proves it by changing the population AFTER
+    // caching a run and confirming /people sees the change -- a route that
+    // took its count from that cached run would still report the old
+    // number.
+    const first = who('count-fresh-a')
+    await send([
+      track(first, 'landed', ago(20 * HOUR)),
+      track(first, 'clicked', ago(20 * HOUR - MINUTE)),
+    ])
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v1/funnels',
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: {
+        name: `count-fresh-${randomUUID()}`,
+        steps: STEPS,
+        window_seconds: WINDOW,
+      } as never,
+    })
+    const id = created.json().id
+
+    const ran = await app.inject({
+      method: 'POST',
+      url: `/v1/funnels/${id}/run`,
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: { since: RANGE.since, until: new Date().toISOString() } as never,
+    })
+    expect(ran.statusCode).toBe(200)
+    const stale = ran.json().steps[1].people
+
+    const second = who('count-fresh-b')
+    await send([
+      track(second, 'landed', ago(19 * HOUR)),
+      track(second, 'clicked', ago(19 * HOUR - MINUTE)),
+    ])
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/funnels/${id}/people`,
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: {
+        step: 2,
+        mode: 'reached',
+        since: RANGE.since,
+        until: new Date().toISOString(),
+      } as never,
+    })
+    expect(res.statusCode).toBe(200)
+    // The run cached ONE person at step 2; the second person landed after
+    // that run, so a fresh count must see two -- a count reusing the
+    // cached run would still report `stale`.
+    expect(res.json().person_count).toBe(stale + 1)
+  })
+
+  it('reports person_count for the WHOLE population, not the page length -- proved by a population past MEMBER_PAGE_SIZE', async () => {
+    // A DIFFERENT way `person_count` could be wrong: deriving it from
+    // `members.length` rather than a real count query passes every other
+    // test in this file, because every other fixture's population fits on
+    // one page. Own step names, isolated from every other fixture in this
+    // file sharing the plain `landed`/`clicked`/`converted` events.
+    const landed = `count-page-landed-${randomUUID()}`
+    const clicked = `count-page-clicked-${randomUUID()}`
+    const people = MEMBER_PAGE_SIZE + 5
+    const batch: object[] = []
+    for (let i = 0; i < people; i++) {
+      const anon = `sem-count-page-${i}`
+      batch.push(track(anon, landed, ago(18 * HOUR)), track(anon, clicked, ago(18 * HOUR - 500)))
+    }
+    for (let i = 0; i < batch.length; i += 400) await send(batch.slice(i, i + 400))
+
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v1/funnels',
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: {
+        name: `count-page-${randomUUID()}`,
+        steps: [{ event: landed }, { event: clicked }],
+        window_seconds: WINDOW,
+      } as never,
+    })
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/funnels/${created.json().id}/people`,
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: {
+        step: 2,
+        mode: 'reached',
+        since: RANGE.since,
+        until: new Date().toISOString(),
+      } as never,
+    })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.members).toHaveLength(MEMBER_PAGE_SIZE)
+    // The page is capped; the count must not be.
+    expect(body.person_count).toBe(people)
+  })
+
+  it("keeps /people's person_count identical across the pages of one cursor walk, even when a person's second qualifying event lands between the two requests", async () => {
+    // The gap the single-request test above cannot see: entry is gated by
+    // `until`, fixed identically on both requests below, so a fixture that
+    // only varies WHO ENTERS never exercises whether the count query
+    // actually reuses the cursor's pinned `asOf` on page 2 rather than a
+    // fresh `now()` -- both give the same answer when nothing about
+    // CONTINUATION changes between requests (compile.ts:140-152, 204-206).
+    // This fixture changes continuation instead: one extra person reaches
+    // level 1 before page 1, then reaches level 2 in the gap between the
+    // two requests, with a real wall-clock timestamp. A count query that
+    // re-derives `now` per request would see that event fall inside its
+    // scan on page 2 and report one person more than page 1 did.
+    const landed = `cross-page-landed-${randomUUID()}`
+    const clicked = `cross-page-clicked-${randomUUID()}`
+    // Real-clock-relative, not the file's `ago()`/NOW -- this fixture needs
+    // `until + window` to stay ahead of the ACTUAL wall clock at BOTH
+    // requests, which only holds if `until` tracks the real clock too.
+    const since = new Date(Date.now() - 3 * HOUR).toISOString()
+    const until = new Date(Date.now() - 1000).toISOString()
+    const enteredAt = new Date(Date.now() - 2 * MINUTE).toISOString()
+    const reachedAt = new Date(Date.now() - 90_000).toISOString()
+
+    const population = MEMBER_PAGE_SIZE + 5
+    const batch: object[] = []
+    for (let i = 0; i < population; i++) {
+      const anon = `sem-cross-page-${i}`
+      batch.push(track(anon, landed, enteredAt), track(anon, clicked, reachedAt))
+    }
+    // Reaches level 1 only, before page 1 -- not part of the level-2
+    // population either page should count YET.
+    const continuationId = `sem-cross-page-continuation-${randomUUID()}`
+    batch.push(track(continuationId, landed, enteredAt))
+    for (let i = 0; i < batch.length; i += 400) await send(batch.slice(i, i + 400))
+
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v1/funnels',
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: {
+        name: `cross-page-${randomUUID()}`,
+        steps: [{ event: landed }, { event: clicked }],
+        window_seconds: WINDOW,
+      } as never,
+    })
+    const id = created.json().id
+
+    const page1 = await app.inject({
+      method: 'POST',
+      url: `/v1/funnels/${id}/people`,
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: { step: 2, mode: 'reached', since, until } as never,
+    })
+    expect(page1.statusCode).toBe(200)
+    const page1Body = page1.json()
+    expect(page1Body.members).toHaveLength(MEMBER_PAGE_SIZE)
+    expect(page1Body.person_count).toBe(population)
+    expect(typeof page1Body.next_cursor).toBe('string')
+
+    // The continuation person's SECOND qualifying event -- strictly between
+    // the two requests, timestamped with whatever the wall clock actually
+    // is right now, which is necessarily after page 1's pinned asOf.
+    await send([track(continuationId, clicked, new Date().toISOString())])
+
+    const page2 = await app.inject({
+      method: 'POST',
+      url: `/v1/funnels/${id}/people`,
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: { step: 2, mode: 'reached', since, until, cursor: page1Body.next_cursor } as never,
+    })
+    expect(page2.statusCode).toBe(200)
+    const page2Body = page2.json()
+    expect(page2Body.members).toHaveLength(population - MEMBER_PAGE_SIZE)
+    // The count must not move between pages of the SAME walk -- a count
+    // that re-derives `now` per request would report one more here.
+    expect(page2Body.person_count).toBe(page1Body.person_count)
+    expect(page2Body.person_count).toBe(population)
   })
 
   describe('step audiences', () => {
@@ -831,6 +1091,611 @@ describe('funnel semantics', () => {
         track(person, 'converted', ago(20 * HOUR - 2 * MINUTE)),
       ])
       expect(await levelOf(person)).toBe(3)
+    })
+  })
+
+  /**
+   * WHO IS AT A STEP — `/v1/funnels/:id/people`, against the live engine.
+   *
+   * Everything above proves what LEVEL a person reached. This block proves
+   * the two populations `/people` builds on top of a level: `reached`
+   * (`level >= N` — the population a chart bar labelled with step N's count
+   * means) and `dropped` (`level = N` — the population `/dropoff` has always
+   * returned). They are one operator apart in `compile.ts` and each answers
+   * the other's question with complete confidence, so every assertion here
+   * is an EXACT SET rather than a `some(...)`.
+   *
+   * Which is only possible because every fixture below names its OWN events.
+   * The plain `landed`/`clicked`/`converted` chain is shared by a dozen tests
+   * in this file, in one shared project — an exact-set assertion over it
+   * would be a test of whatever the rest of the file happened to seed.
+   *
+   * `RANGE` verbatim on every call, never `new Date()`: several tests here
+   * compare a number from one request against a number from another, and a
+   * moving `until` moves the scan's end between the two.
+   */
+  describe('step people', () => {
+    /** A funnel of one's own, so its population is exactly what was seeded. */
+    async function createFunnel(steps: object[], extra: object = {}): Promise<number> {
+      const created = await app.inject({
+        method: 'POST',
+        url: '/v1/funnels',
+        headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+        payload: {
+          name: `people-${randomUUID()}`,
+          steps,
+          window_seconds: WINDOW,
+          ...extra,
+        } as never,
+      })
+      expect(created.statusCode).toBe(201)
+      return created.json().id as number
+    }
+
+    /**
+     * The wire shape this block reads. Narrower than `PeopleRow` on purpose:
+     * naming `traits_num` and `trait_total` here is what lets the traits test
+     * assert on them without a cast, and a cast is how a test ends up
+     * asserting against a field the response does not carry.
+     */
+    interface PeoplePage {
+      members: {
+        person_id: string
+        traits: Record<string, string>
+        traits_num: Record<string, number>
+        trait_total: number
+      }[]
+      person_count: number
+      next_cursor: string | null
+    }
+
+    async function peoplePage(
+      id: number,
+      step: number,
+      mode: 'reached' | 'dropped',
+      extra: object = {},
+    ): Promise<PeoplePage> {
+      const res = await app.inject({
+        method: 'POST',
+        url: `/v1/funnels/${id}/people`,
+        headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+        payload: { step, mode, ...RANGE, ...extra } as never,
+      })
+      expect(res.statusCode).toBe(200)
+      return res.json()
+    }
+
+    /**
+     * A second step nobody ever emits.
+     *
+     * `FunnelDefinition` requires at least two steps -- "a one-step funnel is
+     * a count" (ast.ts) -- and several fixtures below only have a question
+     * about step 1. Padding with an event that was never sent leaves step 1's
+     * population untouched and keeps the funnel legal.
+     */
+    const unreachedStep = () => ({ event: `sp-never-${randomUUID()}` })
+
+    /** The person ids on one page, sorted, for an exact-set comparison. */
+    const idsAt = async (id: number, step: number, mode: 'reached' | 'dropped') =>
+      (await peoplePage(id, step, mode)).members.map((m) => m.person_id).sort()
+
+    /**
+     * THE FIXTURE THIS ENDPOINT EXISTS FOR: one person stops at step 1, one
+     * goes all the way through, and the four (step, mode) questions have four
+     * different right answers.
+     */
+    it('separates who REACHED a step from who STOPPED at it', async () => {
+      const s1 = `sp-a1-${randomUUID()}`
+      const s2 = `sp-a2-${randomUUID()}`
+      const stopper = `sp-stopper-${randomUUID()}`
+      const converter = `sp-converter-${randomUUID()}`
+      await send([
+        track(stopper, s1, ago(20 * HOUR)),
+        track(converter, s1, ago(20 * HOUR)),
+        track(converter, s2, ago(20 * HOUR - MINUTE)),
+      ])
+      const id = await createFunnel([{ event: s1 }, { event: s2 }])
+
+      // THE ASSERTION THE `level >=` -> `level =` MUTATION BREAKS. Under that
+      // mutation `reached` at step 1 loses the converter, because they are at
+      // level 2 -- and every other assertion in this test still passes, which
+      // is exactly why the pair is written out rather than one of them.
+      expect(await idsAt(id, 1, 'reached')).toEqual([converter, stopper].sort())
+      expect(await idsAt(id, 1, 'dropped')).toEqual([stopper])
+
+      expect(await idsAt(id, 2, 'reached')).toEqual([converter])
+      // NOT empty, and the brief said it would be. `windowFunnel`'s level is
+      // "got no further than this", so someone who finished the funnel has
+      // stopped at its LAST step: `level = 2` returns the converter. This is
+      // not new behaviour to argue with -- `/dropoff` has always answered the
+      // final step this way (see `levels.ts`), and `/people` inherits it by
+      // sharing the compile path. The truth, asserted, rather than the
+      // summary.
+      expect(await idsAt(id, 2, 'dropped')).toEqual([converter])
+
+      // The count travels with the page and is mode-aware too.
+      expect((await peoplePage(id, 1, 'reached')).person_count).toBe(2)
+      expect((await peoplePage(id, 1, 'dropped')).person_count).toBe(1)
+      expect((await peoplePage(id, 2, 'reached')).person_count).toBe(1)
+      expect((await peoplePage(id, 2, 'dropped')).person_count).toBe(1)
+    })
+
+    /**
+     * THE ONLY TEST THAT SAYS THE TWO CODE PATHS AGREE.
+     *
+     * A run's `steps[N-1].people` comes from the level histogram summed by
+     * `summarise`; `/people`'s `person_count` for `reached` comes from a
+     * `count()` over `level >= N` in ClickHouse. Completely different
+     * queries, one shared meaning. Three steps with three DIFFERENT
+     * populations, so a count that is constant, off by one, or reading the
+     * wrong step cannot satisfy all three -- and the expected numbers are
+     * asserted outright as well, so the two paths agreeing on a wrong answer
+     * is not a pass either.
+     */
+    it("agrees with the run: person_count for `reached` at step N is the run's steps[N-1].people", async () => {
+      const s1 = `sp-b1-${randomUUID()}`
+      const s2 = `sp-b2-${randomUUID()}`
+      const s3 = `sp-b3-${randomUUID()}`
+      const batch: object[] = []
+      // 3 stop at step 1, 2 stop at step 2, 1 converts: 6 / 3 / 1 by step.
+      for (let i = 0; i < 6; i++) {
+        const p = `sp-agree-${i}-${randomUUID()}`
+        batch.push(track(p, s1, ago(20 * HOUR)))
+        if (i >= 3) batch.push(track(p, s2, ago(20 * HOUR - MINUTE)))
+        if (i >= 5) batch.push(track(p, s3, ago(20 * HOUR - 2 * MINUTE)))
+      }
+      await send(batch)
+      const id = await createFunnel([{ event: s1 }, { event: s2 }, { event: s3 }])
+
+      const ran = await app.inject({
+        method: 'POST',
+        url: `/v1/funnels/${id}/run`,
+        headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+        payload: { ...RANGE } as never,
+      })
+      expect(ran.statusCode).toBe(200)
+      const steps = ran.json().steps as { people: number }[]
+
+      const expected = [6, 3, 1]
+      for (let step = 1; step <= 3; step++) {
+        const page = await peoplePage(id, step, 'reached')
+        expect(page.person_count).toBe(steps[step - 1]?.people)
+        expect(page.person_count).toBe(expected[step - 1])
+        // And the page itself holds that many rows -- so a count query that
+        // is right about a population the row query does not return would
+        // still fail here.
+        expect(page.members).toHaveLength(expected[step - 1] as number)
+      }
+    })
+
+    /**
+     * A `/people` row is a MEMBER row, traits and all -- that is the whole
+     * reason the endpoint exists rather than `/dropoff` growing a mode.
+     *
+     * The person with no traits is the half that matters: `traits` must be an
+     * empty map, not a missing key. `MemberList` reads `Object.entries(row.traits)`,
+     * and a LEFT JOIN that produced `undefined` instead of `{}` would throw
+     * in the browser for exactly the people who are hardest to notice.
+     */
+    it('returns traits on the page, and empty maps rather than a missing key', async () => {
+      const s1 = `sp-c1-${randomUUID()}`
+      const traited = `sp-traited-${randomUUID()}`
+      const bare = `sp-bare-${randomUUID()}`
+      // Its own keys, so no other fixture in this shared project can answer
+      // for them.
+      const strKey = `sp_tier_${randomUUID().replaceAll('-', '')}`
+      const numKey = `sp_seats_${randomUUID().replaceAll('-', '')}`
+      await send([
+        {
+          type: 'identify',
+          message_id: randomUUID(),
+          // user_id === anonymous_id so resolution canonicalises to the id
+          // this test asserts on, rather than to a second one it would then
+          // have to hedge about.
+          anonymous_id: traited,
+          user_id: traited,
+          traits: { [strKey]: 'pro', [numKey]: 7 },
+        },
+        track(traited, s1, ago(20 * HOUR)),
+        track(bare, s1, ago(20 * HOUR)),
+      ])
+      await reloadIdentityDictionaries()
+      const id = await createFunnel([{ event: s1 }, unreachedStep()])
+
+      const page = await peoplePage(id, 1, 'reached')
+      expect(page.members.map((m) => m.person_id).sort()).toEqual([bare, traited].sort())
+
+      const withTraits = page.members.find((m) => m.person_id === traited)
+      expect(withTraits?.traits[strKey]).toBe('pro')
+      // A numeric trait travels in the OTHER map -- `t_has_num` decides which,
+      // and a row carrying `{seats: "7"}` in `traits` would be the drift
+      // `traitsCte`'s own comment warns about.
+      expect(withTraits?.traits_num[numKey]).toBe(7)
+      expect(withTraits?.trait_total).toBe(2)
+
+      const without = page.members.find((m) => m.person_id === bare)
+      expect(without).toBeDefined()
+      // Present and empty, in both maps -- `toEqual({})` alone would pass for
+      // `undefined` on neither, but the key check says the field exists at all.
+      expect(Object.hasOwn(without as object, 'traits')).toBe(true)
+      expect(Object.hasOwn(without as object, 'traits_num')).toBe(true)
+      expect(without?.traits).toEqual({})
+      expect(without?.traits_num).toEqual({})
+      expect(without?.trait_total).toBe(0)
+    })
+
+    /**
+     * SUPPRESSION IS INHERITED, IN `reached` MODE TOO.
+     *
+     * `/people` gets it by compiling through the same `perPerson` pass the
+     * run and `/dropoff` use, and inheritance is precisely what a refactor
+     * drops without anything going red. Both the page AND the count are
+     * checked: they are two compiled queries, and a filter can go missing
+     * from one of them alone.
+     */
+    it('still excludes a deleted person in `reached` mode, from the page and from the count', async () => {
+      const s1 = `sp-d1-${randomUUID()}`
+      const doomed = `sp-doomed-${randomUUID()}`
+      const survivor = `sp-survivor-${randomUUID()}`
+      await send([
+        // Identified, because DELETE needs a person the API can name -- an
+        // anonymous-only visitor answers 404 (a documented limitation, not a
+        // funnel defect).
+        {
+          type: 'identify',
+          message_id: randomUUID(),
+          anonymous_id: doomed,
+          user_id: doomed,
+        },
+        track(doomed, s1, ago(20 * HOUR)),
+        track(survivor, s1, ago(20 * HOUR)),
+      ])
+      await reloadIdentityDictionaries()
+      const id = await createFunnel([{ event: s1 }, unreachedStep()])
+
+      expect(await idsAt(id, 1, 'reached')).toEqual([doomed, survivor].sort())
+      expect((await peoplePage(id, 1, 'reached')).person_count).toBe(2)
+
+      const del = await app.inject({
+        method: 'DELETE',
+        url: `/v1/persons/${encodeURIComponent(doomed)}`,
+        headers: { 'x-lyraflow-server-key': SERVER_KEY },
+      })
+      expect([200, 202]).toContain(del.statusCode)
+
+      // The survivor is still there -- a suppression filter that removed
+      // everybody would satisfy "the deleted person is gone" perfectly.
+      expect(await idsAt(id, 1, 'reached')).toEqual([survivor])
+      expect((await peoplePage(id, 1, 'reached')).person_count).toBe(1)
+    })
+
+    /**
+     * THE FUNNEL'S `segment_id` IS INHERITED TOO, in `reached` mode.
+     *
+     * The differential is the point: the same events, the same step, two
+     * funnels differing only in the restriction. A restriction that matched
+     * nobody and one that was silently dropped both look correct against a
+     * single assertion, and neither survives the pair.
+     */
+    it('still restricts `reached` to the funnel’s segment', async () => {
+      const s1 = `sp-e1-${randomUUID()}`
+      const inside = `sp-in-${randomUUID()}`
+      const outside = `sp-out-${randomUUID()}`
+      // Its own trait value, so no other test's `enterprise` people can join
+      // this segment.
+      const plan = `sp-plan-${randomUUID()}`
+      for (const [anon, membership] of [
+        [inside, plan],
+        [outside, 'free'],
+      ] as const) {
+        await send([
+          {
+            type: 'identify',
+            message_id: randomUUID(),
+            anonymous_id: anon,
+            user_id: anon,
+            traits: { plan: membership },
+          },
+          track(anon, s1, ago(20 * HOUR)),
+        ])
+      }
+      await reloadIdentityDictionaries()
+
+      const seg = await pg.query<{ id: string }>(
+        `INSERT INTO segments (project_id, name, filter, ast_version)
+         VALUES ($1, $2, $3::jsonb, 1) RETURNING id`,
+        [
+          projectId,
+          `sp-seg-${randomUUID()}`,
+          JSON.stringify({ kind: 'trait', key: 'plan', operator: '=', value: plan }),
+        ],
+      )
+      const segmentId = Number(seg.rows[0]?.id)
+      try {
+        const wide = await createFunnel([{ event: s1 }, unreachedStep()])
+        const narrow = await createFunnel([{ event: s1 }, unreachedStep()], {
+          segment_id: segmentId,
+        })
+
+        expect(await idsAt(wide, 1, 'reached')).toEqual([inside, outside].sort())
+        expect((await peoplePage(wide, 1, 'reached')).person_count).toBe(2)
+
+        // Not "fewer": exactly the one person in the segment, in the page and
+        // in the separately compiled count.
+        expect(await idsAt(narrow, 1, 'reached')).toEqual([inside])
+        expect((await peoplePage(narrow, 1, 'reached')).person_count).toBe(1)
+      } finally {
+        await pg.query('DELETE FROM segments WHERE id = $1', [segmentId])
+      }
+    })
+
+    /**
+     * PAGING `reached` PAST `MEMBER_PAGE_SIZE`.
+     *
+     * Every entrant shares ONE instant, deliberately -- the same reasoning as
+     * the `/dropoff` paging test above. Spacing them a second apart gives
+     * every row a distinct `entered_at`, the tie-breaker in the keyset is then
+     * never consulted, and a cursor collapsed to `entered_at <` alone looks
+     * perfect. Ties are the only shape that tests the boundary instant.
+     */
+    it('pages `reached` past MEMBER_PAGE_SIZE without repeating or skipping the boundary instant', async () => {
+      const s1 = `sp-f1-${randomUUID()}`
+      const population = MEMBER_PAGE_SIZE + 5
+      const ids = Array.from(
+        { length: population },
+        (_, i) => `sp-page-${String(i).padStart(3, '0')}-${randomUUID()}`,
+      )
+      const batch = ids.map((p) => track(p, s1, ago(20 * HOUR)))
+      // Batches are capped at 500 payloads, so this goes in chunks.
+      for (let i = 0; i < batch.length; i += 400) await send(batch.slice(i, i + 400))
+      const id = await createFunnel([{ event: s1 }, unreachedStep()])
+
+      const seen: string[] = []
+      let cursor: string | null = null
+      for (let page = 0; page < 10; page++) {
+        const body: PeoplePage = await peoplePage(id, 1, 'reached', cursor ? { cursor } : {})
+        expect(body.person_count).toBe(population)
+        seen.push(...body.members.map((m) => m.person_id))
+        cursor = body.next_cursor
+        if (!cursor) break
+      }
+      // It genuinely paged rather than fitting in one response...
+      expect(seen.length).toBeGreaterThan(MEMBER_PAGE_SIZE)
+      // ...nobody twice...
+      expect(new Set(seen).size).toBe(seen.length)
+      // ...and exactly the seeded population, so a walk that skipped the
+      // people sharing the boundary instant fails here rather than passing a
+      // duplicate check it never had a chance to break.
+      expect([...seen].sort()).toEqual([...ids].sort())
+    })
+
+    /**
+     * THE COMPLEMENT OF THE TEST ABOVE: DISTINCT INSTANTS, so the SORT
+     * DIRECTION is observable.
+     *
+     * The tie fixture above is right to put every entrant at one instant --
+     * that is the only shape that consults the keyset's tie-breaker. But it
+     * has a blind spot, and so does every other `/people` fixture in this
+     * file, because they all share that instant too: with every `entered_at`
+     * equal, `ORDER BY entered_at DESC` and `ASC` return the same rows in the
+     * same order, and the direction is pinned by nothing. Flipping it left all
+     * 33 tests green.
+     *
+     * It is not cosmetic. The keyset resumes with `entered_at < cursor`, which
+     * is only a continuation of a DESCENDING walk. Under `ASC` the cursor
+     * carries the LARGEST instant seen, so page two re-serves the start of the
+     * same population: the walk repeats rows instead of advancing.
+     *
+     * One minute apart, which is also this file's spacing rule -- `WINDOW` is
+     * 3600, so hour-spaced entrants would sit on the window boundary.
+     */
+    it('pages `reached` in one direction when every entrant has a DISTINCT instant', async () => {
+      const s1 = `sp-i1-${randomUUID()}`
+      const population = MEMBER_PAGE_SIZE + 5
+      const ids = Array.from(
+        { length: population },
+        (_, i) => `sp-order-${String(i).padStart(3, '0')}-${randomUUID()}`,
+      )
+      // Every entrant a minute apart, newest first, and all of them inside
+      // RANGE: 105 minutes back from 20 hours ago is still well short of
+      // `since`.
+      const batch = ids.map((p, i) => track(p, s1, ago(20 * HOUR + i * MINUTE)))
+      for (let i = 0; i < batch.length; i += 400) await send(batch.slice(i, i + 400))
+      const id = await createFunnel([{ event: s1 }, unreachedStep()])
+
+      const seen: string[] = []
+      let cursor: string | null = null
+      for (let page = 0; page < 10; page++) {
+        const body: PeoplePage = await peoplePage(id, 1, 'reached', cursor ? { cursor } : {})
+        expect(body.person_count).toBe(population)
+        seen.push(...body.members.map((m) => m.person_id))
+        cursor = body.next_cursor
+        if (!cursor) break
+      }
+      expect(seen.length).toBeGreaterThan(MEMBER_PAGE_SIZE)
+      // Both halves are needed and neither is redundant. A walk sorted the
+      // wrong way round re-serves people it has already sent, so it fails the
+      // duplicate check; one that also drops the tail fails the set check.
+      expect(new Set(seen).size).toBe(seen.length)
+      expect([...seen].sort()).toEqual([...ids].sort())
+      // And the direction read straight off page one rather than inferred
+      // from the walk: newest entrant first, which is what the keyset's `<`
+      // is a continuation of. `ids` was seeded newest-first, so this is the
+      // seeding order unchanged.
+      const firstPage = await peoplePage(id, 1, 'reached')
+      expect(firstPage.members.map((m) => m.person_id)).toEqual(ids.slice(0, MEMBER_PAGE_SIZE))
+    })
+
+    /**
+     * THE COLUMN, not the direction: everything above gives each person
+     * exactly one event, so `entered_at` and `last_seen` are the same value
+     * and sorting by either produces the same walk. Pin the column by
+     * breaking that tie -- a second, non-funnel event per person, timed so
+     * `last_seen`'s order is the REVERSE of `entered_at`'s. If the walk is
+     * ever sorted by `last_seen` instead, page two re-serves page one and
+     * the tail is never reached.
+     */
+    it('pages `reached` by entered_at, not by last_seen, when a second event moves the two apart', async () => {
+      const s1 = `sp-o2-${randomUUID()}`
+      const other = `sp-o2-other-${randomUUID()}`
+      const population = MEMBER_PAGE_SIZE + 5
+      const ids = Array.from(
+        { length: population },
+        (_, i) => `sp-order-col-${String(i).padStart(3, '0')}-${randomUUID()}`,
+      )
+      const entryBatch = ids.map((p, i) => track(p, s1, ago(20 * HOUR + i * MINUTE)))
+      // Always more recent than the funnel event above (10h base vs 20h),
+      // so `last_seen` is exactly this timestamp -- and offset in the
+      // OPPOSITE order, so its ranking across the population is reversed.
+      const otherBatch = ids.map((p, i) =>
+        track(p, other, ago(10 * HOUR + (population - 1 - i) * MINUTE)),
+      )
+      for (let i = 0; i < entryBatch.length; i += 400) await send(entryBatch.slice(i, i + 400))
+      for (let i = 0; i < otherBatch.length; i += 400) await send(otherBatch.slice(i, i + 400))
+      const id = await createFunnel([{ event: s1 }, unreachedStep()])
+
+      const seen: string[] = []
+      let cursor: string | null = null
+      for (let page = 0; page < 10; page++) {
+        const body: PeoplePage = await peoplePage(id, 1, 'reached', cursor ? { cursor } : {})
+        expect(body.person_count).toBe(population)
+        seen.push(...body.members.map((m) => m.person_id))
+        cursor = body.next_cursor
+        if (!cursor) break
+      }
+      expect(seen.length).toBeGreaterThan(MEMBER_PAGE_SIZE)
+      expect(new Set(seen).size).toBe(seen.length)
+      expect([...seen].sort()).toEqual([...ids].sort())
+    })
+
+    /**
+     * MY OWN MUTATION -- a STEP AUDIENCE read through `/people`, which is the
+     * one combination nothing else in this plan or this file puts together.
+     *
+     * The shape every `/people` fixture has in common is a funnel of plain
+     * events, and the shape every audience fixture has in common is reading
+     * the answer through `/dropoff`, whose `select: 'ids'` compiles no CTEs
+     * of its own. `select: 'members'` does: it wraps the per-person pass in
+     * `WITH base AS (…), traits AS (…)`. An audience compiles a whole
+     * `compileSegment` -- which builds its OWN `base`, `traits` and `beh`
+     * CTEs -- into an `IN (…)` INSIDE that per-person pass. So this query
+     * nests a `WITH base` inside a `WITH base`, which the file's own
+     * two-audiences test already names as the failure mode to fear: "a CTE
+     * name resolved across the pair rather than within it would silently give
+     * both gates the same population". Here the outer `base` is not another
+     * gate but the member projection's own join source, so a leak in either
+     * direction is worse than a wrong gate -- it is a wrong person row.
+     *
+     * Three people, so both directions are pinned: one passes the gate, one
+     * fails it and must still appear at step 1, and one is outside the funnel
+     * entirely.
+     */
+    it('applies a step audience to a `/people` page, whose member CTEs share its names', async () => {
+      const s1 = `sp-g1-${randomUUID()}`
+      const s2 = `sp-g2-${randomUUID()}`
+      const gate = `sp-gate-${randomUUID()}`
+      const passes = `sp-aud-pass-${randomUUID()}`
+      const fails = `sp-aud-fail-${randomUUID()}`
+      await send([
+        // Two gate events for one, one for the other -- the only difference
+        // between them, so the audience is the only thing that can separate
+        // them.
+        track(passes, gate, ago(21 * HOUR)),
+        track(passes, gate, ago(21 * HOUR - MINUTE)),
+        track(fails, gate, ago(21 * HOUR)),
+        track(passes, s1, ago(20 * HOUR)),
+        track(passes, s2, ago(20 * HOUR - MINUTE)),
+        track(fails, s1, ago(20 * HOUR)),
+        track(fails, s2, ago(20 * HOUR - MINUTE)),
+      ])
+      const id = await createFunnel([
+        { event: s1 },
+        {
+          event: s2,
+          audience: {
+            kind: 'behavior',
+            event: gate,
+            aggregate: 'count',
+            window: { kind: 'last', n: 1, unit: 'days' },
+            operator: '>=',
+            value: 2,
+          },
+        },
+      ])
+
+      // Both entered, so step 1 `reached` is both -- the audience must not
+      // erase anyone from the report.
+      expect(await idsAt(id, 1, 'reached')).toEqual([fails, passes].sort())
+      // Only the gated one advanced.
+      expect(await idsAt(id, 2, 'reached')).toEqual([passes])
+      expect((await peoplePage(id, 2, 'reached')).person_count).toBe(1)
+      // And the other stopped at step 1 rather than vanishing.
+      expect(await idsAt(id, 1, 'dropped')).toEqual([fails])
+    })
+
+    /**
+     * MY SECOND MUTATION -- ONE PERSON, TWO IDS, ONE ROW.
+     *
+     * The shape every `/people` fixture shares, mine and Task 2's alike, is a
+     * person who exists under a single anonymous id. That hides the join this
+     * projection is built on: `perPerson` resolves identity from the EVENT's
+     * own timestamp, while `base` and `traits` resolve it independently --
+     * `traits` at `now()`, from a different table entirely. Three resolutions,
+     * one row, and nothing above asks them to agree.
+     *
+     * The count is the assertion that matters. If the funnel pass and the
+     * member join disagreed about who this is, the honest failure is not a
+     * missing trait but TWO rows -- the anonymous half at level 1 and the
+     * identified half at level 1 -- which reads as a perfectly plausible page
+     * unless the test says how many people there are supposed to be.
+     */
+    it('returns ONE row for a person identified in the middle of the funnel', async () => {
+      const s1 = `sp-h1-${randomUUID()}`
+      const s2 = `sp-h2-${randomUUID()}`
+      const anon = `sp-id-anon-${randomUUID()}`
+      const user = `sp-id-user-${randomUUID()}`
+      const key = `sp_role_${randomUUID().replaceAll('-', '')}`
+      await send([track(anon, s1, ago(20 * HOUR))])
+      await send([
+        {
+          type: 'identify',
+          message_id: randomUUID(),
+          anonymous_id: anon,
+          user_id: user,
+          traits: { [key]: 'admin' },
+        },
+      ])
+      await reloadIdentityDictionaries()
+      // Step 2 arrives as the KNOWN user, on the far side of the identify.
+      await send([
+        {
+          type: 'track',
+          message_id: randomUUID(),
+          user_id: user,
+          event: s2,
+          timestamp: ago(20 * HOUR - MINUTE),
+        },
+      ])
+      const id = await createFunnel([{ event: s1 }, { event: s2 }])
+
+      const page = await peoplePage(id, 2, 'reached')
+      // ONE person, not two halves of one.
+      expect(page.members).toHaveLength(1)
+      expect(page.person_count).toBe(1)
+      const row = page.members[0]
+      // Under whichever id resolution canonicalises to -- this file's standing
+      // hedge, because which one it is is not this test's claim.
+      expect([anon, user]).toContain(row?.person_id)
+      // The traits were written against the ANONYMOUS id and the funnel found
+      // this person through the USER id. The trait map is where those two
+      // resolutions have to meet.
+      expect(row?.traits[key]).toBe('admin')
+
+      // And step 1 holds the same single person, not the anonymous half on
+      // its own -- `reached` at step 1 is where a split would show as two.
+      const first = await peoplePage(id, 1, 'reached')
+      expect(first.members).toHaveLength(1)
+      expect(first.person_count).toBe(1)
     })
   })
 

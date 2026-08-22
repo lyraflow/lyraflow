@@ -28,6 +28,16 @@ import { useIsWide } from './useIsWide.js'
 export function FunnelFlowOrBars(props: {
   result: FunnelRunResult
   definition?: readonly FunnelStep[] | null
+  /** The step whose people are currently shown beneath the chart, by its
+   * 1-indexed `index`. Forwarded verbatim to whichever of `FunnelFlow` /
+   * `StepBars` renders -- see either's own doc comment for what it does. */
+  selectedStep?: number | null
+  /** Reports which step was clicked. Omitted by a caller with nothing to do
+   * about a click -- `FunnelBuilder`'s preview passes neither this nor
+   * `selectedStep`, which is what keeps its unsaved-definition preview
+   * inert: both `FunnelFlow` and `StepBars` render no interactive step
+   * control at all without it. */
+  onSelectStep?: (step: number) => void
 }) {
   const wide = useIsWide()
   return wide ? <FunnelFlow {...props} /> : <StepBars {...props} />

@@ -32,6 +32,14 @@ export default defineConfig({
     // `@playwright/test`'s own `test()` outside Playwright's runner and
     // fails the whole suite with "Playwright Test did not expect test() to
     // be called here."
-    exclude: [...configDefaults.exclude, 'e2e/**'],
+    // `dist/**` for a second reason of the same kind: `pnpm build` runs
+    // `tsc -b`, which emits every `.test.tsx` beside the source it compiled,
+    // so a built package carries a JS copy of its own suite. Vitest then
+    // collects both, and the copy runs against stale output from whenever
+    // the last build happened -- passing or failing for reasons unrelated to
+    // the source. It stayed invisible until this branch added a test file
+    // that did not exist in an older `dist`, at which point the suite grew
+    // two phantom files that no source change could fix.
+    exclude: [...configDefaults.exclude, 'e2e/**', 'dist/**'],
   },
 })

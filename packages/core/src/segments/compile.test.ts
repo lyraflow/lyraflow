@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest'
+import { AST_VERSION } from './ast.js'
 import type { FilterNode, SegmentQuery } from './ast.js'
-import { MEMBER_PAGE_SIZE, TRAITS_PER_MEMBER_MAX, compileSegment } from './compile.js'
+import {
+  MEMBER_PAGE_SIZE,
+  TRAITS_PER_MEMBER_MAX,
+  compileSegment,
+  memberProjection,
+  traitsCte,
+} from './compile.js'
+import { Params } from './params.js'
 import { SegmentValidationError } from './validate.js'
 
 const compile = (filter: FilterNode) =>
@@ -297,5 +305,55 @@ describe('compileSegment', () => {
     // See "emits no cursor predicate on the first page" for why this is a
     // regex anchored to the cursor shape rather than a bare substring check.
     expect(sql).not.toMatch(/last_seen < \{/)
+  })
+})
+
+describe('shared member projection', () => {
+  it('is the projection the members select actually uses', () => {
+    // Exported so the funnel people query compiles the SAME columns. A second
+    // projection would drift first at `trait_total`, which is the field that
+    // tells a reader what was held back -- and a reader shown a truncated
+    // trait list with no count believes it is complete.
+    const p = memberProjection()
+    for (const field of [
+      'person_id',
+      'first_seen',
+      'last_seen',
+      'traits',
+      'traits_num',
+      'trait_total',
+    ]) {
+      expect(p).toContain(field)
+    }
+  })
+
+  it('builds a traits CTE that reads person_traits and nothing else', () => {
+    const cte = traitsCte({ database: 'lyraflow', projectId: 7, params: new Params() })
+    expect(cte).toContain('traits AS (')
+    expect(cte).toContain('person_traits')
+    expect(cte).toContain('t_has_num')
+  })
+
+  // A pure extraction. If the members SQL moves at all -- even whitespace --
+  // the refactor was not one, and every segment member walk in the product
+  // goes through this code. Captured byte-for-byte from the pre-extraction
+  // compiler (`memberProjection` module-private, the traits CTE inlined)
+  // with these exact inputs, so this is not a substring check that a moved
+  // fragment could still satisfy.
+  const BASELINE_MEMBERS_SQL =
+    "WITH\n  dev AS (\n    SELECT\n      project_id,\n      anonymous_id,\n      user_id,\n      minMerge(first_seen) AS m_first_seen,\n      maxMerge(last_seen)  AS timestamp,\n      maxMerge(last_seen)  AS m_last_seen,\n      argMaxMerge(latest_country) AS m_latest_country,\n      argMaxMerge(latest_region) AS m_latest_region,\n      argMaxMerge(latest_city) AS m_latest_city,\n      argMaxMerge(latest_device) AS m_latest_device,\n      argMaxMerge(latest_os) AS m_latest_os,\n      argMaxMerge(latest_browser) AS m_latest_browser,\n      argMinMerge(first_referrer) AS m_first_referrer,\n      argMinMerge(first_source) AS m_first_source,\n      argMinMerge(first_medium) AS m_first_medium,\n      argMinMerge(first_campaign) AS m_first_campaign,\n      argMinMerge(first_country) AS m_first_country,\n      argMinMerge(first_region) AS m_first_region,\n      argMinMerge(first_city) AS m_first_city,\n      argMinMerge(first_device) AS m_first_device,\n      argMinMerge(first_os) AS m_first_os,\n      argMinMerge(first_browser) AS m_first_browser\n    FROM device_index\n    WHERE project_id = {p0:UInt32}\n    GROUP BY project_id, anonymous_id, user_id, month\n  ),\n  base AS (\n    SELECT\n      /* two-stage identity resolution: stage 1 (identity_bindings) resolves device -> person for anonymous events, then stage 2 (person_aliases) resolves person -> canonical unconditionally */ dictGetOrDefault('lyraflow.person_aliases', 'canonical_id', (dev.project_id, if(dev.user_id != '', dev.user_id, dictGetOrDefault('lyraflow.identity_bindings', 'person_id', (dev.project_id, dev.anonymous_id), toDateTime(dev.timestamp), dev.anonymous_id))), if(dev.user_id != '', dev.user_id, dictGetOrDefault('lyraflow.identity_bindings', 'person_id', (dev.project_id, dev.anonymous_id), toDateTime(dev.timestamp), dev.anonymous_id))) AS person_id,\n      min(m_first_seen) AS first_seen,\n      max(m_last_seen)  AS last_seen,\n      argMax(m_latest_country, m_last_seen) AS latest_country,\n      argMax(m_latest_region, m_last_seen) AS latest_region,\n      argMax(m_latest_city, m_last_seen) AS latest_city,\n      argMax(m_latest_device, m_last_seen) AS latest_device,\n      argMax(m_latest_os, m_last_seen) AS latest_os,\n      argMax(m_latest_browser, m_last_seen) AS latest_browser,\n      argMin(m_first_referrer, m_first_seen) AS first_referrer,\n      argMin(m_first_source, m_first_seen) AS first_source,\n      argMin(m_first_medium, m_first_seen) AS first_medium,\n      argMin(m_first_campaign, m_first_seen) AS first_campaign,\n      argMin(m_first_country, m_first_seen) AS first_country,\n      argMin(m_first_region, m_first_seen) AS first_region,\n      argMin(m_first_city, m_first_seen) AS first_city,\n      argMin(m_first_device, m_first_seen) AS first_device,\n      argMin(m_first_os, m_first_seen) AS first_os,\n      argMin(m_first_browser, m_first_seen) AS first_browser\n    FROM dev\n    GROUP BY person_id\n  ),\n  traits AS (\n    SELECT\n      /* two-stage identity resolution: stage 1 (identity_bindings) resolves device -> person for anonymous events, then stage 2 (person_aliases) resolves person -> canonical unconditionally */ dictGetOrDefault('lyraflow.person_aliases', 'canonical_id', (tr.project_id, if(tr.user_id != '', tr.user_id, dictGetOrDefault('lyraflow.identity_bindings', 'person_id', (tr.project_id, tr.anonymous_id), toDateTime(tr.timestamp), tr.anonymous_id))), if(tr.user_id != '', tr.user_id, dictGetOrDefault('lyraflow.identity_bindings', 'person_id', (tr.project_id, tr.anonymous_id), toDateTime(tr.timestamp), tr.anonymous_id))) AS person_id,\n      CAST((groupArray(trait_key), groupArray(m_value_str)), 'Map(String, String)')  AS t_str,\n      CAST((groupArray(trait_key), groupArray(m_value_num)), 'Map(String, Float64)') AS t_num,\n      CAST((groupArray(trait_key), groupArray(m_has_num)),   'Map(String, UInt8)')   AS t_has_num\n    FROM (\n      SELECT\n        anonymous_id, user_id, project_id, trait_key,\n        argMaxMerge(value_str) AS m_value_str,\n        argMaxMerge(value_num) AS m_value_num,\n        argMaxMerge(has_num)   AS m_has_num,\n        now() AS timestamp\n      FROM person_traits\n      WHERE project_id = {p3:UInt32}\n      GROUP BY project_id, anonymous_id, user_id, trait_key\n    ) AS tr\n    GROUP BY person_id\n  )\nSELECT\n  person_id,\n  first_seen,\n  last_seen,\n  latest_country AS country,\n  latest_region AS region,\n  latest_city AS city,\n  latest_device AS device_type,\n  latest_os AS os,\n  latest_browser AS browser,\n  first_referrer AS referrer,\n  first_source AS utm_source,\n  first_medium AS utm_medium,\n  first_campaign AS utm_campaign,\n  CAST((arraySlice(arraySort(mapKeys(mapFilter((k, v) -> t_has_num[k] = 0, t_str))), 1, 50), arrayMap(k -> t_str[k], arraySlice(arraySort(mapKeys(mapFilter((k, v) -> t_has_num[k] = 0, t_str))), 1, 50))), 'Map(String, String)') AS traits,\n  CAST((arraySlice(arraySort(mapKeys(mapFilter((k, v) -> t_has_num[k] = 1, t_num))), 1, 50), arrayMap(k -> t_num[k], arraySlice(arraySort(mapKeys(mapFilter((k, v) -> t_has_num[k] = 1, t_num))), 1, 50))), 'Map(String, Float64)') AS traits_num,\n  toUInt32(length(t_has_num)) AS trait_total\nFROM base\nLEFT JOIN traits USING (person_id)\n\nWHERE NOT (dictHas('lyraflow.suppressed_persons', ({p4:UInt32}, base.person_id)) AND base.last_seen <= dictGetOrDefault('lyraflow.suppressed_persons', 'suppressed_at', ({p4:UInt32}, base.person_id), toDateTime64(4294967295, 6)))\n  AND (t_str[{p1:String}] = {p2:String})\nORDER BY last_seen DESC, person_id ASC\nLIMIT 100"
+
+  it('leaves the segment members query unchanged, byte-for-byte', () => {
+    const q = compileSegment({
+      query: {
+        ast_version: AST_VERSION,
+        filter: { kind: 'trait', key: 'plan', operator: '=', value: 'pro' },
+      },
+      projectId: 7,
+      database: 'lyraflow',
+      now: new Date('2026-08-22T00:00:00Z'),
+      select: 'members',
+    })
+    expect(q.sql).toBe(BASELINE_MEMBERS_SQL)
   })
 })

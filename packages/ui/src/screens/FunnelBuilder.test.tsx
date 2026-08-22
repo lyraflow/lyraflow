@@ -69,6 +69,11 @@ function fakeBuilderClient(over: Record<string, unknown> = {}) {
     createFunnel: vi.fn(async () => ({ ...FUNNEL, id: 42 })),
     patchFunnel: vi.fn(async () => ({ ...FUNNEL, id: 42 })),
     funnel: vi.fn(async () => FUNNEL),
+    // `FunnelDetail` loads its people panel on mount now -- a step click IS
+    // the request, so there is no "Show people" gate to hold the fetch back.
+    // This suite renders the real detail screen when checking where a save
+    // lands, so its client needs the call or the effect throws.
+    funnelPeople: vi.fn(() => new Promise<never>(() => {})),
     ...over,
   } as unknown as ApiClient & {
     schemaEvents: Mock
@@ -623,6 +628,12 @@ describe('FunnelBuilder — a successful edit lands on the detail page, not the 
       }),
       funnel: vi.fn(async () => currentFunnel),
       runFunnel: vi.fn(async () => RUN),
+      // This test builds its own stand-in server rather than using
+      // `fakeBuilderClient`, so it needs the people call too: the detail
+      // screen it lands on loads its panel on mount, with no "Show people"
+      // gate to hold the fetch back. Left pending — where the save lands is
+      // what this test is about, not what the panel shows.
+      funnelPeople: vi.fn(() => new Promise<never>(() => {})),
     } as unknown as ApiClient & {
       patchFunnel: Mock
       funnel: Mock

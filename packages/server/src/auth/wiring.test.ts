@@ -300,6 +300,16 @@ describe('every funnels route accepts a session', () => {
     expect(res.statusCode).toBeLessThan(400)
   })
 
+  it('POST /v1/funnels/:id/people', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/funnels/${sessionFunnelId}/people`,
+      headers: { cookie, 'x-lyraflow-ui': '1', 'x-lyraflow-project': String(projectId) },
+      payload: { step: 1, mode: 'reached' },
+    })
+    expect(res.statusCode).toBeLessThan(400)
+  })
+
   // Last: the routes above need this funnel to still exist.
   it('DELETE /v1/funnels/:id', async () => {
     const res = await app.inject({
