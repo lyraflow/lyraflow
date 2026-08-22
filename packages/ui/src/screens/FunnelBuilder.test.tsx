@@ -846,6 +846,21 @@ describe('audiences', () => {
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
   })
 
+  it('says which condition is unfinished, on that condition’s own row', async () => {
+    // `audiences.incomplete` (`FunnelBuilder.tsx`) is what disables Save
+    // above -- but a disabled button with nothing else on screen leaves the
+    // operator no way to tell WHICH of a step's conditions is holding it
+    // down. `incomplete` has to actually reach `StepRows` -> `TreeEditor` ->
+    // `ConditionRow` for that sentence to land on the seeded trait's row,
+    // not merely be computed and discarded.
+    renderBuilder()
+    await fillTwoSteps()
+    await userEvent.click(screen.getByRole('button', { name: 'Add audience to step 1' }))
+    expect(
+      within(await screen.findByTestId('condition-0')).getByText(/not finished/i),
+    ).toBeInTheDocument()
+  })
+
   it('refuses Preview on the same draft, for the same reason', async () => {
     renderBuilder()
     await fillTwoSteps()
@@ -912,11 +927,27 @@ describe('audiences', () => {
   it('resolves a warning against the condition it names, not its wrapper', async () => {
     const client = fakeBuilderClient({
       funnel: vi.fn(async () => FUNNEL_BARE_LEAF_AUDIENCE),
-      previewFunnel: vi.fn(async () => ({
+      // Derived from the DEFINITION this call is handed, not hard-coded --
+      // `funnelCostWarnings` (`packages/core/src/funnels/validate.ts`) only
+      // ever raises a warning on a `behavior` leaf it walks into, never on a
+      // group's own root, so the path it returns depends on whether the
+      // audience it was SENT is group-rooted. A fixture that returns
+      // `steps.0.filter` regardless of what was sent describes a response
+      // the real endpoint can never produce for a group-rooted request --
+      // and after the load's own normalisation, everything this screen
+      // sends is group-rooted (`FunnelBuilder`'s seeding effect, `StepRows`'
+      // "Add audience", and `TreeEditor`'s own group-preserving edits all
+      // guarantee it). This mock earns the right to assert the CORRECT
+      // path by computing it the way the endpoint does, rather than
+      // asserting a path no real preview call would ever return here.
+      previewFunnel: vi.fn(async (_projectId, definition) => ({
         ...RUN,
         warnings: [
           {
-            path: 'steps.0.filter',
+            path:
+              definition.steps[0].audience?.kind === 'group'
+                ? 'steps.0.filter.children[0]'
+                : 'steps.0.filter',
             reason:
               'the `docs_search` condition uses an `ever` window, which scans all history rather than a bounded window',
           },
@@ -926,10 +957,16 @@ describe('audiences', () => {
     renderBuilder(client, FUNNEL_BARE_LEAF_AUDIENCE.id)
     await screen.findByTestId('step-1-audience')
     await userEvent.click(screen.getByRole('button', { name: 'Preview' }))
-    // `funnelCostWarnings` ran against the tree the SERVER holds -- a bare
-    // leaf at `steps.0.filter`, which resolves to editor path []. The load
-    // normalised it to [0]. If the normalisation happened at RENDER instead,
-    // the two disagree and this warning lands on the wrapping group.
+    // The load normalised the stored bare leaf to editor path [0] -- and,
+    // because normalisation happened at the SEEDING EFFECT rather than at
+    // render, what got SENT just now was the same group-rooted tree, so
+    // the mock above (deriving from what it was sent) returns
+    // `steps.0.filter.children[0]`, which resolves to editor path [0] and
+    // lands on this condition. If normalisation happened at RENDER
+    // instead, `buildDefinition()` would still send the bare, un-wrapped
+    // leaf -- the mock would then return the bare `steps.0.filter` it was
+    // sent, which resolves to [] and lands nowhere `GroupCard` renders
+    // text for.
     const row = await screen.findByTestId('condition-0')
     expect(within(row).getByText(/scans all history/)).toBeInTheDocument()
   })
