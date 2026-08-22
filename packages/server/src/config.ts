@@ -11,6 +11,15 @@ export interface Config {
   purgeIntervalMs: number
   purgeLeaseMs: number
   purgeMaxAttempts: number
+  /** How long `ProjectCache` serves a project row it already fetched. See
+   * `DEFAULT_PROJECT_CACHE_TTL_MS`. */
+  projectCacheTtlMs: number
+  projectPurgeIntervalMs: number
+  projectPurgeLeaseMs: number
+  projectPurgeMaxAttempts: number
+  /** Derived, never read from its own environment variable — see
+   * `purgeClaimDelayMs`. */
+  projectPurgeClaimDelayMs: number
   allowedOrigins: string[]
   retentionIntervalMs: number
   retentionEnabled: boolean
@@ -29,6 +38,58 @@ export interface Config {
  * shutdown guarantee is silently void.
  */
 export const STOP_GRACE_PERIOD_MS = 30_000
+
+/**
+ * `ProjectCache`'s positive TTL. It was a literal at the one place the cache
+ * is constructed until a second consumer appeared that has to know the same
+ * number: `purgeClaimDelayMs` below.
+ */
+export const DEFAULT_PROJECT_CACHE_TTL_MS = 60_000
+
+/** `IngestBuffer`'s flush cadence — how long an already-accepted event can
+ * sit in memory before it lands in `events`. */
+export const DEFAULT_FLUSH_INTERVAL_MS = 1_000
+
+/**
+ * Added to the cache horizon so the two windows below are covered even when
+ * the clock they are measured against is not the one that stamped
+ * `requested_at`: a `ProjectCache` lookup issued a moment BEFORE the
+ * `deleting_at` write commits can still land after it, and caches a row that
+ * is already out of date the instant it is stored. The margin is the
+ * allowance for that round trip (and for a process paused mid-lookup by GC
+ * or by the scheduler), not decoration on top of a number that is already
+ * exact.
+ */
+export const CLAIM_DELAY_MARGIN_MS = 5_000
+
+/**
+ * How long a `project_deletions` row must sit before any purge may claim it.
+ *
+ * LOAD-BEARING, NOT POLITENESS. `purgeProject`'s verify step says "ingest is
+ * already refused by then, so the reappearing set is bounded" — this delay is
+ * the only thing that makes that sentence true. Ingest reads `deletingAt` off
+ * `ProjectCache`, an in-process map with a TTL, so for up to
+ * `projectCacheTtlMs` after the stamp ANY process can still be answering 202
+ * from a cached row that says the project is live, and for a further
+ * `flushIntervalMs` the events it accepted are still in `IngestBuffer` on
+ * their way to `events`. `DELETE /v1/projects/:id` calls
+ * `projects.invalidate()`, but that clears one process's memory: it says
+ * nothing about a second app process, and nothing at all about the CLI, which
+ * writes `deleting_at` straight to Postgres and can reach no cache anywhere.
+ *
+ * Start a purge inside that window and the teardown races events that are
+ * still being accepted; the Postgres row is then deleted while ClickHouse
+ * partitions are being repopulated, which is exactly the orphaned-project
+ * state (#39) this whole feature exists to make unreachable — reported as a
+ * success. Waiting the window out costs one delay per delete and removes the
+ * race entirely.
+ */
+export function purgeClaimDelayMs(opts: {
+  projectCacheTtlMs: number
+  flushIntervalMs: number
+}): number {
+  return opts.projectCacheTtlMs + opts.flushIntervalMs + CLAIM_DELAY_MARGIN_MS
+}
 
 function num(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
   const raw = env[key]
@@ -74,6 +135,15 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     )
   }
 
+  // Read once and used TWICE: as `ProjectCache`'s TTL, and as the cache
+  // horizon a project purge must wait out before it may claim. The two are
+  // the same number by construction rather than by two literals agreeing —
+  // tuning the TTL down without the claim delay following it would leave the
+  // delay longer than it needs to be; tuning it UP without the delay
+  // following would reopen the race the delay exists to close.
+  const projectCacheTtlMs = num(env, 'LYRAFLOW_PROJECT_CACHE_TTL_MS', DEFAULT_PROJECT_CACHE_TTL_MS)
+  const flushIntervalMs = num(env, 'LYRAFLOW_FLUSH_INTERVAL_MS', DEFAULT_FLUSH_INTERVAL_MS)
+
   const drainDeadlineMs = num(env, 'LYRAFLOW_DRAIN_DEADLINE_MS', 25_000)
   if (drainDeadlineMs >= STOP_GRACE_PERIOD_MS) {
     throw new Error(
@@ -91,7 +161,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
       password: env.LYRAFLOW_CLICKHOUSE_PASSWORD as string,
       database: env.LYRAFLOW_CLICKHOUSE_DB as string,
     },
-    flushIntervalMs: num(env, 'LYRAFLOW_FLUSH_INTERVAL_MS', 1000),
+    flushIntervalMs,
     flushRows: num(env, 'LYRAFLOW_FLUSH_ROWS', 1000),
     bufferMaxRows: num(env, 'LYRAFLOW_BUFFER_MAX_ROWS', 100_000),
     drainDeadlineMs,
@@ -108,6 +178,19 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     // A poisoned request stops being claimed past this, with last_error
     // saying why, rather than spinning forever.
     purgeMaxAttempts: num(env, 'LYRAFLOW_PURGE_MAX_ATTEMPTS', 5),
+    // The project purge's own knobs, separate from the person purge's: a
+    // project teardown is minutes of partition drops and mutations where a
+    // person purge is seconds, so the lease that makes a crash recoverable
+    // is not the same number.
+    projectCacheTtlMs,
+    projectPurgeIntervalMs: num(env, 'LYRAFLOW_PROJECT_PURGE_INTERVAL_MS', 15_000),
+    projectPurgeLeaseMs: num(env, 'LYRAFLOW_PROJECT_PURGE_LEASE_MS', 1_800_000),
+    projectPurgeMaxAttempts: num(env, 'LYRAFLOW_PROJECT_PURGE_MAX_ATTEMPTS', 5),
+    // Not its own environment variable on purpose: an operator who could set
+    // this independently could set it BELOW the cache TTL, and a purge
+    // claimed one second early is indistinguishable from a purge that worked
+    // until the day it silently did not.
+    projectPurgeClaimDelayMs: purgeClaimDelayMs({ projectCacheTtlMs, flushIntervalMs }),
     // Origins permitted to call the write-key ingest routes from a browser.
     // Empty means any origin.
     //

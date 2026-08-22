@@ -1,7 +1,8 @@
-import { render, screen } from '@testing-library/react'
+import { act, render, screen } from '@testing-library/react'
 import { userEvent } from '@testing-library/user-event'
 import { beforeEach, describe, expect, it } from 'vitest'
 import type { Project } from '../api/types.js'
+import type { ProjectState } from './ProjectContext.js'
 import { ProjectProvider, readStoredProjectId, useProject } from './ProjectContext.js'
 
 function project(id: number, name: string): Project {
@@ -13,10 +14,33 @@ function project(id: number, name: string): Project {
     retention_months: 13,
     monthly_event_quota: null,
     disabled_at: null,
+    deleting_at: null,
   }
 }
 
 const PROJECTS = [project(1, 'First'), project(8, 'Demo Data')]
+const acme = project(1, 'Acme')
+const other = project(2, 'Other')
+
+/**
+ * Renders a `ProjectProvider` and hands back a way to reach its live
+ * context value -- `ctx()` reads whatever the most recent render captured,
+ * so a test can call a mutator inside `act()` and immediately assert on
+ * the result without a second component's own render cycle to wait on.
+ */
+function renderWithProvider(projects: Project[], initialId: number | null) {
+  let value: ProjectState | null = null
+  function Capture() {
+    value = useProject()
+    return null
+  }
+  const view = render(
+    <ProjectProvider projects={projects} initialId={initialId}>
+      <Capture />
+    </ProjectProvider>,
+  )
+  return { ...view, ctx: () => value as ProjectState }
+}
 
 /** Reads what the provider resolved, and offers the switcher's one act. */
 function Probe() {
@@ -184,5 +208,58 @@ describe('ProjectProvider remembering the active project', () => {
       </ProjectProvider>,
     )
     expect(active()).toBe('2')
+  })
+})
+
+describe('ProjectProvider removeProject', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('removeProject drops the row and re-resolves the active project', async () => {
+    const view = renderWithProvider([acme, other], acme.id)
+    act(() => view.ctx().removeProject(acme.id))
+    expect(view.ctx().projects.map((p) => p.id)).toEqual([other.id])
+    expect(view.ctx().activeId).toBe(other.id)
+  })
+
+  it('removeProject leaves the active project alone when another is removed', async () => {
+    const view = renderWithProvider([acme, other], acme.id)
+    act(() => view.ctx().removeProject(other.id))
+    expect(view.ctx().activeId).toBe(acme.id)
+  })
+
+  it('removeProject leaves activeId null when nothing survives', async () => {
+    const view = renderWithProvider([acme], acme.id)
+    act(() => view.ctx().removeProject(acme.id))
+    expect(view.ctx().projects).toEqual([])
+    expect(view.ctx().activeId).toBeNull()
+  })
+
+  /**
+   * `Shell.tsx`'s switcher filters `deleting_at !== null` out of the list it
+   * offers. Falling back to a deleting project here would leave the app
+   * scoped to one the switcher refuses to show -- nothing naming the active
+   * project, and no way to change it from the header. The two filters have to
+   * agree, so this asserts the fallback SKIPS a deleting project rather than
+   * taking `projects[0]`.
+   */
+  it('removeProject skips a deleting project when it re-resolves', async () => {
+    const dying = { ...project(2, 'Dying'), deleting_at: '2026-08-21T10:00:00.000Z' }
+    const healthy = project(3, 'Healthy')
+    const view = renderWithProvider([acme, dying, healthy], acme.id)
+    act(() => view.ctx().removeProject(acme.id))
+    expect(view.ctx().projects.map((p) => p.id)).toEqual([dying.id, healthy.id])
+    expect(view.ctx().activeId).toBe(healthy.id)
+  })
+
+  /**
+   * And `null` is the right answer when every survivor is being deleted:
+   * there is no project the switcher would offer, so scoping to one would be
+   * inventing a choice the operator cannot see or undo.
+   */
+  it('leaves activeId null when every survivor is being deleted', async () => {
+    const dying = { ...project(2, 'Dying'), deleting_at: '2026-08-21T10:00:00.000Z' }
+    const view = renderWithProvider([acme, dying], acme.id)
+    act(() => view.ctx().removeProject(acme.id))
+    expect(view.ctx().activeId).toBeNull()
   })
 })

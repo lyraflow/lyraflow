@@ -27,6 +27,16 @@ export interface Project {
    */
   disabledAt: Date | null
   /**
+   * When this project's destruction was requested, or `null`. Cached
+   * alongside `disabledAt` and for the same reason: the write-key
+   * authenticator is the one place that has to refuse it, and it already has
+   * this row in hand. Which also means `DELETE /v1/projects/:id` MUST
+   * invalidate this cache, or a project being destroyed keeps accepting
+   * events into partitions that are about to be dropped — events that are
+   * then neither delivered nor reported.
+   */
+  deletingAt: Date | null
+  /**
    * SHA-256 of the project's server key, at rest in Postgres. Nothing that
    * serialises a `Project` to a response ever exists in this codebase, so it
    * never crosses the wire — it is a per-project, server-side, stable value
@@ -196,8 +206,9 @@ export class ProjectCache {
         monthly_event_quota: string | null
         server_key_hash: string
         disabled_at: Date | null
+        deleting_at: Date | null
       }>(
-        `SELECT id, slug, retention_months, monthly_event_quota, server_key_hash, disabled_at
+        `SELECT id, slug, retention_months, monthly_event_quota, server_key_hash, disabled_at, deleting_at
          FROM projects WHERE ${where}`,
         [param],
       )
@@ -208,6 +219,7 @@ export class ProjectCache {
             slug: row.slug,
             retentionMonths: row.retention_months,
             disabledAt: row.disabled_at,
+            deletingAt: row.deleting_at,
             // The explicit null test is load-bearing in BOTH directions.
             // `Number(null)` is `0`, not `null`, so a bare Number() call
             // turns every unlimited project — which, after 011, is every

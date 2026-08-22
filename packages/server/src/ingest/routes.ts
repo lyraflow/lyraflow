@@ -101,6 +101,14 @@ export function makeAuthenticator(
    * lets anything reading the response tell this from a bad key.
    */
   archivedCode?: string,
+  /**
+   * Answered instead of admitting a project whose destruction has been
+   * requested. Separate from `archivedCode` because the two are different
+   * facts: archiving is reversible and its data is intact, this is neither.
+   * Same 401, forced by the same constraint — the browser SDK treats 401
+   * alone as terminal and every other status is retried forever.
+   */
+  deletedCode?: string,
 ) {
   return async (req: FastifyRequest, reply: FastifyReply) => {
     if (readiness.draining) {
@@ -115,6 +123,13 @@ export function makeAuthenticator(
     const project = await lookup(key)
     if (!project) {
       reply.code(401).send({ error: invalidCode })
+      return null
+    }
+    // Checked BEFORE archivedCode: a project can be both archived and
+    // deleting, and "deleted" is the more specific and more permanent
+    // answer.
+    if (deletedCode !== undefined && project.deletingAt !== null) {
+      reply.code(401).send({ error: deletedCode })
       return null
     }
     if (archivedCode !== undefined && project.disabledAt !== null) {
@@ -295,6 +310,7 @@ export function registerIngestRoutes(app: FastifyInstance, deps: IngestDeps): In
     'missing_write_key',
     'invalid_write_key',
     'project_archived',
+    'project_deleted',
   )
   // Gates /v1/alias on the secret server key rather than the public write
   // key — see SERVER_KEY_HEADER's docstring above for why.

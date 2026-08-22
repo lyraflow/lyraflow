@@ -1,9 +1,14 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import { userEvent } from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { useState } from 'react'
+import type { ReactNode } from 'react'
+import { MemoryRouter } from 'react-router'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ApiError } from '../../api/client.js'
 import type { ApiClient } from '../../api/client.js'
-import type { Project } from '../../api/types.js'
-import { ProjectProvider } from '../../app/ProjectContext.js'
+import type { Project, ProjectDeletion } from '../../api/types.js'
+import { ProjectProvider, useProject } from '../../app/ProjectContext.js'
+import { Shell } from '../../app/Shell.js'
 import { ProjectsSection } from './ProjectsSection.js'
 
 function project(over: Partial<Project> = {}): Project {
@@ -15,6 +20,7 @@ function project(over: Partial<Project> = {}): Project {
     retention_months: 13,
     monthly_event_quota: null,
     disabled_at: null,
+    deleting_at: null,
     ...over,
   }
 }
@@ -163,5 +169,347 @@ describe('ProjectsSection — archive', () => {
     expect(screen.getByLabelText('New name for Demo Data')).toBeInTheDocument()
     expect(within(row('Marketing')).getByRole('button', { name: 'Rename' })).toBeInTheDocument()
     expect(screen.queryByLabelText('New name for Marketing')).not.toBeInTheDocument()
+  })
+})
+
+describe('ProjectsSection — delete', () => {
+  const NOW = '2026-08-21T09:00:00.000Z'
+  // `name` deliberately differs from `slug` -- the row renders both, and a
+  // fixture where they're identical makes every text query ambiguous
+  // (`getByText('acme')` would match the name span AND the slug span).
+  const acme = project({ id: 1, name: 'Acme Corp', slug: 'acme' })
+  const other = project({ id: 2, name: 'Other Co', slug: 'other' })
+
+  /** A `render` wrapper -- this describe block's tests need
+   * `{ wrapper: withProjects([...]) }`, not a helper that renders itself. */
+  function withProjects(projects: Project[]) {
+    return function Wrapper({ children }: { children: ReactNode }) {
+      return (
+        <ProjectProvider projects={projects} initialId={projects[0]?.id ?? null}>
+          {children}
+        </ProjectProvider>
+      )
+    }
+  }
+
+  let client: ApiClient
+  let user: ReturnType<typeof userEvent.setup>
+
+  beforeEach(() => {
+    // `shouldAdvanceTime` lets `user.click`/`user.type` (both driven by real
+    // promises under the hood) resolve normally while `vi.advanceTimersByTimeAsync`
+    // still drives the poll effect's `setInterval` -- the same technique
+    // `usePolling.test.ts` and `Feed.test.tsx` already use for a polled screen.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    user = userEvent.setup({ delay: null })
+    client = {
+      deleteProject: vi.fn(async () => ({ id: 1, project_id: acme.id, status: 'pending' })),
+      projectDeletion: vi.fn(
+        async (): Promise<ProjectDeletion> => ({
+          status: 'in_progress',
+          requested_at: NOW,
+          completed_at: null,
+        }),
+      ),
+    } as unknown as ApiClient
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  /** Opens the row's delete confirmation, types the slug exactly, and
+   * confirms -- the flow every polling test starts from. */
+  async function confirmDelete(slug: string) {
+    // Scoped to the row: more than one project on screen means more than
+    // one plain "Delete" button, and only the row's own must be clicked.
+    await user.click(within(row(slug)).getByRole('button', { name: 'Delete' }))
+    await user.type(screen.getByLabelText(new RegExp(`Type ${slug} to confirm`)), slug)
+    await user.click(screen.getByRole('button', { name: new RegExp(`Delete ${slug} permanently`) }))
+  }
+
+  it('keeps the delete button disabled until the slug is typed exactly', async () => {
+    render(<ProjectsSection client={client} />, { wrapper: withProjects([acme]) })
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+    const confirm = screen.getByRole('button', { name: /Delete acme permanently/ })
+    expect(confirm).toBeDisabled()
+    await user.type(screen.getByLabelText(/Type acme to confirm/), 'acm')
+    expect(confirm).toBeDisabled()
+    await user.type(screen.getByLabelText(/Type acme to confirm/), 'e')
+    expect(confirm).toBeEnabled()
+  })
+
+  it('says what delete destroys, at the moment of asking', async () => {
+    render(<ProjectsSection client={client} />, { wrapper: withProjects([acme]) })
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+    expect(screen.getByText(/cannot be undone/i)).toBeInTheDocument()
+  })
+
+  it('polls after a delete and removes the row when it completes', async () => {
+    client.deleteProject = vi.fn(async () => ({ id: 7, project_id: acme.id, status: 'pending' }))
+    client.projectDeletion = vi
+      .fn()
+      .mockResolvedValueOnce({ status: 'in_progress', requested_at: NOW, completed_at: null })
+      .mockResolvedValueOnce({ status: 'completed', requested_at: NOW, completed_at: NOW })
+    render(<ProjectsSection client={client} />, { wrapper: withProjects([acme, other]) })
+    await confirmDelete('acme')
+    expect(await screen.findByText('deleting')).toBeInTheDocument()
+    await vi.advanceTimersByTimeAsync(6000)
+    // The removal lands via `removeProject`, triggered from inside the poll
+    // effect's own `setInterval` callback rather than an RTL-tracked event --
+    // `waitFor` is what the rest of this codebase reaches for after a fake-
+    // timer advance for exactly that reason (see `Feed.test.tsx`).
+    await waitFor(() => expect(screen.queryByText('acme')).not.toBeInTheDocument())
+    expect(screen.getByText('other')).toBeInTheDocument()
+  })
+
+  it('shows the error and keeps the row when a deletion fails', async () => {
+    client.deleteProject = vi.fn(async () => ({ id: 7, project_id: acme.id, status: 'pending' }))
+    client.projectDeletion = vi.fn(async () => ({
+      status: 'failed' as const,
+      requested_at: NOW,
+      completed_at: null,
+      error: 'ClickHouse unreachable',
+    }))
+    render(<ProjectsSection client={client} />, { wrapper: withProjects([acme]) })
+    await confirmDelete('acme')
+    await vi.advanceTimersByTimeAsync(3500)
+    expect(await screen.findByText(/ClickHouse unreachable/)).toBeInTheDocument()
+    expect(screen.getByText('acme')).toBeInTheDocument()
+  })
+
+  it('stops polling when unmounted', async () => {
+    client.deleteProject = vi.fn(async () => ({ id: 7, project_id: acme.id, status: 'pending' }))
+    client.projectDeletion = vi.fn(async () => ({
+      status: 'in_progress' as const,
+      requested_at: NOW,
+      completed_at: null,
+    }))
+    const view = render(<ProjectsSection client={client} />, { wrapper: withProjects([acme]) })
+    await confirmDelete('acme')
+    await vi.advanceTimersByTimeAsync(3500)
+    const callsBefore = (client.projectDeletion as ReturnType<typeof vi.fn>).mock.calls.length
+    view.unmount()
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect((client.projectDeletion as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(
+      callsBefore,
+    )
+  })
+
+  // ABSENT, not disabled. A disabled Rename reads as an action that will come
+  // back when the row settles, and nothing about a project being destroyed is
+  // actionable again -- the badge is the whole story. Rename shipped disabled
+  // here at first, contradicting the comment on the guard directly below it.
+  it('renders a project that was already deleting with no controls at all', async () => {
+    render(<ProjectsSection client={client} />, {
+      wrapper: withProjects([{ ...acme, deleting_at: NOW }]),
+    })
+    expect(screen.getByText('deleting')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Rename' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Archive' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument()
+  })
+
+  // A delete started in THIS tab must close the header switcher to the
+  // project immediately, on the 202 -- not only once a poll happens to
+  // catch up. Otherwise the switcher keeps offering a project mid-teardown
+  // for the whole 3s (or longer) window before the first poll tick, which
+  // is exactly the failure `Shell.tsx`'s own filter exists to prevent.
+  it('closes the switcher to the project the moment a delete is confirmed, before any poll has run', async () => {
+    render(
+      <MemoryRouter initialEntries={['/settings']}>
+        <ProjectProvider projects={[acme, other]} initialId={acme.id}>
+          <Shell email="a@example.com" onLogout={() => {}}>
+            <ProjectsSection client={client} />
+          </Shell>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    await confirmDelete('acme')
+    // `client.projectDeletion`'s default (beforeEach) never resolves to
+    // 'completed', and no timer is advanced here -- this is the state
+    // BEFORE the first poll tick, the window the switcher must already
+    // reflect.
+    await user.click(screen.getByRole('button', { name: /Acme Corp/ }))
+    expect(screen.queryByRole('option', { name: /Acme Corp/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('option', { name: /Other Co/ })).toBeInTheDocument()
+  })
+
+  // Pins the poll effect's `if (cancelled) return` guard specifically.
+  // `clearInterval` (also run on unmount) only stops FUTURE ticks -- it
+  // does not cancel a callback invocation already in flight, awaiting a
+  // response that has not landed yet. Without the flag, a response that
+  // resolves after unmount would still call `onDeleted`, mutating a
+  // context that has outlived this row.
+  it('ignores a poll response that resolves after the row unmounted mid-poll', async () => {
+    client.deleteProject = vi.fn(async () => ({ id: 7, project_id: acme.id, status: 'pending' }))
+    let resolvePoll: (v: ProjectDeletion) => void = () => {}
+    client.projectDeletion = vi.fn(
+      () =>
+        new Promise<ProjectDeletion>((resolve) => {
+          resolvePoll = resolve
+        }),
+    )
+
+    function ProjectCount() {
+      const { projects } = useProject()
+      return <span data-testid="count">{projects.length}</span>
+    }
+
+    function Harness() {
+      const [show, setShow] = useState(true)
+      return (
+        <>
+          <ProjectCount />
+          <button type="button" onClick={() => setShow(false)}>
+            hide
+          </button>
+          {show && <ProjectsSection client={client} />}
+        </>
+      )
+    }
+
+    render(
+      <ProjectProvider projects={[acme]} initialId={acme.id}>
+        <Harness />
+      </ProjectProvider>,
+    )
+    await confirmDelete('acme')
+    // Fires the poll's one tick; `client.projectDeletion`'s promise is now
+    // in flight and will not settle until `resolvePoll` is called below.
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(client.projectDeletion).toHaveBeenCalledTimes(1)
+
+    await user.click(screen.getByRole('button', { name: 'hide' }))
+    resolvePoll({ status: 'completed', requested_at: NOW, completed_at: NOW })
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(screen.getByTestId('count').textContent).toBe('1')
+  })
+
+  // The 401 branch of `startDelete` is a DIFFERENT condition from a
+  // completed deletion emptying the list: the admin's own session expired,
+  // the same routine, recoverable case `Settings`'s own two fetches already
+  // report as `onUnauthorized`. Reporting it as `onSessionStale` instead
+  // would re-fetch the session, 401 again because it really is gone, and
+  // land on "server not responding" -- this pins it going to the login
+  // screen's own signal instead.
+  it('reports a 401 starting a delete as an expired session, not as the list emptying', async () => {
+    client.deleteProject = vi.fn(async () => {
+      throw new ApiError(401, 'no_session')
+    })
+    const onUnauthorized = vi.fn()
+    const onSessionStale = vi.fn()
+    render(
+      <ProjectsSection
+        client={client}
+        onUnauthorized={onUnauthorized}
+        onSessionStale={onSessionStale}
+      />,
+      { wrapper: withProjects([acme]) },
+    )
+    await confirmDelete('acme')
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalledTimes(1))
+    expect(onSessionStale).not.toHaveBeenCalled()
+  })
+
+  /**
+   * The poll's `catch` treated every failure as a network hiccup, including a
+   * 401. An expired session does not resolve on the next tick, so the timer
+   * retried a request that could only ever 401, every three seconds, for as
+   * long as the tab stayed open -- with nothing on screen explaining why the
+   * row never moved. `startDelete` already routes a 401 to `onUnauthorized`;
+   * the poll now does the same, and stops.
+   */
+  it('reports a 401 from the poll as an expired session, and stops polling', async () => {
+    client.deleteProject = vi.fn(async () => ({ id: 7, project_id: acme.id, status: 'pending' }))
+    client.projectDeletion = vi.fn(async () => {
+      throw new ApiError(401, 'no_session')
+    })
+    const onUnauthorized = vi.fn()
+    const onSessionStale = vi.fn()
+    render(
+      <ProjectsSection
+        client={client}
+        onUnauthorized={onUnauthorized}
+        onSessionStale={onSessionStale}
+      />,
+      { wrapper: withProjects([acme]) },
+    )
+    await confirmDelete('acme')
+    await vi.advanceTimersByTimeAsync(3500)
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalledTimes(1))
+    expect(onSessionStale).not.toHaveBeenCalled()
+
+    // And it really stopped: a 401 that keeps polling would keep counting up
+    // here, which is the half of this the callback alone does not prove.
+    const callsAfterFirst = (client.projectDeletion as ReturnType<typeof vi.fn>).mock.calls.length
+    await vi.advanceTimersByTimeAsync(12_000)
+    expect((client.projectDeletion as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(
+      callsAfterFirst,
+    )
+  })
+
+  /**
+   * A non-401 poll failure keeps its old behaviour, and this is what stops
+   * the fix above from being written as "stop polling on any error": the
+   * teardown runs server-side whether or not this tab is watching, so a 5xx
+   * or a dropped connection must leave the row deleting and try again.
+   */
+  it('keeps polling through a poll failure that is not a 401', async () => {
+    client.deleteProject = vi.fn(async () => ({ id: 7, project_id: acme.id, status: 'pending' }))
+    const onUnauthorized = vi.fn()
+    client.projectDeletion = vi
+      .fn()
+      .mockRejectedValueOnce(new ApiError(503, 'unavailable'))
+      .mockResolvedValue({ status: 'completed', requested_at: NOW, completed_at: NOW })
+    render(<ProjectsSection client={client} onUnauthorized={onUnauthorized} />, {
+      wrapper: withProjects([acme, other]),
+    })
+    await confirmDelete('acme')
+    await vi.advanceTimersByTimeAsync(7000)
+    await waitFor(() => expect(screen.queryByText('acme')).not.toBeInTheDocument())
+    expect(onUnauthorized).not.toHaveBeenCalled()
+  })
+
+  // Regression: `handleDeleted` used to depend directly on `projects`,
+  // which is `ProjectContext`'s own state array and gets a fresh reference
+  // on every `updateProject` call -- including a rename on a DIFFERENT row.
+  // `ProjectRow`'s poll effect depends on `onDeleted`'s identity, so that
+  // unrelated rename tore down and restarted the `setInterval` for a row
+  // that was mid-delete, resetting its 3-second clock. Pinned by starting
+  // a delete on `acme`, renaming `other` partway through the first poll
+  // interval, and checking the original tick still lands on schedule
+  // rather than being pushed out by a second interval.
+  it("does not reset another row's poll timer when an unrelated rename lands mid-delete", async () => {
+    client.deleteProject = vi.fn(async () => ({ id: 7, project_id: acme.id, status: 'pending' }))
+    client.projectDeletion = vi.fn(async () => ({
+      status: 'in_progress' as const,
+      requested_at: NOW,
+      completed_at: null,
+    }))
+    client.updateProject = vi.fn(async (id: number, patch: { name?: string }) => ({
+      ...other,
+      id,
+      ...(patch.name === undefined ? {} : { name: patch.name }),
+    }))
+    render(<ProjectsSection client={client} />, { wrapper: withProjects([acme, other]) })
+    await confirmDelete('acme')
+    expect(await screen.findByText('deleting')).toBeInTheDocument()
+
+    // Partway through the first 3s poll interval -- renaming `other` here
+    // must not be what decides whether `acme`'s next poll lands on time.
+    await vi.advanceTimersByTimeAsync(2000)
+    await user.click(within(row('Other Co')).getByRole('button', { name: 'Rename' }))
+    await user.clear(screen.getByLabelText('New name for Other Co'))
+    await user.type(screen.getByLabelText('New name for Other Co'), 'Renamed Co')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(client.updateProject).toHaveBeenCalledTimes(1))
+
+    // The remaining 1s of the ORIGINAL 3s window: if the poll effect had
+    // been torn down and restarted by the rename, this would not be enough
+    // time left for a fresh 3s interval to fire.
+    await vi.advanceTimersByTimeAsync(1000)
+    await waitFor(() => expect(client.projectDeletion).toHaveBeenCalledTimes(1))
   })
 })

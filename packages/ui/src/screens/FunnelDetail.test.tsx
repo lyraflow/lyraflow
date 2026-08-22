@@ -18,6 +18,7 @@ const PROJECT_1 = {
   retention_months: 24,
   monthly_event_quota: null,
   disabled_at: null,
+  deleting_at: null,
 }
 
 const PROJECTS = [PROJECT_1]
@@ -30,6 +31,7 @@ const PROJECT_2 = {
   retention_months: 24,
   monthly_event_quota: null,
   disabled_at: null,
+  deleting_at: null,
 }
 
 // A same-route navigation trigger for the race tests below -- clicking it

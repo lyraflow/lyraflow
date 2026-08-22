@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError } from '../../api/client.js'
 import type { ApiClient } from '../../api/client.js'
 import type { CreatedProject, Project } from '../../api/types.js'
@@ -28,8 +28,16 @@ function ProjectRow(props: {
   project: Project
   client: ApiClient
   onUpdated: (next: Project) => void
+  onDeleted: (id: number) => void
+  /** Called when starting the delete itself 401s -- the admin's session
+   * expired mid-action. Matches the convention `Settings`'s own two fetches
+   * already use (`Settings.tsx`) and `SegmentDetail` follows for a mutation's
+   * 401: this goes to login, not to `onSessionStale`, which means something
+   * narrower (the project list emptied) and would otherwise misroute an
+   * ordinary expired-session case to the "server not responding" screen. */
+  onUnauthorized?: () => void
 }) {
-  const { project, client, onUpdated } = props
+  const { project, client, onUpdated, onDeleted, onUnauthorized } = props
   const [renaming, setRenaming] = useState(false)
   const [draft, setDraft] = useState(project.name)
   const [busy, setBusy] = useState(false)
@@ -40,6 +48,20 @@ function ProjectRow(props: {
   // for delete. Restoring is one click: it can only ever admit more.
   const [confirmArchive, setConfirmArchive] = useState(false)
   const archived = project.disabled_at !== null
+
+  // Delete's own two-step, distinct from archive's: the confirming action
+  // has to name the slug, not just click through a warning, because unlike
+  // archiving there is no restore on the other side of it.
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const [typed, setTyped] = useState('')
+  const [deleteBusy, setDeleteBusy] = useState(false)
+  // The deletion request's own id (from the 202 response), for polling.
+  // `null` both before a delete is started AND after this row was RENDERED
+  // already deleting (`project.deleting_at` set from a previous session or
+  // another tab) -- in the latter case there is no id here to poll with,
+  // only the fact reported by `GET /v1/projects` itself.
+  const [deletionId, setDeletionId] = useState<number | null>(null)
+  const deleting = project.deleting_at !== null || deletionId !== null
 
   async function save(patch: { name?: string; archived?: boolean }) {
     setBusy(true)
@@ -58,6 +80,88 @@ function ProjectRow(props: {
       setBusy(false)
     }
   }
+
+  async function startDelete() {
+    setDeleteBusy(true)
+    setError(null)
+    try {
+      const res = await client.deleteProject(project.id, project.slug)
+      setDeletionId(res.id)
+      setConfirmDelete(false)
+      setTyped('')
+      // Merges into context immediately, on the 202 -- not once the first
+      // poll happens to land. The header switcher (`Shell.tsx`) filters on
+      // `deleting_at` from context, not on this row's own local state, so
+      // without this the switcher would keep offering the project for the
+      // whole poll interval, exactly the risk its own filter exists to
+      // close. Same precedent `save()` above follows for a rename/archive:
+      // the write's own answer merges in, never a re-fetch. The DELETE
+      // response itself carries no row to merge (`{ id, project_id, status
+      // }`, not a `Project`), so the timestamp is stamped client-side --
+      // its exact value doesn't matter, only that it is non-null.
+      onUpdated({ ...project, deleting_at: new Date().toISOString() })
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        onUnauthorized?.()
+      } else if (err instanceof ApiError && err.status === 409) {
+        setError(
+          err.code === 'slug_mismatch'
+            ? 'That did not match the project slug.'
+            : 'A deletion is already in progress for this project.',
+        )
+      } else if (err instanceof ApiError && err.status === 404) {
+        setError('That project no longer exists.')
+      } else {
+        setError('Could not start the deletion. Try again.')
+      }
+    } finally {
+      setDeleteBusy(false)
+    }
+  }
+
+  // Polls the deletion request every 3s until it lands. A poll that FAILS
+  // (network hiccup, a 5xx) is not a deletion that failed -- the teardown
+  // runs server-side whether or not this tab is watching, so the catch
+  // below leaves the row in its deleting state and tries again on the next
+  // tick. Only a `failed` STATUS is a failure. Cleared on unmount and
+  // whenever there is nothing to poll, so a closed tab or a row that never
+  // started a delete never runs this timer.
+  //
+  // A 401 IS THE ONE EXCEPTION, and it is routed exactly where `startDelete`
+  // routes its own: an expired session is not a hiccup, it will not resolve
+  // on the next tick, and treating it as one means this timer retries a
+  // request that can only ever 401, every three seconds, for as long as the
+  // tab stays open -- while the screen shows nothing to explain why the row
+  // never moves.
+  useEffect(() => {
+    if (deletionId === null) return
+    let cancelled = false
+    const timer = setInterval(async () => {
+      try {
+        const status = await client.projectDeletion(deletionId)
+        if (cancelled) return
+        if (status.status === 'completed') {
+          clearInterval(timer)
+          onDeleted(project.id)
+        } else if (status.status === 'failed') {
+          clearInterval(timer)
+          setError(status.error ?? 'The deletion did not finish.')
+        }
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 401) {
+          clearInterval(timer)
+          if (!cancelled) onUnauthorized?.()
+          return
+        }
+        // See the comment above: any other poll failure is not a deletion
+        // failure.
+      }
+    }, 3000)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [deletionId, client, project.id, onDeleted, onUnauthorized])
 
   return (
     <li className="flex min-w-0 flex-col gap-1 py-2">
@@ -109,58 +213,117 @@ function ProjectRow(props: {
                 archived
               </span>
             )}
+            {deleting && (
+              <span className="rounded-sm bg-muted px-1.5 py-0.5 text-muted-foreground text-xs">
+                deleting
+              </span>
+            )}
             <span className="flex-1" />
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                setDraft(project.name)
-                setRenaming(true)
-              }}
-            >
-              Rename
-            </Button>
-            {archived ? (
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={busy}
-                onClick={() => save({ archived: false })}
-              >
-                Restore
-              </Button>
-            ) : confirmArchive ? (
+            {/* No controls at all once a delete is in flight -- the badge
+             * above is the only thing left to say about this row. Rename
+             * used to render here disabled, which read as an action that
+             * might come back; nothing about this row is actionable again. */}
+            {!deleting && (
               <>
                 <Button
                   type="button"
                   size="sm"
-                  variant="destructive"
-                  disabled={busy}
-                  onClick={() => save({ archived: true })}
-                >
-                  {`Archive ${project.name}`}
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
                   variant="outline"
-                  disabled={busy}
-                  onClick={() => setConfirmArchive(false)}
+                  onClick={() => {
+                    setDraft(project.name)
+                    setRenaming(true)
+                  }}
                 >
-                  Cancel
+                  Rename
                 </Button>
+                {archived ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={busy}
+                    onClick={() => save({ archived: false })}
+                  >
+                    Restore
+                  </Button>
+                ) : confirmArchive ? (
+                  <>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="destructive"
+                      disabled={busy}
+                      onClick={() => save({ archived: true })}
+                    >
+                      {`Archive ${project.name}`}
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={busy}
+                      onClick={() => setConfirmArchive(false)}
+                    >
+                      Cancel
+                    </Button>
+                  </>
+                ) : (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setConfirmArchive(true)}
+                  >
+                    Archive
+                  </Button>
+                )}
+                {confirmDelete ? (
+                  <>
+                    <Label htmlFor={`delete-confirm-${project.id}`} className="sr-only">
+                      {`Type ${project.slug} to confirm`}
+                    </Label>
+                    <Input
+                      id={`delete-confirm-${project.id}`}
+                      value={typed}
+                      disabled={deleteBusy}
+                      placeholder={project.slug}
+                      className="h-8 max-w-32"
+                      onChange={(e) => setTyped(e.target.value)}
+                    />
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="destructive"
+                      disabled={deleteBusy || typed !== project.slug}
+                      onClick={startDelete}
+                    >
+                      {`Delete ${project.slug} permanently`}
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={deleteBusy}
+                      onClick={() => {
+                        setConfirmDelete(false)
+                        setTyped('')
+                        setError(null)
+                      }}
+                    >
+                      Cancel
+                    </Button>
+                  </>
+                ) : (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setConfirmDelete(true)}
+                  >
+                    Delete
+                  </Button>
+                )}
               </>
-            ) : (
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                onClick={() => setConfirmArchive(true)}
-              >
-                Archive
-              </Button>
             )}
           </>
         )}
@@ -174,6 +337,16 @@ function ProjectRow(props: {
           This stops Lyraflow accepting events for this project. Nothing is deleted, every report
           keeps working, and you can restore it here. Events sent while it is archived are refused,
           not queued.
+        </p>
+      )}
+      {/* Said at the moment of asking too, and volunteering the opposite
+       * limit from archive's: this is the one action on this screen
+       * archiving's own copy explicitly contrasts itself with. */}
+      {confirmDelete && (
+        <p className="text-muted-foreground text-xs">
+          This permanently destroys every event, person and report for this project, in both
+          databases. It cannot be undone, and it cannot be recovered from anything but a backup.
+          Archiving stops collection without destroying anything.
         </p>
       )}
       {error != null && (
@@ -207,15 +380,59 @@ function ProjectRow(props: {
  * before that PATCH landed -- would win a whole-list replace even though
  * `updateProject`'s merge already applied the newer value.
  */
-export function ProjectsSection(props: { client: ApiClient }) {
-  const { client } = props
-  const { projects, addProject, updateProject } = useProject()
+export function ProjectsSection(props: {
+  client: ApiClient
+  /** Called when a completed deletion empties the project list -- see
+   * `App.tsx`'s implementation for why the wizard-or-shell decision has to
+   * happen there rather than here. */
+  onSessionStale?: () => void
+  /** Called on a 401 from any row's own delete request -- threaded through
+   * to each `ProjectRow`, matching `Settings`'s own two fetches. Kept
+   * distinct from `onSessionStale`: a 401 means the session expired and
+   * belongs on the login screen, not the "list emptied" re-fetch. */
+  onUnauthorized?: () => void
+}) {
+  const { client, onSessionStale, onUnauthorized } = props
+  const { projects, addProject, updateProject, removeProject } = useProject()
 
   const [mode, setMode] = useState<Mode>('idle')
   const [name, setName] = useState('')
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
   const [createdProject, setCreatedProject] = useState<CreatedProject | null>(null)
+
+  // `handleDeleted` needs the CURRENT project list at the moment a deletion
+  // completes, not one captured when the delete started -- the only other
+  // project could itself have been deleted in the meantime. Reading it
+  // through a ref, updated here, rather than closing over `projects`
+  // directly: `projects` is `ProjectContext`'s own state array, and it gets
+  // a fresh reference on every `updateProject`/`addProject`/`removeProject`
+  // -- a rename, an archive, a restore, a create, or another row's deletion
+  // completing. `ProjectRow`'s poll effect depends on `onDeleted`'s
+  // identity, so if `handleDeleted` depended on `projects` directly, any of
+  // those unrelated changes would tear down and restart the `setInterval`
+  // for EVERY OTHER row currently mid-delete, resetting its 3-second clock.
+  // The ref lets this read the live list without `handleDeleted` itself
+  // changing identity when the list does.
+  const projectsRef = useRef(projects)
+  useEffect(() => {
+    projectsRef.current = projects
+  }, [projects])
+
+  // A completed deletion that leaves other projects behind removes the row
+  // as it always has. One that empties the list can't -- the shell above
+  // has nothing left to show -- so it hands off to `onSessionStale` instead
+  // of `removeProject`, never both.
+  const handleDeleted = useCallback(
+    (id: number) => {
+      if (projectsRef.current.length === 1) {
+        onSessionStale?.()
+      } else {
+        removeProject(id)
+      }
+    },
+    [removeProject, onSessionStale],
+  )
 
   function openForm() {
     setCreateError(null)
@@ -280,6 +497,8 @@ export function ProjectsSection(props: { client: ApiClient }) {
               project={p}
               client={client}
               onUpdated={(next) => updateProject(next.id, next)}
+              onDeleted={handleDeleted}
+              onUnauthorized={onUnauthorized}
             />
           ))}
         </ul>

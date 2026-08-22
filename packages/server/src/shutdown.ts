@@ -49,6 +49,12 @@ export interface ShutdownOptions {
   // process is still watching, and there is nothing to gain from trying to
   // abandon it -- see auth/sweeper.ts's own `stop()` docstring.
   sessionSweeper: { stop(): void }
+  // Same narrowing and same reason as `purge`: no new project purges once
+  // draining starts. A teardown already in flight is left to run — its
+  // ClickHouse partition drops and mutations complete server-side
+  // regardless, and the lease brings the request back on the next boot if
+  // `completed_at` never landed.
+  projectPurge: { stop(): void }
   drainDeadlineMs: number
   onExit?: (code: number) => void
 }
@@ -59,8 +65,17 @@ export interface ShutdownOptions {
  * is buffered, which would make the upgrade story dishonest.
  */
 export function installShutdownHandlers(opts: ShutdownOptions): () => Promise<void> {
-  const { app, readiness, buffer, counters, purge, retention, sessionSweeper, drainDeadlineMs } =
-    opts
+  const {
+    app,
+    readiness,
+    buffer,
+    counters,
+    purge,
+    retention,
+    sessionSweeper,
+    projectPurge,
+    drainDeadlineMs,
+  } = opts
   const exit = opts.onExit ?? ((code: number) => process.exit(code))
   let running: Promise<void> | null = null
 
@@ -82,6 +97,10 @@ export function installShutdownHandlers(opts: ShutdownOptions): () => Promise<vo
       // option's own docstring above for what this does and does not
       // protect against.
       retention.stop()
+      // No new project purges once draining starts, for the same reason as
+      // `purge` above — a teardown already in flight is left to ClickHouse
+      // and Postgres to finish; see this option's own docstring.
+      projectPurge.stop()
       // Housekeeping only (see auth/sweeper.ts) — stopped here purely so a
       // draining process is not still installing timers, not because a
       // missed tick risks anything.

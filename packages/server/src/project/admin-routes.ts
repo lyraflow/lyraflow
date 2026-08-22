@@ -6,12 +6,27 @@ import { SESSION_COOKIE, requireUiHeader } from '../auth/cookie.js'
 import type { ProjectCache } from '../auth/project-cache.js'
 import type { SessionStore } from '../auth/sessions.js'
 import { type Readiness, refuseIfDraining } from '../health.js'
+import type { ProjectDeletionStore } from './deletion-store.js'
 
 export interface AdminProjectDeps {
   pg: Pool
   sessions: SessionStore
   projects: ProjectCache
   readiness: Readiness
+  /** The SAME instance app.ts built for ProjectPurgeWorker — see its own comment. */
+  deletions: ProjectDeletionStore
+  /** The SAME configured value ProjectPurgeWorker claims under — see GET /v1/project-deletions/:id. */
+  maxAttempts: number
+  /** The SAME configured value ProjectPurgeWorker's claim() uses — see GET /v1/project-deletions/:id. */
+  leaseMs: number
+  /**
+   * Drops every cached segment preview for a project, at the moment its data
+   * stops being what a cached preview says it is. The SAME `SegmentCache`
+   * `DELETE /v1/persons/:id` and the retention sweep clear through — a
+   * lookalike built here would leave the entries those two can see
+   * untouched. See the DELETE route below for the window it closes.
+   */
+  clearSegmentCache: (projectId: number) => void
 }
 
 const CreateBody = z.object({ name: z.string().min(1).max(200) })
@@ -28,13 +43,30 @@ const UpdateBody = z.object({
   archived: z.boolean().optional(),
 })
 
+const DeleteBody = z.object({ slug: z.string().min(1) })
+
+/**
+ * `Number('12abc')` is NaN and `Number('')` is 0, so both the shape and the
+ * range are checked -- a bare parse would send `NaN` to Postgres as a bind
+ * parameter and fail as a 500 rather than a 400. Extracted once a third
+ * route needed the identical check (PATCH, DELETE, GET
+ * /v1/project-deletions/:id) -- `privacy/routes.ts`'s `parseDeletionId` is
+ * the same idea; kept local here since every call site in this file answers
+ * the same `invalid_id` body, unlike that one.
+ */
+function parseId(raw: string): number | null {
+  const id = Number(raw)
+  return Number.isInteger(id) && id > 0 ? id : null
+}
+
 /**
  * The instance-scoped admin surface: which projects exist, and creating a
  * new one. Both are the project switcher's and the create-project flow's
  * backing routes for the coming web UI.
  */
 export function registerAdminProjectRoutes(app: FastifyInstance, deps: AdminProjectDeps): void {
-  const { pg, sessions, projects, readiness } = deps
+  const { pg, sessions, projects, readiness, deletions, maxAttempts, leaseMs, clearSegmentCache } =
+    deps
 
   /**
    * Session-only, and deliberately NOT routed through auth/bridge.ts. These
@@ -78,8 +110,9 @@ export function registerAdminProjectRoutes(app: FastifyInstance, deps: AdminProj
       retention_months: number
       monthly_event_quota: string | null
       disabled_at: Date | null
+      deleting_at: Date | null
     }>(
-      `SELECT id, name, slug, created_at, retention_months, monthly_event_quota, disabled_at
+      `SELECT id, name, slug, created_at, retention_months, monthly_event_quota, disabled_at, deleting_at
        FROM projects ORDER BY created_at ASC, id ASC`,
     )
     reply.header('cache-control', 'no-store')
@@ -94,6 +127,10 @@ export function registerAdminProjectRoutes(app: FastifyInstance, deps: AdminProj
         // 0, which isOverQuota refuses to evaluate at all.
         monthly_event_quota: r.monthly_event_quota === null ? null : Number(r.monthly_event_quota),
         disabled_at: r.disabled_at === null ? null : r.disabled_at.toISOString(),
+        // A project mid-deletion is still listed -- the settings screen
+        // shows progress against this rather than the row disappearing
+        // mid-teardown.
+        deleting_at: r.deleting_at === null ? null : r.deleting_at.toISOString(),
       })),
     })
   })
@@ -119,11 +156,8 @@ export function registerAdminProjectRoutes(app: FastifyInstance, deps: AdminProj
   app.patch<{ Params: { id: string } }>('/v1/projects/:id', async (req, reply) => {
     if (!(await requireSession(req, reply))) return
 
-    const id = Number(req.params.id)
-    // `Number('12abc')` is NaN and `Number('')` is 0, so both the shape and
-    // the range are checked -- a bare parse would send `NaN` to Postgres as
-    // a bind parameter and fail as a 500 rather than a 400.
-    if (!Number.isInteger(id) || id <= 0) return reply.code(400).send({ error: 'invalid_id' })
+    const id = parseId(req.params.id)
+    if (id === null) return reply.code(400).send({ error: 'invalid_id' })
 
     const body = UpdateBody.safeParse(req.body)
     if (!body.success) return reply.code(400).send({ error: 'invalid_body' })
@@ -233,10 +267,125 @@ export function registerAdminProjectRoutes(app: FastifyInstance, deps: AdminProj
       // present anyway so this response is the same shape GET /v1/projects
       // returns -- the UI appends this row to that list (#89) and a missing
       // field would make the new row the only one whose archive state is
-      // `undefined` rather than "active".
+      // `undefined` rather than "active". `deleting_at` for the same reason:
+      // a missing field here would make this the one project in the UI's
+      // list whose deletion state reads `undefined` instead of a real value.
       disabled_at: null,
+      deleting_at: null,
       write_key: created.writeKey,
       server_key: created.serverKey,
+    })
+  })
+
+  /**
+   * Destroy a project and everything it holds, in both stores.
+   *
+   * **The slug in the body is the confirmation.** Not a header, not a query
+   * parameter: the caller has to name the thing they are destroying, and a
+   * mismatch is a 409 rather than a 400 because the request is well-formed and
+   * the *state* is what refuses it.
+   *
+   * **202, not 200.** The teardown is minutes of partition drops and
+   * asynchronous mutations; a route that waited would hit every proxy timeout
+   * between here and the operator. `GET /v1/project-deletions/:id` reports how
+   * it went.
+   *
+   * **There is no cancel.** `deleting_at` is stamped here and never cleared --
+   * see migration 019.
+   */
+  app.delete<{ Params: { id: string } }>('/v1/projects/:id', async (req, reply) => {
+    if (!(await requireSession(req, reply))) return
+
+    const id = parseId(req.params.id)
+    if (id === null) return reply.code(400).send({ error: 'invalid_id' })
+
+    const body = DeleteBody.safeParse(req.body)
+    if (!body.success) return reply.code(400).send({ error: 'invalid_body' })
+
+    const found = await pg.query<{ slug: string }>('SELECT slug FROM projects WHERE id = $1', [id])
+    const row = found.rows[0]
+    if (!row) return reply.code(404).send({ error: 'project_not_found' })
+    if (row.slug !== body.data.slug) return reply.code(409).send({ error: 'slug_mismatch' })
+
+    const result = await deletions.request(id)
+    if (result === 'not_found') return reply.code(404).send({ error: 'project_not_found' })
+    if ('alreadyDeleting' in result) {
+      return reply.code(409).send({ error: 'already_deleting', id: result.alreadyDeleting })
+    }
+
+    // MUST come after the write, for the reason PATCH documents: the write-key
+    // authenticator reads `deletingAt` off this cache, so skipping it keeps
+    // admitting events into partitions this request is about to drop.
+    //
+    // It closes the window for THIS PROCESS ONLY, which is worth being exact
+    // about: another app process's cache is untouched by it, and the CLI can
+    // reach no cache at all. What actually bounds those is the claim delay
+    // (`purgeClaimDelayMs`, config.ts) — no purge may start until the whole
+    // cache horizon has passed. This call makes the refusal immediate here
+    // rather than eventual; it does not make it universal.
+    projects.invalidate()
+
+    // The third path that changes what a segment preview could return, and
+    // the reason `app.ts`'s retention comment asks for this call. A preview
+    // hit within `SegmentCache`'s 30s TTL would otherwise keep serving this
+    // project's member rows — person ids, traits, first/last seen — out of a
+    // snapshot taken before the project was destroyed. Wrapped for the same
+    // reason `DELETE /v1/persons/:id` wraps its own call: the deletion is
+    // already committed, and a future change to `clearProject` must not be
+    // able to turn an accepted request into a 500.
+    try {
+      clearSegmentCache(id)
+    } catch (err) {
+      req.log.error({ err, projectId: id }, 'segment cache invalidation failed')
+    }
+
+    reply.header('cache-control', 'no-store')
+    return reply.code(202).send({ id: result.id, project_id: id, status: 'pending' })
+  })
+
+  /**
+   * Instance-scoped, not project-scoped like `GET /v1/deletions/:id` -- by the
+   * time this answers `completed` there is no project row left to scope by.
+   */
+  app.get<{ Params: { id: string } }>('/v1/project-deletions/:id', async (req, reply) => {
+    if (!(await requireSession(req, reply))) return
+
+    const id = parseId(req.params.id)
+    if (id === null) return reply.code(400).send({ error: 'invalid_id' })
+
+    const found = await deletions.get(id)
+    if (!found) return reply.code(404).send({ error: 'deletion_not_found' })
+
+    reply.header('cache-control', 'no-store')
+    const requested_at = found.requestedAt.toISOString()
+    if (found.completedAt) {
+      return reply
+        .code(200)
+        .send({ status: 'completed', requested_at, completed_at: found.completedAt.toISOString() })
+    }
+    // Terminal: attempts exhausted, never completed. The request WAS accepted
+    // and did not finish; `last_error` carries why.
+    if (found.attempts >= maxAttempts) {
+      return reply
+        .code(200)
+        .send({ status: 'failed', requested_at, completed_at: null, error: found.lastError })
+    }
+    // An attempt failed and the request is not dead yet -- reported as pending
+    // WITH its error, ahead of the lease check, for the reason
+    // `GET /v1/deletions/:id` documents: `fail()` leaves `claimed_at` set, so a
+    // request failing every attempt would otherwise report `in_progress`
+    // continuously and never surface `last_error` until it was already dead.
+    if (found.lastError !== null) {
+      return reply
+        .code(200)
+        .send({ status: 'pending', requested_at, completed_at: null, error: found.lastError })
+    }
+    const leased = found.claimedAt !== null && Date.now() - found.claimedAt.getTime() < leaseMs
+    return reply.code(200).send({
+      status: leased ? 'in_progress' : 'pending',
+      requested_at,
+      completed_at: null,
+      error: null,
     })
   })
 }

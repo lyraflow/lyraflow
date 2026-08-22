@@ -30,7 +30,10 @@ import { registerPrivacyRoutes } from './privacy/routes.js'
 import { SuppressionStore } from './privacy/suppression-store.js'
 import { PurgeWorker } from './privacy/worker.js'
 import { registerAdminProjectRoutes } from './project/admin-routes.js'
+import { ProjectDeletionStore } from './project/deletion-store.js'
+import { purgeProject } from './project/purge.js'
 import { registerProjectRoutes } from './project/routes.js'
+import { ProjectPurgeWorker } from './project/worker.js'
 import { logDroppedPartition } from './retention/logging.js'
 import { RetentionStore } from './retention/store.js'
 import { RetentionWorker } from './retention/worker.js'
@@ -56,6 +59,17 @@ export interface AppDeps {
    * interval — see retention/wiring.test.ts.
    */
   retention: RetentionWorker
+  /**
+   * Exposed for the same reason `purge`/`retention` are (see index.ts and
+   * shutdown.ts): a live timer belongs to boot succeeding, not to
+   * construction, and a test that wants to drive a real project purge does
+   * it through `runOnce()` on this exact instance. Its backing
+   * `ProjectDeletionStore` is not exposed here -- unlike this worker, Task
+   * 5's routes are registered inside `buildApp()` itself and reach it
+   * through the same closure this worker is built in, so a second exposure
+   * point on `AppDeps` would be redundant.
+   */
+  projectPurge: ProjectPurgeWorker
   /**
    * Exposed for the same reason `buffer`/`counters`/`purge` already are:
    * tests need to reach the EXACT instance the routes share, not a
@@ -167,7 +181,7 @@ export function buildApp(input: {
   // worker's reads and the routes' writes have to see each other's effects
   // immediately, and a second ProjectCache-shaped duplicate would double the
   // Postgres load an identical lookup produces.
-  const projects = new ProjectCache(pg, 60_000)
+  const projects = new ProjectCache(pg, config.projectCacheTtlMs)
   const sessions = new SessionStore(pg)
   const loginLimiter = new AttemptLimiter()
   // Wraps the SAME `sessions` instance every route above reads and writes
@@ -204,6 +218,33 @@ export function buildApp(input: {
     leaseMs: config.purgeLeaseMs,
     maxAttempts: config.purgeMaxAttempts,
     onError: (err, ctx) => app.log.error({ err, ...ctx }, 'purge failed'),
+  })
+
+  // Exactly ONE ProjectDeletionStore, for the same reason there is exactly
+  // one SuppressionStore/DeletionStore/PurgeWorker: the admin routes below
+  // consume this same instance, and a second construction site would let a
+  // request accepted through one and claimed through the other drift apart.
+  const projectDeletions = new ProjectDeletionStore(pg)
+  const projectPurge = new ProjectPurgeWorker({
+    claim: () =>
+      projectDeletions.claim({
+        leaseMs: config.projectPurgeLeaseMs,
+        maxAttempts: config.projectPurgeMaxAttempts,
+        // The cache horizon this same process's `projects` cache is built
+        // with, derived once in config.ts. A worker claiming sooner than
+        // this would tear a project down while a sibling process (or this
+        // one, before `invalidate()` reached it) can still be admitting
+        // events for it.
+        claimDelayMs: config.projectPurgeClaimDelayMs,
+      }),
+    purge: (projectId) => purgeProject({ ch, pg, projectId }),
+    complete: (id) => projectDeletions.complete(id),
+    fail: (id, error) => projectDeletions.fail(id, error),
+    defer: (id, note) => projectDeletions.defer(id, note),
+    intervalMs: config.projectPurgeIntervalMs,
+    leaseMs: config.projectPurgeLeaseMs,
+    maxAttempts: config.projectPurgeMaxAttempts,
+    onError: (err, ctx) => app.log.error({ err, ...ctx }, 'project purge failed'),
   })
 
   // Mutated only from `onRun` below, on the single-threaded event loop —
@@ -278,6 +319,7 @@ export function buildApp(input: {
     counters,
     purge,
     retention,
+    projectPurge,
     segmentCache,
     projects,
     sessions,
@@ -361,7 +403,18 @@ export function buildApp(input: {
   registerProjectRoutes(app, { authenticate, pg, projects })
   // Session-only and NOT given `authenticate` -- see admin-routes.ts's own
   // docstring for why these two routes must not accept a project server key.
-  registerAdminProjectRoutes(app, { pg, sessions, projects, readiness })
+  registerAdminProjectRoutes(app, {
+    pg,
+    sessions,
+    projects,
+    readiness,
+    deletions: projectDeletions,
+    maxAttempts: config.projectPurgeMaxAttempts,
+    leaseMs: config.projectPurgeLeaseMs,
+    // The shared instance, not a new one — see `segmentCache`'s own comment
+    // above and `AdminProjectDeps.clearSegmentCache`.
+    clearSegmentCache: (projectId) => segmentCache.clearProject(projectId),
+  })
   // One shared object, not one built per registration: registerExportRoute
   // takes the exact same PrivacyDeps registerPrivacyRoutes does (export.ts's
   // own docstring), and constructing a second literal here is exactly the
@@ -413,6 +466,10 @@ export function buildApp(input: {
   // same rule again — a live timer issuing real `DELETE FROM sessions`
   // during unrelated tests would be the identical cross-file interference —
   // see auth/boot.test.ts, which drives it through `runOnce()` directly.
+  // `projectPurge` follows the same rule once more — a live timer issuing
+  // real `ALTER TABLE ... DROP PARTITION` calls and `DELETE FROM projects`
+  // against the shared test database on every unrelated test file's boot
+  // would be the identical interference. index.ts starts it too.
   return app
 }
 

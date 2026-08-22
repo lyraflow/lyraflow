@@ -57,6 +57,10 @@ export function AppRouter(props: {
    * session it renders the header from -- this screen has just made that
    * value stale, and the server already returns the new one. */
   onEmailChanged?(): void
+  /** Called when a completed deletion empties the project list -- threaded
+   * straight through to `Settings`, the only screen that can trigger it,
+   * matching `onUnauthorized`'s own shape. */
+  onSessionStale?(): void
 }) {
   const feed = <Feed client={props.client} onUnauthorized={props.onUnauthorized} />
   // IMPORTANT 3 from the whole-branch review: `onUnauthorized` used to be
@@ -64,7 +68,13 @@ export function AppRouter(props: {
   // (`GET /v1/project`, `GET /v1/project/usage`) that can 401 exactly the
   // same way, and it is the only screen with no unauthorized detector of
   // its own now that both destinations get one.
-  const settings = <Settings client={props.client} onUnauthorized={props.onUnauthorized} />
+  const settings = (
+    <Settings
+      client={props.client}
+      onUnauthorized={props.onUnauthorized}
+      onSessionStale={props.onSessionStale}
+    />
+  )
   const profile = (
     <Profile
       client={props.client}

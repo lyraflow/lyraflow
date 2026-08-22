@@ -43,7 +43,7 @@ function resolveInitialId(projects: Project[], initialId: number | null): number
   return initialId
 }
 
-interface ProjectState {
+export interface ProjectState {
   projects: Project[]
   activeId: number | null
   setActiveId(id: number): void
@@ -65,6 +65,11 @@ interface ProjectState {
   // response now carries every field a `Project` needs (`CreatedProject`,
   // `api/types.ts`), so there is no re-fetch to race in the first place.
   addProject(project: Project): void
+  // Drops a destroyed project from the list. Paired with `addProject` and
+  // deliberately NOT a whole-list re-fetch, for the same reason (#89): a GET
+  // issued here could still be in flight when a concurrent PATCH commits,
+  // and its stale response would win the replace.
+  removeProject(id: number): void
 }
 
 const Ctx = createContext<ProjectState | null>(null)
@@ -146,6 +151,28 @@ export function ProjectProvider(props: {
     setActiveIdState(resolveInitialId(props.projects, props.initialId))
   }, [props.initialId, props.projects])
 
+  // `removeProject` (below) sets `activeId` to `null` when the project that
+  // just vanished was the active one, rather than resolving the fallback
+  // itself -- it only has the PREVIOUS `projects` list in scope inside its
+  // own updater, not the filtered one `setProjects`'s updater computes.
+  // This is what actually resolves that `null` to the first survivor, the
+  // moment one exists: every screen stays scoped to a project that exists,
+  // and `null` only ever persists when nothing survives -- which is the
+  // wizard branch `App.tsx` chooses above this provider. Watching internal
+  // `projects`/`activeId` rather than the `props.initialId` the effect above
+  // tracks -- a removal changes neither of those props.
+  //
+  // A project being DELETED is not a survivor. `Shell.tsx`'s switcher filters
+  // `deleting_at !== null` out, so falling back to one would leave the app
+  // scoped to a project the switcher refuses to offer -- no way to see which
+  // project is active and no way to change it. The two filters have to agree.
+  useEffect(() => {
+    const first = projects.find((p) => p.deleting_at === null)
+    if (activeId === null && first !== undefined) {
+      setActiveIdState(first.id)
+    }
+  }, [activeId, projects])
+
   const updateProject = useCallback((id: number, patch: Partial<Project>) => {
     setProjects((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)))
   }, [])
@@ -160,9 +187,18 @@ export function ProjectProvider(props: {
     setProjects((prev) => (prev.some((p) => p.id === project.id) ? prev : [...prev, project]))
   }, [])
 
+  const removeProject = useCallback((id: number) => {
+    setProjects((prev) => prev.filter((p) => p.id !== id))
+    // The active project may be the one that just vanished. `null` here is
+    // resolved by the effect above, which picks the first survivor that is
+    // not itself being deleted; `null` persists only when nothing survives,
+    // which is the wizard branch `App.tsx` chooses above this provider.
+    setActiveIdState((prev) => (prev === id ? null : prev))
+  }, [])
+
   const value = useMemo(
-    () => ({ projects, activeId, setActiveId, updateProject, addProject }),
-    [projects, activeId, setActiveId, updateProject, addProject],
+    () => ({ projects, activeId, setActiveId, updateProject, addProject, removeProject }),
+    [projects, activeId, setActiveId, updateProject, addProject, removeProject],
   )
   return <Ctx.Provider value={value}>{props.children}</Ctx.Provider>
 }

@@ -13,6 +13,7 @@ const PLACEHOLDER_PROJECT = {
   retention_months: 24,
   monthly_event_quota: null,
   disabled_at: null,
+  deleting_at: null,
 }
 
 function client(over: Partial<Record<string, unknown>> = {}) {
@@ -25,6 +26,20 @@ function client(over: Partial<Record<string, unknown>> = {}) {
     events: vi.fn(async () => ({ events: [], next_cursor: null })),
     stats: vi.fn(async () => ({ buckets: [] })),
     rejections: vi.fn(async () => ({ rejections: [], has_more: false, next_offset: 0 })),
+    project: vi.fn(async () => ({
+      name: PLACEHOLDER_PROJECT.name,
+      slug: PLACEHOLDER_PROJECT.slug,
+      write_key: 'wk_placeholder',
+    })),
+    usage: vi.fn(async () => ({
+      month: '2026-08',
+      events_accepted: 0,
+      events_rejected: 0,
+      events_throttled: 0,
+      events_bot: 0,
+      monthly_event_quota: null,
+      disabled_at: null,
+    })),
     ...over,
   } as never
 }
@@ -307,4 +322,49 @@ describe('App', () => {
     expect(await screen.findByText(/loading/i)).toBeInTheDocument()
     expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
   })
+
+  // The case the phase check at the top of App.tsx exists to catch: that
+  // check sits ABOVE ProjectProvider, so nothing re-evaluates it when a
+  // completed deletion empties the context's project list from underneath
+  // the shell. Settings' own delete flow (ProjectsSection.test.tsx) already
+  // covers removing a project that leaves others behind; this drives the
+  // one case it stops short of -- a real confirm and a real poll completing
+  // for the LAST project -- and checks the wizard takes over rather than a
+  // shell with nothing left to render.
+  it('returns to the wizard when the last project is deleted', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const only = { ...PLACEHOLDER_PROJECT, id: 9, name: 'Only', slug: 'only' }
+      const projects = vi.fn().mockResolvedValueOnce([only]).mockResolvedValue([])
+      const deleteProject = vi.fn(async () => ({ id: 5, project_id: only.id, status: 'pending' }))
+      const projectDeletion = vi.fn(async () => ({
+        status: 'completed' as const,
+        requested_at: '2026-08-21T09:00:00.000Z',
+        completed_at: '2026-08-21T09:00:00.000Z',
+      }))
+      const c = client({ projects, deleteProject, projectDeletion })
+      const user = userEvent.setup({ delay: null })
+      render(<App client={c} />)
+
+      await user.click(await screen.findByRole('link', { name: /settings/i }))
+      await confirmDelete(user, 'only')
+      await vi.advanceTimersByTimeAsync(4000)
+
+      expect(await screen.findByText(/name your first project/i)).toBeInTheDocument()
+      expect(screen.queryByText('Feed')).not.toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
+
+/** Opens the row's delete confirmation, types the slug exactly, and
+ * confirms -- the same flow `ProjectsSection.test.tsx`'s own `confirmDelete`
+ * drives, one level up: this one navigates from the shell rather than
+ * rendering `ProjectsSection` directly, so the phase decision above
+ * `ProjectProvider` is actually exercised. */
+async function confirmDelete(user: ReturnType<typeof userEvent.setup>, slug: string) {
+  await user.click(await screen.findByRole('button', { name: 'Delete' }))
+  await user.type(screen.getByLabelText(new RegExp(`Type ${slug} to confirm`)), slug)
+  await user.click(screen.getByRole('button', { name: new RegExp(`Delete ${slug} permanently`) }))
+}

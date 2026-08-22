@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
+import { type Pool, createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { retentionBoundary, toYYYYMM } from './boundary.js'
 import { type DropResult, RETENTION_TABLES, RetentionStore, type RetentionTarget } from './store.js'
@@ -87,6 +87,20 @@ async function makeProject(slug: string, name: string, retentionMonths: number):
     [name, slug, `wk_${slug}`, `sk_hash_${slug}`, retentionMonths],
   )
   return Number(r.rows[0]?.id)
+}
+
+// A prefix distinct from SLUG_A/SLUG_B -- this helper's callers create and
+// delete their own rows within a single test, so they need a slug that
+// cannot collide with the two long-lived fixture projects above.
+let deletingTestCounter = 0
+async function createProject(db: Pool, name: string): Promise<{ id: number }> {
+  const slug = `ret-store-deleting-${Date.now()}-${deletingTestCounter++}`
+  const r = await db.query<{ id: string }>(
+    `INSERT INTO projects (name, slug, write_key, server_key_hash)
+     VALUES ($1, $2, $3, $4) RETURNING id`,
+    [name, slug, `wk_${slug}`, `sk_${slug}`],
+  )
+  return { id: Number(r.rows[0]?.id) }
 }
 
 /** ClickHouse DateTime64(3) literal from an ISO-8601 string. */
@@ -552,6 +566,27 @@ describe('RetentionStore', () => {
     const b = targets.find((t: RetentionTarget) => t.projectId === projectB)
     expect(a?.retentionMonths).toBe(13)
     expect(b?.retentionMonths).toBe(3)
+  })
+
+  /**
+   * A project being deleted IS still swept, deliberately. A purge that ends
+   * permanently failed leaves `deleting_at` stamped forever with whatever
+   * survived the teardown still in ClickHouse; excluding those projects here
+   * would mean nothing ever sweeps or reports that data again. Redundant
+   * work between the two workers is the cheap side of this trade, and both
+   * are idempotent.
+   */
+  it('still sweeps a project that is being deleted', async () => {
+    const live = await createProject(pg, 'Live')
+    const dying = await createProject(pg, 'Dying')
+    try {
+      await pg.query('UPDATE projects SET deleting_at = now() WHERE id = $1', [dying.id])
+      const targets = await store.listProjects()
+      expect(targets.map((t) => t.projectId)).toContain(live.id)
+      expect(targets.map((t) => t.projectId)).toContain(dying.id)
+    } finally {
+      await pg.query('DELETE FROM projects WHERE id = ANY($1)', [[live.id, dying.id]])
+    }
   })
 
   // Regression test for the old "never drop everything" guard's other

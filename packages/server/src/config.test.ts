@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { loadConfig } from './config.js'
+import { CLAIM_DELAY_MARGIN_MS, loadConfig } from './config.js'
 
 const required = {
   LYRAFLOW_POSTGRES_URL: 'postgres://u:p@localhost:5432/db',
@@ -21,6 +21,28 @@ describe('loadConfig', () => {
     expect(c.purgeMaxAttempts).toBe(5)
     expect(c.retentionIntervalMs).toBe(3_600_000)
     expect(c.retentionEnabled).toBe(true)
+    expect(c.projectCacheTtlMs).toBe(60_000)
+    expect(c.projectPurgeClaimDelayMs).toBe(66_000)
+  })
+
+  /**
+   * The claim delay is DERIVED, and the derivation is what stops the two
+   * numbers drifting: turn the project cache's TTL up and the window a purge
+   * must wait out has to follow it, or a purge starts while a cached project
+   * row still says the project is live. There is deliberately no
+   * `LYRAFLOW_PROJECT_PURGE_CLAIM_DELAY_MS` to set independently.
+   */
+  it('derives the purge claim delay from the cache TTL and the flush interval', () => {
+    const c = loadConfig({
+      ...required,
+      LYRAFLOW_PROJECT_CACHE_TTL_MS: '20000',
+      LYRAFLOW_FLUSH_INTERVAL_MS: '2000',
+    } as NodeJS.ProcessEnv)
+    expect(c.projectCacheTtlMs).toBe(20_000)
+    expect(c.flushIntervalMs).toBe(2000)
+    expect(c.projectPurgeClaimDelayMs).toBe(20_000 + 2000 + CLAIM_DELAY_MARGIN_MS)
+    // Strictly longer than the window it covers, never merely equal to it.
+    expect(c.projectPurgeClaimDelayMs).toBeGreaterThan(c.projectCacheTtlMs + c.flushIntervalMs)
   })
 
   it('throws a named error listing every missing variable at once', () => {

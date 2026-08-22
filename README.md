@@ -382,10 +382,23 @@ queued, so they do not arrive later. **Renaming never changes the slug** — the
 slug is what `lyraflow` commands address a project by, so a rename would
 otherwise break scripts silently.
 
-**There is no delete.** Removing a project's data means clearing both stores,
-and the ClickHouse half is partition drops for some tables and asynchronous
-mutations for others; getting that ordering wrong leaves data nothing will ever
-sweep again. Archiving is the reversible answer until that exists.
+**Deleting a project** destroys it. Every event, person, trait and report, in both
+databases, plus the project row itself — and unlike archiving there is no way back
+short of a backup. Deleting asks you to type the project's slug, from Settings and
+from the CLI alike, because nothing else about the action is reversible.
+
+It runs as a background job rather than a single request: ClickHouse holds a
+project's events across partitions in three tables and two more that need
+asynchronous mutations, which takes minutes on a large project. Confirming stops
+Lyraflow accepting events for the project, then the teardown waits for the last
+in-flight events to drain before it starts — about a minute on a default
+install, because each project's row is cached in memory for that long and a
+teardown that raced it would drop partitions those events were still landing in.
+Then it tears ClickHouse down, confirms nothing is left, and only then removes
+the project from Postgres — in that order, so a half-finished delete can be
+retried rather than leaving data nothing will ever sweep again. Settings shows
+the progress; `lyraflow projects deletion get <id>` reports the same thing, and
+`lyraflow projects deletion retry <id>` resumes one that gave up.
 
 **Volunteering the limit:** that is the whole UI. People and person profiles
 have **no** screens at all yet; reach them the way the rest of this document
@@ -506,16 +519,40 @@ Neither choice can be changed later without re-ingesting, because it decides
 how identity was resolved at write time. Separate products: separate projects.
 One product across several domains: one project.
 
+### `lyraflow projects`
+
+    lyraflow projects list
+    lyraflow projects delete <slug> [--yes] [--queue]
+    lyraflow projects deletion get <id>
+    lyraflow projects deletion retry <id>
+
+`delete` asks you to type the slug before it does anything. `--yes` skips the
+prompt for scripts; without it, a non-interactive stdin refuses rather than
+hanging. By default the CLI performs the teardown itself, so it works on an
+install whose server is stopped; `--queue` leaves it for the running server.
+
+It also pauses before starting, and says so. Lyraflow caches each project's
+row in memory for a minute, so for that long after you confirm, a running
+server can still be accepting events for the project out of a cache that has
+not heard about the deletion — and a teardown that started immediately would
+drop partitions those events are about to land in. The command waits that
+window out first. On a default install that is about a minute.
+
+**When a deletion fails.** A teardown that keeps failing stops being retried
+after five attempts and reports `failed`, with the reason in `deletion get`.
+The project is then in a half-finished state: it accepts no events, it is gone
+from every screen but Settings, and whatever survived the teardown is still in
+ClickHouse — where retention keeps sweeping it, so it is not invisible.
+`deletion retry <id>` puts the request back in the queue and the teardown
+starts again from the top, which is safe to repeat: every step of it is
+predicated on the project and dropping something already dropped does
+nothing.
+
 ### What is missing today
 
 - **No cross-project read.** No endpoint aggregates projects, so an "all my
   sites" total does not exist in the API. Getting one means querying
   ClickHouse directly, or calling each project in turn and adding up.
-- **No project delete.** `GET /v1/projects` (session-only — see below) lists
-  every project, and the [Web UI](#web-ui)'s Settings screen is built on it,
-  but nothing removes one. Removing a project means deleting the Postgres row
-  by hand — and its ClickHouse partitions with it, because the retention
-  worker only sweeps projects it can still see in Postgres.
 - **One project per page.** The browser SDK keeps a single configuration on
   `window.lyraflow`; calling `init()` again reconfigures it from scratch
   rather than adding a second destination. One page cannot report to two
@@ -727,10 +764,11 @@ within 24 hours of server time.
   discarded. `/metrics` reports the accepted, rejected, throttled, over-quota
   and bot totals, so a `202` that stored nothing is still visible there.
 - `401` — missing or unknown write key, **or a project that has been
-  archived**, which answers `{"error":"project_archived"}`. Archiving stops
-  collection deliberately; the status is `401` rather than `403` because the
-  browser SDK treats `401` as final and stops, while any other status is
-  retried indefinitely by every bundle already deployed on a page.
+  archived**, which answers `{"error":"project_archived"}`, **or one being
+  deleted**, which answers `{"error":"project_deleted"}`. Both stop collection
+  deliberately; the status is `401` rather than `403` because the browser SDK
+  treats `401` as final and stops, while any other status is retried
+  indefinitely by every bundle already deployed on a page.
 - `429` with `{"error":"quota_exceeded"}` — the project has used its monthly
   event quota. **No `retry-after`, deliberately**: unlike a `503`, this does not
   clear on its own shortly. It holds until the month rolls over or an operator

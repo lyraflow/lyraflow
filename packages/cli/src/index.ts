@@ -17,6 +17,7 @@ import {
 import { runEvents } from './api/commands/events.js'
 import { runFunnels } from './api/commands/funnels.js'
 import { runPersons } from './api/commands/persons.js'
+import { runProjects } from './api/commands/projects.js'
 import { runSnippet } from './api/commands/snippet.js'
 import { runStats } from './api/commands/stats.js'
 import { runUsage } from './api/commands/usage.js'
@@ -183,6 +184,65 @@ export function createPrompt(
 
       rl.question(`${question} [y/N] `, (answer) => {
         finish(/^y(es)?$/i.test(answer.trim()))
+      })
+    })
+}
+
+/**
+ * The real `AdminCommandContext['prompt']` for `projects delete` —
+ * `createPrompt`'s sibling, not a reuse of it: `projects delete`'s
+ * confirmation is "type the slug", not "type y/N", so the answer this
+ * resolves to is the raw typed line, not a boolean. Every safety property
+ * `createPrompt`'s own docstring documents (the four ways a stream can stop
+ * producing an answer, and why each needs its own listener) applies
+ * identically here, RESOLVING `null` EVERYWHERE `createPrompt` resolves
+ * `false` — `runProjectsDelete`'s `answer !== row.slug` check treats `null`
+ * as a decline the same way, so nothing here can hang OR silently "confirm"
+ * on a stream that never answered.
+ */
+export function createRawPrompt(
+  input: NodeJS.ReadableStream = process.stdin,
+  output: NodeJS.WritableStream = process.stderr,
+  timeoutMs: number = PROMPT_TIMEOUT_MS,
+): (question: string) => Promise<string | null> {
+  return (question: string) =>
+    new Promise<string | null>((resolve) => {
+      const rl = createInterface({ input, output })
+      let settled = false
+
+      const finish = (value: string | null) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        input.removeListener('close', onInputClose)
+        input.removeListener('error', onInputError)
+        rl.removeListener('error', onRlError)
+        rl.close()
+        resolve(value)
+      }
+
+      rl.once('close', () => finish(null))
+      const onInputClose = () => finish(null)
+      input.on('close', onInputClose)
+      const onInputError = () => finish(null)
+      const onRlError = () => finish(null)
+      input.on('error', onInputError)
+      rl.on('error', onRlError)
+
+      const timer = setTimeout(() => {
+        try {
+          output.write(
+            `\n(no reply within ${Math.round(timeoutMs / 1000)}s; treating as declined — nothing was deleted)\n`,
+          )
+        } catch {
+          // A broken output stream at this point changes nothing about the
+          // answer this resolves to — `finish(null)` runs either way.
+        }
+        finish(null)
+      }, timeoutMs)
+
+      rl.question(question, (answer) => {
+        finish(answer)
       })
     })
 }
@@ -556,6 +616,30 @@ async function main(): Promise<void> {
       break
     }
 
+    case 'projects': {
+      // Same shape as `set-admin-password`/`seed-demo` above: database
+      // handles built here, not an HTTP `Client` — see projects.ts's own
+      // module docstring for why this group cannot go through
+      // `CommandContext['client']`. `createRawPrompt`, not `createPrompt`:
+      // this group's confirmation is "type the slug", not "type y/N".
+      const { pg, ch } = clients()
+      try {
+        process.exitCode = await runProjects(args, {
+          pg,
+          ch,
+          write: (s) => process.stdout.write(s),
+          writeErr: (s) => process.stderr.write(s),
+          prompt: createRawPrompt(),
+          stdinIsTty: process.stdin.isTTY ?? false,
+          stdoutIsTty: process.stdout.isTTY ?? false,
+        })
+      } finally {
+        await pg.end()
+        await ch.close()
+      }
+      break
+    }
+
     case 'set-admin-password': {
       const isTty = process.stdout.isTTY ?? false
       const write = (s: string) => process.stdout.write(s)
@@ -815,7 +899,7 @@ async function main(): Promise<void> {
 
     default:
       console.error(
-        'Usage: lyraflow <--version|migrate|create-project|set-admin-password|seed-demo|healthcheck|events|stats|persons|deletions|segments|funnels|schema|usage|snippet>',
+        'Usage: lyraflow <--version|migrate|create-project|set-admin-password|seed-demo|healthcheck|events|stats|persons|deletions|projects|segments|funnels|schema|usage|snippet>',
       )
       process.exit(2)
   }

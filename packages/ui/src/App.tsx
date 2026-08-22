@@ -297,6 +297,17 @@ export default function App(props: { client?: ApiClient; sessionPollIntervalMs?:
         email={session.email}
         onLogout={handleLogout}
         onUnauthorized={handleSessionExpired}
+        onSessionStale={() => {
+          // The project list changed underneath the shell in a way the shell
+          // cannot represent -- today, the last project was destroyed. The
+          // wizard-or-shell decision lives HERE, above ProjectProvider, so
+          // the fix is to re-read the session and let that decision run
+          // again rather than teach a screen below it to render an install
+          // with no projects.
+          loadSession(client, session.email)
+            .then((loaded) => setPhase({ kind: 'authenticated', session: loaded }))
+            .catch(() => setPhase({ kind: 'unavailable' }))
+        }}
         // Re-read rather than patched in place: the header renders `email`
         // from this state, and `GET /v1/auth/session` is the thing that
         // knows what was actually stored -- taking the profile screen's

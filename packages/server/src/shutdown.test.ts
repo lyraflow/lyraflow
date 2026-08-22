@@ -19,8 +19,9 @@ function harness(insert: (rows: unknown[]) => Promise<void>) {
   const purge = { stop: vi.fn() }
   const retention = { stop: vi.fn() }
   const sessionSweeper = { stop: vi.fn() }
+  const projectPurge = { stop: vi.fn() }
   const app = Fastify()
-  return { readiness, buffer, counters, purge, retention, sessionSweeper, app }
+  return { readiness, buffer, counters, purge, retention, sessionSweeper, projectPurge, app }
 }
 
 // installShutdownHandlers only calls buffer.add()/drain() generically — it
@@ -48,6 +49,7 @@ describe('installShutdownHandlers', () => {
       purge: h.purge,
       retention: h.retention,
       sessionSweeper: h.sessionSweeper,
+      projectPurge: h.projectPurge,
       drainDeadlineMs: 5000,
       onExit: () => {},
     })
@@ -61,6 +63,7 @@ describe('installShutdownHandlers', () => {
     expect(h.purge.stop).toHaveBeenCalled()
     expect(h.retention.stop).toHaveBeenCalled()
     expect(h.sessionSweeper.stop).toHaveBeenCalled()
+    expect(h.projectPurge.stop).toHaveBeenCalled()
   })
 
   it('stops the retention worker beside the purge worker, before the drain completes', async () => {
@@ -84,6 +87,7 @@ describe('installShutdownHandlers', () => {
       purge: h.purge,
       retention: h.retention,
       sessionSweeper: h.sessionSweeper,
+      projectPurge: h.projectPurge,
       drainDeadlineMs: 5000,
       onExit: () => {},
     })
@@ -95,6 +99,48 @@ describe('installShutdownHandlers', () => {
     await Promise.resolve()
 
     expect(h.retention.stop).toHaveBeenCalledTimes(1)
+    const stillDraining = await Promise.race([
+      shutdownPromise.then(() => 'settled' as const),
+      new Promise<'pending'>((resolve) => setTimeout(() => resolve('pending'), 0)),
+    ])
+    expect(stillDraining).toBe('pending')
+
+    releaseInsert()
+    await shutdownPromise
+  })
+
+  it('stops the project purge worker beside the purge worker, before the drain completes', async () => {
+    // Mirrors the purge test directly below: projectPurge.stop() must fire
+    // at the same point in shutdown purge.stop() does, for the reason its
+    // own docstring gives — no new project teardown starts once draining
+    // begins, while one already in flight is left to finish server-side.
+    let releaseInsert: () => void = () => {}
+    const insertGate = new Promise<void>((resolve) => {
+      releaseInsert = resolve
+    })
+    const h = harness(async () => {
+      await insertGate
+    })
+    const shutdown = installShutdownHandlers({
+      app: h.app,
+      readiness: h.readiness,
+      buffer: asEventBuffer(h.buffer),
+      counters: h.counters,
+      purge: h.purge,
+      retention: h.retention,
+      sessionSweeper: h.sessionSweeper,
+      projectPurge: h.projectPurge,
+      drainDeadlineMs: 5000,
+      onExit: () => {},
+    })
+
+    h.buffer.add({ n: 1 })
+    const shutdownPromise = shutdown()
+
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(h.projectPurge.stop).toHaveBeenCalledTimes(1)
     const stillDraining = await Promise.race([
       shutdownPromise.then(() => 'settled' as const),
       new Promise<'pending'>((resolve) => setTimeout(() => resolve('pending'), 0)),
@@ -126,6 +172,7 @@ describe('installShutdownHandlers', () => {
       purge: h.purge,
       retention: h.retention,
       sessionSweeper: h.sessionSweeper,
+      projectPurge: h.projectPurge,
       drainDeadlineMs: 5000,
       onExit: () => {},
     })
@@ -165,6 +212,7 @@ describe('installShutdownHandlers', () => {
       purge: h.purge,
       retention: h.retention,
       sessionSweeper: h.sessionSweeper,
+      projectPurge: h.projectPurge,
       drainDeadlineMs: 50,
       onExit: (code) => exits.push(code),
     })
@@ -187,6 +235,7 @@ describe('installShutdownHandlers', () => {
       purge: h.purge,
       retention: h.retention,
       sessionSweeper: h.sessionSweeper,
+      projectPurge: h.projectPurge,
       drainDeadlineMs: 5000,
       onExit: () => {},
     })

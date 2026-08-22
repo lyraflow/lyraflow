@@ -30,6 +30,7 @@ installShutdownHandlers({
   purge: app.deps.purge,
   retention: app.deps.retention,
   sessionSweeper: app.deps.sessionSweeper,
+  projectPurge: app.deps.projectPurge,
   drainDeadlineMs: config.drainDeadlineMs,
 })
 
@@ -118,6 +119,10 @@ if (adminOutcome === 'created') {
 // exits, and starting a timer that outlives that decision is pointless.
 app.deps.purge.start()
 app.deps.sessionSweeper.start()
+// A project purge does not resolve identity either, but for the same
+// reason as `purge` above: no point starting a timer that outlives a boot
+// that already failed.
+app.deps.projectPurge.start()
 
 // Same reasoning as purge above, plus one more: off is a legitimate choice
 // for an operator managing retention some other way, but silently doing

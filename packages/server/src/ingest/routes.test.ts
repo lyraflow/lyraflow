@@ -709,6 +709,80 @@ describe('ingest routes', () => {
 })
 
 /**
+ * `DELETE /v1/projects/:id` and `PATCH /v1/projects/:id` (registered by
+ * buildApp alongside the ingest routes) each stop this same write key --
+ * for different, and differently permanent, reasons. Own projects rather
+ * than the shared 'wk_routes' one: marking that project deleting or
+ * archived would break every other describe block in this file that
+ * assumes it keeps accepting events.
+ */
+describe('project deletion and ingest', () => {
+  let delCounter = 0
+  async function createDeletableProject(
+    name: string,
+  ): Promise<{ id: number; slug: string; writeKey: string }> {
+    const slug = `ingest-del-${Date.now()}-${delCounter++}`
+    const writeKey = `wk_${slug}`
+    const r = await pg.query<{ id: string }>(
+      `INSERT INTO projects (name, slug, write_key, server_key_hash)
+       VALUES ($1, $2, $3, $4) RETURNING id`,
+      [name, slug, writeKey, `sk_${slug}`],
+    )
+    return { id: Number(r.rows[0]?.id), slug, writeKey }
+  }
+
+  afterEach(async () => {
+    await pg.query(`DELETE FROM project_deletions WHERE slug LIKE 'ingest-del-%'`)
+    await pg.query(`DELETE FROM projects WHERE slug LIKE 'ingest-del-%'`)
+  })
+
+  it('refuses ingest for a deleting project with 401 project_deleted', async () => {
+    const project = await createDeletableProject('Acme')
+    // Warm the cache FIRST, so this proves invalidation and not merely the
+    // column. Removing `projects.invalidate()` from the DELETE route makes
+    // only this test fail.
+    const warm = await track(
+      { message_id: randomUUID(), anonymous_id: 'a-del', event: 'warm' },
+      project.writeKey,
+    )
+    expect(warm.statusCode).toBe(202)
+
+    const deleted = await app.inject({
+      method: 'DELETE',
+      url: `/v1/projects/${project.id}`,
+      headers: { cookie: adminCookie, 'x-lyraflow-ui': '1' },
+      payload: { slug: project.slug },
+    })
+    expect(deleted.statusCode).toBe(202)
+
+    const res = await track(
+      { message_id: randomUUID(), anonymous_id: 'a-del', event: 'blocked' },
+      project.writeKey,
+    )
+    expect(res.statusCode).toBe(401)
+    expect(res.json()).toEqual({ error: 'project_deleted' })
+  })
+
+  it('still answers project_archived for a project that is only archived', async () => {
+    const project = await createDeletableProject('Acme Archived')
+    const patched = await app.inject({
+      method: 'PATCH',
+      url: `/v1/projects/${project.id}`,
+      headers: { cookie: adminCookie, 'x-lyraflow-ui': '1' },
+      payload: { archived: true },
+    })
+    expect(patched.statusCode).toBe(200)
+
+    const res = await track(
+      { message_id: randomUUID(), anonymous_id: 'a-arch', event: 'blocked' },
+      project.writeKey,
+    )
+    expect(res.statusCode).toBe(401)
+    expect(res.json()).toEqual({ error: 'project_archived' })
+  })
+})
+
+/**
  * Routes exercised here with fully mocked IngestDeps rather than buildApp,
  * so each test can force a specific failure mode (a synchronous throw from
  * the ClickHouse client, a saturated buffer) deterministically instead of
@@ -722,6 +796,7 @@ describe('ingest routes (mocked deps)', () => {
     monthlyEventQuota: 1_000_000,
     serverKeyHash: 'mocked-server-key-hash',
     disabledAt: null,
+    deletingAt: null,
   }
 
   // Minimal fakes satisfying only the methods routes.ts actually calls; cast
@@ -1745,6 +1820,7 @@ describe('quotaSnapshot', () => {
       monthlyEventQuota: opts.quota,
       serverKeyHash: 'h',
       disabledAt: null,
+      deletingAt: null,
     }
     const pool = {
       query: async (text: string) => {
