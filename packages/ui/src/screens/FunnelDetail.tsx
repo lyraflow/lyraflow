@@ -9,9 +9,32 @@ import { Button } from '../components/ui/button.js'
 import { FunnelFlowOrBars } from './funnels/FunnelFlowOrBars.js'
 import type { RangeDays } from './funnels/RangePicker.js'
 import { DEFAULT_RANGE_DAYS, RangePicker, sinceIsoForDays } from './funnels/RangePicker.js'
+import type { StepPeopleSeedCounts } from './funnels/StepPeople.js'
+import { StepPeople } from './funnels/StepPeople.js'
 import { WarningPanel } from './funnels/WarningPanel.js'
 import { describeError } from './funnels/errors.js'
 import { formatRangeDays, formatRelative } from './funnels/format.js'
+
+/**
+ * The reached/dropped counts for step `step`, computed from the run result
+ * this screen already holds -- no extra request.
+ *
+ * `reached(N) = steps[N-1].people` (everyone at level >= N). `dropped(N) =
+ * steps[N-1].people - (steps[N]?.people ?? 0)` -- verified exact against
+ * `levels.ts:75-90`'s `stoppedAt[N] = atLeast[N] - atLeast[N+1]`, where
+ * `atLeast[len+1]` is 0. That last part is what makes the FINAL step's
+ * dropped count equal its reached count: there is no `steps[N]` beyond it,
+ * so the `?? 0` fallback fires and `dropped = reached - 0`. That is not a
+ * coincidence to guard against -- it is the same fact `mode: 'dropped'`
+ * returns from the server for the last step, so the two numbers agreeing
+ * there is the formula being right, not wrong.
+ */
+function seedCountsFor(result: FunnelRunResult, step: number): StepPeopleSeedCounts {
+  const reached = result.steps[step - 1]?.people
+  if (reached == null) return {}
+  const dropped = reached - (result.steps[step]?.people ?? 0)
+  return { reached, dropped }
+}
 
 /**
  * A funnel referencing a stale or deleted segment still answers `200` with
@@ -103,6 +126,16 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
   const [running, setRunning] = useState(false)
   const [stale, setStale] = useState(false)
   const [days, setDays] = useState<RangeDays>(DEFAULT_RANGE_DAYS)
+  // Task 6: the step whose people the panel beneath the chart shows, by its
+  // 1-indexed `index`. `null` until a result has actually landed -- there is
+  // nothing to select against a funnel whose shape (step count) is not yet
+  // known, and selecting step 1 pre-emptively would have this screen ask for
+  // step 1 of a funnel that might turn out to have none. Set (and clamped)
+  // only where a result is actually APPLIED, in `runNow`'s success branch
+  // below -- never here, and never by a plain effect on `result`, so a
+  // response discarded for failing the answer-identity check (see the big
+  // comment on `answerIdRef`) cannot move the selection either.
+  const [selectedStep, setSelectedStep] = useState<number | null>(null)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
@@ -179,6 +212,18 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
           if (answerId !== answerIdRef.current) return
           setResult(r)
           setStale(false)
+          // Task 6's clamp: select step 1 the first time a result ever
+          // lands (`prev == null`), and again whenever the CURRENT
+          // selection no longer names a step this result has (`prev >
+          // r.steps.length`) -- a funnel edited from 4 steps to 2 must not
+          // leave step 4 selected, since the panel would go on to request
+          // step 4 of a funnel that no longer has one. Any other selection
+          // survives verbatim: an operator who picked step 3, changed the
+          // range and pressed Run is still looking at step 3. Resetting to
+          // 1 unconditionally on every landed result -- rather than only
+          // when the current selection is actually out of range -- would
+          // pass the clamp case and fail this one; see the paired tests.
+          setSelectedStep((prev) => (prev == null || prev > r.steps.length ? 1 : prev))
         })
         .catch((err: unknown) => {
           if (err instanceof ApiError && err.status === 401) {
@@ -234,6 +279,12 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
     setRunError(null)
     setStale(false)
     setDays(DEFAULT_RANGE_DAYS)
+    // A different funnel entirely (new `:id`, or a project switch) --
+    // whatever was selected named a step of the PREVIOUS one, and a stale
+    // selection here would go on to request people for a step number this
+    // funnel may not even have. `runNow` below re-selects step 1 once its
+    // own result lands, same as the very first mount.
+    setSelectedStep(null)
 
     client
       .funnel(activeId, validId)
@@ -310,6 +361,11 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
     setDays(newDays)
     setStale(true)
   }
+
+  // Reported by `FunnelFlowOrBars` (via `FunnelFlow`/`StepBars`) with the
+  // step's 1-indexed `index` -- the same number the panel below and the
+  // API's `step` parameter both expect, so this needs no translation.
+  const handleSelectStep = (step: number) => setSelectedStep(step)
 
   // Behind a confirmation, deliberately -- deletion is the one action on
   // this screen with no undo. `deleteError` deliberately does NOT reuse
@@ -499,7 +555,37 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
            * `funnel` can legitimately still be null here -- the fetch and
            * the run are independent requests -- and `FunnelFlowOrBars` renders no
            * clause at all rather than one it cannot place. */}
-          <FunnelFlowOrBars result={result} definition={funnel?.steps} />
+          <FunnelFlowOrBars
+            result={result}
+            definition={funnel?.steps}
+            selectedStep={selectedStep}
+            onSelectStep={handleSelectStep}
+          />
+          {/* `activeId` is guaranteed here: `result` only ever gets set from
+           * a response `runNow` issued, and `runNow` returns without issuing
+           * one at all when `activeId == null` (see its own guard above).
+           *
+           * Keyed on the step AND `result.as_of`, not on the step alone:
+           * `StepPeople`'s own doc comment reads its `seedCounts` once, at
+           * mount, and a caller that wants a LATER change reflected -- a
+           * re-run landing new numbers under the SAME selected step -- has
+           * to pass a fresh instance for that to show up. Keying on the
+           * step alone would also miss switching steps refreshing the
+           * fetched member walk itself, not just the seeded labels: without
+           * it, clicking a different step would relabel the toggle but
+           * leave the OLD step's already-fetched rows on screen. */}
+          {selectedStep != null && activeId != null && (
+            <StepPeople
+              key={`${selectedStep}-${result.as_of}`}
+              client={client}
+              projectId={activeId}
+              funnelId={validId}
+              step={selectedStep}
+              range={result.range}
+              onUnauthorized={onUnauthorized}
+              seedCounts={seedCountsFor(result, selectedStep)}
+            />
+          )}
         </div>
       )}
     </div>
