@@ -8,6 +8,7 @@ import { buildApp } from '../app.js'
 import { hashServerKey } from '../auth/project-cache.js'
 import { loadConfig } from '../config.js'
 import { Readiness } from '../health.js'
+import { type PgDictionarySource, ensureIdentityDictionaries } from '../identity/dictionaries.js'
 
 /**
  * What a funnel MEANS, proved against a real ClickHouse.
@@ -106,6 +107,19 @@ const who = (name: string) => `sem-${name}`
  * pre-identify world — which looks exactly like an engine that cannot resolve
  * identity at all.
  */
+/**
+ * How the ClickHouse *server* reaches Postgres to populate the identity
+ * dictionaries -- its own container network, not this process's host-mapped
+ * `localhost:5433`. Same shape as `person.test.ts` and `resolve.test.ts`.
+ */
+const pgSource: PgDictionarySource = {
+  host: 'postgres',
+  port: 5432,
+  user: 'lyraflow',
+  password: 'lyraflow',
+  database: CH.database,
+}
+
 async function reloadIdentityDictionaries(): Promise<void> {
   await ch.command({ query: `SYSTEM RELOAD DICTIONARY ${CH.database}.identity_bindings` })
   await ch.command({ query: `SYSTEM RELOAD DICTIONARY ${CH.database}.person_aliases` })
@@ -118,6 +132,23 @@ beforeAll(async () => {
     migrations: loadMigrations(join(import.meta.dirname, '../../../db/migrations')),
     appSchemaVersion: 999,
   })
+  // CREATE the identity dictionaries, not merely reload them.
+  //
+  // Every read in this file resolves a person through `identity_bindings`,
+  // and `reloadIdentityDictionaries` below issues `SYSTEM RELOAD DICTIONARY`,
+  // which requires one that already exists. This file never created them --
+  // it inherited them from whichever other suite had run against the same
+  // database first, and on a machine where the test database persists
+  // between runs that is always true, so the gap was invisible.
+  //
+  // It is not true of a fresh database. CI creates one per run, so whether
+  // this file passed depended on the order vitest happened to pick: land
+  // before every suite that calls `ensureIdentityDictionaries` and all 34
+  // tests here fail at once with "Dictionary not found" and a 503, including
+  // the ones that predate this feature by months. Creating them here makes
+  // this file independent of that order, which is what every other suite
+  // needing them already does.
+  await ensureIdentityDictionaries(ch, pgSource)
   await pg.query('DELETE FROM projects WHERE slug = $1', ['funnel-semantics'])
   const p = await pg.query<{ id: string }>(
     `INSERT INTO projects (name, slug, write_key, server_key_hash)
@@ -146,6 +177,23 @@ afterAll(async () => {
   await ch.command({
     query: `ALTER TABLE events DELETE WHERE project_id = ${projectId}`,
   })
+  // CREATE the identity dictionaries, not merely reload them.
+  //
+  // Every read in this file resolves a person through `identity_bindings`,
+  // and `reloadIdentityDictionaries` below issues `SYSTEM RELOAD DICTIONARY`,
+  // which requires one that already exists. This file never created them --
+  // it inherited them from whichever other suite had run against the same
+  // database first, and on a machine where the test database persists
+  // between runs that is always true, so the gap was invisible.
+  //
+  // It is not true of a fresh database. CI creates one per run, so whether
+  // this file passed depended on the order vitest happened to pick: land
+  // before every suite that calls `ensureIdentityDictionaries` and all 34
+  // tests here fail at once with "Dictionary not found" and a 503, including
+  // the ones that predate this feature by months. Creating them here makes
+  // this file independent of that order, which is what every other suite
+  // needing them already does.
+  await ensureIdentityDictionaries(ch, pgSource)
   await pg.query('DELETE FROM projects WHERE slug = $1', ['funnel-semantics'])
   await pg.end()
   await ch.close()
