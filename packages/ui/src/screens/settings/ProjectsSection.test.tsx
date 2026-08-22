@@ -296,12 +296,18 @@ describe('ProjectsSection — delete', () => {
     )
   })
 
-  it('renders a project that was already deleting as deleting, with its controls disabled', async () => {
+  // ABSENT, not disabled. A disabled Rename reads as an action that will come
+  // back when the row settles, and nothing about a project being destroyed is
+  // actionable again -- the badge is the whole story. Rename shipped disabled
+  // here at first, contradicting the comment on the guard directly below it.
+  it('renders a project that was already deleting with no controls at all', async () => {
     render(<ProjectsSection client={client} />, {
       wrapper: withProjects([{ ...acme, deleting_at: NOW }]),
     })
     expect(screen.getByText('deleting')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Rename' })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: 'Rename' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Archive' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument()
   })
 
   // A delete started in THIS tab must close the header switcher to the

@@ -219,22 +219,23 @@ function ProjectRow(props: {
               </span>
             )}
             <span className="flex-1" />
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={deleting}
-              onClick={() => {
-                setDraft(project.name)
-                setRenaming(true)
-              }}
-            >
-              Rename
-            </Button>
-            {/* No controls below once a delete is in flight -- the badge
-             * above is the only thing left to say about this row. */}
+            {/* No controls at all once a delete is in flight -- the badge
+             * above is the only thing left to say about this row. Rename
+             * used to render here disabled, which read as an action that
+             * might come back; nothing about this row is actionable again. */}
             {!deleting && (
               <>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setDraft(project.name)
+                    setRenaming(true)
+                  }}
+                >
+                  Rename
+                </Button>
                 {archived ? (
                   <Button
                     type="button"
