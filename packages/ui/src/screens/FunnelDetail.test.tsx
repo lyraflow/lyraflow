@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -243,6 +243,64 @@ describe('FunnelDetail', () => {
     expect(client.runFunnel).toHaveBeenCalledTimes(1)
     expect(screen.getByTestId('funnel-result')).toHaveAttribute('data-stale', 'true')
     expect(screen.getByRole('button', { name: /^run$/i })).toBeEnabled()
+  })
+
+  it('says in words which range is shown and which one Run would load', async () => {
+    // Dimming was the ONLY signal, and it is not one a reader can act on: it
+    // says something is off without saying what, or that anything is required
+    // of them. Reported as "the UI blurs but never refreshes", which is an
+    // accurate description of being told nothing.
+    const client = fakeClient()
+    renderDetail(client)
+    await screen.findByTestId('funnel-step-1')
+
+    expect(screen.queryByTestId('funnel-stale-notice')).toBeNull()
+
+    await userEvent.selectOptions(screen.getByLabelText(/range/i), '30')
+
+    const notice = screen.getByTestId('funnel-stale-notice')
+    // BOTH ranges, and this is the point: one number alone reads as a label
+    // rather than as a mismatch, and the mismatch is the whole message.
+    expect(notice).toHaveTextContent('the last 7 days')
+    expect(notice).toHaveTextContent('the last 30 days')
+
+    // Then a SECOND range, and this half is what makes the test mean
+    // anything. A hardcoded "Showing the last 7 days. Run to load the last
+    // 30 days." passes everything above it -- proved by stubbing exactly
+    // that -- because 7 and 30 are the mount default and the first thing a
+    // test reaches for. The singular is picked deliberately: it is the one
+    // phrasing the picker's own label ("Last 1 day") does not share, so it
+    // cannot be satisfied by echoing the option that was selected either.
+    await userEvent.selectOptions(screen.getByLabelText(/range/i), '1')
+    expect(notice).toHaveTextContent('the last 7 days')
+    expect(notice).toHaveTextContent('Run to load the last day')
+    expect(notice).not.toHaveTextContent('the last 30 days')
+    expect(notice).not.toHaveTextContent('the last 1 day')
+  })
+
+  it('clears the notice once the new range has actually been run', async () => {
+    const client = fakeClient()
+    renderDetail(client)
+    await screen.findByTestId('funnel-step-1')
+    await userEvent.selectOptions(screen.getByLabelText(/range/i), '30')
+    expect(screen.getByTestId('funnel-stale-notice')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: /^run$/i }))
+
+    await waitFor(() => expect(screen.queryByTestId('funnel-stale-notice')).toBeNull())
+  })
+
+  it('puts Run beside the range picker, not at the far edge of the row', async () => {
+    // The control that fixes the staleness has to be where the change was
+    // made. It previously sat at the opposite end of a justify-between row --
+    // about 1400px away on a wide screen, which is why "press Run" was not
+    // discovered.
+    renderDetail(fakeClient())
+    await screen.findByTestId('funnel-step-1')
+
+    const controls = screen.getByTestId('funnel-range-controls')
+    expect(within(controls).getByLabelText(/range/i)).toBeInTheDocument()
+    expect(within(controls).getByRole('button', { name: /^run$/i })).toBeInTheDocument()
   })
 
   // I1 (whole-branch review): `FunnelRunResult.range` was declared and never
