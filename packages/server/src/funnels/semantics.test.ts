@@ -632,9 +632,17 @@ describe('funnel semantics', () => {
         expect(await levelOf(inPasses, overrides)).toBe(2)
         // In the segment, outside the audience: STILL COUNTED, at step 1.
         expect(await levelOf(inFails, overrides)).toBe(1)
-        // Outside the segment: gone. Not level 1 — absent. Reading 1 here
-        // would mean the funnel-wide restriction had been folded into the
-        // step condition and stopped erasing anyone.
+        // Outside the segment: gone. Not level 1 — absent.
+        //
+        // What this pins is that the restriction is APPLIED AT ALL: delete
+        // `segmentFilter` from `compileFunnel` and this reads 2. It does NOT
+        // pin where the restriction sits, and an earlier version of this
+        // comment claimed it did. Folding `segmentPersonSql` into every step
+        // condition and deleting `segmentFilter` leaves this whole file
+        // green, because that rewrite is behaviour-preserving: a
+        // person-constant false condition on step 1 gives level 0, and the
+        // outer `WHERE level > 0` gives level 0 too. The placement that is
+        // pinned is the AUDIENCE's, by the test at the top of this block.
         expect(await levelOf(outside, overrides)).toBe(0)
         // ...and without the restriction, that same person is level 2, so
         // the 0 above is the segment and not a broken fixture.
@@ -704,6 +712,115 @@ describe('funnel semantics', () => {
       // are here: if both steps were gated by the SAME compiled audience,
       // this person and `firstOnly` would swap answers.
       expect(await levelOf(secondOnly, { steps })).toBe(0)
+    })
+
+    /**
+     * THE GATE IS JUDGED PER PERSON, NOT PER DEVICE.
+     *
+     * Every other fixture in this block puts the gating events and the
+     * funnel-step events under ONE `anonymous_id`, so the audience resolves
+     * whoever the funnel resolves no matter how either side does it. But the
+     * gate is `<resolved person> IN (<segment persons>)` — TWO independent
+     * resolutions, in two independently compiled queries, that have to agree
+     * about who a person is. The file pins identity for the funnel itself
+     * (see the identify-mid-funnel test above) and, until this, never for
+     * the gate.
+     *
+     * Both searches happen on device A; the whole funnel happens on device
+     * B; both devices are identified to one user. `soloUser` is the same
+     * two-device shape with ONE search, so the negative direction is pinned
+     * by a fixture that differs only in the count the audience reads.
+     *
+     * Resolution canonicalises to the `user_id`, so the drop-off list
+     * contains NEITHER anonymous id. Asking `levelOf` for a device id alone
+     * reads 0 for both people and passes for entirely the wrong reason —
+     * hence `levelOfPerson`, which is this file's existing
+     * `id === anon || id === userId` hedge in the shape `levelOf` needs.
+     */
+    it('judges an audience per person, across two devices', async () => {
+      const deviceA = `aud-idA-${randomUUID()}`
+      const deviceB = `aud-idB-${randomUUID()}`
+      const user = `aud-iduser-${randomUUID()}`
+      const soloA = `aud-soloA-${randomUUID()}`
+      const soloB = `aud-soloB-${randomUUID()}`
+      const soloUser = `aud-solouser-${randomUUID()}`
+      await send([
+        // Two searches, both on device A only.
+        track(deviceA, 'searched', ago(21 * HOUR)),
+        track(deviceA, 'searched', ago(21 * HOUR - MINUTE)),
+        { type: 'identify', message_id: randomUUID(), anonymous_id: deviceA, user_id: user },
+        { type: 'identify', message_id: randomUUID(), anonymous_id: deviceB, user_id: user },
+        // ONE search on device A only -- the control, same two-device shape.
+        track(soloA, 'searched', ago(21 * HOUR)),
+        { type: 'identify', message_id: randomUUID(), anonymous_id: soloA, user_id: soloUser },
+        { type: 'identify', message_id: randomUUID(), anonymous_id: soloB, user_id: soloUser },
+      ])
+      await reloadIdentityDictionaries()
+      await send([
+        // The funnel itself happens entirely on device B.
+        track(deviceB, 'landed', ago(20 * HOUR)),
+        track(deviceB, 'clicked', ago(20 * HOUR - MINUTE)),
+        track(soloB, 'landed', ago(20 * HOUR)),
+        track(soloB, 'clicked', ago(20 * HOUR - MINUTE)),
+      ])
+      const steps = [{ event: 'landed', audience: searchedCount('>=', 2) }, { event: 'clicked' }]
+      /** The level of whichever id the resolution canonicalised to. */
+      const levelOfPerson = async (...ids: string[]): Promise<number> => {
+        for (const id of ids) {
+          const level = await levelOf(id, { steps })
+          if (level > 0) return level
+        }
+        return 0
+      }
+      // The searches are on the OTHER device. Judged per person, this is 2.
+      expect(await levelOfPerson(deviceB, deviceA, user)).toBe(2)
+      // Same shape, one search: outside the audience, so no level at all.
+      expect(await levelOfPerson(soloB, soloA, soloUser)).toBe(0)
+    })
+
+    /**
+     * A TRAIT audience, which reaches the engine by a different route.
+     *
+     * Every other audience here is a `behavior` node, so every one of them
+     * builds a behavioural CTE and reads it back. A trait node builds none:
+     * it is answered entirely out of the `traits` CTE that `compileSegment`
+     * assembles for every tree whether or not anything reads it. Coverage
+     * for that path against a live engine, not a new theme — which is why
+     * the two people differ only in one trait.
+     */
+    it('gates a step on a trait, not only on a behaviour', async () => {
+      const pro = `aud-trait-pro-${randomUUID()}`
+      const basic = `aud-trait-basic-${randomUUID()}`
+      // Its own key, so no other test's traits can answer this audience.
+      const key = `aud_tier_${randomUUID().replaceAll('-', '')}`
+      for (const [anon, tier] of [
+        [pro, 'pro'],
+        [basic, 'basic'],
+      ] as const) {
+        await send([
+          {
+            type: 'identify',
+            message_id: randomUUID(),
+            anonymous_id: anon,
+            user_id: anon,
+            traits: { [key]: tier },
+          },
+          track(anon, 'landed', ago(20 * HOUR)),
+          track(anon, 'clicked', ago(20 * HOUR - MINUTE)),
+        ])
+      }
+      await reloadIdentityDictionaries()
+      const steps = [
+        { event: 'landed' },
+        {
+          event: 'clicked',
+          audience: { kind: 'trait', key, operator: '=', value: 'pro' },
+        },
+      ]
+      expect(await levelOf(pro, { steps })).toBe(2)
+      // Counted at the step they reached, exactly as a behavioural audience
+      // leaves them -- the semantics do not depend on the node kind.
+      expect(await levelOf(basic, { steps })).toBe(1)
     })
 
     it('runs a definition with no audience exactly as it did before', async () => {
