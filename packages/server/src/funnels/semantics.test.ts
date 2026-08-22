@@ -455,6 +455,268 @@ describe('funnel semantics', () => {
     expect(res.statusCode).toBe(400)
   })
 
+  describe('step audiences', () => {
+    /** `count(event) <op> n` over the last day -- the shape every test here uses. */
+    const searchedCount = (operator: '=' | '>=', value: number) => ({
+      kind: 'behavior' as const,
+      event: 'searched',
+      aggregate: 'count' as const,
+      window: { kind: 'last' as const, n: 1, unit: 'days' as const },
+      operator,
+      value,
+    })
+
+    /**
+     * A page view with a real `context.path`.
+     *
+     * NOT `track(p, '$page', t, { path: '/docs' })`, which is how this was
+     * first written: that puts `path` in the caller's PROPERTY BAG, while an
+     * `attribute` predicate reads the `path` COLUMN, which ingest fills from
+     * `context.path` alone (`ingest/row.ts`). The two never meet, so the
+     * step matched nobody and all three people in the reported-example test
+     * came back at level 0 — a failure that reads exactly like a broken
+     * audience gate and is nothing of the kind.
+     */
+    const pageView = (anonymousId: string, path: string, timestamp: string) => ({
+      type: 'page',
+      message_id: randomUUID(),
+      anonymous_id: anonymousId,
+      timestamp,
+      context: { path },
+    })
+
+    /**
+     * THE FIXTURE THIS FEATURE EXISTS FOR.
+     *
+     * A person who satisfies step 1 and fails step 2's audience must appear
+     * at LEVEL 1. Not absent. The funnel-wide `segment_id` filter is applied
+     * outside the per-person aggregate and would remove them from the report
+     * entirely; an audience is folded into the step's own condition and stops
+     * them advancing instead. Move the gate and this is the test that says so.
+     */
+    it('leaves a person who fails a later step’s audience counted at the step they reached', async () => {
+      const passes = `aud-pass-${randomUUID()}`
+      const fails = `aud-fail-${randomUUID()}`
+      await send([
+        // Both land and both search. The only difference is HOW MANY times
+        // they searched, which is exactly what the audience counts.
+        track(passes, 'landed', ago(20 * HOUR)),
+        track(passes, 'searched', ago(20 * HOUR - MINUTE)),
+        track(fails, 'landed', ago(20 * HOUR)),
+        track(fails, 'searched', ago(20 * HOUR - MINUTE)),
+        track(fails, 'searched', ago(20 * HOUR - 2 * MINUTE)),
+      ])
+      const steps = [{ event: 'landed' }, { event: 'searched', audience: searchedCount('=', 1) }]
+      expect(await levelOf(passes, { steps })).toBe(2)
+      // NOT 0, and not absent.
+      expect(await levelOf(fails, { steps })).toBe(1)
+    })
+
+    it('bounds entry when the audience is on step 1', async () => {
+      const inside = `aud-in-${randomUUID()}`
+      const outside = `aud-out-${randomUUID()}`
+      await send([
+        track(inside, 'searched', ago(21 * HOUR)),
+        track(inside, 'searched', ago(21 * HOUR - MINUTE)),
+        track(inside, 'landed', ago(20 * HOUR)),
+        track(inside, 'clicked', ago(20 * HOUR - MINUTE)),
+        track(outside, 'searched', ago(21 * HOUR)),
+        track(outside, 'landed', ago(20 * HOUR)),
+        track(outside, 'clicked', ago(20 * HOUR - MINUTE)),
+      ])
+      const steps = [{ event: 'landed', audience: searchedCount('>=', 2) }, { event: 'clicked' }]
+      expect(await levelOf(inside, { steps })).toBe(2)
+      // Never entered at all -- a person outside step 1's audience has no
+      // level, which is a different fact from stopping at step 1.
+      expect(await levelOf(outside, { steps })).toBe(0)
+    })
+
+    /** The reported question, end to end. */
+    it('answers the reported question: a /docs view, then a single retention search', async () => {
+      const matches = `aud-ex-ok-${randomUUID()}`
+      const searchedTwice = `aud-ex-two-${randomUUID()}`
+      const wrongQuery = `aud-ex-q-${randomUUID()}`
+      await send([
+        pageView(matches, '/docs', ago(20 * HOUR)),
+        track(matches, 'docs_search', ago(20 * HOUR - MINUTE), { query: 'retention' }),
+
+        pageView(searchedTwice, '/docs', ago(20 * HOUR)),
+        track(searchedTwice, 'docs_search', ago(20 * HOUR - MINUTE), { query: 'retention' }),
+        track(searchedTwice, 'docs_search', ago(20 * HOUR - 2 * MINUTE), { query: 'funnels' }),
+
+        pageView(wrongQuery, '/docs', ago(20 * HOUR)),
+        track(wrongQuery, 'docs_search', ago(20 * HOUR - MINUTE), { query: 'funnels' }),
+      ])
+      const steps = [
+        {
+          event: '$page',
+          where: [{ source: 'attribute', attribute: 'path', operator: '=', value: '/docs' }],
+        },
+        {
+          event: 'docs_search',
+          where: [{ property: 'query', operator: '=', value: 'retention' }],
+          audience: {
+            kind: 'behavior',
+            event: 'docs_search',
+            aggregate: 'count',
+            window: { kind: 'last', n: 14, unit: 'days' },
+            operator: '=',
+            value: 1,
+          },
+        },
+      ]
+      expect(await levelOf(matches, { steps })).toBe(2)
+      // Searched twice -- fails the AUDIENCE, stops at step 1.
+      expect(await levelOf(searchedTwice, { steps })).toBe(1)
+      // Searched once, for the wrong thing -- passes the audience, fails the
+      // WHERE. Also stops at step 1, by the other route. Both must be
+      // reachable or one of the two mechanisms is doing nothing.
+      expect(await levelOf(wrongQuery, { steps })).toBe(1)
+    })
+
+    /**
+     * A step audience and a funnel-wide `segment_id` on the SAME funnel.
+     *
+     * Nothing else in the product exercises the pair, and the pair is where
+     * the two mechanisms would collapse into one without anyone noticing:
+     * both compile to `<resolved person> IN (<segment sql>)`, and the only
+     * difference is WHERE that clause is placed. The third person is the one
+     * that proves they are still distinct — failing the funnel-wide
+     * restriction erases you, failing a step's audience does not.
+     */
+    it('keeps a segment restriction and a step audience doing different things', async () => {
+      const inPasses = `aud-combo-pass-${randomUUID()}`
+      const inFails = `aud-combo-fail-${randomUUID()}`
+      const outside = `aud-combo-out-${randomUUID()}`
+      // Its own trait value, so this segment cannot pick up the people the
+      // `plan = enterprise` test above identified into the same project.
+      const plan = `combo-${randomUUID()}`
+      for (const [anon, membership, searches] of [
+        [inPasses, plan, 1],
+        [inFails, plan, 2],
+        // Would pass the step audience with room to spare. The segment is
+        // the only reason they must not appear.
+        [outside, 'free', 1],
+      ] as const) {
+        await send([
+          {
+            type: 'identify',
+            message_id: randomUUID(),
+            anonymous_id: anon,
+            user_id: anon,
+            traits: { plan: membership },
+          },
+          ...Array.from({ length: searches }, (_, i) =>
+            track(anon, 'searched', ago(21 * HOUR - i * MINUTE)),
+          ),
+          track(anon, 'landed', ago(20 * HOUR)),
+          track(anon, 'clicked', ago(20 * HOUR - MINUTE)),
+        ])
+      }
+      await reloadIdentityDictionaries()
+
+      const seg = await pg.query<{ id: string }>(
+        `INSERT INTO segments (project_id, name, filter, ast_version)
+         VALUES ($1, $2, $3::jsonb, 1) RETURNING id`,
+        [
+          projectId,
+          `combo-${randomUUID()}`,
+          JSON.stringify({ kind: 'trait', key: 'plan', operator: '=', value: plan }),
+        ],
+      )
+      const segmentId = Number(seg.rows[0]?.id)
+      try {
+        const steps = [{ event: 'landed' }, { event: 'clicked', audience: searchedCount('=', 1) }]
+        const overrides = { steps, segment_id: segmentId }
+        // In the segment, inside the audience: all the way through.
+        expect(await levelOf(inPasses, overrides)).toBe(2)
+        // In the segment, outside the audience: STILL COUNTED, at step 1.
+        expect(await levelOf(inFails, overrides)).toBe(1)
+        // Outside the segment: gone. Not level 1 — absent. Reading 1 here
+        // would mean the funnel-wide restriction had been folded into the
+        // step condition and stopped erasing anyone.
+        expect(await levelOf(outside, overrides)).toBe(0)
+        // ...and without the restriction, that same person is level 2, so
+        // the 0 above is the segment and not a broken fixture.
+        expect(await levelOf(outside, { steps })).toBe(2)
+      } finally {
+        await pg.query('DELETE FROM segments WHERE id = $1', [segmentId])
+      }
+    })
+
+    /**
+     * TWO AUDIENCES, DIFFERENT ONES, IN ONE FUNNEL — the shape every other
+     * fixture in this block avoids.
+     *
+     * All of them use one audience on a two-step funnel, so nothing yet says
+     * a funnel's audiences are told apart at all: reusing the first gate for
+     * every audienced step satisfies every test above. It also puts an
+     * audience on the LAST step of a three-step funnel, and it puts two
+     * independently compiled `WITH base AS (…) SELECT …` subqueries — each
+     * with its own `base`, `traits` and `beh` — inside one ClickHouse query,
+     * where a CTE name resolved across the pair rather than within it would
+     * silently give both gates the same population.
+     *
+     * The three people are chosen so that each gate is the ONLY thing
+     * separating two of them.
+     */
+    it('tells two different step audiences apart within one funnel', async () => {
+      const both = `aud-two-both-${randomUUID()}`
+      const firstOnly = `aud-two-first-${randomUUID()}`
+      const secondOnly = `aud-two-second-${randomUUID()}`
+      await send([
+        track(both, 'searched', ago(21 * HOUR)),
+        track(both, 'searched', ago(21 * HOUR - MINUTE)),
+        track(both, 'browsed', ago(21 * HOUR - 2 * MINUTE)),
+        track(firstOnly, 'searched', ago(21 * HOUR)),
+        track(firstOnly, 'searched', ago(21 * HOUR - MINUTE)),
+        track(secondOnly, 'searched', ago(21 * HOUR)),
+        track(secondOnly, 'browsed', ago(21 * HOUR - 2 * MINUTE)),
+      ])
+      await send(
+        [both, firstOnly, secondOnly].flatMap((p) => [
+          track(p, 'landed', ago(20 * HOUR)),
+          track(p, 'clicked', ago(20 * HOUR - MINUTE)),
+          track(p, 'converted', ago(20 * HOUR - 2 * MINUTE)),
+        ]),
+      )
+      const steps = [
+        { event: 'landed', audience: searchedCount('>=', 2) },
+        { event: 'clicked' },
+        {
+          event: 'converted',
+          audience: {
+            kind: 'behavior',
+            event: 'browsed',
+            aggregate: 'count',
+            window: { kind: 'last', n: 1, unit: 'days' },
+            operator: '>=',
+            value: 1,
+          },
+        },
+      ]
+      // Passes both gates.
+      expect(await levelOf(both, { steps })).toBe(3)
+      // Passes step 1's gate, fails step 3's — so the last step is the one
+      // that stops them, and they are still counted at step 2.
+      expect(await levelOf(firstOnly, { steps })).toBe(2)
+      // Fails step 1's gate. Would pass step 3's, which is exactly why they
+      // are here: if both steps were gated by the SAME compiled audience,
+      // this person and `firstOnly` would swap answers.
+      expect(await levelOf(secondOnly, { steps })).toBe(0)
+    })
+
+    it('runs a definition with no audience exactly as it did before', async () => {
+      const person = `aud-none-${randomUUID()}`
+      await send([
+        track(person, 'landed', ago(20 * HOUR)),
+        track(person, 'clicked', ago(20 * HOUR - MINUTE)),
+        track(person, 'converted', ago(20 * HOUR - 2 * MINUTE)),
+      ])
+      expect(await levelOf(person)).toBe(3)
+    })
+  })
+
   /**
    * The level one specific person reached, read THROUGH the product.
    *
@@ -464,8 +726,16 @@ describe('funnel semantics', () => {
    * — so walking the levels through the real endpoint both isolates the
    * person and exercises the code under test.
    */
-  async function levelOf(personId: string, overrides: object = {}): Promise<number> {
-    for (let step = 1; step <= STEPS.length; step++) {
+  async function levelOf(
+    personId: string,
+    overrides: { steps?: unknown[] } & Record<string, unknown> = {},
+  ): Promise<number> {
+    // From the OVERRIDE when there is one -- `STEPS.length` is 3, and a
+    // two-step override asking for level 3 is a question the endpoint has no
+    // answer to (it answers 400, and the `expect` inside `dropoffPeopleFor`
+    // turns that into a failure that looks like the feature is broken).
+    const count = (overrides.steps ?? STEPS).length
+    for (let step = 1; step <= count; step++) {
       if ((await dropoffPeopleFor(step, overrides)).includes(personId)) return step
     }
     return 0
