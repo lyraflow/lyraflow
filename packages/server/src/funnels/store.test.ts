@@ -490,6 +490,44 @@ describe('FunnelStore', () => {
   })
 })
 
+describe('update stamps definition_version on a real steps change', () => {
+  it('bumps a v1 row to the current version once an audience is patched in', async () => {
+    const created = await store.create(projectId, 'stamp-version', {
+      steps: [{ event: 'a' }, { event: 'b' }],
+      window_seconds: 3600,
+    })
+    // Seed the row the way a pre-branch funnel actually looks: written before
+    // step audiences existed, so it still claims version 1.
+    await pg.query('UPDATE funnels SET definition_version = 1 WHERE id = $1', [created.id])
+    expect((await store.get(projectId, created.id))?.definitionVersion).toBe(1)
+
+    await store.update(projectId, created.id, {
+      steps: [{ event: 'a' }, { event: 'b', audience: behaviour('docs_search') }],
+    })
+
+    const after = await store.get(projectId, created.id)
+    // The row now carries an embedded, separately-versioned FilterNode. A
+    // migration scanning `definition_version >= 2` must find it -- which is
+    // exactly what this assertion is standing in for.
+    expect(after?.definitionVersion).toBe(FUNNEL_DEFINITION_VERSION)
+    expect(after?.definitionVersion).toBeGreaterThanOrEqual(2)
+  })
+
+  it('leaves the version alone on a patch that never touches steps', async () => {
+    const created = await store.create(projectId, 'stamp-version-rename', {
+      steps: [{ event: 'a' }, { event: 'b' }],
+      window_seconds: 3600,
+    })
+    await pg.query('UPDATE funnels SET definition_version = 1 WHERE id = $1', [created.id])
+
+    await store.update(projectId, created.id, { name: 'stamp-version-renamed' })
+
+    // A rename did not change what the definition measures, so it must not
+    // claim a version the stored tree was never re-parsed against.
+    expect((await store.get(projectId, created.id))?.definitionVersion).toBe(1)
+  })
+})
+
 describe('the cached summary records what it ran over (#91)', () => {
   const OTHER = {
     since: new Date('2026-05-10T00:00:00.000Z'),

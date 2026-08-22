@@ -59,6 +59,11 @@ export class FunnelValidationError extends Error {
  * `MAX_BEHAVIOR_NODES` — 50 at the number below, against 200 with no cap at
  * all.
  *
+ * That covers behavioural conditions. A trait-only audience costs zero
+ * against this cap while still adding its own `compileSegment` subquery, so
+ * the other dimension is audience SUBQUERIES, bounded instead by
+ * `MAX_FUNNEL_STEPS` (8) — one audience per step, at most.
+ *
  * 25 is a starting value, chosen as "one segment's worth for the whole
  * funnel" and to be confirmed by measuring a funnel at the cap against a
  * live ClickHouse. Lower it if that measurement says so. Do not raise it

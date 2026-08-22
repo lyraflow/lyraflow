@@ -417,6 +417,12 @@ export class FunnelStore {
    * things: a number sets it, `null` clears the restriction, and `undefined`
    * leaves it alone. Collapsing null and undefined would make "remove the
    * segment" unexpressible through PATCH.
+   *
+   * A patch that writes `steps` also stamps `definition_version` to the
+   * current `FUNNEL_DEFINITION_VERSION` — the stored tree is now whatever
+   * this build parsed and wrote, whether or not the row's old value already
+   * matched. A patch that only renames, or only touches window/segment,
+   * leaves the version alone: the definition did not change.
    */
   async update(
     projectId: number,
@@ -465,6 +471,7 @@ export class FunnelStore {
         `UPDATE funnels SET
            name              = COALESCE($3, name),
            steps             = COALESCE($4::jsonb, steps),
+           definition_version = CASE WHEN $4::jsonb IS NULL THEN definition_version ELSE $9 END,
            window_seconds    = COALESCE($5, window_seconds),
            segment_id        = CASE WHEN $6 THEN $7 ELSE segment_id END,
            last_entered      = CASE WHEN $8 THEN NULL ELSE last_entered END,
@@ -492,6 +499,7 @@ export class FunnelStore {
           patch.segmentId !== undefined,
           patch.segmentId ?? null,
           resetsSummary,
+          FUNNEL_DEFINITION_VERSION,
         ],
       )
       await client.query('COMMIT')

@@ -205,8 +205,9 @@ describe('audiences', () => {
     )
     const ever = warnings.find((w) => w.reason.includes('`ever` window'))
     expect(ever).toBeDefined()
-    // Prefixed with the step, and the index in BRACKETS -- that is the format
-    // validate.ts's walk emits and the UI's costWarningPath parses.
+    // Prefixed with the step. This audience is a bare leaf, not wrapped in a
+    // group, so the path has no `children[N]` segment at all -- that's the
+    // format validate.ts's walk emits and the UI's costWarningPath parses.
     expect(ever?.path).toBe('steps.1.filter')
   })
 

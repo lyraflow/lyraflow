@@ -1597,7 +1597,9 @@ in one funnel may total at most 25
 covers the embedded audiences only — the tree behind `segment_id` is a
 separate segment, capped separately at 25 behavioural nodes of its own when it
 was saved — so one run's real worst case is up to 50 behavioural conditions,
-not 25.
+not 25. A trait-only audience costs nothing against that cap but still adds
+its own subquery, one per step at most — bounded by the eight-step ceiling
+above, not by `MAX_FUNNEL_BEHAVIOR_NODES`.
 
 Two steps minimum, eight maximum.
 
