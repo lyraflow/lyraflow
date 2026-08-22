@@ -96,7 +96,12 @@ export function FunnelFlow(props: {
        * was the first attempt and it re-flowed "loses 35.1% of the previous
        * step" onto two lines inside a card with 800px of empty space beside
        * it -- a chart constraint has no business setting prose measure. */}
-      <div className="mx-auto flex w-full min-w-0 flex-col gap-2" style={plot}>
+      {/* Left-aligned, not centred. The cap means a short funnel does not
+       * fill the card, and centring left it marooned in the middle with the
+       * sentences beneath it starting at the left edge -- two different
+       * origins on one block. `mr-auto` takes up the slack on the right so
+       * the plot starts where every other line on the screen starts. */}
+      <div className="mr-auto flex w-full min-w-0 flex-col gap-2" style={plot}>
         {/* Stage names, above the plot as in a column chart -- the reader
          * needs to know what a bar IS before they read how tall it is. */}
         <div className="grid gap-1" style={columns}>
