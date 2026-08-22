@@ -1479,6 +1479,48 @@ describe('funnel semantics', () => {
     })
 
     /**
+     * THE COLUMN, not the direction: everything above gives each person
+     * exactly one event, so `entered_at` and `last_seen` are the same value
+     * and sorting by either produces the same walk. Pin the column by
+     * breaking that tie -- a second, non-funnel event per person, timed so
+     * `last_seen`'s order is the REVERSE of `entered_at`'s. If the walk is
+     * ever sorted by `last_seen` instead, page two re-serves page one and
+     * the tail is never reached.
+     */
+    it('pages `reached` by entered_at, not by last_seen, when a second event moves the two apart', async () => {
+      const s1 = `sp-o2-${randomUUID()}`
+      const other = `sp-o2-other-${randomUUID()}`
+      const population = MEMBER_PAGE_SIZE + 5
+      const ids = Array.from(
+        { length: population },
+        (_, i) => `sp-order-col-${String(i).padStart(3, '0')}-${randomUUID()}`,
+      )
+      const entryBatch = ids.map((p, i) => track(p, s1, ago(20 * HOUR + i * MINUTE)))
+      // Always more recent than the funnel event above (10h base vs 20h),
+      // so `last_seen` is exactly this timestamp -- and offset in the
+      // OPPOSITE order, so its ranking across the population is reversed.
+      const otherBatch = ids.map((p, i) =>
+        track(p, other, ago(10 * HOUR + (population - 1 - i) * MINUTE)),
+      )
+      for (let i = 0; i < entryBatch.length; i += 400) await send(entryBatch.slice(i, i + 400))
+      for (let i = 0; i < otherBatch.length; i += 400) await send(otherBatch.slice(i, i + 400))
+      const id = await createFunnel([{ event: s1 }, unreachedStep()])
+
+      const seen: string[] = []
+      let cursor: string | null = null
+      for (let page = 0; page < 10; page++) {
+        const body: PeoplePage = await peoplePage(id, 1, 'reached', cursor ? { cursor } : {})
+        expect(body.person_count).toBe(population)
+        seen.push(...body.members.map((m) => m.person_id))
+        cursor = body.next_cursor
+        if (!cursor) break
+      }
+      expect(seen.length).toBeGreaterThan(MEMBER_PAGE_SIZE)
+      expect(new Set(seen).size).toBe(seen.length)
+      expect([...seen].sort()).toEqual([...ids].sort())
+    })
+
+    /**
      * MY OWN MUTATION -- a STEP AUDIENCE read through `/people`, which is the
      * one combination nothing else in this plan or this file puts together.
      *

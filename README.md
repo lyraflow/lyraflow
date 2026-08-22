@@ -14,10 +14,10 @@ under Docker, and nothing leaves it.
 > **Early days.** v0.1 is the API and the operations behind it: ingest,
 > identity, segments, event reads, privacy, retention, quotas, and backup. A
 > web UI now sits on top of it — sign in, walk through a first-run wizard,
-> watch events arrive live, build and run funnels, and edit a project's
-> retention and quota — but segments, people and person profiles still have
-> **no screen**, **API and CLI only**; see [Web UI](#web-ui) for exactly what
-> exists and what does not.
+> watch events arrive live, build and run funnels, build and edit segments,
+> and edit a project's retention and quota — but people and person profiles
+> still have **no screen**, **API and CLI only**; see [Web UI](#web-ui) for
+> exactly what exists and what does not.
 
 ## What it is good at
 
@@ -1766,7 +1766,7 @@ The response:
 {
   "members": [
     { "person_id": "user-42", "first_seen": "2026-07-01T00:00:00.000Z",
-      "last_seen": "2026-08-06T09:30:00.000Z", "entered_at": "2026-08-08T09:12:00.000Z",
+      "last_seen": "2026-08-08T09:20:00.000Z", "entered_at": "2026-08-08T09:12:00.000Z",
       "country": "US", "region": "CA", "city": "San Francisco", "device_type": "desktop",
       "os": "macOS", "browser": "Chrome", "referrer": "https://google.com",
       "utm_source": "google", "utm_medium": "cpc", "utm_campaign": "launch",
