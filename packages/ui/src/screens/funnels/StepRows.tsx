@@ -1,8 +1,11 @@
-import type { WherePredicate } from '@lyraflow/core/segments/ast.js'
+import type { FilterNode, Group, WherePredicate } from '@lyraflow/core/segments/ast.js'
+import type { CostWarning } from '@lyraflow/core/segments/validate.js'
 import { ArrowDown, ArrowUp, X } from 'lucide-react'
 import type { ApiClient } from '../../api/client.js'
 import type { FunnelStep } from '../../api/types.js'
 import { Button } from '../../components/ui/button.js'
+import { newCondition } from '../segments/GroupCard.js'
+import { TreeEditor } from '../segments/TreeEditor.js'
 import { WherePredicates } from '../segments/WherePredicates.js'
 import { EventCombobox } from './EventCombobox.js'
 
@@ -43,6 +46,19 @@ export const MIN_STEPS = 2
  * happens for a property no event has recorded YET: this codebase lets a
  * definition be written ahead of the data that fills it, which is why these
  * fields are free-typed rather than picklists.
+ *
+ * A step may also carry an `audience`, gating WHICH PERSON may advance past
+ * it -- as opposed to `where`, which gates WHICH OCCURRENCE of the event
+ * counts. "page_view where path is /changelog, audience: plan = pro" asks
+ * two different questions: `where` narrows the event that arrived; the
+ * audience narrows whose event it has to be. It is the segment `FilterNode`
+ * verbatim (`FunnelStep.audience`'s own doc comment says why), so it gets
+ * the segment builder's own editor, `TreeEditor`, unchanged -- the same
+ * relationship `where` already has to `WherePredicates`. Unlike `where`, it
+ * is opt-in per step behind an "Add audience"/"Remove audience" pair rather
+ * than always rendered: a bare-leaf-or-more tree editor on every one of up
+ * to eight steps would bury the event field, still each step's primary
+ * content, under editors most steps will never use.
  */
 export function StepRows(props: {
   client: ApiClient
@@ -50,8 +66,23 @@ export function StepRows(props: {
   steps: FunnelStep[]
   onChange: (steps: FunnelStep[]) => void
   onUnauthorized?: () => void
+  /** The WHOLE funnel's cost warnings, unfiltered. Filtered per step below;
+   * see `stepWarnings`. */
+  warnings?: CostWarning[]
+  /** Step index -> the editor paths whose node does not parse, from
+   * `completeness()`. Computed by the builder, which is where Save is
+   * gated on it. */
+  incomplete?: Record<number, number[][]>
 }) {
-  const { client, projectId, steps, onChange, onUnauthorized } = props
+  const {
+    client,
+    projectId,
+    steps,
+    onChange,
+    onUnauthorized,
+    warnings = [],
+    incomplete = {},
+  } = props
 
   function updateEvent(i: number, event: string) {
     onChange(steps.map((s, idx) => (idx === i ? { ...s, event } : s)))
@@ -71,6 +102,39 @@ export function StepRows(props: {
       }),
     )
   }
+  /**
+   * Same rule as `updateWhere`: the KEY is dropped rather than set to
+   * `undefined`, because `audience` is `.optional()` and "absent" is the
+   * shape a step that never had one is stored with. A step whose condition
+   * was removed must round-trip to exactly that, not to a step carrying a
+   * field that only looks absent once `JSON.stringify` has dropped it.
+   */
+  function updateAudience(i: number, audience: FilterNode | undefined) {
+    onChange(
+      steps.map((s, idx) => {
+        if (idx !== i) return s
+        const { audience: _previous, ...rest } = s
+        return audience == null ? rest : { ...rest, audience }
+      }),
+    )
+  }
+
+  /**
+   * This step's warnings, by the `steps.<i>.` prefix `funnelCostWarnings`
+   * writes.
+   *
+   * NOT stripped -- `costWarningPath` (`segments/warnings.ts`) resolves a
+   * path by matching `children[N]` segments only, so the prefix is ignored
+   * there by construction and a prefixed path already lands on the right
+   * row. What genuinely breaks without this filter is attribution BETWEEN
+   * steps: step 1's `steps.0.filter.children[0]` and step 2's
+   * `steps.1.filter.children[0]` both resolve to the editor path `[0]`, so
+   * an unfiltered list renders every warning on every step.
+   */
+  function stepWarnings(i: number): CostWarning[] {
+    return warnings.filter((w) => w.path.startsWith(`steps.${i}.`))
+  }
+
   function addStep() {
     onChange([...steps, { event: '' }])
   }
@@ -161,6 +225,63 @@ export function StepRows(props: {
               onChange={(where) => updateWhere(i, where)}
               onUnauthorized={onUnauthorized}
             />
+            {/* "audience", not "condition". `GroupCard` renders its own
+             * "Add condition" button INSIDE the editor this control opens,
+             * and two buttons a few pixels apart whose accessible names
+             * differ only by a trailing "to step 1" is an ambiguity for a
+             * screen reader and for every test that addresses a button by
+             * name. The word also carries the distinction the field exists
+             * for: `where` narrows the occurrence, the audience narrows the
+             * person. */}
+            {step.audience === undefined ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="self-start"
+                onClick={() =>
+                  updateAudience(i, { kind: 'group', op: 'and', children: [newCondition()] })
+                }
+              >
+                {`Add audience to step ${i + 1}`}
+              </Button>
+            ) : (
+              <div data-testid={`step-${i + 1}-audience`} className="flex flex-col gap-2">
+                <p className="text-sm font-medium">Audience — who may advance past this step</p>
+                {/* `step.audience` is ALREADY NORMALISED -- `FunnelBuilder`
+                 * does it at the one point a stored funnel enters its
+                 * state, exactly as `SegmentBuilder` does (Task 6), and
+                 * every `TreeEditor` edit hands back a group-rooted node.
+                 *
+                 * DO NOT call `normaliseRoot` here. Normalising at render
+                 * reopens the precise seam its own doc comment describes:
+                 * `funnelCostWarnings` computes paths against the tree the
+                 * SERVER holds, and wrapping a bare leaf at render moves
+                 * that leaf from editor path `[]` to `[0]` while the
+                 * warning still resolves to `[]`. The warning then lands on
+                 * the group instead of the condition it names -- one tree
+                 * on screen, another one the paths were computed from,
+                 * reconciled nowhere. */}
+                <TreeEditor
+                  value={step.audience as Group}
+                  onChange={(next) => updateAudience(i, next)}
+                  client={client}
+                  projectId={projectId}
+                  onUnauthorized={onUnauthorized}
+                  warnings={stepWarnings(i)}
+                  incomplete={incomplete[i] ?? []}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="self-start"
+                  onClick={() => updateAudience(i, undefined)}
+                >
+                  {`Remove audience from step ${i + 1}`}
+                </Button>
+              </div>
+            )}
           </div>
         )
       })}
