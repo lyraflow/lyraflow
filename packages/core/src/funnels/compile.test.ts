@@ -252,3 +252,97 @@ describe('attribute predicates on a step', () => {
     expect(projection).toContain('os')
   })
 })
+
+const audience = {
+  kind: 'behavior' as const,
+  event: 'docs_search',
+  aggregate: 'count' as const,
+  window: { kind: 'last' as const, n: 14, unit: 'days' as const },
+  operator: '=' as const,
+  value: 1,
+}
+
+describe('step audiences', () => {
+  it('gates the step condition, not the outer result', () => {
+    const c = compileFunnel({
+      ...base,
+      definition: {
+        steps: [{ event: 'a' }, { event: 'b', audience }],
+        window_seconds: 3600,
+      },
+    })
+    // The gate must sit INSIDE the windowFunnel argument list. If it were
+    // applied where the funnel-wide segment filter is, a person failing it
+    // would vanish from the report instead of stopping at step 1 -- which is
+    // the entire reason this feature is not just a second segment_id.
+    // `IN (WITH`, NOT ` IN (` -- every funnel already emits
+    // `AND event_name IN (${eventList})` in its inner scan, so the bare
+    // marker matches an unaudienced funnel too and the pin below would pass
+    // against no implementation at all. A compiled person set never opens
+    // with a bare `SELECT`: `compileSegment` always builds a `base` CTE (a
+    // person can have zero behaviours but never zero identity), so its SQL
+    // always starts `WITH`; an event placeholder list never does. Measured
+    // against the actual `compileSegment` output, not assumed from its shape.
+    const windowFunnelArgs = c.sql.slice(c.sql.indexOf('windowFunnel'), c.sql.indexOf('AS level'))
+    expect(windowFunnelArgs).toContain('IN (WITH')
+    // ...and NOT next to `level > 0`, where segment_id's filter lives.
+    const outer = c.sql.slice(c.sql.indexOf('WHERE level > 0'))
+    expect(outer).not.toContain('IN (WITH')
+  })
+
+  it('compiles a definition with no audience to exactly the SQL it did before', () => {
+    const withNone = compileFunnel({ ...base, definition: twoSteps })
+    expect(withNone.sql).not.toContain('IN (WITH')
+  })
+
+  it('threads ONE parameter sequence through every audience', () => {
+    const c = compileFunnel({
+      ...base,
+      definition: {
+        steps: [
+          { event: 'a', audience: { ...audience, event: 'first' } },
+          { event: 'b', audience: { ...audience, event: 'second' } },
+        ],
+        window_seconds: 3600,
+      },
+    })
+    // Both audiences' event names are bound, and neither overwrote the
+    // other: two independently-numbered Params maps merged after the fact
+    // would silently collide on p0, p1, ...
+    const values = Object.values(c.params)
+    expect(values).toContain('first')
+    expect(values).toContain('second')
+    // Every placeholder the SQL names must exist in the map.
+    for (const m of c.sql.matchAll(/\{(p\d+):/g)) {
+      expect(c.params).toHaveProperty(m[1] as string)
+    }
+  })
+
+  it('gates step 1, so entered_at counts only gated entrants', () => {
+    const c = compileFunnel({
+      ...base,
+      definition: { steps: [{ event: 'a', audience }, { event: 'b' }], window_seconds: 3600 },
+    })
+    // `minIf(timestamp, conditions[0])` reuses step 1's condition verbatim,
+    // so the gate reaches entry for free. Both occurrences must carry it.
+    const minIf = c.sql.slice(c.sql.indexOf('minIf('), c.sql.indexOf('AS entered_at'))
+    expect(minIf).toContain('IN (WITH')
+  })
+
+  it('refuses a definition whose audiences exceed the funnel-wide cap', () => {
+    const many = {
+      kind: 'group' as const,
+      op: 'and' as const,
+      children: Array.from({ length: 26 }, (_, i) => ({ ...audience, event: `e${i}` })),
+    }
+    expect(() =>
+      compileFunnel({
+        ...base,
+        definition: {
+          steps: [{ event: 'a', audience: many }, { event: 'b' }],
+          window_seconds: 3600,
+        },
+      }),
+    ).toThrow(FunnelValidationError)
+  })
+})

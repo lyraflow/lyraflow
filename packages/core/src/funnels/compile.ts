@@ -1,6 +1,7 @@
 import { RESOLVED_PERSON_ALIAS, resolvedPersonExpr } from '../identity/resolve.js'
 import { notSuppressedExpr } from '../privacy/suppression.js'
-import { type CompiledQuery, MEMBER_PAGE_SIZE } from '../segments/compile.js'
+import { AST_VERSION } from '../segments/ast.js'
+import { type CompiledQuery, MEMBER_PAGE_SIZE, compileSegment } from '../segments/compile.js'
 import type { Cursor } from '../segments/cursor.js'
 import { Params, chDateTime } from '../segments/params.js'
 import { attributeColumns, wherePredicate } from '../segments/predicates.js'
@@ -9,15 +10,26 @@ import { funnelCostWarnings, validateFunnel, validateRange } from './validate.js
 
 /**
  * One step's condition: the event name, ANDed with any predicates on that
- * event's own properties. Every value is bound; nothing is concatenated.
+ * event's own properties, ANDed with the person-set its `audience` compiles
+ * to. Every value is bound; nothing is concatenated.
+ *
+ * The audience gate is CONSTANT PER PERSON, which is what makes it cheap
+ * here: ClickHouse evaluates the `IN` subquery once and the per-row test is
+ * a set membership. It belongs inside this condition rather than beside the
+ * funnel-wide `segmentFilter` below -- there, it would remove the person
+ * from the report; here, it stops them advancing and leaves them counted at
+ * the step they did reach. See `funnels/ast.ts` on the field itself.
  */
 function stepCondition(
   step: FunnelStep,
   params: Params,
   eventPlaceholder: (event: string) => string,
+  audienceSql: (step: FunnelStep) => string | undefined,
 ): string {
   const parts = [`event_name = ${eventPlaceholder(step.event)}`]
   for (const w of step.where ?? []) parts.push(wherePredicate(w, params))
+  const gate = audienceSql(step)
+  if (gate !== undefined) parts.push(gate)
   return parts.length === 1 ? (parts[0] as string) : `(${parts.join(' AND ')})`
 }
 
@@ -126,11 +138,41 @@ export function compileFunnel(opts: {
   // added, because the alternative is fourteen extra columns read by every
   // funnel run in the product. Names come from a Zod enum over
   // `EVENT_COLUMN_FIELDS`, which is what makes this interpolation safe.
+  const resolved = resolvedPersonExpr({ database, alias: 'e' })
+  // Compiled here rather than passed in, unlike `segmentPersonSql`: an
+  // audience is EMBEDDED in the definition, so it needs no database lookup
+  // and there is nothing for the caller to do. The same `params` instance
+  // is threaded through every one of them -- placeholder names are
+  // positional (`p0`, `p1`, ...), so independently-numbered maps merged
+  // afterwards would silently overwrite each other.
+  //
+  // `now`, not the range: a segment's window is anchored to now and this is
+  // the segment grammar verbatim. The consequence for a run over an older
+  // range is real and is stated in the builder, not hidden here.
+  //
+  // Keyed by the step OBJECT, not by index, so `conditions` and the
+  // `minIf` that reuses `conditions[0]` cannot disagree about which gate
+  // belongs to which step.
+  const audienceByStep = new Map<FunnelStep, string>()
+  for (const step of definition.steps) {
+    if (step.audience === undefined) continue
+    const persons = compileSegment({
+      query: { ast_version: AST_VERSION, filter: step.audience },
+      projectId,
+      database,
+      now,
+      select: 'persons',
+      params,
+    })
+    audienceByStep.set(step, `${resolved} IN (${persons.sql})`)
+  }
+  const audienceSql = (step: FunnelStep): string | undefined => audienceByStep.get(step)
+
   const attributes = attributeColumns(definition.steps.flatMap((s) => s.where ?? []))
   const attributeSelect = attributes.length > 0 ? `,\n           ${attributes.join(', ')}` : ''
 
   const conditions = definition.steps.map((s, i) => {
-    const cond = stepCondition(s, params, eventPlaceholder)
+    const cond = stepCondition(s, params, eventPlaceholder, audienceSql)
     // Step 1 additionally bounds ENTRY to the range. Without it the extended
     // scan above would let someone whose first step lands after `until` enter
     // a funnel the caller did not ask about.
@@ -165,7 +207,6 @@ export function compileFunnel(opts: {
     'DateTime64(3)',
   )
 
-  const resolved = resolvedPersonExpr({ database, alias: 'e' })
   const notSuppressed = notSuppressedExpr({
     database,
     projectId,
