@@ -259,14 +259,23 @@ describe('FunnelFlow selection', () => {
     expect(screen.queryAllByRole('button')).toHaveLength(0)
   })
 
-  it('puts the step buttons in their own layer, never inside the pointer-events-none label overlay', () => {
-    // The label overlay (`aria-hidden`, `pointer-events-none`) is where the
-    // brief's original approach would have put the buttons, which makes them
-    // permanently unclickable. This pins the buttons OUTSIDE that container.
-    const { container } = render(<FunnelFlow result={result()} onSelectStep={() => {}} />)
-    const labelLayer = container.querySelector('[aria-hidden="true"]')
-    expect(labelLayer).not.toBeNull()
-    expect(labelLayer?.querySelector('button')).toBeNull()
-    expect(screen.getByTestId('flow-step-1-select').closest('[aria-hidden="true"]')).toBeNull()
+  it('has no ancestor that disables pointer events -- any such ancestor makes the button permanently unclickable in a real browser, even though jsdom cannot detect that from a click alone', () => {
+    // A structural check that a button merely sits OUTSIDE the label overlay
+    // is a proxy for this, not the invariant itself: it is defeated by
+    // `pointer-events-none` landing on the new layer's OWN wrapper, which is
+    // still "outside" the label overlay yet still swallows every click. The
+    // real rule is about the whole ancestor chain, not one named container.
+    render(<FunnelFlow result={result()} onSelectStep={() => {}} />)
+    const button = screen.getByTestId('flow-step-1-select')
+    let node: Element | null = button.parentElement
+    let disabledBy: Element | null = null
+    while (node) {
+      if (/pointer-events-none/.test(node.className)) {
+        disabledBy = node
+        break
+      }
+      node = node.parentElement
+    }
+    expect(disabledBy).toBeNull()
   })
 })
