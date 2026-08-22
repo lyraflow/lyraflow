@@ -1,7 +1,14 @@
 import { RESOLVED_PERSON_ALIAS, resolvedPersonExpr } from '../identity/resolve.js'
 import { notSuppressedExpr } from '../privacy/suppression.js'
 import { AST_VERSION } from '../segments/ast.js'
-import { type CompiledQuery, MEMBER_PAGE_SIZE, compileSegment } from '../segments/compile.js'
+import { baseCte } from '../segments/base.js'
+import {
+  type CompiledQuery,
+  MEMBER_PAGE_SIZE,
+  compileSegment,
+  memberProjection,
+  traitsCte,
+} from '../segments/compile.js'
 import type { Cursor } from '../segments/cursor.js'
 import { Params, chDateTime } from '../segments/params.js'
 import { attributeColumns, wherePredicate } from '../segments/predicates.js'
@@ -79,10 +86,30 @@ export function compileFunnel(opts: {
   /** Injected rather than read here, so a test can pin the partial boundary. */
   now: Date
   /**
-   * Return the people who reached exactly this step and stopped, instead of
-   * the histogram. 1-indexed, matching the `index` in a run response.
+   * Return the people at this step instead of the histogram. 1-indexed,
+   * matching the `index` in a run response.
+   *
+   * `mode` picks the population: `'reached'` is `level >= step` -- everyone
+   * who got at least that far, which is what a chart bar labelled with a
+   * step's count means. `'dropped'` is `level = step` -- only those who
+   * stopped exactly there, the population `/dropoff` has always returned.
+   * Confusing the two answers a different question with full confidence: on
+   * a real funnel the two counts differ by a factor of three.
+   *
+   * `select` picks the shape: `'ids'` is the bare (person, entered_at) list
+   * `/dropoff` has always compiled -- no traits join, so an existing caller's
+   * SQL is unchanged. `'members'` wraps it with the same member projection a
+   * segment walk uses, joining `base` and `traits`. `'count'` is a single
+   * `person_count`, uncursored and unpaged, for a caller that must compute a
+   * count in the SAME request as the page rather than reuse a run's own
+   * `steps[i].people` -- which was computed at a different instant.
    */
-  dropoffAt?: { step: number; cursor?: Cursor }
+  peopleAt?: {
+    step: number
+    mode: 'reached' | 'dropped'
+    select: 'ids' | 'members' | 'count'
+    cursor?: Cursor
+  }
 }): CompiledQuery {
   const { definition, projectId, database, range, segmentPersonSql, now } = opts
 
@@ -244,29 +271,73 @@ export function compileFunnel(opts: {
   GROUP BY ${RESOLVED_PERSON_ALIAS}
 `
 
-  const dropoff = opts.dropoffAt
+  const people = opts.peopleAt
 
-  // "Dropped at step N" is level == N — the ONE place in this feature where
-  // comparing a level for equality is correct. Everywhere else (see
-  // levels.ts) a step's population is level >= N, and confusing the two is
-  // the defect this whole layer is shaped to avoid.
-  //
   // Ordered newest-entrant first, tie-broken by person_id, and paged by a
   // strictly lexicographic keyset — collapsing that to `entered_at <` alone
   // would skip every remaining person sharing the boundary row's instant.
-  const dropoffAfter =
-    dropoff?.cursor !== undefined
-      ? ` AND (entered_at < ${params.add(dropoff.cursor.lastSeen, 'DateTime64(3)')}` +
-        ` OR (entered_at = ${params.add(dropoff.cursor.lastSeen, 'DateTime64(3)')}` +
-        ` AND ${RESOLVED_PERSON_ALIAS} > ${params.add(dropoff.cursor.personId, 'String')}))`
+  // Not applied to the `count` shape: a count has no page to keep the cursor
+  // for, and threading it in would bind a value the SQL never reads.
+  const peopleAfter =
+    people?.select !== 'count' && people?.cursor !== undefined
+      ? ` AND (entered_at < ${params.add(people.cursor.lastSeen, 'DateTime64(3)')}` +
+        ` OR (entered_at = ${params.add(people.cursor.lastSeen, 'DateTime64(3)')}` +
+        ` AND ${RESOLVED_PERSON_ALIAS} > ${params.add(people.cursor.personId, 'String')}))`
       : ''
 
-  if (dropoff) {
-    const level = params.add(dropoff.step, 'UInt32')
+  if (people) {
+    const level = params.add(people.step, 'UInt32')
+    // `>=` for "reached", `=` for "stopped here". The two differ by a factor
+    // of three on a real funnel, so this is the one line where a wrong
+    // operator answers a different question with full confidence.
+    const levelPredicate = people.mode === 'reached' ? `level >= ${level}` : `level = ${level}`
+
+    if (people.select === 'count') {
+      return {
+        sql: `SELECT count() AS person_count
+FROM (${perPerson})
+WHERE ${levelPredicate}${segmentFilter}`,
+        params: params.values,
+        warnings: funnelCostWarnings(definition, range),
+      }
+    }
+
+    if (people.select === 'members') {
+      // Both CTEs, not just traits: memberProjection selects first_seen,
+      // last_seen and the CONTEXT_FIELDS columns, which come from `base` --
+      // joining only `traits` would reference columns nothing in the query
+      // produces. `base` and the funnel's per-person pass alias the join key
+      // identically (RESOLVED_PERSON_ALIAS), which is what makes `USING`
+      // valid here.
+      const ctes = [
+        baseCte({ database, projectId, params }),
+        traitsCte({ database, projectId, params }),
+      ]
+      return {
+        sql: `WITH
+  ${ctes.join(',\n  ')}
+SELECT
+  ${memberProjection()},
+  f.entered_at AS entered_at
+FROM (${perPerson}) AS f
+LEFT JOIN base USING (${RESOLVED_PERSON_ALIAS})
+LEFT JOIN traits USING (${RESOLVED_PERSON_ALIAS})
+WHERE ${levelPredicate}${segmentFilter}${peopleAfter}
+ORDER BY entered_at DESC, ${RESOLVED_PERSON_ALIAS} ASC
+LIMIT ${MEMBER_PAGE_SIZE}`,
+        params: params.values,
+        warnings: funnelCostWarnings(definition, range),
+      }
+    }
+
+    // select === 'ids' -- exactly what `/dropoff` has always compiled, with
+    // only the level predicate substituted. No traits join: a second scan of
+    // person_traits on every existing caller's request is not this task's to
+    // add.
     return {
       sql: `SELECT ${RESOLVED_PERSON_ALIAS}, entered_at
 FROM (${perPerson})
-WHERE level = ${level}${segmentFilter}${dropoffAfter}
+WHERE ${levelPredicate}${segmentFilter}${peopleAfter}
 ORDER BY entered_at DESC, ${RESOLVED_PERSON_ALIAS} ASC
 LIMIT ${MEMBER_PAGE_SIZE}`,
       params: params.values,

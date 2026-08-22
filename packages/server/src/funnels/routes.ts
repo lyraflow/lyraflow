@@ -146,7 +146,7 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
     funnel: { steps: FunnelStep[]; windowSeconds: number; segmentId: number | null },
     range: { since: Date; until: Date },
     now: Date,
-    dropoffAt?: { step: number; cursor?: Cursor },
+    peopleAt?: { step: number; cursor?: Cursor },
   ): Promise<{ compiled: ReturnType<typeof compileFunnel>; extraWarnings: CostWarning[] }> {
     const params = new Params()
     const extraWarnings: CostWarning[] = []
@@ -190,7 +190,7 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
       now,
       params,
       segmentPersonSql,
-      dropoffAt,
+      peopleAt: peopleAt && { ...peopleAt, mode: 'dropped', select: 'ids' },
     })
     return { compiled, extraWarnings }
   }
