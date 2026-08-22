@@ -49,10 +49,22 @@ export function EventCombobox(props: {
   value: string
   onChange: (value: string) => void
   label: string
+  /**
+   * The accessible name, when it must differ from the visible label.
+   *
+   * A funnel step's card is already headed "Step 1", so the field inside it
+   * reads better as plain "Event" -- but N steps then put N controls named
+   * "Event" on one page, which is ambiguous to a screen reader and to any
+   * test addressing a field by name. This keeps the short visible label and
+   * gives the control a unique name.
+   */
+  accessibleName?: string
   disabled?: boolean
   onUnauthorized?: () => void
 }) {
-  const { client, projectId, value, onChange, label, disabled, onUnauthorized } = props
+  const { client, projectId, value, onChange, label, accessibleName, disabled, onUnauthorized } =
+    props
+  const name = accessibleName ?? label
   const [text, setText] = useState(value)
   const [options, setOptions] = useState<string[]>([])
   // Separates "no lookup has answered yet" from "a lookup answered with
@@ -115,7 +127,7 @@ export function EventCombobox(props: {
       <Label htmlFor={id}>{label}</Label>
       <Combobox
         id={id}
-        label={label}
+        label={name}
         value={text}
         options={options}
         loading={!fetched && !loadError}

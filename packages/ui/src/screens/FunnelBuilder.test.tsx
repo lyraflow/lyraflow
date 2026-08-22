@@ -110,19 +110,19 @@ function renderBuilder(client: ApiClient = fakeBuilderClient(), editId?: number)
  * using this keeps the default window (7 days = 604800s) and segment
  * (Everyone = null) unless it changes them itself. */
 async function fillTwoSteps() {
-  await userEvent.type(screen.getByLabelText('Step 1'), 'page_view')
+  await userEvent.type(screen.getByLabelText('Step 1 event'), 'page_view')
   await userEvent.click(screen.getByRole('button', { name: /add step/i }))
-  await userEvent.type(screen.getByLabelText('Step 2'), 'signup_completed')
+  await userEvent.type(screen.getByLabelText('Step 2 event'), 'signup_completed')
 }
 
 describe('FunnelBuilder', () => {
   it('requires at least two steps before preview or save is possible', async () => {
     renderBuilder()
     await userEvent.type(await screen.findByLabelText(/name/i), 'Signup')
-    await userEvent.type(screen.getByLabelText('Step 1'), 'page_view')
+    await userEvent.type(screen.getByLabelText('Step 1 event'), 'page_view')
     expect(screen.getByRole('button', { name: /save/i })).toBeDisabled()
     await userEvent.click(screen.getByRole('button', { name: /add step/i }))
-    await userEvent.type(screen.getByLabelText('Step 2'), 'signup_completed')
+    await userEvent.type(screen.getByLabelText('Step 2 event'), 'signup_completed')
     expect(screen.getByRole('button', { name: /save/i })).toBeEnabled()
   })
 
@@ -169,8 +169,8 @@ describe('FunnelBuilder', () => {
     )
     expect(screen.getByTestId('funnel-step-2-where')).toHaveTextContent('where plan is not free')
 
-    await userEvent.clear(screen.getByLabelText('Step 1'))
-    await userEvent.type(screen.getByLabelText('Step 1'), 'landing_view')
+    await userEvent.clear(screen.getByLabelText('Step 1 event'))
+    await userEvent.type(screen.getByLabelText('Step 1 event'), 'landing_view')
     expect(screen.queryByTestId('funnel-step-1-where')).toBeNull()
     // The step that still lines up keeps its clause -- the guard is per
     // position, not a whole-chart switch.
@@ -240,7 +240,7 @@ describe('FunnelBuilder', () => {
 
     // Editing the definition -- retyping step 2 -- must dim it, without a
     // second preview call.
-    await userEvent.type(screen.getByLabelText('Step 2'), '_v2')
+    await userEvent.type(screen.getByLabelText('Step 2 event'), '_v2')
     expect(screen.getByTestId('builder-preview-result')).toHaveAttribute('data-stale', 'true')
     expect(client.previewFunnel).toHaveBeenCalledTimes(1)
 
@@ -365,7 +365,7 @@ describe('FunnelBuilder -- invented mutations', () => {
   it('preview is disabled with only one step, independent of the name field', async () => {
     renderBuilder()
     await userEvent.type(await screen.findByLabelText(/name/i), 'Signup')
-    await userEvent.type(screen.getByLabelText('Step 1'), 'page_view')
+    await userEvent.type(screen.getByLabelText('Step 1 event'), 'page_view')
     expect(screen.getByRole('button', { name: /preview/i })).toBeDisabled()
   })
 
@@ -401,8 +401,8 @@ describe('FunnelBuilder -- invented mutations', () => {
     })
     renderBuilder(client, FUNNEL.id)
     expect(await screen.findByLabelText(/name/i)).toHaveValue('Signup flow')
-    expect(screen.getByLabelText('Step 1')).toHaveValue('page_view')
-    expect(screen.getByLabelText('Step 2')).toHaveValue('signup_completed')
+    expect(screen.getByLabelText('Step 1 event')).toHaveValue('page_view')
+    expect(screen.getByLabelText('Step 2 event')).toHaveValue('signup_completed')
     // 3600 seconds seeds as "1 hour", not the 7-day default a fresh builder
     // would show -- the one assertion that would fail if seeding silently
     // fell back to NEW_STEPS/defaults instead of reading the response.
@@ -498,7 +498,7 @@ describe('FunnelBuilder — threads onUnauthorized to the segment picker and eve
         </ProjectProvider>
       </MemoryRouter>,
     )
-    await userEvent.type(screen.getByLabelText('Step 1'), 'signup')
+    await userEvent.type(screen.getByLabelText('Step 1 event'), 'signup')
     await waitFor(() => expect(onUnauthorized).toHaveBeenCalled())
   })
 })
