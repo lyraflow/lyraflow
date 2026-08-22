@@ -160,3 +160,43 @@ describe('StepPeople', () => {
     await waitFor(() => expect(onUnauthorized).toHaveBeenCalledTimes(1))
   })
 })
+
+describe('StepPeople -- seeded counts', () => {
+  it('shows both seeded counts immediately, with no fetch at all', () => {
+    const funnelPeople = vi.fn(async () => page())
+    render(
+      <StepPeople
+        client={fakeClient(funnelPeople)}
+        {...BASE_PROPS}
+        seedCounts={{ reached: 134, dropped: 47 }}
+      />,
+    )
+    expect(screen.getByRole('button', { name: 'Reached (134)' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Dropped here (47)' })).toBeInTheDocument()
+    expect(funnelPeople).not.toHaveBeenCalled()
+  })
+
+  // The seed is provisional, not a cache: it can be stale by the time an
+  // operator actually opens a mode, so a real fetch for that mode must
+  // overwrite it -- and ONLY that mode's seed, not the other one, which is
+  // still all the reader has for the mode not yet opened.
+  it("a resolved fetch overrides ITS OWN mode's seed with the fresher number, and leaves the other mode's seed alone", async () => {
+    const funnelPeople = vi.fn(async () => page({ person_count: 140 }))
+    render(
+      <StepPeople
+        client={fakeClient(funnelPeople)}
+        {...BASE_PROPS}
+        seedCounts={{ reached: 134, dropped: 47 }}
+      />,
+    )
+    // Seeded, pre-fetch.
+    expect(screen.getByRole('button', { name: 'Reached (134)' })).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: /show people/i }))
+    // The fetch answered 140, not the seeded 134 -- the fresher number wins.
+    expect(await screen.findByRole('button', { name: 'Reached (140)' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Reached (134)' })).not.toBeInTheDocument()
+    // Dropped was never fetched -- its seed of 47 must still be showing.
+    expect(screen.getByRole('button', { name: 'Dropped here (47)' })).toBeInTheDocument()
+  })
+})
