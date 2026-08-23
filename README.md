@@ -471,14 +471,18 @@ belonging to another project answers `404`, never `403`.
 Three of those are worth stating plainly rather than leaving to be discovered:
 
 **`LYRAFLOW_ALLOWED_ORIGINS` is one list for the whole install.** It is a
-server env var, not a project column. Unset — the default — every origin is
-allowed and a second site needs nothing. But **if you have set it, every
-domain you instrument must appear in that one list**
+server env var, not a project column — on the Compose stack, a line in `.env`
+that the `lyraflow` service's `environment:` block passes through. Unset — the
+default — every origin is allowed and a second site needs nothing. But **if
+you have set it, every domain you instrument must appear in that one list**
 (`https://acme.example,https://docs.example`), because creating a project does
 not extend it. The symptom of forgetting is a site whose events never arrive
 while its snippet looks perfectly correct: the browser's CORS preflight is
 refused before any request reaches ingest, so nothing is rejected, dead-lettered
-or counted anywhere you would think to look.
+or counted anywhere you would think to look. Because that silence looks the
+same as a variable that never reached the server at all, the boot log states
+which of the two you have — see [When the allowlist does not take
+effect](#when-the-allowlist-does-not-take-effect).
 
 **The ingest buffer is one buffer, not one per project.** It holds 100,000
 rows by default (`LYRAFLOW_BUFFER_MAX_ROWS`), and it is shared. A burst on
@@ -676,7 +680,16 @@ this release has its old page views under their old names and its new ones under
 
 `/v1/track`, `/v1/page`, `/v1/identify` and `/v1/batch` are CORS-preflighted
 requests. By default Lyraflow answers that preflight for any origin — set
-`LYRAFLOW_ALLOWED_ORIGINS` (comma-separated) on the server to restrict it.
+`LYRAFLOW_ALLOWED_ORIGINS` (comma-separated) to restrict it. On the shipped
+Compose stack that means a line in `.env`, which the `lyraflow` service's
+`environment:` block passes through; anywhere else it is an environment
+variable on the server process. **Confirm it took effect rather than assuming
+it did:** the server states which mode it is in on every boot, so
+`docker compose logs lyraflow | grep 'ingest CORS'` answers it in one line.
+Getting `ingest CORS unrestricted` back after setting the variable means the
+value never reached the process — see [When the allowlist does not take
+effect](#when-the-allowlist-does-not-take-effect).
+
 This is not a security boundary: the write key already ships in page source,
 and any non-browser client ignores CORS entirely. What it buys is
 tamper-evidence — stopping someone from pasting your write key on their own
@@ -975,6 +988,47 @@ applies here too, since this is exactly what triggers it: the same
 quietly reusing your write key on a different origin without you noticing —
 it is **not** a security boundary, because the write key already ships in
 page source and any non-browser sender ignores CORS entirely.
+
+### When the allowlist does not take effect
+
+Setting `LYRAFLOW_ALLOWED_ORIGINS` somewhere the server never reads it fails
+**silently and in the permissive direction**: nothing errors, the stack comes
+up healthy, and every origin is still allowed. There is no outward difference
+between that and a working allowlist until somebody tries the thing the
+allowlist was meant to stop.
+
+So the server says which mode it booted in, every time:
+
+```sh
+docker compose logs lyraflow | grep 'ingest CORS'
+```
+
+- `ingest CORS restricted to 2 origin(s) …` — it took effect, and the line
+  names the origins it parsed.
+- `ingest CORS unrestricted …` — it did not. Every origin is allowed.
+
+The usual cause of the second line is Compose. **`.env` alone is not enough
+unless the variable is also named in the `environment:` block of the
+`lyraflow` service** — Compose uses `.env` for substitution inside the compose
+file and passes the container only the variables that block names. The shipped
+`docker-compose.yml` names this one, so a plain `.env` line works on a stock
+install; a compose file predating that, or a hand-edited one, does not. Check
+what actually reached the container:
+
+```sh
+docker compose exec lyraflow env | grep ALLOWED_ORIGINS
+```
+
+Empty output there, with the value present in `.env`, is exactly this bug.
+
+The same silence applies to a value that *did* arrive but does not match:
+origins are compared exactly. `https://example.com` and
+`https://www.example.com` are two different origins, `http://` and `https://`
+are two different origins, and a trailing slash or a port that the browser
+does not send makes an entry match nothing. A blocked preflight is not
+rejected, dead-lettered, or counted anywhere — so if one instrumented site
+goes quiet while the others keep reporting, compare its entry against the
+`Origin` header the browser actually sends, character for character.
 
 ### Single-page apps
 

@@ -136,5 +136,36 @@ if (config.retentionEnabled) {
   )
 }
 
+// Stated at startup, in BOTH directions, for the same "visible rather than
+// merely absent" reason as retention above — but here the absent case is the
+// dangerous one, so neither branch may be silent.
+//
+// A blocked preflight is invisible by design: @fastify/cors omits the
+// `access-control-allow-origin` header rather than refusing the request, so
+// the browser drops the response and the server records nothing. Nothing is
+// rejected, dead-lettered, or counted. That is the correct wire behaviour and
+// it is not what this line is about.
+//
+// What it is about: an operator who sets LYRAFLOW_ALLOWED_ORIGINS somewhere it
+// does not take effect — the classic one being `.env` on a Compose install
+// whose compose file does not name the variable (#195) — gets no error, and an
+// install that allows every origin looks exactly like one whose allowlist is
+// working. Both states are quiet, so the only way to tell them apart is to say
+// which one this process is in. Restart, read one line, know.
+//
+// `info`, not `warn`, on the unrestricted branch: it is the documented default
+// and the reason a fresh install's snippet works on first paste. Warning on
+// the shipped default trains operators to ignore the warning.
+if (config.allowedOrigins.length > 0) {
+  app.log.info(
+    { allowedOrigins: config.allowedOrigins },
+    `ingest CORS restricted to ${config.allowedOrigins.length} origin(s) from LYRAFLOW_ALLOWED_ORIGINS — a browser on any other origin cannot send events, and is refused silently`,
+  )
+} else {
+  app.log.info(
+    'ingest CORS unrestricted (LYRAFLOW_ALLOWED_ORIGINS unset or empty) — a browser on ANY origin may send events to this install. If you meant to set it, this line is how you know it did not take effect: on a Compose install the variable must be named in the `environment:` block of the `lyraflow` service, not only in `.env`',
+  )
+}
+
 await app.listen({ port: config.port, host: '0.0.0.0' })
 readiness.markReady()

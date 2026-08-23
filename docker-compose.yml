@@ -61,6 +61,16 @@ services:
       # from the domain the install was already given (issue #61) instead of
       # requiring it typed in by hand every time.
       LYRAFLOW_DOMAIN: ${LYRAFLOW_DOMAIN:-}
+      # Same `:-` as the three above, and named here for the same reason they
+      # are: without this line the value sits in `.env` and never reaches
+      # `loadConfig`. That failure is quieter than the others, which is why it
+      # is worth its own note. `LYRAFLOW_ALLOWED_ORIGINS` unset means "allow
+      # every origin", so an operator who sets it in `.env`, restarts, and
+      # gets no error has an install that still answers the preflight for
+      # anybody — indistinguishable, from the outside, from one whose
+      # allowlist is working. The startup line in index.ts states which of the
+      # two it is; this line is what makes the documented `.env` route true.
+      LYRAFLOW_ALLOWED_ORIGINS: ${LYRAFLOW_ALLOWED_ORIGINS:-}
     # Interpolated so domain mode can drop this to loopback without a second
     # compose file. Unset it is 3000:3000 -- byte-for-byte today's behaviour.
     # The three-part IP:host:container form is required in domain mode;
