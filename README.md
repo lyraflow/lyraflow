@@ -11,13 +11,18 @@ Lyraflow records what people do in your product, stitches anonymous visits to
 known accounts, and lets you ask who did what. It runs on your own machine
 under Docker, and nothing leaves it.
 
-> **Early days.** v0.1 is the API and the operations behind it: ingest,
-> identity, segments, event reads, privacy, retention, quotas, and backup. A
-> web UI now sits on top of it — sign in, walk through a first-run wizard,
-> watch events arrive live, build and run funnels, build and edit segments,
-> and edit a project's retention and quota — but people and person profiles
-> still have **no screen**, **API and CLI only**; see [Web UI](#web-ui) for
-> exactly what exists and what does not.
+> **Early days.** v0.9 is the API and the operations behind it — ingest,
+> identity, segments, funnels, event reads, privacy, retention, quotas and
+> backup — with a web UI over the top: a live event feed where any event opens
+> to show everything it arrived with, funnels that read as a flow and whose
+> steps can gate on who someone is as well as what they did, a segment builder
+> that filters on an event's own attributes as well as its properties, and
+> settings for your projects and your own account. Clicking a funnel step or a
+> segment lists the people behind the number, with their traits. There is
+> still **no person profile**: no per-person event history, and no way to open
+> someone who is neither in a segment nor at a funnel step. Journeys and
+> dashboards are still ahead. See [Web UI](#web-ui) for exactly what exists
+> and what does not.
 
 ## What it is good at
 
@@ -987,8 +992,8 @@ client-side navigation completes.
 
 ## Identity resolution
 
-v0.1 stitches a device's anonymous activity to the person it belongs to, and
-lets you merge two people that turn out to be the same one. Filtering and
+Lyraflow stitches a device's anonymous activity to the person it belongs to,
+and lets you merge two people that turn out to be the same one. Filtering and
 segmentation are built on top of it — see [Segments](#segments) below.
 
 ### Binding a device to a person
@@ -1036,7 +1041,7 @@ full every 5–15 seconds. If you send high identified volume, expect this to
 be the fastest-growing table in your Postgres, and watch dictionary reload
 time alongside it.
 
-This is a known cost in v0.1, not an oversight. A write-side suppression
+This is a known cost, not an oversight. A write-side suppression
 (skip the insert when the device is already bound to this person) was built
 and then reverted: it is not safe against a late, out-of-order `identify`,
 which can silently and permanently hand one person's later activity to
@@ -1076,8 +1081,8 @@ curl -i http://localhost:3000/v1/alias \
 ```
 
 Answers `200` with `{"status":"merged"}`, or `{"status":"noop"}` if the two
-ids already resolve to the same person. **Aliasing is not reversible in
-v0.1** — there is no `unalias`, and merging `A` into `B` and then `B` into
+ids already resolve to the same person. **Aliasing is not reversible** —
+there is no `unalias`, and merging `A` into `B` and then `B` into
 `A` lands on `noop` rather than undoing the first merge. `400` for a missing
 or empty `from_user_id`/`to_user_id`; `401` for a missing or invalid server
 key. `503` with `retry-after: 5` — the merge runs in a `SERIALIZABLE`
