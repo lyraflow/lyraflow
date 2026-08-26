@@ -52,6 +52,87 @@ export function rampIndex(stepIndex: number, totalSteps: number): number {
 }
 
 /**
+ * The steps that make up the required chain, in order.
+ *
+ * The ribbons, the ramp and the leak all read this rather than the whole
+ * list. An optional step has a bar and a slot, and it is not a stage: its
+ * `from_previous` is measured against the required step it branches off
+ * (`core/src/funnels/spine.ts`), so anything comparing consecutive stages
+ * must skip it or it is comparing two different denominators.
+ */
+export function spineSteps(steps: readonly StepResult[]): StepResult[] {
+  return steps.filter((s) => s.optional !== true)
+}
+
+/**
+ * The DEFINITION-ORDER slot of each spine step, in order.
+ *
+ * The plot keeps one slot per definition step -- an optional step is drawn,
+ * so it occupies one -- while the ribbons are drawn between consecutive
+ * entries HERE. Two optional steps in a row therefore still produce ONE
+ * ribbon, spanning three slots, rather than a chain of three.
+ */
+export function spineSlots(steps: readonly StepResult[]): number[] {
+  const out: number[] = []
+  for (let i = 0; i < steps.length; i++) {
+    if (steps[i]?.optional !== true) out.push(i)
+  }
+  return out
+}
+
+/**
+ * For each definition-order slot, the slot of the required step it branches
+ * off -- `null` for a required step, and for an optional step with no
+ * required step before it.
+ *
+ * The last required step BEFORE it, never its neighbour: two optional steps
+ * in a row both hang off the same required step, and the second one's
+ * `from_previous` was computed against that step, not against the first
+ * branch. `validateFunnel` refuses an optional first step, so the `null`
+ * case is unreachable through the API -- it is still defined here, because a
+ * pure function that throws its caller's validation rule states that rule
+ * twice.
+ */
+export function branchSlots(steps: readonly StepResult[]): (number | null)[] {
+  const out: (number | null)[] = []
+  let lastRequired: number | null = null
+  for (let i = 0; i < steps.length; i++) {
+    if (steps[i]?.optional === true) {
+      out.push(lastRequired)
+      continue
+    }
+    out.push(null)
+    lastRequired = i
+  }
+  return out
+}
+
+/**
+ * Which ramp step each step paints with, by definition-order index.
+ *
+ * Computed over the SPINE, with an optional step taking the ramp step of the
+ * stage it branches off -- so it reads as attached to that stage rather than
+ * as one of its own. Consuming a ramp step would spend the ordinal channel
+ * on something that has no position in the order, and would also shift every
+ * later stage's colour, so the same six-stage funnel would repaint itself
+ * because a side branch was added beside it.
+ */
+export function rampIndexes(steps: readonly StepResult[]): number[] {
+  const spineLength = spineSteps(steps).length
+  const out: number[] = []
+  let rank = 0
+  for (const step of steps) {
+    if (step.optional === true) {
+      out.push(rampIndex(Math.max(0, rank - 1), spineLength))
+      continue
+    }
+    out.push(rampIndex(rank, spineLength))
+    rank++
+  }
+  return out
+}
+
+/**
  * A bar's height for `people` out of `entered`.
  *
  * Guarded at a zero denominator for the same reason `StepBars` guards its
@@ -88,10 +169,19 @@ export function plotWidth(totalSteps: number): number {
  * The curve is a cubic with horizontal control points at the midpoint,
  * giving the flat-then-fall-then-flat shape that reads as a flow rather
  * than as a triangle.
+ *
+ * The destination is EXPLICIT rather than `fromStep + 1`, because an
+ * optional step occupies a slot the spine ribbon must span. A ribbon routed
+ * through it would draw a loss between two stages that are not consecutive.
  */
-export function ribbonPath(fromHeight: number, toHeight: number, fromStep: number): string {
+export function ribbonPath(
+  fromHeight: number,
+  toHeight: number,
+  fromStep: number,
+  toStep: number,
+): string {
   const x1 = barX(fromStep) + BAR_WIDTH
-  const x2 = barX(fromStep + 1)
+  const x2 = barX(toStep)
   const y1 = PLOT_HEIGHT - fromHeight
   const y2 = PLOT_HEIGHT - toHeight
   const mid = (x1 + x2) / 2
@@ -102,6 +192,35 @@ export function ribbonPath(fromHeight: number, toHeight: number, fromStep: numbe
     `L ${x1} ${PLOT_HEIGHT}`,
     'Z',
   ].join(' ')
+}
+
+/**
+ * The thread from a required step's bar to the optional step hanging off it.
+ *
+ * The SAME cubic as `ribbonPath`'s top edge and NOT a ribbon: no baseline
+ * legs, no `Z`, so there is no area to fill and no taper to read. That is
+ * the whole point. A taper says "the loss happened between these two
+ * stages"; nothing was lost between a required step and a branch off it,
+ * because the branch is not the next stage -- the people who did not take it
+ * carried on down the spine. Drawing a wedge here would depict a loss that
+ * did not happen, which is worse than the stacked bars this plot replaced.
+ *
+ * Stroked, dashed and thin at the call site for the same reason: an optional
+ * step is subordinate to the chain it hangs off, and the dash is what says
+ * so at a glance without depending on colour.
+ */
+export function branchPath(
+  fromHeight: number,
+  toHeight: number,
+  fromStep: number,
+  toStep: number,
+): string {
+  const x1 = barX(fromStep) + BAR_WIDTH
+  const x2 = barX(toStep)
+  const y1 = PLOT_HEIGHT - fromHeight
+  const y2 = PLOT_HEIGHT - toHeight
+  const mid = (x1 + x2) / 2
+  return `M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}`
 }
 
 /** Roughly one `text-xs` line box, used to centre the ribbon's label on the
@@ -131,10 +250,24 @@ const LABEL_FITS_ABOVE = 24
  * half on the surface, legible against neither. Above the wedge it sits on
  * the surface, where the ordinary text token is already the validated
  * pairing.
+ *
+ * `spannedBarHeight` is the tallest bar standing in a slot this ribbon spans
+ * ACROSS -- an optional step's, and 0 whenever the ribbon joins two adjacent
+ * slots, which is every ribbon on a funnel with no optional steps. FOUND BY
+ * RENDERING IT: a spanning ribbon's centre is the middle of the branch's own
+ * slot, so the label came out printed across the branch bar's dashed
+ * outline, with the dashes running through the glyphs. Lifting it clear of
+ * BOTH the ribbon and that bar is the fix; `max` of the two rather than the
+ * bar alone, because a branch shorter than the ribbon would still leave the
+ * label inside the ribbon it was lifted out of.
  */
-export function ribbonLabelY(fromHeight: number, toHeight: number): number {
+export function ribbonLabelY(fromHeight: number, toHeight: number, spannedBarHeight = 0): number {
   const topAtCentre = PLOT_HEIGHT - (fromHeight + toHeight) / 2
   const thickness = PLOT_HEIGHT - topAtCentre
+  if (spannedBarHeight > 0) {
+    const clearOf = Math.max(thickness, spannedBarHeight)
+    return Math.max(0, Math.round(PLOT_HEIGHT - clearOf - LABEL_HEIGHT - 2))
+  }
   if (thickness >= LABEL_FITS_ABOVE) {
     return Math.round(topAtCentre + thickness / 2 - LABEL_HEIGHT / 2)
   }
@@ -157,11 +290,20 @@ export function ribbonLabelY(fromHeight: number, toHeight: number): number {
  * entered, or no step lost anyone. "Biggest leak: none" is noise, and a
  * funnel that loses nobody deserves silence rather than a sentence
  * congratulating it.
+ *
+ * This comparison is over the SPINE. Callers pass `spineSteps(...)`, and it
+ * filters again itself rather than trusting them to: an optional step's
+ * `from_previous` is a share of the required step it branches off, so a
+ * rarely-taken side branch would otherwise win a comparison it is not in and
+ * the screen would name a branch nobody was expected to take as the funnel's
+ * worst problem. Stating the rule in each caller is how the next caller gets
+ * it wrong.
  */
 export function biggestLeak(
-  steps: readonly StepResult[],
+  rawSteps: readonly StepResult[],
   entered: number,
 ): { index: number; event: string; lost: number } | null {
+  const steps = spineSteps(rawSteps)
   if (entered <= 0 || steps.length < 2) return null
   let worst: { index: number; event: string; lost: number } | null = null
   for (let i = 1; i < steps.length; i++) {

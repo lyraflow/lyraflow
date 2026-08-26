@@ -9,10 +9,15 @@ import {
   barHeight,
   barX,
   biggestLeak,
+  branchPath,
+  branchSlots,
   plotWidth,
   rampIndex,
+  rampIndexes,
   ribbonLabelY,
   ribbonPath,
+  spineSlots,
+  spineSteps,
 } from './flowGeometry.js'
 
 const step = (over: Partial<StepResult> & { index: number }): StepResult => ({
@@ -83,20 +88,20 @@ describe('ribbonPath', () => {
     // A constant-thickness ribbon would say the loss happens AT the bar. The
     // top edge falling from one bar's top to the next's is what draws the
     // loss where it occurs.
-    const d = ribbonPath(PLOT_HEIGHT, PLOT_HEIGHT / 2, 0)
+    const d = ribbonPath(PLOT_HEIGHT, PLOT_HEIGHT / 2, 0, 1)
     expect(d).toBe(
       `M ${BAR_WIDTH + 28} 0 C ${(BAR_WIDTH + 28 + 128) / 2} 0, ${(BAR_WIDTH + 28 + 128) / 2} 90, 128 90 L 128 180 L ${BAR_WIDTH + 28} 180 Z`,
     )
   })
 
   it('starts where the source bar ends and lands where the next one starts', () => {
-    const d = ribbonPath(100, 40, 2)
+    const d = ribbonPath(100, 40, 2, 3)
     expect(d.startsWith(`M ${barX(2) + BAR_WIDTH} ${PLOT_HEIGHT - 100} `)).toBe(true)
     expect(d).toContain(`${barX(3)} ${PLOT_HEIGHT - 40}`)
   })
 
   it('emits no NaN for a zero-entrant funnel', () => {
-    expect(ribbonPath(barHeight(0, 0), barHeight(0, 0), 0)).not.toContain('NaN')
+    expect(ribbonPath(barHeight(0, 0), barHeight(0, 0), 0, 1)).not.toContain('NaN')
   })
 })
 
@@ -190,5 +195,128 @@ describe('biggestLeak', () => {
       step({ index: 3, event: 'b', people: 25, from_previous: 0.5 }),
     ]
     expect(biggestLeak(steps, 100)?.event).toBe('a')
+  })
+})
+
+describe('geometry with optional steps', () => {
+  const s = (event: string, people: number, optional?: true): StepResult => ({
+    index: 0,
+    event,
+    people,
+    from_previous: 1,
+    from_start: 1,
+    ...(optional ? { optional, skipped: 0 } : {}),
+  })
+
+  it('spans the spine ribbon across an optional slot', () => {
+    // Slot 1 to slot 3, not slot 1 to slot 2. Routing the ribbon THROUGH the
+    // optional step would draw a loss that did not happen, which is worse
+    // than the stacked bars this plot replaced.
+    const path = ribbonPath(100, 50, 1, 3)
+    expect(path).toContain(`M ${barX(1) + BAR_WIDTH}`)
+    expect(path).toContain(`${barX(3)}`)
+  })
+
+  it('excludes optional steps from the spine', () => {
+    const steps = [s('a', 10), s('b', 8), s('c', 3, true), s('d', 5)]
+    expect(spineSteps(steps).map((x) => x.event)).toEqual(['a', 'b', 'd'])
+  })
+
+  it('never names an optional step as the biggest leak', () => {
+    // Its `from_previous` is measured against the step it branches off, so a
+    // rarely-taken side branch would otherwise win a comparison it is not in.
+    const steps = [
+      { ...s('a', 100), from_previous: 1 },
+      { ...s('b', 90), from_previous: 0.9 },
+      { ...s('c', 5, true), from_previous: 0.05 },
+      { ...s('d', 40), from_previous: 0.44 },
+    ]
+    // Asserted BOTH ways on purpose. `biggestLeak` filters to the spine
+    // itself rather than trusting the caller to have done it, so a future
+    // caller handing it the raw definition list cannot reintroduce this.
+    expect(biggestLeak(steps, 100)?.event).toBe('d')
+    expect(biggestLeak(spineSteps(steps), 100)?.event).toBe('d')
+  })
+
+  it('ramps colour over the spine, and hands an optional step its branch point colour', () => {
+    // The ordinal ramp says "these are in an order". An off-spine step is
+    // not in that order, so it borrows rather than consuming a step.
+    const steps = [s('a', 10), s('b', 8), s('c', 3, true), s('d', 5)]
+    const ramp = rampIndexes(steps)
+    expect(ramp).toEqual([1, 2, 2, 3])
+  })
+
+  it('leaves a funnel with no optional steps ramping exactly as before', () => {
+    const steps = [s('a', 10), s('b', 8), s('c', 5)]
+    expect(rampIndexes(steps)).toEqual([1, 2, 3])
+    expect(spineSteps(steps)).toHaveLength(3)
+  })
+
+  it('names the definition-order slot of every spine step, so a ribbon spans rather than routes', () => {
+    // The pairs the ribbons are drawn between are consecutive entries HERE,
+    // not consecutive definition positions. Two optional steps in a row must
+    // still yield one pair, spanning both slots.
+    expect(spineSlots([s('a', 10), s('b', 8), s('c', 3, true), s('d', 5)])).toEqual([0, 1, 3])
+    expect(spineSlots([s('a', 10), s('b', 3, true), s('c', 2, true), s('d', 5)])).toEqual([0, 3])
+    expect(spineSlots([s('a', 10), s('b', 8)])).toEqual([0, 1])
+  })
+
+  it('hangs each optional step off the last REQUIRED step before it, never off its neighbour', () => {
+    // Two optional steps in a row both branch off the same required step --
+    // the second does NOT branch off the first, which is the denominator
+    // `levels.ts` computed its `from_previous` against.
+    const steps = [s('a', 10), s('b', 8), s('c', 3, true), s('d', 2, true), s('e', 5)]
+    expect(branchSlots(steps)).toEqual([null, null, 1, 1, null])
+  })
+
+  it('draws a branch connector as an open curve that cannot read as a taper', () => {
+    // A tapering ribbon means "the loss happened between these two stages".
+    // Nothing was lost between a required step and the branch hanging off
+    // it, so the connector is a stroked line with no area at all -- no
+    // baseline leg, no close.
+    const d = branchPath(180, 60, 1, 2)
+    expect(d.startsWith(`M ${barX(1) + BAR_WIDTH} ${PLOT_HEIGHT - 180}`)).toBe(true)
+    expect(d).toContain(`${barX(2)} ${PLOT_HEIGHT - 60}`)
+    expect(d).not.toContain('Z')
+    expect(d).not.toContain('L')
+  })
+
+  it('emits no NaN from a branch connector on a zero-entrant funnel', () => {
+    expect(branchPath(barHeight(0, 0), barHeight(0, 0), 0, 1)).not.toContain('NaN')
+  })
+})
+
+describe('ribbonLabelY over a spanned slot', () => {
+  it('lifts the label clear of a branch bar standing in the slot the ribbon spans', () => {
+    // FOUND BY RENDERING IT. A spanning ribbon's centre is the middle of the
+    // branch's own slot, so the label printed across the branch bar's dashed
+    // outline with the dashes running through the glyphs.
+    const from = 180
+    const to = 90
+    const bar = 30
+    const centred = ribbonLabelY(from, to)
+    const lifted = ribbonLabelY(from, to, bar)
+    expect(lifted).toBeLessThan(centred)
+    // Above the ribbon's own thickness at the centre, which is 135 here --
+    // clearing the bar alone would still leave it inside the ribbon.
+    expect(lifted).toBeLessThanOrEqual(PLOT_HEIGHT - 135 - LABEL_HEIGHT)
+  })
+
+  it('clears a branch TALLER than the ribbon it stands in, not just a short one', () => {
+    // The branch can be taller than the chain at that point -- a side path
+    // most people take. Lifting only above the ribbon would put the label
+    // straight back on the bar.
+    const lifted = ribbonLabelY(40, 20, 150)
+    expect(lifted).toBeLessThanOrEqual(PLOT_HEIGHT - 150 - LABEL_HEIGHT)
+    expect(lifted).toBeGreaterThanOrEqual(0)
+  })
+
+  it('never returns a negative offset for a full-height branch', () => {
+    expect(ribbonLabelY(PLOT_HEIGHT, PLOT_HEIGHT, PLOT_HEIGHT)).toBeGreaterThanOrEqual(0)
+  })
+
+  it('is unchanged when nothing is spanned, which is every ribbon on a funnel with no branches', () => {
+    expect(ribbonLabelY(PLOT_HEIGHT, PLOT_HEIGHT, 0)).toBe(ribbonLabelY(PLOT_HEIGHT, PLOT_HEIGHT))
+    expect(ribbonLabelY(4, 4, 0)).toBe(ribbonLabelY(4, 4))
   })
 })

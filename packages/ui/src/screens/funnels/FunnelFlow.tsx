@@ -6,10 +6,14 @@ import {
   barHeight,
   barX,
   biggestLeak,
+  branchPath,
+  branchSlots,
   plotWidth,
-  rampIndex,
+  rampIndexes,
   ribbonLabelY,
   ribbonPath,
+  spineSlots,
+  spineSteps,
 } from './flowGeometry.js'
 import { formatCount, formatPercent } from './format.js'
 
@@ -25,14 +29,22 @@ import { formatCount, formatPercent } from './format.js'
  * NOTHING -- a narrowing shown against the wrong step would have an operator
  * act on a population the screen never measured, and that failure is
  * invisible. An omitted clause is merely less information.
+ *
+ * `optional` is checked for the same reason and with the same ruling. An
+ * optional treatment drawn against a required step has an operator read a
+ * branch as a stage, and that failure is invisible too. When the two
+ * disagree the RESULT wins everywhere on this screen -- it is what the
+ * numbers were computed from -- and this returns `null`, so no narrowing is
+ * shown beside a step whose shape the definition disagrees about.
  */
 function whereFor(
   definition: readonly FunnelStep[] | null | undefined,
   i: number,
-  event: string,
+  result: StepResult,
 ): string | null {
   const step = definition?.[i]
-  if (step == null || step.event !== event) return null
+  if (step == null || step.event !== result.event) return null
+  if ((step.optional === true) !== (result.optional === true)) return null
   if (step.where == null || step.where.length === 0) return null
   return wherePhrase(step.where)
 }
@@ -91,7 +103,14 @@ export function FunnelFlow(props: {
   const steps = result.steps
   const total = steps.length
   const heights = steps.map((s) => barHeight(s.people, result.entered))
-  const leak = biggestLeak(steps, result.entered)
+  /* One slot per DEFINITION step, and the spine is what the ribbons are
+   * drawn between: `slots` is the definition-order position of each required
+   * step, so a pair of consecutive entries can be two slots apart, or three.
+   * `branches` says which required step each optional step hangs off. */
+  const slots = spineSlots(steps)
+  const branches = branchSlots(steps)
+  const ramp = rampIndexes(steps)
+  const leak = biggestLeak(spineSteps(steps), result.entered)
   const columns = { gridTemplateColumns: `repeat(${Math.max(1, total)}, minmax(0, 1fr))` }
   /* A cap, not a width: the plot still shrinks to whatever room it is given.
    * Without it a two-step funnel spreads two bars across the whole card and
@@ -116,12 +135,24 @@ export function FunnelFlow(props: {
          * needs to know what a bar IS before they read how tall it is. */}
         <div className="grid gap-1" style={columns}>
           {steps.map((s, i) => {
-            const where = whereFor(definition, i, s.event)
+            const where = whereFor(definition, i, s)
             return (
               <div key={s.index} className="min-w-0 px-1 text-center">
                 <p className="truncate text-sm font-medium" title={s.event}>
                   {s.event}
                 </p>
+                {/* Said in WORDS, not only in the dash on the bar. The dash
+                 * is what carries the branch at a glance; a reader who has
+                 * not learned what it means still has to be told, and
+                 * "optional" is one word. */}
+                {s.optional === true && (
+                  <p
+                    data-testid={`flow-step-${s.index}-optional`}
+                    className="truncate text-xs text-muted-foreground"
+                  >
+                    optional
+                  </p>
+                )}
                 {where != null && (
                   <p
                     data-testid={`flow-step-${s.index}-where`}
@@ -143,7 +174,13 @@ export function FunnelFlow(props: {
            * whatever the container's aspect ratio makes it. */}
           <svg
             role="img"
-            aria-label={`Funnel flow: ${steps.map((s) => `${s.event} ${formatPercent(s.from_start)}`).join(', ')}`}
+            aria-label={`Funnel flow: ${steps
+              .map((s) =>
+                s.optional === true
+                  ? `${s.event} (optional) ${formatPercent(s.from_previous)} of the step it branches off`
+                  : `${s.event} ${formatPercent(s.from_start)}`,
+              )
+              .join(', ')}`}
             viewBox={`0 0 ${plotWidth(total)} ${PLOT_HEIGHT}`}
             preserveAspectRatio="none"
             width="100%"
@@ -152,27 +189,77 @@ export function FunnelFlow(props: {
           >
             <title>Funnel flow</title>
             {/* Ribbons first, so a bar's own edge always sits on top of the
-             * ribbon meeting it rather than being overdrawn by it. */}
-            {steps.slice(0, -1).map((s, i) => (
-              <path
-                key={`ribbon-${s.index}`}
-                data-testid={`flow-ribbon-${s.index}`}
-                d={ribbonPath(heights[i] as number, heights[i + 1] as number, i)}
-                fill="var(--chart-funnel-ribbon)"
-              />
-            ))}
-            {steps.map((s, i) => (
-              <rect
-                key={`bar-${s.index}`}
-                data-testid={`flow-bar-${s.index}`}
-                x={barX(i)}
-                y={PLOT_HEIGHT - (heights[i] as number)}
-                width={BAR_WIDTH}
-                height={heights[i] as number}
-                rx={4}
-                fill={`var(--chart-funnel-${rampIndex(i, total)})`}
-              />
-            ))}
+             * ribbon meeting it rather than being overdrawn by it.
+             *
+             * One per consecutive pair on the SPINE, spanning whatever slots
+             * lie between them. NOT one per adjacent slot: a ribbon routed
+             * into an optional step and out again would draw two losses that
+             * did not happen, between stages that are not consecutive. The
+             * spine is the chain; an optional step is a branch off it, and
+             * the flow past it is undisturbed, which is exactly what a
+             * ribbon at full geometry across its slot says. */}
+            {slots.slice(0, -1).map((from, k) => {
+              const to = slots[k + 1] as number
+              const source = steps[from] as StepResult
+              return (
+                <path
+                  key={`ribbon-${source.index}`}
+                  data-testid={`flow-ribbon-${source.index}`}
+                  d={ribbonPath(heights[from] as number, heights[to] as number, from, to)}
+                  fill="var(--chart-funnel-ribbon)"
+                />
+              )
+            })}
+            {/* The thread from a branch point to the step hanging off it.
+             * Stroked and dashed, with NO fill and no baseline legs -- see
+             * `branchPath`. A wedge here would say the people who skipped
+             * this step were lost, and they were not: they carried on down
+             * the spine, which is the ribbon passing behind this. */}
+            {branches.map((from, i) =>
+              from == null ? null : (
+                <path
+                  key={`branch-${(steps[i] as StepResult).index}`}
+                  data-testid={`flow-branch-${(steps[i] as StepResult).index}`}
+                  d={branchPath(heights[from] as number, heights[i] as number, from, i)}
+                  fill="none"
+                  stroke={`var(--chart-funnel-${ramp[i]})`}
+                  strokeWidth={1.5}
+                  strokeDasharray="4 3"
+                  /* The plot stretches horizontally, so a stroke in user
+                   * space would come out thicker on one axis than the other
+                   * and the dash pattern would stretch with the container.
+                   * This keeps both in screen space, which is the only way a
+                   * dash reads as the same dash at every card width. */
+                  vectorEffect="non-scaling-stroke"
+                />
+              ),
+            )}
+            {steps.map((s, i) => {
+              const optional = s.optional === true
+              return (
+                <rect
+                  key={`bar-${s.index}`}
+                  data-testid={`flow-bar-${s.index}`}
+                  data-optional={optional ? 'true' : undefined}
+                  x={barX(i)}
+                  y={PLOT_HEIGHT - (heights[i] as number)}
+                  width={BAR_WIDTH}
+                  height={heights[i] as number}
+                  rx={4}
+                  /* Optional: the palest token in the set -- the same one the
+                   * ribbons use -- outlined in its branch point's ramp step.
+                   * Subordinate by weight rather than by hue, and the outline
+                   * is what ties it to the stage it hangs off. A solid ramp
+                   * fill would make it look like a stage of its own, which is
+                   * the one thing it must not look like. */
+                  fill={optional ? 'var(--chart-funnel-ribbon)' : `var(--chart-funnel-${ramp[i]})`}
+                  stroke={optional ? `var(--chart-funnel-${ramp[i]})` : undefined}
+                  strokeWidth={optional ? 1.5 : undefined}
+                  strokeDasharray={optional ? '4 3' : undefined}
+                  vectorEffect={optional ? 'non-scaling-stroke' : undefined}
+                />
+              )
+            })}
           </svg>
 
           {/* One transparent, full-slot button per step -- its OWN layer,
@@ -199,7 +286,7 @@ export function FunnelFlow(props: {
                   type="button"
                   data-testid={`flow-step-${s.index}-select`}
                   aria-pressed={selectedStep === s.index}
-                  aria-label={`Show people at step ${s.index}: ${s.event}`}
+                  aria-label={`Show people at step ${s.index}: ${s.event}${s.optional === true ? ' (optional)' : ''}`}
                   onClick={() => onSelectStep(s.index)}
                   className="h-full w-full rounded-sm border-0 bg-transparent p-0 hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset aria-pressed:bg-accent/20"
                   style={{ gridRow: 1, gridColumn: i + 1 }}
@@ -239,26 +326,44 @@ export function FunnelFlow(props: {
             style={columns}
             aria-hidden="true"
           >
-            {steps.slice(0, -1).map((s, i) => (
-              <span
-                key={`rate-${s.index}`}
-                data-testid={`flow-rate-${s.index}`}
-                className="justify-self-center self-start text-xs font-medium tabular-nums text-foreground"
-                style={{
-                  /* `gridRow: 1` on EVERY label, and it is not decorative.
-                   * Their column spans overlap by one, so auto-placement
-                   * pushes each one onto a fresh row -- the labels came out
-                   * stacked down the page, the later ones outside the card
-                   * entirely. Pinning the row makes them overlay the plot,
-                   * which is the whole point of an absolute overlay. */
-                  gridRow: 1,
-                  gridColumn: `${i + 1} / span 2`,
-                  marginTop: `${ribbonLabelY(heights[i] as number, heights[i + 1] as number)}px`,
-                }}
-              >
-                {formatPercent((steps[i + 1] as StepResult).from_previous)}
-              </span>
-            ))}
+            {slots.slice(0, -1).map((from, k) => {
+              const to = slots[k + 1] as number
+              const source = steps[from] as StepResult
+              /* The tallest branch bar standing in a slot this ribbon spans
+               * across -- 0 when the two stages are adjacent, which is every
+               * ribbon on a funnel with no optional steps. See
+               * `ribbonLabelY`: without it the label prints across the
+               * branch's dashed outline. */
+              let spanned = 0
+              for (let s = from + 1; s < to; s++) {
+                spanned = Math.max(spanned, heights[s] as number)
+              }
+              return (
+                <span
+                  key={`rate-${source.index}`}
+                  data-testid={`flow-rate-${source.index}`}
+                  className="justify-self-center self-start text-xs font-medium tabular-nums text-foreground"
+                  style={{
+                    /* `gridRow: 1` on EVERY label, and it is not decorative.
+                     * Their column spans overlap by one, so auto-placement
+                     * pushes each one onto a fresh row -- the labels came out
+                     * stacked down the page, the later ones outside the card
+                     * entirely. Pinning the row makes them overlay the plot,
+                     * which is the whole point of an absolute overlay. */
+                    gridRow: 1,
+                    /* Spanning the pair's OWN slots, however many lie between
+                     * them. Centred over `${from + 1}` through `${to + 1}`
+                     * lands on `(from + to + 1) * SLOT_WIDTH / 2`, which is
+                     * exactly the ribbon's midpoint -- the same identity the
+                     * two-column case relied on, and it holds for any span. */
+                    gridColumn: `${from + 1} / span ${to - from + 1}`,
+                    marginTop: `${ribbonLabelY(heights[from] as number, heights[to] as number, spanned)}px`,
+                  }}
+                >
+                  {formatPercent((steps[to] as StepResult).from_previous)}
+                </span>
+              )
+            })}
           </div>
         </div>
 
@@ -268,12 +373,56 @@ export function FunnelFlow(props: {
          * copies into a ticket. Both in text tokens, never in the series
          * colour -- the bar above carries identity. */}
         <div className="grid gap-1" style={columns}>
-          {steps.map((s) => (
-            <div key={s.index} data-testid={`flow-step-${s.index}`} className="min-w-0 text-center">
-              <p className="text-base font-semibold tabular-nums">{formatPercent(s.from_start)}</p>
-              <p className="text-xs tabular-nums text-muted-foreground">{formatCount(s.people)}</p>
-            </div>
-          ))}
+          {steps.map((s) =>
+            s.optional === true ? (
+              /* `from_previous`, NOT `from_start`, as the headline -- and
+               * that is not a style choice. An optional step's rate is a
+               * share of the required step it branches off, so putting it
+               * where every other column puts a share of the ENTRANTS would
+               * print two different denominators in one row of numbers with
+               * nothing saying which is which. The words under it say whose
+               * share it is. */
+              <div
+                key={s.index}
+                data-testid={`flow-step-${s.index}`}
+                className="min-w-0 text-center"
+              >
+                <p className="text-base font-semibold tabular-nums">
+                  {formatPercent(s.from_previous)}
+                </p>
+                <p className="text-xs tabular-nums text-muted-foreground">
+                  {formatCount(s.people)} did
+                </p>
+                {/* The two counts cannot be read as one population, which is
+                 * why each carries its own verb rather than sharing a
+                 * middot with it. `skipped` is people who reached the branch
+                 * point and did NOT do this -- they are still in the funnel,
+                 * and a reader who takes them for a drop-off has the story
+                 * backwards. */}
+                {s.skipped != null && (
+                  <p
+                    data-testid={`flow-step-${s.index}-skipped`}
+                    className="text-xs tabular-nums text-muted-foreground"
+                  >
+                    {formatCount(s.skipped)} skipped
+                  </p>
+                )}
+              </div>
+            ) : (
+              <div
+                key={s.index}
+                data-testid={`flow-step-${s.index}`}
+                className="min-w-0 text-center"
+              >
+                <p className="text-base font-semibold tabular-nums">
+                  {formatPercent(s.from_start)}
+                </p>
+                <p className="text-xs tabular-nums text-muted-foreground">
+                  {formatCount(s.people)}
+                </p>
+              </div>
+            ),
+          )}
         </div>
       </div>
 

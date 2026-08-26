@@ -246,3 +246,106 @@ describe('StepBars selection', () => {
     expect(step).not.toHaveAttribute('aria-pressed')
   })
 })
+
+describe('StepBars with an optional step', () => {
+  // Step 3 of four is optional: it branches off step 2, and step 4 follows
+  // step 2 on the spine. 30 of step 2's 80 took the branch, 50 did not, and
+  // 40 of the same 80 went on to step 4.
+  const BRANCHED = {
+    ...RESULT,
+    entered: 100,
+    converted: 40,
+    conversion_rate: 0.4,
+    steps: [
+      { index: 1, event: 'signup', people: 100, from_previous: 1, from_start: 1 },
+      { index: 2, event: 'onboarded', people: 80, from_previous: 0.8, from_start: 0.8 },
+      {
+        index: 3,
+        event: 'video_submitted',
+        people: 30,
+        from_previous: 0.375,
+        from_start: 0.3,
+        optional: true as const,
+        skipped: 50,
+      },
+      { index: 4, event: 'purchase', people: 40, from_previous: 0.5, from_start: 0.4 },
+    ],
+  }
+
+  it('marks an optional step and gives it both of its numbers', () => {
+    render(<StepBars result={BRANCHED} />)
+    const row = screen.getByTestId('funnel-step-3')
+    expect(screen.getByTestId('funnel-step-3-optional')).toHaveTextContent('optional')
+    expect(row).toHaveTextContent('30')
+    // `from_previous` (37.5% of the step it branches off), and the branch
+    // point is NAMED -- 30.0% of the entrants is equally true and shares no
+    // denominator with the column it would sit in.
+    expect(row).toHaveTextContent('37.5%')
+    expect(row).toHaveTextContent('of onboarded')
+    expect(screen.getByTestId('funnel-step-3-skipped')).toHaveTextContent('50 skipped')
+  })
+
+  it('gives an optional step no drop row -- nobody drops out at a branch', () => {
+    // A drop row here would say those 50 people left the funnel. They did
+    // not: they are in step 4's 40 or they stopped at step 2, and the row
+    // beneath already accounts for them.
+    render(<StepBars result={BRANCHED} />)
+    expect(screen.queryByTestId('funnel-drop-3')).toBeNull()
+  })
+
+  it('counts the drop into the step AFTER a branch against the previous REQUIRED step', () => {
+    // THE MUTATION THIS BLOCK EXISTS FOR. `steps[i - 1]` is the branch, so
+    // the naive count is 30 - 40 = -10, a negative "dropped" count. The
+    // right one is step 2's 80 - 40 = 40. The percentage was always right
+    // (the server computed it against the spine); only the count beside it
+    // could be wrong, which is what makes this invisible to a test that
+    // reads the percentage alone.
+    render(<StepBars result={BRANCHED} />)
+    const drop = screen.getByTestId('funnel-drop-4')
+    expect(drop).toHaveTextContent('40 dropped')
+    expect(drop).toHaveTextContent('50.0%')
+    expect(drop).not.toHaveTextContent('-10')
+  })
+
+  it('outlines a branch’s bar instead of filling it, and leaves every other bar alone', () => {
+    render(<StepBars result={BRANCHED} />)
+    const branch = within(screen.getByTestId('funnel-step-3')).getByTestId('bar-fill')
+    expect(branch).toHaveAttribute('data-optional', 'true')
+    expect(branch.className).toContain('border-dashed')
+    const stage = within(screen.getByTestId('funnel-step-4')).getByTestId('bar-fill')
+    expect(stage).not.toHaveAttribute('data-optional')
+    expect(stage.className).toContain('bg-primary')
+    expect(stage.className).not.toContain('border-dashed')
+  })
+
+  it('renders as the RESULT says and shows no narrowing when the definition disagrees about optionality', () => {
+    const stale: FunnelStep[] = [
+      { event: 'signup' },
+      { event: 'onboarded' },
+      { event: 'video_submitted', where: [{ property: 'kind', operator: '=', value: 'intro' }] },
+      { event: 'purchase' },
+    ]
+    render(<StepBars result={BRANCHED} definition={stale} />)
+    expect(screen.queryByTestId('funnel-step-3-where')).toBeNull()
+    // Still a branch, because that is what the numbers are, and still no
+    // drop row for it.
+    expect(screen.getByTestId('funnel-step-3-optional')).toBeInTheDocument()
+    expect(screen.queryByTestId('funnel-drop-3')).toBeNull()
+  })
+
+  it('keeps the clause on a step the definition DOES agree about', () => {
+    const definition: FunnelStep[] = [
+      { event: 'signup', where: [{ property: 'plan', operator: '=', value: 'pro' }] },
+      { event: 'onboarded' },
+      {
+        event: 'video_submitted',
+        optional: true,
+        where: [{ property: 'kind', operator: '=', value: 'intro' }],
+      },
+      { event: 'purchase' },
+    ]
+    render(<StepBars result={BRANCHED} definition={definition} />)
+    expect(screen.getByTestId('funnel-step-1-where')).toHaveTextContent('pro')
+    expect(screen.getByTestId('funnel-step-3-where')).toHaveTextContent('kind is intro')
+  })
+})

@@ -16,24 +16,41 @@ import { describeError } from './funnels/errors.js'
 import { formatRangeDays, formatRelative, rangeDays, rangePhrase } from './funnels/format.js'
 
 /**
- * The reached/dropped counts for step `step`, computed from the run result
- * this screen already holds -- no extra request.
+ * The per-mode counts for step `step`, computed from the run result this
+ * screen already holds -- no extra request.
  *
- * `reached(N) = steps[N-1].people` (everyone at level >= N). `dropped(N) =
- * steps[N-1].people - (steps[N]?.people ?? 0)` -- verified exact against
- * `levels.ts:75-90`'s `stoppedAt[N] = atLeast[N] - atLeast[N+1]`, where
- * `atLeast[len+1]` is 0. That last part is what makes the FINAL step's
- * dropped count equal its reached count: there is no `steps[N]` beyond it,
- * so the `?? 0` fallback fires and `dropped = reached - 0`. That is not a
- * coincidence to guard against -- it is the same fact `mode: 'dropped'`
- * returns from the server for the last step, so the two numbers agreeing
- * there is the formula being right, not wrong.
+ * `reached(N) = steps[N-1].people` on every step, optional or not.
+ *
+ * `dropped(N) = steps[N-1].people - (next REQUIRED step's people ?? 0)` --
+ * verified exact against `levels.ts:75-90`'s `stoppedAt[N] = atLeast[N] -
+ * atLeast[N+1]`, where `atLeast[len+1]` is 0. That last part is what makes
+ * the FINAL step's dropped count equal its reached count: there is no step
+ * beyond it, so the `?? 0` fallback fires and `dropped = reached - 0`. That
+ * is not a coincidence to guard against -- it is the same fact `mode:
+ * 'dropped'` returns from the server for the last step, so the two numbers
+ * agreeing there is the formula being right, not wrong.
+ *
+ * The NEXT REQUIRED step, not `steps[step]`. `atLeast` is indexed by SPINE
+ * RANK (`core/src/funnels/spine.ts`), so with an optional step sitting
+ * between two stages, `steps[step]` is a branch and subtracting its
+ * population from a stage's is not a drop count at all. The two spellings
+ * agree exactly on every funnel with no optional steps, which is what would
+ * have made getting it wrong invisible.
+ *
+ * An optional step has no `dropped` -- nobody drops out at a branch, and the
+ * server 400s the mode. Its second population is `skipped`, which the run
+ * result carries directly.
  */
 function seedCountsFor(result: FunnelRunResult, step: number): StepPeopleSeedCounts {
-  const reached = result.steps[step - 1]?.people
-  if (reached == null) return {}
-  const dropped = reached - (result.steps[step]?.people ?? 0)
-  return { reached, dropped }
+  const current = result.steps[step - 1]
+  if (current == null) return {}
+  if (current.optional === true) {
+    return current.skipped == null
+      ? { reached: current.people }
+      : { reached: current.people, skipped: current.skipped }
+  }
+  const nextRequired = result.steps.slice(step).find((s) => s.optional !== true)
+  return { reached: current.people, dropped: current.people - (nextRequired?.people ?? 0) }
 }
 
 /**
@@ -605,6 +622,13 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
               step={selectedStep}
               range={result.range}
               onUnauthorized={onUnauthorized}
+              /* From the RUN RESULT, never from `funnel.steps`. The two are
+               * independent requests, the definition can be newer than the
+               * numbers on screen, and the server decides which modes are
+               * legal from the definition it ran -- which is the one this
+               * result came from. */
+              optional={result.steps[selectedStep - 1]?.optional === true}
+              event={result.steps[selectedStep - 1]?.event}
               seedCounts={seedCountsFor(result, selectedStep)}
             />
           )}
