@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
+import type { FilterNode } from '../segments/ast.js'
 import { Params } from '../segments/params.js'
+import type { FunnelStep } from './ast.js'
 import { compileFunnel } from './compile.js'
-import { FunnelValidationError } from './validate.js'
+import { FunnelValidationError, MAX_COMPILED_QUERY_BYTES } from './validate.js'
 
 const range = { since: new Date('2026-08-07T00:00:00Z'), until: new Date('2026-08-14T00:00:00Z') }
 // Well after `until`, so the default case is a fully-elapsed window.
@@ -657,5 +659,84 @@ describe('optional steps', () => {
     const q = compileFunnel({ ...base, definition: withOptional })
     const line = q.sql.split('\n').find((l) => l.includes('AS full_0')) ?? ''
     expect(line).toMatch(/AND timestamp < \{p\d+:DateTime64\(3\)\}\)/)
+  })
+})
+
+describe('compiled query size guard', () => {
+  const guardBase = {
+    projectId: 7,
+    database: 'lyraflow',
+    range: { since: new Date('2026-08-07T00:00:00Z'), until: new Date('2026-08-14T00:00:00Z') },
+    now: new Date('2026-09-01T00:00:00Z'),
+  }
+
+  const behaviour = (event: string): FilterNode => ({
+    kind: 'behavior',
+    event,
+    aggregate: 'count',
+    window: { kind: 'last', n: 14, unit: 'days' },
+    operator: '=',
+    value: 1,
+  })
+  const trait = (key: string): FilterNode => ({ kind: 'trait', key, operator: '=', value: 'x' })
+  const group = (children: FilterNode[]): FilterNode => ({ kind: 'group', op: 'and', children })
+
+  it('pins an ordinary funnel is nowhere near the guard, and does not throw', () => {
+    // A handful of steps, one predicate and a small audience apiece --
+    // the common case, not the cap on anything.
+    const q = compileFunnel({
+      ...guardBase,
+      definition: {
+        steps: [
+          { event: '$page', where: [{ property: 'path', operator: '=', value: '/' }] },
+          { event: 'signed_up', audience: group([behaviour('docs_search')]) },
+          { event: 'subscription_started', optional: true },
+          { event: 'invoice_paid' },
+        ],
+        window_seconds: 3600,
+      },
+    })
+    // Well under the guard -- a fraction of it, not just short of it --
+    // so this pins headroom, not a coincidence of one measurement.
+    expect(Buffer.byteLength(q.sql, 'utf8')).toBeLessThan(MAX_COMPILED_QUERY_BYTES / 5)
+  })
+
+  it('throws, naming a lever to remove, on a legal definition that compiles past the guard', () => {
+    // Every dimension stays inside its OWN cap -- 8 steps (MAX_FUNNEL_STEPS),
+    // 1 optional (under MAX_OPTIONAL_STEPS), 10 `where` per step
+    // (MAX_WHERE_PREDICATES), and each step's audience at exactly 100 nodes
+    // (MAX_TREE_NODES) with only enough `behavior` nodes to land at 25 in
+    // total across the funnel (MAX_FUNNEL_BEHAVIOR_NODES) -- the rest
+    // padded with `trait` nodes, which cost nothing against that cap. This
+    // is the shape the review found: legal everywhere, and still too large
+    // for ClickHouse to parse.
+    const behaviourCounts = [4, 3, 3, 3, 3, 3, 3, 3] // sums to 25
+    const steps: FunnelStep[] = behaviourCounts.map((n, i) => {
+      let evCounter = i * 100
+      const behaviours = Array.from({ length: n }, () => behaviour(`ev_${evCounter++}`))
+      const traits = Array.from({ length: 100 - 1 - n }, (_, t) => trait(`trait_${i}_${t}`))
+      return {
+        event: `step_${i}`,
+        where: Array.from({ length: 10 }, (_, w) => ({
+          property: `p${w}`,
+          operator: '=' as const,
+          value: 1,
+        })),
+        audience: group([...behaviours, ...traits]),
+        ...(i === 4 ? { optional: true as const } : {}),
+      }
+    })
+    const definition = { steps, window_seconds: 3600 }
+    expect(() => compileFunnel({ ...guardBase, definition })).toThrow(FunnelValidationError)
+    try {
+      compileFunnel({ ...guardBase, definition })
+      throw new Error('expected compileFunnel to throw')
+    } catch (err) {
+      expect(err).toBeInstanceOf(FunnelValidationError)
+      expect((err as FunnelValidationError).code).toBe('steps')
+      // Names a lever, not just "too big" -- an operator needs something to
+      // remove, and this funnel has three independent things to try.
+      expect((err as FunnelValidationError).message).toMatch(/where|audience|optional/i)
+    }
   })
 })

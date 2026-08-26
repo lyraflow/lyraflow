@@ -14,7 +14,13 @@ import { Params, chDateTime } from '../segments/params.js'
 import { attributeColumns, wherePredicate } from '../segments/predicates.js'
 import type { FunnelDefinition, FunnelStep } from './ast.js'
 import { funnelSpine } from './spine.js'
-import { funnelCostWarnings, validateFunnel, validateRange } from './validate.js'
+import {
+  FunnelValidationError,
+  MAX_COMPILED_QUERY_BYTES,
+  funnelCostWarnings,
+  validateFunnel,
+  validateRange,
+} from './validate.js'
 
 /**
  * One step's condition: the event name, ANDed with any predicates on that
@@ -342,6 +348,27 @@ export function compileFunnel(opts: {
 
   const people = opts.peopleAt
 
+  /**
+   * Every shape this function can return -- the histogram, and all three
+   * `peopleAt` projections -- shares ONE `perPerson` subquery, which
+   * ALWAYS carries every branch and full chain regardless of which shape
+   * reads them (see the comment above `branchSelects`). So the size risk
+   * is identical across all four, and this is the ONE place that measures
+   * the assembled SQL and refuses it before handing it to ClickHouse,
+   * which would otherwise fail at the lexer with a bare "Max query size
+   * exceeded" and no indication of what to remove.
+   */
+  const finalize = (sql: string): CompiledQuery => {
+    const bytes = Buffer.byteLength(sql, 'utf8')
+    if (bytes > MAX_COMPILED_QUERY_BYTES) {
+      throw new FunnelValidationError(
+        `this funnel compiles to a ${bytes}-byte query, past the ${MAX_COMPILED_QUERY_BYTES}-byte limit ClickHouse can parse; remove some \`where\` predicates, step audiences, or optional steps`,
+        'steps',
+      )
+    }
+    return { sql, params: params.values, warnings: funnelCostWarnings(definition, range) }
+  }
+
   // Ordered newest-entrant first, tie-broken by person_id, and paged by a
   // strictly lexicographic keyset — collapsing that to `entered_at <` alone
   // would skip every remaining person sharing the boundary row's instant.
@@ -379,13 +406,9 @@ export function compileFunnel(opts: {
     }
 
     if (people.select === 'count') {
-      return {
-        sql: `SELECT count() AS person_count
+      return finalize(`SELECT count() AS person_count
 FROM (${perPerson})
-WHERE ${levelPredicate}${segmentFilter}`,
-        params: params.values,
-        warnings: funnelCostWarnings(definition, range),
-      }
+WHERE ${levelPredicate}${segmentFilter}`)
     }
 
     if (people.select === 'members') {
@@ -399,8 +422,7 @@ WHERE ${levelPredicate}${segmentFilter}`,
         baseCte({ database, projectId, params }),
         traitsCte({ database, projectId, params }),
       ]
-      return {
-        sql: `WITH
+      return finalize(`WITH
   ${ctes.join(',\n  ')}
 SELECT
   ${memberProjection()},
@@ -410,25 +432,18 @@ LEFT JOIN base USING (${RESOLVED_PERSON_ALIAS})
 LEFT JOIN traits USING (${RESOLVED_PERSON_ALIAS})
 WHERE ${levelPredicate}${segmentFilter}${peopleAfter}
 ORDER BY entered_at DESC, ${RESOLVED_PERSON_ALIAS} ASC
-LIMIT ${MEMBER_PAGE_SIZE}`,
-        params: params.values,
-        warnings: funnelCostWarnings(definition, range),
-      }
+LIMIT ${MEMBER_PAGE_SIZE}`)
     }
 
     // select === 'ids' -- exactly what `/dropoff` has always compiled, with
     // only the level predicate substituted. No traits join: a second scan of
     // person_traits on every existing caller's request is not this task's to
     // add.
-    return {
-      sql: `SELECT ${RESOLVED_PERSON_ALIAS}, entered_at
+    return finalize(`SELECT ${RESOLVED_PERSON_ALIAS}, entered_at
 FROM (${perPerson})
 WHERE ${levelPredicate}${segmentFilter}${peopleAfter}
 ORDER BY entered_at DESC, ${RESOLVED_PERSON_ALIAS} ASC
-LIMIT ${MEMBER_PAGE_SIZE}`,
-      params: params.values,
-      warnings: funnelCostWarnings(definition, range),
-    }
+LIMIT ${MEMBER_PAGE_SIZE}`)
   }
 
   const optionalCounts = spine.optional
@@ -448,17 +463,11 @@ LIMIT ${MEMBER_PAGE_SIZE}`,
     })
     .join('')
 
-  const sql = `SELECT
+  return finalize(`SELECT
   level,
   count() AS people,
   countIf(entered_at > ${partialBoundary}) AS partial${optionalCounts}${continuedCounts}
 FROM (${perPerson})
 WHERE level > 0${segmentFilter}
-GROUP BY level`
-
-  return {
-    sql,
-    params: params.values,
-    warnings: funnelCostWarnings(definition, range),
-  }
+GROUP BY level`)
 }

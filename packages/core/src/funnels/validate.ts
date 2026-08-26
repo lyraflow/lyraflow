@@ -20,22 +20,47 @@ export const MAX_FUNNEL_STEPS = 8
 /**
  * Optional steps per funnel.
  *
- * Each one now costs TWO extra `windowFunnel`s over rows the scan already
- * reads -- a branch chain and a full chain (see `compile.ts`) -- and both
- * chains COPY the SQL text of every required condition before them,
- * audience subqueries included. That is aggregate work, not another scan,
- * but it is not free text: measured against a live ClickHouse with the
- * worst legal shape -- `MAX_FUNNEL_STEPS` (8) steps, audiences spread to
- * exactly `MAX_FUNNEL_BEHAVIOR_NODES` (25) behavioural nodes, a `where` on
- * every step -- the compiled query grows with the optional count: 75,627
- * bytes at 0 optional, 156,762 at 1, 189,567 at 2, 270,733 at 3. ClickHouse
- * refuses anything past its default `max_query_size` of 262,144 bytes
- * (SYNTAX_ERROR, "Max query size exceeded"), which 3 optional steps clears
- * by over 8KB -- not slow, outright broken. 2 optional steps stays under
- * that ceiling with headroom (~72KB) and executed in under 500ms on the
- * same data. First and last being required already bounds this at
- * `MAX_FUNNEL_STEPS - 2`; 2 is the number that measurement supports. Lower
- * it further if a later measurement says so. Do not raise it without one.
+ * Each one costs TWO extra `windowFunnel`s over rows the scan already reads
+ * -- a branch chain and a full chain (see `compile.ts`) -- and both chains
+ * COPY the SQL text of every required condition before them, audience
+ * subqueries included. That is aggregate work, not another scan, but it is
+ * not free text, and it can make the compiled query too large for
+ * ClickHouse to even parse. `compileFunnel` now guards that directly --
+ * see the `FunnelValidationError` it throws when the assembled SQL crosses
+ * `MAX_COMPILED_QUERY_BYTES`, below -- because THIS CONSTANT DOES NOT.
+ *
+ * 2 is chosen because it measured strictly better than 3 on one shape, not
+ * because 2 is proven safe. That shape: 8 steps (`MAX_FUNNEL_STEPS`), ONE
+ * `where` predicate per step, audiences spread across all 8 steps to
+ * exactly `MAX_FUNNEL_BEHAVIOR_NODES` (25) behavioural nodes, optional
+ * steps at early-to-mid positions. Compiled size: 75,627 bytes at 0
+ * optional, 156,762 at 1, 189,567 at 2, 270,733 at 3 -- ClickHouse's
+ * default `max_query_size` is 262,144 bytes, so 3 optional steps fails
+ * outright (SYNTAX_ERROR, "Max query size exceeded") and 2 does not, on
+ * THAT shape only.
+ *
+ * What was not varied, and is NOT covered by those numbers: predicate
+ * count per step (`MAX_WHERE_PREDICATES` allows up to 10, not the 1 used
+ * above); trait-only audiences, which cost ZERO against
+ * `MAX_FUNNEL_BEHAVIOR_NODES` while still compiling a full
+ * `compileSegment` subquery (see that constant's own comment); a filter
+ * tree's own node cap, `MAX_TREE_NODES` (100), which applies PER STEP,
+ * independent of the funnel-wide behavioural cap; and optional-step
+ * position, which changes how many required conditions each branch/full
+ * chain must re-embed -- later positions duplicate more.
+ *
+ * Varying those found the ceiling crossed at just ONE optional step: 8
+ * steps with optional steps placed later in the chain measured 270,105
+ * bytes (fails); 10 `where` predicates per step plus trait-audience
+ * padding, with only ONE optional step, measured 285,229 bytes (fails);
+ * the identical shape at ZERO optional measured 113,290 bytes (parses). So
+ * the optional-step count is not the lever that keeps this under the
+ * ceiling -- query text grows with chains × prefix length × per-condition
+ * size, and the last factor is unbounded by anything this module caps.
+ * `MAX_COMPILED_QUERY_BYTES` is the real guard; this constant is left at 2
+ * because it is still strictly better than 3, not because it closes the
+ * failure mode. Lower it, or replace it with a different lever entirely,
+ * if a later measurement says so. Do not raise it without one.
  */
 export const MAX_OPTIONAL_STEPS = 2
 /**
@@ -91,6 +116,30 @@ export class FunnelValidationError extends Error {
  * without one.
  */
 export const MAX_FUNNEL_BEHAVIOR_NODES = 25
+
+/**
+ * ClickHouse's default `max_query_size` is 262,144 bytes -- past this it
+ * refuses to even PARSE the query (SYNTAX_ERROR, code 62, "Max query size
+ * exceeded") rather than running slow. `compileFunnel` measures the
+ * assembled SQL against this after building it and throws here instead,
+ * because none of the per-definition caps above bound it: `MAX_FUNNEL_STEPS`,
+ * `MAX_WHERE_PREDICATES` and `MAX_FUNNEL_BEHAVIOR_NODES` each bound ONE
+ * dimension, but the compiled size is chains × prefix length × per-condition
+ * size, and a trait-only audience costs zero against the behavioural cap
+ * while still compiling a full `compileSegment` subquery (see that
+ * constant's own comment) -- so a legal definition under every existing cap
+ * can still fail to parse. `MAX_OPTIONAL_STEPS`'s own comment has the
+ * measurements that found this.
+ *
+ * 230,000 stays 32,144 bytes (~12%) under ClickHouse's default -- enough
+ * that a self-hosted deployment with a slightly lower `max_query_size`, or
+ * a future edit that adds a little wrapping SQL, still clears the real
+ * ceiling with the same margin this number was chosen against. It is well
+ * above every KNOWN-GOOD shape measured so far (189,567 bytes at most), so
+ * it should not refuse an ordinary funnel -- pinned in `compile.test.ts`,
+ * alongside the test that pins the throw itself.
+ */
+export const MAX_COMPILED_QUERY_BYTES = 230_000
 
 /**
  * Definition-level caps, checked at CREATE time as well as at run time.
