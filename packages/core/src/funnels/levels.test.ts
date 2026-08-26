@@ -243,4 +243,39 @@ describe('summarise with optional steps', () => {
     expect(r.steps[2]?.from_previous).toBeCloseTo(0.375)
     expect(r.steps[2]?.skipped).toBe(10)
   })
+
+  it('reports continued as the people who carried on through the optional step', () => {
+    const rows: LevelRow[] = [
+      { level: 1, people: 10, partial: 0, optionalReached: [0], optionalContinued: [0] },
+      { level: 2, people: 6, partial: 0, optionalReached: [2], optionalContinued: [1] },
+      { level: 3, people: 4, partial: 0, optionalReached: [3], optionalContinued: [3] },
+    ]
+    const r = summarise(rows, withOptional)
+    expect(r.steps[2]?.people).toBe(5)
+    expect(r.steps[2]?.continued).toBe(4)
+  })
+
+  it('never lets continued exceed the people who reached the step', () => {
+    // via is a SUBSET of did by construction: the full chain's prefix is the
+    // branch chain verbatim. A row claiming otherwise is a compiler that
+    // disagrees with this module, and it must be visible, not clamped away.
+    const rows: LevelRow[] = [
+      { level: 2, people: 8, partial: 0, optionalReached: [5], optionalContinued: [3] },
+    ]
+    const r = summarise(rows, withOptional)
+    expect(r.steps[2]?.continued).toBeLessThanOrEqual(r.steps[2]?.people ?? 0)
+  })
+
+  it('leaves required steps free of continued, as of optional and skipped', () => {
+    const r = summarise([], withOptional)
+    expect(r.steps[0]?.continued).toBeUndefined()
+    expect(r.steps[3]?.continued).toBeUndefined()
+    expect(r.steps[2]?.continued).toBe(0)
+  })
+
+  it('treats an absent optionalContinued as zero rather than NaN', () => {
+    const r = summarise([{ level: 3, people: 4, partial: 0, optionalReached: [2] }], withOptional)
+    expect(r.steps[2]?.continued).toBe(0)
+    expect(Number.isFinite(r.steps[2]?.continued ?? Number.NaN)).toBe(true)
+  })
 })
