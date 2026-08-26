@@ -233,6 +233,24 @@ export function compileFunnel(opts: {
       conditions[k] as string,
     ]
   })
+  // The branch chain ends AT the optional step, which answers "did they do
+  // it" and nothing else. A chart that draws the step as a node needs its
+  // OUTGOING flow too, or the node is a dead end: people walk in and vanish.
+  //
+  // `null` when no required step follows -- `validateFunnel` refuses an
+  // optional last step so the API cannot reach it, but `funnelSpine` is pure
+  // over whatever it is handed and indexing past the end would be a crash
+  // rather than a refusal.
+  const fullChains = spine.optional.map((k) => {
+    const rank = spine.placements[k]?.spineRank ?? 0
+    const next = spine.required[rank]
+    if (next === undefined) return null
+    return [
+      ...spine.required.slice(0, rank).map((i) => conditions[i] as string),
+      conditions[k] as string,
+      conditions[next] as string,
+    ]
+  })
 
   // Built after the conditions, which is what populates `eventParams`.
   const eventList = [...eventParams.values()].join(', ')
@@ -289,6 +307,13 @@ export function compileFunnel(opts: {
         `\n    windowFunnel(${windowParam})(toUInt64(toUnixTimestamp64Milli(timestamp)), ${chain.join(', ')}) AS branch_${j},`,
     )
     .join('')
+  const fullSelects = fullChains
+    .map((chain, j) =>
+      chain === null
+        ? ''
+        : `\n    windowFunnel(${windowParam})(toUInt64(toUnixTimestamp64Milli(timestamp)), ${chain.join(', ')}) AS full_${j},`,
+    )
+    .join('')
 
   /**
    * The per-person pass, shared by both projections above it. Written once so
@@ -299,7 +324,7 @@ export function compileFunnel(opts: {
   const perPerson = `
   SELECT
     ${resolved} AS ${RESOLVED_PERSON_ALIAS},
-    windowFunnel(${windowParam})(toUInt64(toUnixTimestamp64Milli(timestamp)), ${spineConditions.join(', ')}) AS level,${branchSelects}
+    windowFunnel(${windowParam})(toUInt64(toUnixTimestamp64Milli(timestamp)), ${spineConditions.join(', ')}) AS level,${branchSelects}${fullSelects}
     minIf(timestamp, ${spineConditions[0]}) AS entered_at
   FROM (
     SELECT project_id, anonymous_id, user_id, timestamp, event_name,
@@ -413,10 +438,20 @@ LIMIT ${MEMBER_PAGE_SIZE}`,
     })
     .join('')
 
+  // `branch.level + 1` is the full chain's own length: the branch chain
+  // reaches `spineRank + 1`, and the full chain adds exactly one condition.
+  const continuedCounts = spine.optional
+    .map((k, j) => {
+      if (fullChains[j] === null) return ''
+      const level = params.add((spine.placements[k]?.branch?.level ?? 1) + 1, 'UInt32')
+      return `,\n  countIf(full_${j} >= ${level}) AS continued_${j}`
+    })
+    .join('')
+
   const sql = `SELECT
   level,
   count() AS people,
-  countIf(entered_at > ${partialBoundary}) AS partial${optionalCounts}
+  countIf(entered_at > ${partialBoundary}) AS partial${optionalCounts}${continuedCounts}
 FROM (${perPerson})
 WHERE level > 0${segmentFilter}
 GROUP BY level`

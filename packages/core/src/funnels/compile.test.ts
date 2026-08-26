@@ -607,4 +607,44 @@ describe('optional steps', () => {
     expect(q.sql).not.toContain("'c'")
     expect(q.sql).not.toMatch(/branch_\d+ >= \d/)
   })
+
+  it('emits one full chain per optional step, alongside its branch chain', () => {
+    const q = compileFunnel({ ...base, definition: withOptional })
+    // spine + branch_0 + full_0
+    expect((q.sql.match(/windowFunnel/g) ?? []).length).toBe(3)
+    expect(q.sql).toContain('AS full_0')
+    expect(q.sql).not.toContain('AS full_1')
+  })
+
+  it('carries the full chain through to the NEXT required step', () => {
+    // [a, b, c(optional), d] -- full_0 must be a, b, c, d and reach level 4.
+    const q = compileFunnel({ ...base, definition: withOptional })
+    const line = q.sql.split('\n').find((l) => l.includes('AS full_0')) ?? ''
+    for (const event of ['a', 'b', 'c', 'd']) {
+      const name = Object.keys(q.params).find((key) => q.params[key] === event)
+      expect(name).toBeDefined()
+      expect(line).toContain(`{${name}:String}`)
+    }
+  })
+
+  it('counts continued at the full chain length, bound as a value', () => {
+    const q = compileFunnel({ ...base, definition: withOptional })
+    const m = q.sql.match(/countIf\(full_0 >= \{(p\d+):UInt32\}\) AS continued_0/)
+    expect(m).not.toBeNull()
+    expect(q.params[m?.[1] ?? '']).toBe(4)
+  })
+
+  it('leaves a funnel with no optional steps at exactly one windowFunnel', () => {
+    const plain = { steps: [{ event: 'a' }, { event: 'b' }], window_seconds: 3600 }
+    const q = compileFunnel({ ...base, definition: plain })
+    expect((q.sql.match(/windowFunnel/g) ?? []).length).toBe(1)
+    expect(q.sql).not.toContain('full_')
+    expect(q.sql).not.toContain('continued_')
+  })
+
+  it('carries the entry bound into the full chain as well', () => {
+    const q = compileFunnel({ ...base, definition: withOptional })
+    const line = q.sql.split('\n').find((l) => l.includes('AS full_0')) ?? ''
+    expect(line).toMatch(/AND timestamp < \{p\d+:DateTime64\(3\)\}\)/)
+  })
 })
