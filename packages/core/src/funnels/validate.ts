@@ -134,10 +134,18 @@ export const MAX_FUNNEL_BEHAVIOR_NODES = 25
  * 230,000 stays 32,144 bytes (~12%) under ClickHouse's default -- enough
  * that a self-hosted deployment with a slightly lower `max_query_size`, or
  * a future edit that adds a little wrapping SQL, still clears the real
- * ceiling with the same margin this number was chosen against. It is well
- * above every KNOWN-GOOD shape measured so far (189,567 bytes at most), so
- * it should not refuse an ordinary funnel -- pinned in `compile.test.ts`,
- * alongside the test that pins the throw itself.
+ * ceiling with the same margin this number was chosen against. If this ever
+ * moves, it should move DOWN, not up: a saved `segment_id` audience embeds
+ * 10.9-13.0 KB of its own SQL at the tree cap, which none of the
+ * measurements below included, so roughly a third of this margin is
+ * already spoken for before that path is even measured.
+ *
+ * A passing shape under THIS compiler measures 223,063 bytes -- 3% under
+ * the guard, not comfortably under it -- so this is close to the largest
+ * legal-everywhere shape found so far, not a number with room to spare.
+ * It still does not refuse an ORDINARY funnel -- pinned in
+ * `compile.test.ts`, alongside the test that pins the throw itself -- but
+ * "ordinary" and "at the caps" are very different distances from here.
  */
 export const MAX_COMPILED_QUERY_BYTES = 230_000
 

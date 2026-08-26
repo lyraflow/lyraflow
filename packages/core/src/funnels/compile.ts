@@ -352,11 +352,15 @@ export function compileFunnel(opts: {
    * Every shape this function can return -- the histogram, and all three
    * `peopleAt` projections -- shares ONE `perPerson` subquery, which
    * ALWAYS carries every branch and full chain regardless of which shape
-   * reads them (see the comment above `branchSelects`). So the size risk
-   * is identical across all four, and this is the ONE place that measures
-   * the assembled SQL and refuses it before handing it to ClickHouse,
-   * which would otherwise fail at the lexer with a bare "Max query size
-   * exceeded" and no indication of what to remove.
+   * reads them (see the comment above `branchSelects`). That is the shared
+   * RISK, not a shared size: measured on the same definition, `members` is
+   * the largest of the four -- its two extra CTEs (`base`, `traits`) and
+   * its wider projection add roughly 5KB over the histogram -- while `ids`
+   * and `count` land a little BELOW it (`ids` has no traits join at all).
+   * Each of the four is measured on its OWN assembled SQL, at its own
+   * return site, for exactly that reason: a single check against the
+   * histogram's size would be wrong for `members`, the path most likely to
+   * cross the guard first.
    */
   const finalize = (sql: string): CompiledQuery => {
     const bytes = Buffer.byteLength(sql, 'utf8')

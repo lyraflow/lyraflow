@@ -701,15 +701,15 @@ describe('compiled query size guard', () => {
     expect(Buffer.byteLength(q.sql, 'utf8')).toBeLessThan(MAX_COMPILED_QUERY_BYTES / 5)
   })
 
-  it('throws, naming a lever to remove, on a legal definition that compiles past the guard', () => {
-    // Every dimension stays inside its OWN cap -- 8 steps (MAX_FUNNEL_STEPS),
-    // 1 optional (under MAX_OPTIONAL_STEPS), 10 `where` per step
-    // (MAX_WHERE_PREDICATES), and each step's audience at exactly 100 nodes
-    // (MAX_TREE_NODES) with only enough `behavior` nodes to land at 25 in
-    // total across the funnel (MAX_FUNNEL_BEHAVIOR_NODES) -- the rest
-    // padded with `trait` nodes, which cost nothing against that cap. This
-    // is the shape the review found: legal everywhere, and still too large
-    // for ClickHouse to parse.
+  // Every dimension stays inside its OWN cap -- 8 steps (MAX_FUNNEL_STEPS),
+  // 1 optional (under MAX_OPTIONAL_STEPS), 10 `where` per step
+  // (MAX_WHERE_PREDICATES), and each step's audience at exactly 100 nodes
+  // (MAX_TREE_NODES) with only enough `behavior` nodes to land at 25 in
+  // total across the funnel (MAX_FUNNEL_BEHAVIOR_NODES) -- the rest padded
+  // with `trait` nodes, which cost nothing against that cap. This is the
+  // shape the review found: legal everywhere, and still too large for
+  // ClickHouse to parse.
+  const oversizeDefinition = (): { steps: FunnelStep[]; window_seconds: number } => {
     const behaviourCounts = [4, 3, 3, 3, 3, 3, 3, 3] // sums to 25
     const steps: FunnelStep[] = behaviourCounts.map((n, i) => {
       let evCounter = i * 100
@@ -726,10 +726,13 @@ describe('compiled query size guard', () => {
         ...(i === 4 ? { optional: true as const } : {}),
       }
     })
-    const definition = { steps, window_seconds: 3600 }
-    expect(() => compileFunnel({ ...guardBase, definition })).toThrow(FunnelValidationError)
+    return { steps, window_seconds: 3600 }
+  }
+
+  function expectOversizeThrow(compile: () => unknown): void {
+    expect(compile).toThrow(FunnelValidationError)
     try {
-      compileFunnel({ ...guardBase, definition })
+      compile()
       throw new Error('expected compileFunnel to throw')
     } catch (err) {
       expect(err).toBeInstanceOf(FunnelValidationError)
@@ -738,5 +741,52 @@ describe('compiled query size guard', () => {
       // remove, and this funnel has three independent things to try.
       expect((err as FunnelValidationError).message).toMatch(/where|audience|optional/i)
     }
+  }
+
+  it('throws on the histogram path -- the plain run, no peopleAt', () => {
+    const definition = oversizeDefinition()
+    expectOversizeThrow(() => compileFunnel({ ...guardBase, definition }))
+  })
+
+  // `finalize` is called at FOUR return sites -- the histogram above, and
+  // these three `peopleAt` projections. A guard proven only on the
+  // histogram implies coverage it does not have: the review replaced
+  // `finalize` with a pass-through on these three specifically, rebuilt,
+  // and every test up to this point still passed. `step: 4` names the
+  // required step right after the optional one (`i === 4` above is
+  // 1-indexed step 5, so its branch point is step 4) -- any legal step
+  // works, since the size comes from `perPerson`, shared by every shape,
+  // not from which step is asked about.
+  it('throws on the peopleAt "ids" path', () => {
+    const definition = oversizeDefinition()
+    expectOversizeThrow(() =>
+      compileFunnel({
+        ...guardBase,
+        definition,
+        peopleAt: { step: 4, mode: 'reached', select: 'ids' },
+      }),
+    )
+  })
+
+  it('throws on the peopleAt "members" path', () => {
+    const definition = oversizeDefinition()
+    expectOversizeThrow(() =>
+      compileFunnel({
+        ...guardBase,
+        definition,
+        peopleAt: { step: 4, mode: 'reached', select: 'members' },
+      }),
+    )
+  })
+
+  it('throws on the peopleAt "count" path', () => {
+    const definition = oversizeDefinition()
+    expectOversizeThrow(() =>
+      compileFunnel({
+        ...guardBase,
+        definition,
+        peopleAt: { step: 4, mode: 'reached', select: 'count' },
+      }),
+    )
   })
 })
