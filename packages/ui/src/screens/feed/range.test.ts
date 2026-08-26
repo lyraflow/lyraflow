@@ -77,9 +77,13 @@ describe('rangeById', () => {
     expect(rangeById('7d').label).toBe('Last 7 days')
   })
 
-  it('falls back to a real range on an unknown id', () => {
-    // A stored preference outlives the list it was chosen from.
-    expect(FEED_RANGES).toContain(rangeById('not-a-range'))
+  it('falls back to the DEFAULT range on an unknown id, not to a position', () => {
+    // A shared link outlives the list it was made from. Asserting only that
+    // the result is *some* range let the fallback be `FEED_RANGES[1]`, which
+    // is the default by coincidence of ordering -- reorder the list and
+    // every stale link silently opens on a different window.
+    expect(rangeById('not-a-range').id).toBe(DEFAULT_RANGE_ID)
+    expect(rangeById('').id).toBe(DEFAULT_RANGE_ID)
   })
 })
 

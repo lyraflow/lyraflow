@@ -1,5 +1,6 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { userEvent } from '@testing-library/user-event'
+import { MemoryRouter, useNavigate } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import type { ApiClient } from '../api/client.js'
@@ -197,6 +198,10 @@ function renderFeed(
     projectId?: number
     pollIntervalMs?: number
     onUnauthorized?: () => void
+    /** The URL the feed opens at. The range and the event filter live in the
+     * query string now, so a test that wants either has to arrive with it
+     * the way a refresh or a shared link does. */
+    url?: string
   } = {},
 ) {
   const client = opts.client ?? fakeClient()
@@ -222,27 +227,21 @@ function renderFeed(
       deleting_at: null,
     },
   ]
-  const view = render(
-    <ProjectProvider projects={projects} initialId={opts.projectId ?? 1}>
-      <Feed
-        client={client}
-        pollIntervalMs={opts.pollIntervalMs}
-        onUnauthorized={opts.onUnauthorized}
-      />
-    </ProjectProvider>,
+  const tree = (id: number) => (
+    <MemoryRouter initialEntries={[opts.url ?? '/feed']}>
+      <ProjectProvider projects={projects} initialId={id}>
+        <Feed
+          client={client}
+          pollIntervalMs={opts.pollIntervalMs}
+          onUnauthorized={opts.onUnauthorized}
+        />
+      </ProjectProvider>
+    </MemoryRouter>
   )
+  const view = render(tree(opts.projectId ?? 1))
   return {
     client,
-    rerenderWithProject: (id: number) =>
-      view.rerender(
-        <ProjectProvider projects={projects} initialId={id}>
-          <Feed
-            client={client}
-            pollIntervalMs={opts.pollIntervalMs}
-            onUnauthorized={opts.onUnauthorized}
-          />
-        </ProjectProvider>,
-      ),
+    rerenderWithProject: (id: number) => view.rerender(tree(id)),
   }
 }
 
@@ -480,6 +479,108 @@ describe('Feed', () => {
       } finally {
         vi.useRealTimers()
       }
+    })
+
+    it('opens on the range and filter the URL carries, not on the defaults', async () => {
+      // A REFRESH IS THIS TEST. The window and the filter live in the query
+      // string, so reloading the page arrives here exactly as a shared link
+      // does -- there is no separate restore path that could rot.
+      const client = fakeClient()
+      renderFeed({ client, url: '/feed?range=7d&event=checkout' })
+      await waitFor(() => expect(client.stats).toHaveBeenCalled())
+      const q = client.events.mock.calls[0]?.[1]
+      const span = new Date(q.until).getTime() - new Date(q.since).getTime()
+      expect(Math.abs(span - 7 * 24 * 3_600_000)).toBeLessThan(2000)
+      expect(q.event).toBe('checkout')
+      // ...and the controls show it, or the polls and the screen disagree.
+      expect((screen.getByTestId('feed-range') as HTMLSelectElement).value).toBe('7d')
+      expect((screen.getByLabelText(/filter by event/i) as HTMLInputElement).value).toBe('checkout')
+    })
+
+    it('puts a chosen range and filter INTO the URL', async () => {
+      const client = fakeClient()
+      renderFeed({ client })
+      await waitFor(() => expect(client.stats).toHaveBeenCalled())
+      await userEvent.selectOptions(screen.getByTestId('feed-range'), '30d')
+      await userEvent.type(screen.getByLabelText(/filter by event/i), 'signup')
+      // `MemoryRouter` keeps its history in memory rather than in
+      // `window.location`, so the URL itself is not readable here -- the
+      // round trip through it is pinned directly in `params.test.ts`, and
+      // what this test owns is that the controls and the polls both follow.
+      await waitFor(() => expect(client.events.mock.calls.at(-1)?.[1].event).toBe('signup'))
+      expect((screen.getByTestId('feed-range') as HTMLSelectElement).value).toBe('30d')
+      expect(client.stats.mock.calls.at(-1)?.[1].interval).toBe('1d')
+    })
+
+    it('survives a remount at the same URL, which is what a refresh is', async () => {
+      const client = fakeClient()
+      const first = renderFeed({ client, url: '/feed?range=90d&event=purchase' })
+      await waitFor(() => expect(client.stats).toHaveBeenCalled())
+      expect(client.stats.mock.calls[0]?.[1].interval).toBe('1d')
+      first.client.stats.mockClear()
+
+      // A fresh mount at the same address -- no shared state, no context
+      // carried over. Anything held only in `useState` is gone by here.
+      renderFeed({ client, url: '/feed?range=90d&event=purchase' })
+      await waitFor(() => expect(client.stats).toHaveBeenCalled())
+      const q = client.stats.mock.calls.at(-1)?.[1]
+      expect(q.interval).toBe('1d')
+      expect(q.event).toBe('purchase')
+    })
+
+    it('does not bury the page behind one history entry per keystroke', async () => {
+      // The event field writes on every character. Pushing would put six
+      // entries between the operator and wherever they came from, so Back
+      // walks backwards through their own typing instead of leaving the
+      // screen. Found by mutation: nothing asserted this, and flipping
+      // `replace` to `false` passed the whole suite.
+      let go: ReturnType<typeof useNavigate> | null = null
+      function Probe() {
+        go = useNavigate()
+        return null
+      }
+      const client = fakeClient()
+      render(
+        <MemoryRouter initialEntries={['/feed']}>
+          <ProjectProvider
+            projects={[
+              {
+                id: 1,
+                name: 'Alpha',
+                slug: 'alpha',
+                created_at: '',
+                retention_months: 24,
+                monthly_event_quota: null,
+                disabled_at: null,
+                deleting_at: null,
+              },
+            ]}
+            initialId={1}
+          >
+            <Probe />
+            <Feed client={client} />
+          </ProjectProvider>
+        </MemoryRouter>,
+      )
+      const field = screen.getByLabelText(/filter by event/i) as HTMLInputElement
+      await userEvent.type(field, 'signup')
+      await waitFor(() => expect(field.value).toBe('signup'))
+
+      await act(async () => {
+        ;(go as unknown as ReturnType<typeof useNavigate>)(-1)
+      })
+      // One step back must not land on a half-typed filter. With `replace`
+      // the entry was never added, so there is nowhere to go and the value
+      // stands; with `push` this reads "signu".
+      expect(field.value).not.toBe('signu')
+    })
+
+    it('ignores a range the option list has never heard of', async () => {
+      // A hand-edited or stale link must open the feed, not break it.
+      const client = fakeClient()
+      renderFeed({ client, url: '/feed?range=42y' })
+      await waitFor(() => expect(client.stats).toHaveBeenCalled())
+      expect((screen.getByTestId('feed-range') as HTMLSelectElement).value).toBe('24h')
     })
 
     it('names the window it looked at, and never claims the project is empty', async () => {

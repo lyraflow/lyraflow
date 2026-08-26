@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router'
 import type { ApiClient } from '../api/client.js'
 import { ApiError, DEFAULT_LIMIT } from '../api/client.js'
 import { useProject } from '../app/ProjectContext.js'
@@ -7,13 +8,8 @@ import { AcceptedTable } from './feed/AcceptedTable.js'
 import { FeedFilters } from './feed/FeedFilters.js'
 import { RejectionsTable } from './feed/RejectionsTable.js'
 import { Sparkline } from './feed/Sparkline.js'
-import {
-  DEFAULT_RANGE_ID,
-  type FeedRange,
-  LIVE_POLL_MS,
-  rangeById,
-  rangeWindow,
-} from './feed/range.js'
+import { readFeedParams, writeFeedParams } from './feed/params.js'
+import { type FeedRange, LIVE_POLL_MS, rangeWindow } from './feed/range.js'
 import { usePolling } from './feed/usePolling.js'
 import { formatRelative } from './funnels/format.js'
 
@@ -100,12 +96,43 @@ export function Feed(props: {
   const { client, pollIntervalMs, onUnauthorized } = props
   const { activeId } = useProject()
   const [tab, setTab] = useState('accepted')
-  const [range, setRange] = useState<FeedRange>(() => rangeById(DEFAULT_RANGE_ID))
+
+  /* THE URL IS THE STATE, not a copy of it.
+   *
+   * Held here rather than in `useState` so a refresh keeps the window and
+   * the filter an operator chose -- and so the screen they are looking at
+   * can be sent to someone else, which is the thing an operator actually
+   * wants the moment they find a spike. Reading straight from the search
+   * params rather than seeding state from them also removes the class of
+   * bug where the two drift: there is one value, and the address bar is it.
+   *
+   * `replace`, never push: the event field writes on every keystroke, and
+   * pushing would bury the page the operator arrived from under one history
+   * entry per character. The cost is that back does not step through filter
+   * changes, which is the right trade for a text field.
+   */
+  const [search, setSearch] = useSearchParams()
+  const { range, event } = readFeedParams(search)
+  const setParams = useCallback(
+    (next: { range?: FeedRange; event?: string }) => {
+      setSearch(
+        (prev) =>
+          writeFeedParams(prev, {
+            range: next.range ?? readFeedParams(prev).range,
+            event: next.event ?? readFeedParams(prev).event,
+          }),
+        { replace: true },
+      )
+    },
+    [setSearch],
+  )
+  const setRange = useCallback((r: FeedRange) => setParams({ range: r }), [setParams])
+  const setEvent = useCallback((e: string) => setParams({ event: e }), [setParams])
+
   /** `''` is no filter, never `undefined`: `EventCombobox` is a text field
    * and an empty string is what it reports when cleared. The polls convert
    * it to an omitted parameter, which is the only place the distinction
    * between "no filter" and "an empty event name" has to be made. */
-  const [event, setEvent] = useState('')
   const eventParam = event === '' ? undefined : event
 
   /* The cadence follows the range, and `pollIntervalMs` still wins so a

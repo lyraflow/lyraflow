@@ -92,8 +92,21 @@ export const FEED_RANGES: readonly FeedRange[] = [
  */
 export const DEFAULT_RANGE_ID = '24h'
 
+/**
+ * The named range, or the default for anything unrecognised.
+ *
+ * The fallback used to be `FEED_RANGES[1]`, which is the default only by
+ * coincidence of ordering -- reorder this list and every stale link silently
+ * opens on a different window. It names `DEFAULT_RANGE_ID` now, and this is
+ * the ONLY place an unknown id is handled: `readFeedParams` used to check
+ * the list itself before calling this, a second guard that could not fail
+ * and hid the fact that this one was doing the work.
+ */
 export function rangeById(id: string): FeedRange {
-  return FEED_RANGES.find((r) => r.id === id) ?? (FEED_RANGES[1] as FeedRange)
+  return (
+    FEED_RANGES.find((r) => r.id === id) ??
+    (FEED_RANGES.find((r) => r.id === DEFAULT_RANGE_ID) as FeedRange)
+  )
 }
 
 /**
