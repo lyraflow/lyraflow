@@ -132,8 +132,14 @@ function whereFor(
  * order that changes the meaning if you swap them, so they take one hue in
  * monotone lightness steps -- `--chart-funnel-1..7`, whose span was measured
  * against each mode's surface rather than chosen (see `theme.css`). Each
- * link is tinted from its SOURCE node, so a band stays traceable back to
- * where it left even where two of them cross. A palette of distinct hues,
+ * link is tinted from its SOURCE node, which ties a band to where it came
+ * from rather than to where it lands. **That is not what makes a crossing
+ * readable, and it must not be sold as though it were.** A ramp step is
+ * shared by every band leaving one stage AND by the branch that borrows it:
+ * on a funnel with two adjacent optional steps, five of the six bands carry
+ * `--chart-funnel-2`. What actually separates two bands where they overlap
+ * is the full-opacity outline each one carries in its own tint, and the
+ * continuity of its shape through the crossing. A palette of distinct hues,
  * which is what the reference design for this screen used, would spend the
  * identity channel restating an order that position already carries, and no
  * hue ordering survives colour-blindness.
@@ -291,9 +297,12 @@ export function FunnelFlow(props: {
                   d={bandPath(x0, link.y0, link.w0, x1, link.y1, link.w1)}
                   /* The SOURCE node's ramp step, never the destination's.
                    * Two bands arriving at one node came from different
-                   * places and are different populations; tinting by where
-                   * they land would paint them identically at exactly the
-                   * point the reader is trying to tell them apart. */
+                   * places and are different populations, and the tint says
+                   * which stage each one left. Tinting by where they land
+                   * instead would state the opposite -- that they are the
+                   * same population -- which is a claim about the data, not
+                   * a shortfall in legibility. What keeps the two findable
+                   * where they overlap is the outline, not the fill. */
                   fill={`var(--chart-funnel-${src.ramp})`}
                   fillOpacity={LINK_FILL_OPACITY}
                   stroke={`var(--chart-funnel-${src.ramp})`}

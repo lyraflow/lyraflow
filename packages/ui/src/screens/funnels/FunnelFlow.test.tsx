@@ -88,6 +88,63 @@ const TWO_BRANCHES = result({
   ],
 })
 
+// Every link `TWO_BRANCHES` produces, in the model's own order: chain 1->2,
+// branch 2->3, continue 3->5, branch 2->4, continue 4->5, bypass 2->5.
+// Three leave node 2 and three arrive at node 5, which is what makes this
+// the fixture that can see both edges of a node at once.
+const TWO_BRANCH_LINKS: [number, number][] = [
+  [1, 2],
+  [2, 3],
+  [3, 5],
+  [2, 4],
+  [4, 5],
+  [2, 5],
+]
+
+/**
+ * All four endpoints of a band, recovered from its `d`.
+ *
+ * `bandPath` writes `M x0 y0 C mid y0, mid y1, x1 y1 L x1 y1+w1 C mid y1+w1,
+ * mid y0+w0, x0 y0+w0 Z`, so dropping the command letters leaves sixteen
+ * numbers with every endpoint among them. Reading the SOURCE side alone --
+ * which is all this file used to do -- leaves `y1` and `w1` unread, and a
+ * band that arrives at the wrong place or the wrong thickness looks
+ * identical from here.
+ */
+function band(from: number, to: number) {
+  const d = screen.getByTestId(`flow-link-${from}-${to}`).getAttribute('d') ?? ''
+  const n = d
+    .trim()
+    .split(/[\s,]+/)
+    .filter((t) => t !== '' && !Number.isNaN(Number(t)))
+    .map(Number)
+  expect(n).toHaveLength(16)
+  const at = (i: number) => n[i] as number
+  return {
+    from,
+    to,
+    x0: at(0),
+    y0: at(1),
+    w0: at(15) - at(1),
+    x1: at(6),
+    y1: at(7),
+    w1: at(9) - at(7),
+  }
+}
+
+/** A node's drawn rectangle. */
+function box(index: number) {
+  const el = screen.getByTestId(`flow-node-${index}`)
+  const num = (name: string) => Number(el.getAttribute(name) ?? Number.NaN)
+  return { x: num('x'), y: num('y'), width: num('width'), height: num('height') }
+}
+
+/** The viewBox `width height` pair of an `<svg>`. */
+function viewBox(svg: Element | null): { width: number; height: number } {
+  const parts = (svg?.getAttribute('viewBox') ?? '').trim().split(/[\s,]+/)
+  return { width: Number(parts[2]), height: Number(parts[3]) }
+}
+
 describe('FunnelFlow', () => {
   it('draws one node per step, sized against the entrant count', () => {
     render(<FunnelFlow result={result()} />)
@@ -345,7 +402,7 @@ describe('FunnelFlow with an optional step', () => {
     expect(screen.getByTestId('flow-rate-2-4')).toHaveTextContent('20.0%')
   })
 
-  it('tints a link from its SOURCE node, so a crossing link stays traceable', () => {
+  it('tints a link from its SOURCE node, so a band says which stage it left', () => {
     render(<FunnelFlow result={BRANCHED} />)
     const link = screen.getByTestId('flow-link-2-3')
     expect(link.getAttribute('fill')).toContain('--chart-funnel-')
@@ -363,31 +420,116 @@ describe('FunnelFlow with an optional step', () => {
     expect(screen.getByTestId('flow-link-3-4')).toHaveAttribute('fill', 'var(--chart-funnel-2)')
   })
 
-  it('starts each band where the model stacked it, so two bands leaving one node do not overlap', () => {
-    // The mutation this exists for: drawing every band from its source
-    // node's TOP is a one-word change that looks right on any funnel with a
-    // single link per node, and silently draws the branch and the bypass on
-    // top of each other the moment there are two. `sankeyModel` stacks them
-    // along the node's edge; this reads the `d` back and checks the two out
-    // of `onboarded` tile it exactly, from its top edge to its bottom.
-    render(<FunnelFlow result={BRANCHED} />)
-    const edges = (id: string) => {
-      const d = screen.getByTestId(id).getAttribute('d') ?? ''
-      const t = d.trim().split(/[\s,]+/)
-      // `M x0 y0 C ... Z`, and the last coordinate before `Z` is `y0 + w0`.
-      return { top: Number(t[2]), bottom: Number(t[t.length - 2]) }
+  it('tiles both edges of every node with the bands that touch it, and lays them out on the model’s x axis', () => {
+    // ONE test for a class of mutation, not one per mutation. The previous
+    // version of this read `y0` and `w0` off a single node's outgoing side,
+    // which pinned exactly the mutation it was written for and left the
+    // destination edge and the whole horizontal axis unread -- so `y1 -> y0`,
+    // `w1 -> w0`, a `nodeLeft` that ignores `node.x` and a constant viewBox
+    // width all passed the entire suite.
+    //
+    // The invariant instead: a band is a quadrilateral between two node
+    // edges, and on EITHER side of a node the bands touching it are disjoint
+    // and together span that node exactly -- no gap, no overlap, nothing
+    // spilling past. That is the property `sankeyModel` computes `w0/y0` and
+    // `w1/y1` separately to provide, so any component that drops one of them
+    // breaks it somewhere.
+    //
+    // TWO_BRANCHES on purpose: three bands leave node 2, three arrive at
+    // node 5, and no band has y0 == y1 or w0 == w1. A fixture whose two
+    // axes coincide lets a swapped axis through, which is how the survivor
+    // survived.
+    render(<FunnelFlow result={TWO_BRANCHES} />)
+    const bands = TWO_BRANCH_LINKS.map(([from, to]) => band(from, to))
+    expect(screen.getAllByTestId(/^flow-link-/)).toHaveLength(bands.length)
+    expect(bands.filter((b) => b.from === 2)).toHaveLength(3)
+    expect(bands.filter((b) => b.to === 5)).toHaveLength(3)
+
+    const spans = (edges: { start: number; thickness: number }[], node: ReturnType<typeof box>) => {
+      let cursor = node.y
+      for (const edge of [...edges].sort((a, b) => a.start - b.start)) {
+        // A zero-thickness band would let two of them claim one offset and
+        // still tile, so the disjointness below would mean nothing.
+        expect(edge.thickness).toBeGreaterThan(0)
+        expect(edge.start).toBeCloseTo(cursor, 1)
+        cursor += edge.thickness
+      }
+      expect(cursor).toBeCloseTo(node.y + node.height, 1)
     }
-    const node = screen.getByTestId('flow-node-2')
-    const y = Number(node.getAttribute('y') ?? 0)
-    const height = Number(node.getAttribute('height') ?? 0)
-    const branch = edges('flow-link-2-3')
-    const bypass = edges('flow-link-2-4')
-    expect(branch.top).toBeCloseTo(y, 1)
-    expect(bypass.top).toBeCloseTo(branch.bottom, 1)
-    expect(bypass.bottom).toBeCloseTo(y + height, 1)
-    // And the two are actually two, not a coincidence of equal offsets.
-    expect(branch.bottom).toBeGreaterThan(branch.top)
-    expect(bypass.bottom).toBeGreaterThan(bypass.top)
+
+    for (const index of [1, 2, 3, 4, 5]) {
+      const node = box(index)
+      const out = bands.filter((b) => b.from === index)
+      const into = bands.filter((b) => b.to === index)
+      if (out.length > 0) {
+        spans(
+          out.map((b) => ({ start: b.y0, thickness: b.w0 })),
+          node,
+        )
+      }
+      if (into.length > 0) {
+        spans(
+          into.map((b) => ({ start: b.y1, thickness: b.w1 })),
+          node,
+        )
+      }
+    }
+
+    // The horizontal axis, which nothing read at all. Every band runs from
+    // its source node's right edge to its destination node's left edge.
+    for (const b of bands) {
+      expect(b.x0).toBeCloseTo(box(b.from).x + box(b.from).width, 5)
+      expect(b.x1).toBeCloseTo(box(b.to).x, 5)
+      expect(b.x1).toBeGreaterThan(b.x0)
+    }
+    // And the nodes are spread evenly across the plot rather than sharing
+    // one slot -- which the per-band check above cannot see, because a
+    // `nodeLeft` that ignores `node.x` satisfies it with all five stacked in
+    // the same place.
+    const xs = [1, 2, 3, 4, 5].map((i) => box(i).x)
+    const pitch = (xs[1] as number) - (xs[0] as number)
+    expect(pitch).toBeGreaterThan(0)
+    for (let i = 1; i < xs.length; i++) {
+      expect((xs[i] as number) - (xs[i - 1] as number)).toBeCloseTo(pitch, 5)
+    }
+
+    // The viewBox is as wide as the layout it holds, with the same margin on
+    // both sides.
+    const width = viewBox(screen.getByRole('img')).width
+    const last = box(5)
+    expect(width - (last.x + last.width)).toBeCloseTo(xs[0] as number, 5)
+    // And a constant that happens to fit five steps is still a constant --
+    // exactly how a hardcoded HEIGHT survived the first round of this file.
+    // A shorter funnel gets a proportionally narrower viewBox.
+    const two = render(<FunnelFlow result={result()} />)
+    const narrower = viewBox(two.container.querySelector('svg')).width
+    expect(narrower).toBeLessThan(width)
+    expect(width / narrower).toBeCloseTo(5 / 2, 5)
+  })
+
+  it('puts each band’s label at that band’s own midpoint', () => {
+    // The chip's TEXT was pinned and its placement was not: replacing the
+    // inline `left`/`top` with `0%` and `0px` stacks all six labels in the
+    // corner and the suite stays green. Each expected position is derived
+    // here from that chip's OWN band, so a chip with no position and a chip
+    // borrowing its neighbour's midpoint both fail.
+    render(<FunnelFlow result={TWO_BRANCHES} />)
+    const width = viewBox(screen.getByRole('img')).width
+    const seen = new Set<string>()
+    for (const [from, to] of TWO_BRANCH_LINKS) {
+      const b = band(from, to)
+      const chip = screen.getByTestId(`flow-rate-${from}-${to}`)
+      // The band's midpoint needs no sampling: both edges are cubics whose
+      // control points sit at the horizontal midpoint, so at the centre each
+      // edge is exactly the mean of its two ends.
+      const midY = (b.y0 + b.w0 / 2 + (b.y1 + b.w1 / 2)) / 2
+      expect(Number.parseFloat(chip.style.top)).toBeCloseTo(midY, 1)
+      expect(Number.parseFloat(chip.style.left)).toBeCloseTo(((b.x0 + b.x1) / 2 / width) * 100, 5)
+      seen.add(`${chip.style.left}|${chip.style.top}`)
+    }
+    // Six bands, six distinct positions -- the fixture cannot make the
+    // assertions above pass by coincidence.
+    expect(seen.size).toBe(TWO_BRANCH_LINKS.length)
   })
 
   it('gives an optional node its branch point’s ramp step rather than one of its own', () => {
