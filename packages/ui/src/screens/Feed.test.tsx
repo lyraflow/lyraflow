@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { userEvent } from '@testing-library/user-event'
-import { MemoryRouter, useNavigate } from 'react-router'
+import { MemoryRouter, useLocation, useNavigate } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import type { ApiClient } from '../api/client.js'
@@ -192,6 +192,32 @@ function failingRejectionsAfterFirstCall() {
   return c
 }
 
+/** The two projects every test on this screen renders with. Module level so a
+ * test that builds its own tree -- to add a probe, or its own router entry --
+ * uses the same fixture rather than a copy that can drift from it. */
+const PROJECTS = [
+  {
+    id: 1,
+    name: 'Alpha',
+    slug: 'alpha',
+    created_at: '',
+    retention_months: 24,
+    monthly_event_quota: null,
+    disabled_at: null,
+    deleting_at: null,
+  },
+  {
+    id: 2,
+    name: 'Beta',
+    slug: 'beta',
+    created_at: '',
+    retention_months: 24,
+    monthly_event_quota: null,
+    disabled_at: null,
+    deleting_at: null,
+  },
+]
+
 function renderFeed(
   opts: {
     client?: ReturnType<typeof fakeClient>
@@ -205,31 +231,9 @@ function renderFeed(
   } = {},
 ) {
   const client = opts.client ?? fakeClient()
-  const projects = [
-    {
-      id: 1,
-      name: 'Alpha',
-      slug: 'alpha',
-      created_at: '',
-      retention_months: 24,
-      monthly_event_quota: null,
-      disabled_at: null,
-      deleting_at: null,
-    },
-    {
-      id: 2,
-      name: 'Beta',
-      slug: 'beta',
-      created_at: '',
-      retention_months: 24,
-      monthly_event_quota: null,
-      disabled_at: null,
-      deleting_at: null,
-    },
-  ]
   const tree = (id: number) => (
     <MemoryRouter initialEntries={[opts.url ?? '/feed']}>
-      <ProjectProvider projects={projects} initialId={id}>
+      <ProjectProvider projects={PROJECTS} initialId={id}>
         <Feed
           client={client}
           pollIntervalMs={opts.pollIntervalMs}
@@ -497,6 +501,42 @@ describe('Feed', () => {
       expect((screen.getByLabelText(/filter by event/i) as HTMLInputElement).value).toBe('checkout')
     })
 
+    it('writes the chosen range and filter into the URL, keeping anything else there', async () => {
+      // Reads the ACTUAL location through a probe rather than inferring it
+      // from the polls. Without this the Feed-level tests could not see the
+      // URL at all, and a build that rebuilt the query string from scratch --
+      // dropping every parameter this screen does not own -- passed all of
+      // them. Nothing else is in the feed's query string today, which is
+      // exactly why the regression would land silently.
+      let url = ''
+      function Probe() {
+        url = useLocation().search
+        return null
+      }
+      const client = fakeClient()
+      render(
+        <MemoryRouter initialEntries={['/feed?keep=me']}>
+          <ProjectProvider projects={PROJECTS} initialId={1}>
+            <Probe />
+            <Feed client={client} />
+          </ProjectProvider>
+        </MemoryRouter>,
+      )
+      await waitFor(() => expect(client.stats).toHaveBeenCalled())
+
+      await userEvent.selectOptions(screen.getByTestId('feed-range'), '30d')
+      await waitFor(() => expect(new URLSearchParams(url).get('range')).toBe('30d'))
+      await userEvent.type(screen.getByLabelText(/filter by event/i), 'signup')
+      await waitFor(() => expect(new URLSearchParams(url).get('event')).toBe('signup'))
+      expect(new URLSearchParams(url).get('keep')).toBe('me')
+
+      // Back to the default range: the parameter goes away entirely rather
+      // than being written out as the value it already defaults to.
+      await userEvent.selectOptions(screen.getByTestId('feed-range'), '24h')
+      await waitFor(() => expect(new URLSearchParams(url).has('range')).toBe(false))
+      expect(new URLSearchParams(url).get('keep')).toBe('me')
+    })
+
     it('puts a chosen range and filter INTO the URL', async () => {
       const client = fakeClient()
       renderFeed({ client })
@@ -542,21 +582,7 @@ describe('Feed', () => {
       const client = fakeClient()
       render(
         <MemoryRouter initialEntries={['/feed']}>
-          <ProjectProvider
-            projects={[
-              {
-                id: 1,
-                name: 'Alpha',
-                slug: 'alpha',
-                created_at: '',
-                retention_months: 24,
-                monthly_event_quota: null,
-                disabled_at: null,
-                deleting_at: null,
-              },
-            ]}
-            initialId={1}
-          >
+          <ProjectProvider projects={PROJECTS} initialId={1}>
             <Probe />
             <Feed client={client} />
           </ProjectProvider>
