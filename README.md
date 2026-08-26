@@ -1735,9 +1735,9 @@ this reason: read them, not the width.
 A funnel may have up to `MAX_OPTIONAL_STEPS` (2) optional steps, inside the
 same eight-step ceiling as before. Each optional step costs two extra
 `windowFunnel` chains, and both copy the SQL text of every condition before
-them — measured at three optional steps, the worst legal definition compiles
-past ClickHouse's 262,144-byte `max_query_size` and fails outright, which is
-why the limit is 2 and not 3.
+them — one measured shape at three optional steps compiles past ClickHouse's
+262,144-byte `max_query_size` and fails outright, which is why the limit is 2
+and not 3.
 
 A funnel that compiles past that same limit some other way — enough `where`
 predicates or step audiences, even with two or fewer optional steps — is
