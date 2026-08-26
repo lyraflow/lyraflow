@@ -17,6 +17,36 @@ import { stepSummary } from './stepSummary.js'
 export const MIN_STEPS = 2
 
 /**
+ * The list with `optional` stripped from whatever now sits at either end.
+ *
+ * `optionalDisabledReason` refuses the toggle BY POSITION, and reordering
+ * or removing a step changes positions without touching `optional` -- so
+ * `[a, b(optional), c]` plus one click of b's move-down becomes `[a, c,
+ * b(optional)]`, a state the toggle itself would never have allowed and
+ * cannot undo, because b's toggle is now disabled for being last. The same
+ * hole opens at index 0 via move-up, and via a removal that shortens the
+ * list onto an optional step. `stepsValid` checks only length and event
+ * names, so Save stays enabled and the server answers 400 with no
+ * `detail[]` -- `This funnel could not be read: steps`, naming neither
+ * rule. Every mutator therefore lands the list already legal rather than
+ * leaving `canSave` to catch it: a rejection at save time is a guard firing
+ * after the fact, not a rule keeping the state unreachable.
+ *
+ * The KEY is dropped, never set to `false`, for the reason `updateOptional`
+ * spells out: `FunnelStep.optional` is `.optional()`, so a step that never
+ * carried one must round-trip as absent. Only a genuinely optional step is
+ * rewritten, so a list with nothing to fix is handed through untouched.
+ */
+function endsRequired(steps: FunnelStep[]): FunnelStep[] {
+  return steps.map((s, idx) => {
+    if (s.optional !== true) return s
+    if (idx !== 0 && idx !== steps.length - 1) return s
+    const { optional: _stranded, ...rest } = s
+    return rest
+  })
+}
+
+/**
  * Owns add, remove and reorder for the step list -- the builder itself only
  * ever hands this the current `steps` array and receives the next one back
  * whole, exactly the way `RangePicker` hands back a plain value rather than
@@ -172,7 +202,7 @@ export function StepRows(props: {
   }
   function removeStep(i: number) {
     if (steps.length <= MIN_STEPS) return
-    onChange(steps.filter((_, idx) => idx !== i))
+    onChange(endsRequired(steps.filter((_, idx) => idx !== i)))
   }
   function moveStep(i: number, dir: -1 | 1) {
     const j = i + dir
@@ -181,7 +211,7 @@ export function StepRows(props: {
     const tmp = next[i]
     next[i] = next[j] as FunnelStep
     next[j] = tmp as FunnelStep
-    onChange(next)
+    onChange(endsRequired(next))
   }
 
   // How many steps are ALREADY optional, funnel-wide -- the cap is on the

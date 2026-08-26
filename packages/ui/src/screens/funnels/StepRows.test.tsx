@@ -620,3 +620,78 @@ describe('the optional toggle', () => {
     expect(screen.getByText(/any time after .* within the window/i)).toBeInTheDocument()
   })
 })
+
+describe('reordering and removing an optional step', () => {
+  // The toggle refuses first and last BY POSITION, and move/remove change
+  // positions. Left alone they strand an optional step at an end where its
+  // own toggle is disabled -- so the operator cannot undo it from the
+  // control that caused it, Save stays enabled (`stepsValid` checks only
+  // length and event names), and the server's 400 carries no `detail[]`:
+  // `This funnel could not be read: steps`, naming neither rule. Fixed in
+  // the mutators, because the rule is meant to be unreachable rather than
+  // rejected after the fact.
+  //
+  // The KEY must be gone, not set to `false` -- `optional` is `.optional()`,
+  // so a step that never carried one round-trips as absent.
+
+  it('drops optionality from a step moved onto the END of the list', async () => {
+    const onChange = vi.fn()
+    renderStepRows({
+      steps: [{ event: 'a' }, { event: 'b', optional: true }, { event: 'c' }],
+      onChange,
+    })
+    await user.click(screen.getByRole('button', { name: 'Move step 2 down' }))
+    expect(onChange).toHaveBeenCalledWith([{ event: 'a' }, { event: 'c' }, { event: 'b' }])
+    expect(Object.keys(onChange.mock.calls[0]?.[0]?.[2] ?? {})).toEqual(['event'])
+  })
+
+  it('drops optionality from a step moved onto the FRONT of the list', async () => {
+    const onChange = vi.fn()
+    renderStepRows({
+      steps: [{ event: 'a' }, { event: 'b', optional: true }, { event: 'c' }],
+      onChange,
+    })
+    await user.click(screen.getByRole('button', { name: 'Move step 2 up' }))
+    expect(onChange).toHaveBeenCalledWith([{ event: 'b' }, { event: 'a' }, { event: 'c' }])
+    expect(Object.keys(onChange.mock.calls[0]?.[0]?.[0] ?? {})).toEqual(['event'])
+  })
+
+  it('leaves optionality alone on a move that keeps the step in the middle', async () => {
+    // Stripping unconditionally would silently undo an operator's toggle
+    // every time they nudged a step, which is the mirror defect.
+    const onChange = vi.fn()
+    renderStepRows({
+      steps: [{ event: 'a' }, { event: 'b', optional: true }, { event: 'c' }, { event: 'd' }],
+      onChange,
+    })
+    await user.click(screen.getByRole('button', { name: 'Move step 2 down' }))
+    expect(onChange).toHaveBeenCalledWith([
+      { event: 'a' },
+      { event: 'c' },
+      { event: 'b', optional: true },
+      { event: 'd' },
+    ])
+  })
+
+  it('drops optionality from the step a REMOVAL leaves at the end', async () => {
+    const onChange = vi.fn()
+    renderStepRows({
+      steps: [{ event: 'a' }, { event: 'b' }, { event: 'c', optional: true }, { event: 'd' }],
+      onChange,
+    })
+    await user.click(screen.getByRole('button', { name: 'Remove step 4' }))
+    expect(onChange).toHaveBeenCalledWith([{ event: 'a' }, { event: 'b' }, { event: 'c' }])
+    expect(Object.keys(onChange.mock.calls[0]?.[0]?.[2] ?? {})).toEqual(['event'])
+  })
+
+  it('drops optionality from the step a REMOVAL leaves at the front', async () => {
+    const onChange = vi.fn()
+    renderStepRows({
+      steps: [{ event: 'a' }, { event: 'b', optional: true }, { event: 'c' }, { event: 'd' }],
+      onChange,
+    })
+    await user.click(screen.getByRole('button', { name: 'Remove step 1' }))
+    expect(onChange).toHaveBeenCalledWith([{ event: 'b' }, { event: 'c' }, { event: 'd' }])
+    expect(Object.keys(onChange.mock.calls[0]?.[0]?.[0] ?? {})).toEqual(['event'])
+  })
+})

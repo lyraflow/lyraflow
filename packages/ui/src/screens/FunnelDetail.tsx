@@ -623,10 +623,18 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
               range={result.range}
               onUnauthorized={onUnauthorized}
               /* From the RUN RESULT, never from `funnel.steps`. The two are
-               * independent requests, the definition can be newer than the
-               * numbers on screen, and the server decides which modes are
-               * legal from the definition it ran -- which is the one this
-               * result came from. */
+               * independent requests and the definition can be newer than
+               * the numbers on screen, so this labels the step these numbers
+               * describe rather than a step they never came from.
+               *
+               * It is NOT what the server will check. `/people` re-reads the
+               * stored definition when the request arrives
+               * (`funnels/routes.ts`), so a definition edited between the run
+               * and the click leaves the toggle offering a mode the server
+               * then refuses with `code: "mode"`. Re-running the funnel is
+               * what reconciles the two; reading `funnel.steps` here would
+               * only move the disagreement onto the numbers already on
+               * screen, which is the worse half to be wrong about. */
               optional={result.steps[selectedStep - 1]?.optional === true}
               event={result.steps[selectedStep - 1]?.event}
               seedCounts={seedCountsFor(result, selectedStep)}

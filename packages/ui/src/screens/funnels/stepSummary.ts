@@ -62,9 +62,19 @@ export function collapsedOnLoad(steps: readonly FunnelStep[]): number[] {
  * collapsed row is never a blank line the reader has to click to identify.
  * `stepComplete` means this should not happen through the UI, but a funnel
  * written through the API can carry anything the schema allows.
+ *
+ * `optional` is a part of its own, immediately after the event and in the
+ * same one word the flow chart prints under an optional step's bar.
+ * `collapsedOnLoad` folds every complete step once a funnel reaches four,
+ * which is the length this feature was built for -- so without it, opening
+ * a five-step funnel hides which step is optional until each row is
+ * expanded one at a time.
  */
 export function stepSummary(step: FunnelStep): string {
   const parts: string[] = [step.event.trim() === '' ? 'Not set' : step.event]
+  if (step.optional === true) {
+    parts.push('optional')
+  }
   if (step.where != null && step.where.length > 0) {
     parts.push(`where ${wherePhrase(step.where)}`)
   }

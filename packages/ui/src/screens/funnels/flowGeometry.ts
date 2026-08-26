@@ -260,13 +260,26 @@ const LABEL_FITS_ABOVE = 24
  * BOTH the ribbon and that bar is the fix; `max` of the two rather than the
  * bar alone, because a branch shorter than the ribbon would still leave the
  * label inside the ribbon it was lifted out of.
+ *
+ * A TALL spanned bar drops the label back INSIDE, which is the same trade
+ * the thin-ribbon case makes in the other direction. Past
+ * `PLOT_HEIGHT - LABEL_HEIGHT - 2` there is no surface left above to lift
+ * onto -- a branch taken by more than ~90% of entrants, the ordinary shape
+ * for an optional step most people take -- and clamping at 0 printed the
+ * label across the dashed outline it was lifted to avoid. Two pixels BELOW
+ * the top edge instead: inside both the ribbon and the branch bar, which
+ * are filled with the same `--chart-funnel-ribbon` token, so the label
+ * keeps the pairing `text-foreground` was measured against and stays clear
+ * of the dashes.
  */
 export function ribbonLabelY(fromHeight: number, toHeight: number, spannedBarHeight = 0): number {
   const topAtCentre = PLOT_HEIGHT - (fromHeight + toHeight) / 2
   const thickness = PLOT_HEIGHT - topAtCentre
   if (spannedBarHeight > 0) {
     const clearOf = Math.max(thickness, spannedBarHeight)
-    return Math.max(0, Math.round(PLOT_HEIGHT - clearOf - LABEL_HEIGHT - 2))
+    const above = PLOT_HEIGHT - clearOf - LABEL_HEIGHT - 2
+    if (above < 0) return Math.round(PLOT_HEIGHT - clearOf + 2)
+    return Math.round(above)
   }
   if (thickness >= LABEL_FITS_ABOVE) {
     return Math.round(topAtCentre + thickness / 2 - LABEL_HEIGHT / 2)

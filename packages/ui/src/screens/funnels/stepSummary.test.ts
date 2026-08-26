@@ -114,4 +114,22 @@ describe('stepSummary', () => {
     expect(s).toContain('audience:')
     expect(s.split(' · ')).toHaveLength(3)
   })
+
+  it('says a step is optional, which is otherwise invisible on a folded row', () => {
+    // `collapsedOnLoad` folds every complete step from four steps up, which
+    // is the length an optional step exists for -- so without this, opening
+    // a five-step funnel hides which step is optional until each row has
+    // been expanded one at a time, and the sentence beside the toggle is
+    // not on screen at load.
+    expect(stepSummary({ event: 'docs_view', optional: true })).toBe('docs_view · optional')
+    expect(
+      stepSummary({
+        event: 'docs_view',
+        optional: true,
+        where: [{ property: 'path', operator: '=', value: '/docs' }],
+      }),
+    ).toBe('docs_view · optional · where path is /docs')
+    // A required step is untouched, so the word means what it says.
+    expect(stepSummary({ event: 'docs_view' })).toBe('docs_view')
+  })
 })

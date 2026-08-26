@@ -315,6 +315,21 @@ describe('ribbonLabelY over a spanned slot', () => {
     expect(ribbonLabelY(PLOT_HEIGHT, PLOT_HEIGHT, PLOT_HEIGHT)).toBeGreaterThanOrEqual(0)
   })
 
+  it('drops the label inside the ribbon when a tall branch leaves no surface above it', () => {
+    // MEASURED. Entered 200, step 1 = 200, the optional step = 195, the next
+    // required step = 190. The branch stands 175.5 tall, so lifting clear of
+    // it wants a NEGATIVE offset -- and clamping that at 0 put the label
+    // straight back across the dashed outline it was lifted to avoid, whose
+    // top edge is at 4.5. A branch taken by ~90%+ of entrants is the
+    // ordinary shape for an optional step most people take, not an exotic
+    // one.
+    const bar = barHeight(195, 200)
+    const y = ribbonLabelY(barHeight(200, 200), barHeight(190, 200), bar)
+    expect(y).toBeGreaterThan(PLOT_HEIGHT - bar)
+    // And still on the plot, rather than hanging off the bottom of it.
+    expect(y + LABEL_HEIGHT).toBeLessThanOrEqual(PLOT_HEIGHT)
+  })
+
   it('is unchanged when nothing is spanned, which is every ribbon on a funnel with no branches', () => {
     expect(ribbonLabelY(PLOT_HEIGHT, PLOT_HEIGHT, 0)).toBe(ribbonLabelY(PLOT_HEIGHT, PLOT_HEIGHT))
     expect(ribbonLabelY(4, 4, 0)).toBe(ribbonLabelY(4, 4))
