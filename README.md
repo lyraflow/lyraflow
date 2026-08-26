@@ -319,8 +319,17 @@ Past the wizard (or immediately, if a project already exists), there are four
 screens, reachable from the sidebar:
 
 - **Feed** — a live event feed, split into an **Accepted** tab and a
-  **Rejected** tab. Rejected events carry the reason they were dropped next
-  to each row — `validation_failed`, `too_many_properties`,
+  **Rejected** tab, over a window you pick — the last hour through the last
+  90 days — with an optional event-name filter. The window and the filter are
+  held in the URL, so a refresh keeps them and the screen can be shared as a
+  link; the page polls every few seconds on the short windows and once a
+  minute on the long ones. The chart above the tables counts events per
+  bucket over the same window, at the finest resolution that window allows.
+  The event filter reaches the chart and the Accepted tab but **not** the
+  Rejected one: a payload may have been refused precisely because its event
+  name was missing or unparseable, so filtering the rejections by name would
+  hide the rows that tab exists for. Rejected events carry the reason they
+  were dropped next to each row — `validation_failed`, `too_many_properties`,
   `event_name_cardinality` or `property_key_cardinality` — which is
   otherwise only visible by reading server logs. An unauthenticated or
   over-quota request is refused *before* it reaches a project at all, so it
@@ -2106,7 +2115,12 @@ is present on a bucket **only** when grouping was requested:
 | `since` | ISO 8601 datetime |
 | `until` | ISO 8601 datetime, defaults to now |
 | `interval` | `1m`, `1h`, or `1d`; default `1h` |
+| `event` | one event name, at most 128 characters |
 | `group_by` | only `event_name` is accepted |
+
+`event` narrows the aggregate to a single event name, exactly as it does on
+`GET /v1/events`, and works with or without `group_by`. It is applied before
+the counts are grouped, so it narrows the scan rather than the result.
 
 **There is a hard cap of 1,000 buckets per request.** This route sums groups
 server-side rather than paging rows, so unlike the feed it has no `limit` to
