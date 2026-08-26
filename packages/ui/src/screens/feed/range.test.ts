@@ -77,6 +77,17 @@ describe('rangeById', () => {
     expect(rangeById('7d').label).toBe('Last 7 days')
   })
 
+  it('returns the SAME object for the same id, every time', () => {
+    // Load-bearing, and nothing else pins it. `Feed` puts the range in the
+    // dependency array of all three poll callbacks. If this returned a fresh
+    // object per call, every render would rebuild those callbacks, `usePolling`
+    // would tear down and re-fire on each one, and the re-render its own
+    // setState causes would do it again -- a request loop that no test here
+    // would notice and that would hammer a self-hoster's ClickHouse.
+    expect(rangeById('7d')).toBe(rangeById('7d'))
+    expect(rangeById('nope')).toBe(rangeById('also-nope'))
+  })
+
   it('falls back to the DEFAULT range on an unknown id, not to a position', () => {
     // A shared link outlives the list it was made from. Asserting only that
     // the result is *some* range let the fallback be `FEED_RANGES[1]`, which
