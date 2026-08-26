@@ -101,6 +101,17 @@ const TWO_BRANCH_LINKS: [number, number][] = [
   [2, 5],
 ]
 
+// Every link `BRANCHED` produces, in the model's own order: chain 1->2,
+// branch 2->3, continue 3->4, bypass 2->4. The one-optional shape is the one
+// the product actually ships, so the invariant below is asserted on it too
+// rather than living only on the five-node fixture.
+const BRANCHED_LINKS: [number, number][] = [
+  [1, 2],
+  [2, 3],
+  [3, 4],
+  [2, 4],
+]
+
 /**
  * All four endpoints of a band, recovered from its `d`.
  *
@@ -143,6 +154,59 @@ function box(index: number) {
 function viewBox(svg: Element | null): { width: number; height: number } {
   const parts = (svg?.getAttribute('viewBox') ?? '').trim().split(/[\s,]+/)
   return { width: Number(parts[2]), height: Number(parts[3]) }
+}
+
+/**
+ * The tiling invariant, on BOTH edges of every node of the funnel currently
+ * rendered.
+ *
+ * A band is a quadrilateral between two node edges, and on either side of a
+ * node the bands touching it are disjoint and together span that node
+ * exactly -- no gap, no overlap, nothing spilling past.
+ *
+ * **The edges are walked in the model's LINK order and deliberately not
+ * sorted by offset.** Sorting throws the stacking order away, and an
+ * invariant satisfied by any permutation is not the invariant `sankeyModel`
+ * step 4 promises -- it stacks the links "in link order". Reversing that
+ * iteration leaves every band still tiling its node, and sends the branch
+ * out of the BOTTOM of a node it is lifted above, crossing the bypass that
+ * should sit under it. `links` arrives here in the order the model emits, so
+ * walking it pins the order in the same loop that pins the tiling.
+ */
+function tilesEveryNodeEdge(links: readonly [number, number][], nodeCount: number) {
+  const bands = links.map(([from, to]) => band(from, to))
+  expect(screen.getAllByTestId(/^flow-link-/)).toHaveLength(bands.length)
+
+  const spans = (edges: { start: number; thickness: number }[], node: ReturnType<typeof box>) => {
+    let cursor = node.y
+    for (const edge of edges) {
+      // A zero-thickness band would let two of them claim one offset and
+      // still tile, so the disjointness this walk asserts would mean nothing.
+      expect(edge.thickness).toBeGreaterThan(0)
+      expect(edge.start).toBeCloseTo(cursor, 1)
+      cursor += edge.thickness
+    }
+    expect(cursor).toBeCloseTo(node.y + node.height, 1)
+  }
+
+  for (let index = 1; index <= nodeCount; index++) {
+    const node = box(index)
+    const out = bands.filter((b) => b.from === index)
+    const into = bands.filter((b) => b.to === index)
+    if (out.length > 0) {
+      spans(
+        out.map((b) => ({ start: b.y0, thickness: b.w0 })),
+        node,
+      )
+    }
+    if (into.length > 0) {
+      spans(
+        into.map((b) => ({ start: b.y1, thickness: b.w1 })),
+        node,
+      )
+    }
+  }
+  return bands
 }
 
 describe('FunnelFlow', () => {
@@ -428,52 +492,27 @@ describe('FunnelFlow with an optional step', () => {
     // `w1 -> w0`, a `nodeLeft` that ignores `node.x` and a constant viewBox
     // width all passed the entire suite.
     //
-    // The invariant instead: a band is a quadrilateral between two node
-    // edges, and on EITHER side of a node the bands touching it are disjoint
-    // and together span that node exactly -- no gap, no overlap, nothing
-    // spilling past. That is the property `sankeyModel` computes `w0/y0` and
-    // `w1/y1` separately to provide, so any component that drops one of them
-    // breaks it somewhere.
+    // The invariant instead, in `tilesEveryNodeEdge`: on EITHER side of a
+    // node the bands touching it are disjoint, stack in the model's own link
+    // order and together span that node exactly. That is the property
+    // `sankeyModel` computes `w0/y0` and `w1/y1` separately to provide, so
+    // any component that drops one of them breaks it somewhere.
     //
     // TWO_BRANCHES on purpose: three bands leave node 2, three arrive at
     // node 5, and no band has y0 == y1 or w0 == w1. A fixture whose two
     // axes coincide lets a swapped axis through, which is how the survivor
     // survived.
+    // Both shapes: the one-optional funnel is what the product ships today,
+    // and it goes first so the five-node fixture cannot be the only place
+    // this invariant is ever checked.
+    const branched = render(<FunnelFlow result={BRANCHED} />)
+    tilesEveryNodeEdge(BRANCHED_LINKS, 4)
+    branched.unmount()
+
     render(<FunnelFlow result={TWO_BRANCHES} />)
-    const bands = TWO_BRANCH_LINKS.map(([from, to]) => band(from, to))
-    expect(screen.getAllByTestId(/^flow-link-/)).toHaveLength(bands.length)
+    const bands = tilesEveryNodeEdge(TWO_BRANCH_LINKS, 5)
     expect(bands.filter((b) => b.from === 2)).toHaveLength(3)
     expect(bands.filter((b) => b.to === 5)).toHaveLength(3)
-
-    const spans = (edges: { start: number; thickness: number }[], node: ReturnType<typeof box>) => {
-      let cursor = node.y
-      for (const edge of [...edges].sort((a, b) => a.start - b.start)) {
-        // A zero-thickness band would let two of them claim one offset and
-        // still tile, so the disjointness below would mean nothing.
-        expect(edge.thickness).toBeGreaterThan(0)
-        expect(edge.start).toBeCloseTo(cursor, 1)
-        cursor += edge.thickness
-      }
-      expect(cursor).toBeCloseTo(node.y + node.height, 1)
-    }
-
-    for (const index of [1, 2, 3, 4, 5]) {
-      const node = box(index)
-      const out = bands.filter((b) => b.from === index)
-      const into = bands.filter((b) => b.to === index)
-      if (out.length > 0) {
-        spans(
-          out.map((b) => ({ start: b.y0, thickness: b.w0 })),
-          node,
-        )
-      }
-      if (into.length > 0) {
-        spans(
-          into.map((b) => ({ start: b.y1, thickness: b.w1 })),
-          node,
-        )
-      }
-    }
 
     // The horizontal axis, which nothing read at all. Every band runs from
     // its source node's right edge to its destination node's left edge.

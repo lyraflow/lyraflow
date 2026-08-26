@@ -138,8 +138,10 @@ function whereFor(
  * shared by every band leaving one stage AND by the branch that borrows it:
  * on a funnel with two adjacent optional steps, five of the six bands carry
  * `--chart-funnel-2`. What actually separates two bands where they overlap
- * is the full-opacity outline each one carries in its own tint, and the
- * continuity of its shape through the crossing. A palette of distinct hues,
+ * is the full-opacity outline read against the 0.55 fill it encloses -- a
+ * contrast in OPACITY, which is the only channel left once two bands share
+ * a ramp step -- together with the continuity of each shape through the
+ * crossing. A palette of distinct hues,
  * which is what the reference design for this screen used, would spend the
  * identity channel restating an order that position already carries, and no
  * hue ordering survives colour-blindness.
