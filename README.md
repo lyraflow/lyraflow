@@ -1678,6 +1678,49 @@ above, not by `MAX_FUNNEL_BEHAVIOR_NODES`.
 
 Two steps minimum, eight maximum.
 
+### Optional steps
+
+A step can carry `"optional": true`. Absent means required — which is what
+every step was before this, so an existing funnel with no optional steps
+reports exactly what it always reported.
+
+```json
+"steps": [
+  { "event": "$page" },
+  { "event": "signed_up" },
+  { "event": "subscription_started" },
+  { "event": "video_submitted", "optional": true },
+  { "event": "subscription_canceled" }
+]
+```
+
+Someone who skips `video_submitted` still counts at `subscription_canceled` —
+an optional step does not disqualify anyone from the steps after it.
+**Conversion is measured over the required steps only.**
+
+An optional step branches off the last **required** step before it, not off
+whatever step precedes it in the definition — two optional steps back to
+back both branch from the same required step, not from each other. Its
+`from_previous` is a share of that branch point's population, not of the
+step written just above it. Its result carries `optional: true` and a
+`skipped` count — the people who reached the branch point and did not do
+this step inside the window. A required step's result carries neither field.
+
+**The first and last steps cannot be optional.** Step 1 defines entry — it
+is what bounds who enters within the range — and the last step defines
+conversion; making either optional leaves both undefined.
+
+A funnel may have up to `MAX_OPTIONAL_STEPS` (3) optional steps, inside the
+same eight-step ceiling as before.
+
+**The limit worth knowing before you rely on this:** an optional step counts
+any time after the required step before it and inside the window —
+*including after a later step*. Someone who cancels and then submits a video
+afterward is still counted as having done the optional step.
+`windowFunnel` reports a chain length, not the instants it matched at, so
+"step 4 happened before step 5" is not a question this can answer without a
+different query shape.
+
 ### The three clocks
 
 This is the part worth reading twice, because getting it wrong makes a funnel
@@ -1818,6 +1861,11 @@ already scripts against it never sees a difference. It is not two ways of
 doing one thing: `/people` is the general endpoint, and `/dropoff` is the one
 call it happens to always make (`mode: "dropped"`).
 
+On an **optional** step, `/dropoff` is refused with a `400` — skipping a step
+means never stopping there, so "stopped exactly here" is not a population an
+optional step has. The error points the caller at `/people`, where `reached`
+or `skipped` are the two readings that mean something.
+
 ### Who reached a step, or stopped there
 
 ```sh
@@ -1832,6 +1880,15 @@ everyone who got at least that far) and `dropped` (`level = step`, everyone
 who stopped exactly there) differ by a factor of three on a real funnel, and
 whichever way a default fell, the other reading is what a caller would get by
 accident.
+
+A third mode, `skipped`, exists for **optional steps only** — the people who
+reached the required step this one branches off and did not do this step
+inside the window, the same count the run response's `skipped` field gives
+for that step. Asking for `mode: "dropped"` on an optional step is refused
+with a `400` (`code: "mode"`): skipping it means never stopping there, so
+that reading is not a population an optional step has. Asking for
+`mode: "skipped"` on a required step is refused the same way — nobody can
+skip a required step, so the mode means nothing there.
 
 `reached` is the population behind the number on the chart: step N's `people`
 in the run response above is exactly this count, at whatever instant the run

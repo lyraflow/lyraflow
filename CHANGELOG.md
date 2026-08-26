@@ -21,6 +21,29 @@ here as it happened rather than tagged retroactively, for the same reason 0.1.0
 is: a tag created after the fact names a moment nobody could have fetched. Its
 one fix is contained in 0.3.0.
 
+## Unreleased
+
+### Added
+
+- **A funnel step can be optional.** A step marked `"optional": true` may be
+  skipped without disqualifying anyone from the steps after it —
+  **conversion is now measured over the required steps alone**, so a funnel
+  with no optional steps reports exactly what it always reported. An
+  optional step branches off the last required step before it: its result
+  carries `optional: true` and a `skipped` count — the people who reached
+  that required step and did not do this one inside the window — while a
+  required step's result carries neither field. The first and last steps of
+  a funnel still cannot be optional, since they define entry and
+  conversion, and a funnel may carry at most `MAX_OPTIONAL_STEPS` (3) of
+  them inside the existing eight-step ceiling. `POST
+  /v1/funnels/:id/people` accepts a third `mode`, `"skipped"`, for optional
+  steps only; it and `/dropoff` refuse `mode: "dropped"` on an optional
+  step and `mode: "skipped"` on a required one, each with a `400`
+  (`code: "mode"`). `definition_version` moves to 3 for this — a build
+  reading a definition a newer build wrote now refuses it with a `400`
+  naming the version, on both read and write, rather than silently dropping
+  the field it does not understand and reporting a smaller `converted`.
+
 ## 0.9.0 — 2026-08-22
 
 ### Added
