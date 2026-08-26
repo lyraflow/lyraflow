@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import type { FunnelRunResult, FunnelStep, StepResult } from '../../api/types.js'
 import { FunnelFlow } from './FunnelFlow.js'
-import { BAR_WIDTH, PLOT_HEIGHT, barX } from './flowGeometry.js'
+import { BAR_WIDTH, PLOT_HEIGHT, SLOT_WIDTH, barX } from './flowGeometry.js'
 
 const step = (over: Partial<StepResult> & { index: number }): StepResult => ({
   event: `e${over.index}`,
@@ -355,16 +355,21 @@ describe('FunnelFlow with an optional step', () => {
     expect(screen.queryByTestId('flow-rate-3')).not.toBeInTheDocument()
   })
 
-  it('hangs the branch off its own branch point with a stroked, dashed, unfillable connector', () => {
+  it('marks the branch wedge with a stroked, dashed leading edge off its own branch point', () => {
+    // The connector survives the wedge and is now the wedge's top EDGE. It
+    // used to be the whole branch, with no fill, on the reasoning that a
+    // taper would say the people who skipped were lost. It was reported as
+    // making one path out of the branch point look like the funnel and the
+    // other like an annotation, so the fill came back and the dash stayed:
+    // the dash is what marks this flow as the optional one.
     render(<FunnelFlow result={BRANCHED} />)
-    const branch = screen.getByTestId('flow-branch-3')
-    expect(branch).toHaveAttribute('fill', 'none')
-    expect(branch).toHaveAttribute('stroke-dasharray', '4 3')
-    const d = branch.getAttribute('d') ?? ''
+    const edge = screen.getByTestId('flow-branch-edge-3')
+    expect(edge).toHaveAttribute('fill', 'none')
+    expect(edge).toHaveAttribute('stroke-dasharray', '4 3')
+    const d = edge.getAttribute('d') ?? ''
     // From step 2's bar, not from step 1's and not from the plot edge.
     expect(d.startsWith(`M ${barX(1) + BAR_WIDTH} ${PLOT_HEIGHT - 144}`)).toBe(true)
-    // No area: a `Z` or a baseline leg would make this a taper, which would
-    // say people were lost between the branch point and the branch.
+    // The EDGE carries no area of its own -- the wedge beneath it does.
     expect(d).not.toContain('Z')
     expect(d).not.toContain('L')
   })
@@ -508,5 +513,53 @@ describe('FunnelFlow with an optional step', () => {
       const branch = screen.getByTestId(id).getAttribute('d') ?? ''
       expect(branch.startsWith(`M ${barX(1) + BAR_WIDTH} `)).toBe(true)
     }
+  })
+
+  it('draws the branch as a FILLED ribbon, so both paths out of a branch point read as flows', () => {
+    // A stroked thread made one path look like the funnel and the other like
+    // an annotation. The two legs leaving a branch point are both real
+    // populations and both get a wedge.
+    render(<FunnelFlow result={BRANCHED} />)
+    const branch = screen.getByTestId('flow-branch-3')
+    expect(branch.getAttribute('fill')).not.toBe('none')
+    expect(branch.getAttribute('d')).toContain('Z')
+  })
+
+  it('gives the branch its own rate, measured against the step it hangs off', () => {
+    // 30 of onboarded's 80. NOT the spine's 50%, which belongs to the ribbon
+    // passing behind it.
+    render(<FunnelFlow result={BRANCHED} />)
+    expect(screen.getByTestId('flow-branch-rate-3')).toHaveTextContent('37.5%')
+    expect(screen.getByTestId('flow-branch-rate-3')).not.toHaveTextContent('50.0%')
+  })
+
+  it('keeps the spanning ribbon rate clear of the branch bar it passes', () => {
+    // THE DEFECT THIS FIXES. Centred across its own span, a ribbon from
+    // onboarded to purchase puts its label in the middle of video_submitted's
+    // slot -- on top of the branch bar, directly above that step's own and
+    // different percentage.
+    render(<FunnelFlow result={BRANCHED} />)
+    const cols = screen.getByTestId('flow-rate-2').style.gridColumn
+    const [start, span] = [Number(cols.split('/')[0]?.trim()), 2]
+    const centreX = (start - 1 + span / 2) * SLOT_WIDTH
+    // The branch bar stands at slot 2.
+    expect(centreX).toBeGreaterThan(barX(2) + BAR_WIDTH)
+  })
+
+  it('leaves label placement on a funnel with no branches exactly where it was', () => {
+    const plain = result({
+      entered: 100,
+      converted: 40,
+      conversion_rate: 0.4,
+      steps: [
+        step({ index: 1, event: 'signup', people: 100, from_previous: 1, from_start: 1 }),
+        step({ index: 2, event: 'onboarded', people: 80, from_previous: 0.8, from_start: 0.8 }),
+        step({ index: 3, event: 'purchase', people: 40, from_previous: 0.5, from_start: 0.4 }),
+      ],
+    })
+    render(<FunnelFlow result={plain} />)
+    expect(screen.getByTestId('flow-rate-1').style.gridColumn).toBe('1 / span 2')
+    expect(screen.getByTestId('flow-rate-2').style.gridColumn).toBe('2 / span 2')
+    expect(screen.queryByTestId('flow-branch-rate-1')).not.toBeInTheDocument()
   })
 })

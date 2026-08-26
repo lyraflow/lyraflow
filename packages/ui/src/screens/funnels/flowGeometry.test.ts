@@ -11,6 +11,7 @@ import {
   biggestLeak,
   branchPath,
   branchSlots,
+  labelColumns,
   plotWidth,
   rampIndex,
   rampIndexes,
@@ -333,5 +334,37 @@ describe('ribbonLabelY over a spanned slot', () => {
   it('is unchanged when nothing is spanned, which is every ribbon on a funnel with no branches', () => {
     expect(ribbonLabelY(PLOT_HEIGHT, PLOT_HEIGHT, 0)).toBe(ribbonLabelY(PLOT_HEIGHT, PLOT_HEIGHT))
     expect(ribbonLabelY(4, 4, 0)).toBe(ribbonLabelY(4, 4))
+  })
+})
+
+describe('labelColumns', () => {
+  it('centres an adjacent pair across its own two slots, exactly as before', () => {
+    // Every ribbon on a funnel with no optional steps is this case, and its
+    // placement must not move: the midpoint of two adjacent slots IS the
+    // ribbon's midpoint.
+    expect(labelColumns(0, 1)).toEqual({ start: 1, span: 2 })
+    expect(labelColumns(3, 4)).toEqual({ start: 4, span: 2 })
+  })
+
+  it('anchors a spanning ribbon at its ARRIVAL gap, never over the slot it passes', () => {
+    // FOUND ON A REAL FUNNEL. A ribbon from step 1 to step 3 has its midpoint
+    // in the middle of step 2's slot, so a centred label lands squarely on
+    // the branch bar standing there and reads as that step's rate -- next to
+    // the branch's own, different, percentage. Anchored at the arrival gap it
+    // sits beside the bar the ribbon lands on, where nothing else is drawn.
+    expect(labelColumns(0, 2)).toEqual({ start: 2, span: 2 })
+  })
+
+  it('anchors at the arrival gap however many slots are spanned', () => {
+    expect(labelColumns(0, 3)).toEqual({ start: 3, span: 2 })
+    expect(labelColumns(1, 4)).toEqual({ start: 4, span: 2 })
+  })
+
+  it('never overlaps the branch label that shares the branch point', () => {
+    // The branch ribbon leaves the same bar and labels itself across slots
+    // 1-2; the spanning ribbon must not also sit there.
+    const branch = labelColumns(0, 1)
+    const spine = labelColumns(0, 2)
+    expect(branch.start + branch.span).toBeLessThanOrEqual(spine.start + 1)
   })
 })

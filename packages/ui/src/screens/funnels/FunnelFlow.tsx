@@ -1,3 +1,4 @@
+import { Fragment } from 'react'
 import type { FunnelRunResult, FunnelStep, StepResult } from '../../api/types.js'
 import { wherePhrase } from '../segments/vocabulary.js'
 import {
@@ -8,6 +9,7 @@ import {
   biggestLeak,
   branchPath,
   branchSlots,
+  labelColumns,
   plotWidth,
   rampIndexes,
   ribbonLabelY,
@@ -217,21 +219,44 @@ export function FunnelFlow(props: {
              * the spine, which is the ribbon passing behind this. */}
             {branches.map((from, i) =>
               from == null ? null : (
-                <path
-                  key={`branch-${(steps[i] as StepResult).index}`}
-                  data-testid={`flow-branch-${(steps[i] as StepResult).index}`}
-                  d={branchPath(heights[from] as number, heights[i] as number, from, i)}
-                  fill="none"
-                  stroke={`var(--chart-funnel-${ramp[i]})`}
-                  strokeWidth={1.5}
-                  strokeDasharray="4 3"
-                  /* The plot stretches horizontally, so a stroke in user
-                   * space would come out thicker on one axis than the other
-                   * and the dash pattern would stretch with the container.
-                   * This keeps both in screen space, which is the only way a
-                   * dash reads as the same dash at every card width. */
-                  vectorEffect="non-scaling-stroke"
-                />
+                <Fragment key={`branch-${(steps[i] as StepResult).index}`}>
+                  {/* THE BRANCH IS A FLOW, AND IT GETS A WEDGE.
+                   *
+                   * This was a stroked thread with no fill, on the reasoning
+                   * that a wedge would say the people who skipped this step
+                   * were lost. They are not lost -- but a thread made one
+                   * path out of the branch point look like the funnel and
+                   * the other look like an annotation, which is the thing an
+                   * operator actually reported. Both legs are real
+                   * populations and both are drawn as flows; the spine
+                   * ribbon carrying on at full geometry behind this is what
+                   * says nobody was lost. */}
+                  <path
+                    data-testid={`flow-branch-${(steps[i] as StepResult).index}`}
+                    d={ribbonPath(heights[from] as number, heights[i] as number, from, i)}
+                    fill={`var(--chart-funnel-${ramp[i]})`}
+                    /* Translucent, so it reads as a distinct wedge ON TOP OF
+                     * the spine ribbon rather than beside it. A funnel that
+                     * converts everyone draws that ribbon as a flat
+                     * full-height band, and an opaque branch in the same
+                     * token vanished into it completely. */
+                    fillOpacity={0.45}
+                  />
+                  <path
+                    data-testid={`flow-branch-edge-${(steps[i] as StepResult).index}`}
+                    d={branchPath(heights[from] as number, heights[i] as number, from, i)}
+                    fill="none"
+                    stroke={`var(--chart-funnel-${ramp[i]})`}
+                    strokeWidth={1.5}
+                    strokeDasharray="4 3"
+                    /* The plot stretches horizontally, so a stroke in user
+                     * space would come out thicker on one axis than the other
+                     * and the dash pattern would stretch with the container.
+                     * This keeps both in screen space, which is the only way a
+                     * dash reads as the same dash at every card width. */
+                    vectorEffect="non-scaling-stroke"
+                  />
+                </Fragment>
               ),
             )}
             {steps.map((s, i) => {
@@ -351,16 +376,49 @@ export function FunnelFlow(props: {
                      * entirely. Pinning the row makes them overlay the plot,
                      * which is the whole point of an absolute overlay. */
                     gridRow: 1,
-                    /* Spanning the pair's OWN slots, however many lie between
-                     * them. Centred over `${from + 1}` through `${to + 1}`
-                     * lands on `(from + to + 1) * SLOT_WIDTH / 2`, which is
-                     * exactly the ribbon's midpoint -- the same identity the
-                     * two-column case relied on, and it holds for any span. */
-                    gridColumn: `${from + 1} / span ${to - from + 1}`,
+                    /* `labelColumns` decides this, and only two cases exist.
+                     * An adjacent pair stays centred across its own two
+                     * slots, exactly where it has always been. A ribbon that
+                     * SPANS a slot is anchored at its arrival gap instead --
+                     * its midpoint is the middle of the branch's slot, so a
+                     * centred label printed on top of the branch bar,
+                     * directly above that step's own and different rate. */
+                    gridColumn: `${labelColumns(from, to).start} / span ${labelColumns(from, to).span}`,
                     marginTop: `${ribbonLabelY(heights[from] as number, heights[to] as number, spanned)}px`,
                   }}
                 >
                   {formatPercent((steps[to] as StepResult).from_previous)}
+                </span>
+              )
+            })}
+            {/* The branch's OWN rate, on the branch's own wedge.
+             *
+             * Without it the plot showed one percentage between two bars and
+             * left the reader to guess which of the two flows leaving the
+             * branch point it described. `from_previous` on an optional step
+             * is already a share of the step it hangs off, so this is the
+             * same measure the spine label carries, against the same
+             * denominator -- which is what makes the two comparable at a
+             * glance. Adjacent by construction (a branch hangs off the
+             * required step before it), so `labelColumns` centres it over
+             * its own gap and it cannot collide with the spanning label,
+             * which is anchored a gap further right. */}
+            {branches.map((from, i) => {
+              if (from == null) return null
+              const s = steps[i] as StepResult
+              const cols = labelColumns(from, i)
+              return (
+                <span
+                  key={`branch-rate-${s.index}`}
+                  data-testid={`flow-branch-rate-${s.index}`}
+                  className="justify-self-center self-start text-xs font-medium tabular-nums text-foreground"
+                  style={{
+                    gridRow: 1,
+                    gridColumn: `${cols.start} / span ${cols.span}`,
+                    marginTop: `${ribbonLabelY(heights[from] as number, heights[i] as number)}px`,
+                  }}
+                >
+                  {formatPercent(s.from_previous)}
                 </span>
               )
             })}

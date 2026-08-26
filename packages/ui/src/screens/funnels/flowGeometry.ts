@@ -272,6 +272,31 @@ const LABEL_FITS_ABOVE = 24
  * keeps the pairing `text-foreground` was measured against and stays clear
  * of the dashes.
  */
+/**
+ * Which grid columns a ribbon's rate label spans, 1-based, as
+ * `{ start, span }` for a CSS `grid-column`.
+ *
+ * An ADJACENT pair keeps the label centred across its own two slots. That
+ * midpoint IS the ribbon's midpoint, it is where every funnel without
+ * optional steps has always drawn it, and nothing here moves it.
+ *
+ * A ribbon that SPANS a slot cannot use its midpoint, and this was found on a
+ * real funnel rather than reasoned about: a ribbon from step 1 to step 3 has
+ * its centre in the middle of step 2's slot, so the label printed squarely
+ * over the branch bar standing there -- directly above that step's own,
+ * different, percentage. Two numbers stacked in one column, belonging to two
+ * different things. It is anchored at the ARRIVAL gap instead: the two
+ * columns straddling the destination bar's left edge, where the only thing
+ * beside it is the bar the ribbon lands on.
+ *
+ * Vertical placement is `ribbonLabelY`'s and is deliberately untouched --
+ * the ambiguity was horizontal, and the lift over a spanned bar still holds.
+ */
+export function labelColumns(fromStep: number, toStep: number): { start: number; span: number } {
+  if (toStep - fromStep <= 1) return { start: fromStep + 1, span: toStep - fromStep + 1 }
+  return { start: toStep, span: 2 }
+}
+
 export function ribbonLabelY(fromHeight: number, toHeight: number, spannedBarHeight = 0): number {
   const topAtCentre = PLOT_HEIGHT - (fromHeight + toHeight) / 2
   const thickness = PLOT_HEIGHT - topAtCentre
