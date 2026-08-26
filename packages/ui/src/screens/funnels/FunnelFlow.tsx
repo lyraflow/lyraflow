@@ -1,21 +1,56 @@
+import { useEffect, useId, useRef, useState } from 'react'
 import type { FunnelRunResult, FunnelStep, StepResult } from '../../api/types.js'
 import { wherePhrase } from '../segments/vocabulary.js'
-import { SLOT_WIDTH, biggestLeak, branchSlots, spineSteps } from './flowGeometry.js'
+import { biggestLeak, branchSlots, spineSteps } from './flowGeometry.js'
 import { formatCount, formatPercent } from './format.js'
-import { type SankeyLink, type SankeyNode, sankeyModel } from './sankey.js'
+import {
+  PEEL_DY,
+  type SankeyDrop,
+  type SankeyLink,
+  type SankeyNode,
+  sankeyModel,
+} from './sankey.js'
 
 /**
- * How wide a node stands in its slot, in viewBox units.
+ * How wide a node stands in its slot, IN PIXELS.
  *
  * NARROW on purpose. In a Sankey the links carry the quantity and the node
  * is only the place they meet, so a node wide enough to read as a bar
  * re-tells the story the band beside it already told -- which is what the
- * bars this replaced did. The plot stretches horizontally, so this is 8% of
- * a slot rather than a pixel count: at the widest the plot is ever drawn
- * (200px per step, see `plot` below) it lands at 16px, and it shrinks with
- * the card rather than swallowing a narrow one.
+ * bars this replaced did.
+ *
+ * A pixel count rather than a share of a slot, which is what it used to be.
+ * The model is measured in pixels now, so a node is the same object at every
+ * card width instead of a sliver on a narrow one and a slab on a wide one --
+ * and a fixed width is what lets the cap below be a real radius.
  */
-const NODE_WIDTH = 12
+const NODE_WIDTH = 15
+
+/** Fully rounded ends, which needs the width to be known in pixels -- under
+ * the stretched space this replaced, a radius came out as an oval whose
+ * eccentricity changed with the card. Capped at half the height so a node
+ * two pixels tall stays a shape rather than inverting. */
+const NODE_RADIUS = NODE_WIDTH / 2
+
+/** How far the selection ring stands off the node. Square units, so this is
+ * the same clearance on all four sides -- which is exactly what it was not
+ * under the stretched space, where three units drew fifteen pixels beside a
+ * node and three above it. */
+const SELECT_INSET = 3
+
+/** A ring of the surface token around a glyph, so a label reads against
+ * whatever band it happens to land on. Eight offsets rather than four: at
+ * four the diagonals show through as notches at this weight. */
+const HALO = [
+  '2px 0 var(--lf-surface)',
+  '-2px 0 var(--lf-surface)',
+  '0 2px var(--lf-surface)',
+  '0 -2px var(--lf-surface)',
+  '1.5px 1.5px var(--lf-surface)',
+  '-1.5px 1.5px var(--lf-surface)',
+  '1.5px -1.5px var(--lf-surface)',
+  '-1.5px -1.5px var(--lf-surface)',
+].join(', ')
 
 /** The narrowest a stage may get before the plot scrolls instead of
  * compressing. Eight stages at this width is about 1160px, which is wider
@@ -39,8 +74,8 @@ const MAX_SLOT_PX = 320
  * plot gets a symmetric half-slot margin instead of a whole empty slot on
  * the right.
  */
-function nodeLeft(node: SankeyNode): number {
-  return node.x + (SLOT_WIDTH - NODE_WIDTH) / 2
+function nodeLeft(node: SankeyNode, slot: number): number {
+  return node.x + (slot - NODE_WIDTH) / 2
 }
 
 /** Two decimals is past what any screen can resolve and keeps the `d`
@@ -67,6 +102,36 @@ function bandPath(x0: number, y0: number, w0: number, x1: number, y1: number, w1
     `C ${r(mid)} ${r(y0)}, ${r(mid)} ${r(y1)}, ${r(x1)} ${r(y1)}`,
     `L ${r(x1)} ${r(y1 + w1)}`,
     `C ${r(mid)} ${r(y1 + w1)}, ${r(mid)} ${r(y0 + w0)}, ${r(x0)} ${r(y0 + w0)}`,
+    'Z',
+  ].join(' ')
+}
+
+/** How far along the plot a drop-off ribbon travels before it has faded
+ * out. Horizontal, so unlike `PEEL_DY` it changes nothing about how much
+ * room the plot needs and stays here with the path that uses it. Short of a
+ * whole slot on purpose: the ribbon says "these people left", and a ribbon
+ * long enough to reach the next stage would say they went there. */
+const PEEL_DX = 118
+
+/**
+ * The people who stopped at a node, leaving it: a band of their own
+ * thickness that displaces away from the flow and fades out.
+ *
+ * The same cubic as `bandPath`, so a ribbon reads as the same kind of object
+ * as a flow rather than as an annotation -- it IS a population, and drawing
+ * it in a different vocabulary would say otherwise. What separates it is
+ * that it carries no colour of its own and fades to nothing, which is what
+ * stops the eye following it as a path to somewhere.
+ */
+function peelPath(x0: number, top: number, w: number, up: boolean): string {
+  const y1 = top + (up ? -PEEL_DY : PEEL_DY)
+  const mid = x0 + PEEL_DX * 0.45
+  const x1 = x0 + PEEL_DX
+  return [
+    `M ${r(x0)} ${r(top)}`,
+    `C ${r(mid)} ${r(top)}, ${r(mid)} ${r(y1)}, ${r(x1)} ${r(y1)}`,
+    `L ${r(x1)} ${r(y1 + w)}`,
+    `C ${r(mid)} ${r(y1 + w)}, ${r(mid)} ${r(top + w)}, ${r(x0)} ${r(top + w)}`,
     'Z',
   ].join(' ')
 }
@@ -98,6 +163,54 @@ const BRANCH_FILL_OPACITY = 0.3
  * viewBox units tall (`MIN_BAR_HEIGHT`, a step nobody reached), so the
  * button is centred on the node and grown to something a pointer can hit. */
 const HIT_MIN_HEIGHT = 24
+
+/**
+ * The width the model is built at before the plot has been measured, and
+ * after it has been measured as zero.
+ *
+ * Both cases are real. The first paint happens before layout, and a test
+ * environment reports every element as 0x0 for ever -- so a model built
+ * straight from the measurement would put every node at x = 0 with a slot a
+ * pixel wide, and the chart would be a stripe. Falling back to the widest a
+ * stage is allowed to be gives a plot that is correct in every proportion,
+ * just not yet the size of its container; one frame later the observer
+ * replaces it.
+ */
+const FALLBACK_SLOT_PX = MAX_SLOT_PX
+
+/**
+ * The plot's width in CSS pixels, from the element it is drawn into.
+ *
+ * A ResizeObserver, which this component went out of its way to avoid until
+ * now -- the old model was drawn in an abstract space stretched to fit, so a
+ * measurement was genuinely unnecessary. That space is what made a node's
+ * rounded cap an oval, a stroke thicker on one axis than the other, and any
+ * fixed inset five times wider than it was tall; the selection mark was
+ * re-cut twice over it. Measuring buys a coordinate space where one unit is
+ * one pixel on both axes, and every one of those problems stops existing
+ * rather than being worked around.
+ */
+function usePlotWidth(fallback: number): [number, (el: HTMLDivElement | null) => void] {
+  const [width, setWidth] = useState(0)
+  const observer = useRef<ResizeObserver | null>(null)
+  useEffect(() => () => observer.current?.disconnect(), [])
+  const ref = (el: HTMLDivElement | null) => {
+    observer.current?.disconnect()
+    observer.current = null
+    if (el == null) return
+    setWidth(el.getBoundingClientRect().width)
+    // Guarded: jsdom has no ResizeObserver, and a component that throws on
+    // mount there would take every test of this screen with it.
+    if (typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver((entries) => {
+      const entry = entries[0]
+      if (entry != null) setWidth(entry.contentRect.width)
+    })
+    ro.observe(el)
+    observer.current = ro
+  }
+  return [width > 0 ? width : fallback, ref]
+}
 
 /**
  * The predicates narrowing the step at position `i`, or `null` when this
@@ -212,7 +325,12 @@ export function FunnelFlow(props: {
   const { result, definition, selectedStep, onSelectStep } = props
   const steps = result.steps
   const total = steps.length
-  const model = sankeyModel(steps, result.entered)
+  const [plotWidthPx, plotRef] = usePlotWidth(Math.max(1, total) * FALLBACK_SLOT_PX)
+  /** A gradient is referenced by a document-wide id, so two funnels on one
+   * screen would otherwise share -- and silently swap -- each other's fades.
+   * `useId` is what React gives for exactly this, and it survives hydration. */
+  const plotId = useId().replace(/:/g, '')
+  const model = sankeyModel(steps, result.entered, plotWidthPx)
   /** `branchSlots` still, and only for the WORDS: an optional step's rate is
    * a share of the required step it hangs off, and the row under the plot
    * has to name which one. The model draws the branch; this names it, from
@@ -261,7 +379,7 @@ export function FunnelFlow(props: {
        * sentences beneath it starting at the left edge -- two different
        * origins on one block. `mr-auto` takes up the slack on the right so
        * the plot starts where every other line on the screen starts. */}
-      <div className="flex w-full flex-col gap-2" style={plot}>
+      <div ref={plotRef} className="flex w-full flex-col gap-2" style={plot}>
         {/* Stage names, above the plot as in a column chart -- the reader
          * needs to know what a node IS before they read how big it is. */}
         <div className="grid gap-1" style={columns}>
@@ -320,15 +438,64 @@ export function FunnelFlow(props: {
             className="block"
           >
             <title>Funnel flow</title>
-            {/* Links first, so a node's own edge always sits on top of the
+            <defs>
+              {/* One gradient per ribbon rather than one shared: a `<defs>`
+               * id has to be unique on the PAGE, and two funnels can be on
+               * one screen. Keyed by step index, which is unique within a
+               * result, and prefixed with the plot's own id. */}
+              {model.drops.map((drop: SankeyDrop) => (
+                <linearGradient
+                  key={`fade-${drop.node}`}
+                  id={`lf-drop-${plotId}-${drop.node}`}
+                  x1="0"
+                  x2="1"
+                >
+                  <stop offset="0" stopColor="var(--lf-text-subtle)" stopOpacity={0.3} />
+                  <stop offset="1" stopColor="var(--lf-text-subtle)" stopOpacity={0} />
+                </linearGradient>
+              ))}
+            </defs>
+            {/* THE DROP-OFF, drawn first and under everything.
+             *
+             * These people are the reason the funnel is a funnel, and until
+             * now the chart drew them as nothing at all -- the empty space
+             * under a node's bands, which a reader had to know to look for.
+             * On a step that loses a third of its traffic that empty space is
+             * most of the node's height, and it read as a rendering fault
+             * rather than as a loss. Reported as "the drop-off spacing
+             * doesn't look right", which was the right complaint about the
+             * wrong thing: the spacing was correct and the absence was the
+             * defect.
+             *
+             * Under the flows, in no colour of its own, fading to nothing:
+             * it has to be legible as a quantity without competing with the
+             * paths that continue. */}
+            {model.drops.map((drop: SankeyDrop) => {
+              const node = model.nodes[drop.node] as SankeyNode
+              const s = steps[drop.node] as StepResult
+              return (
+                <path
+                  key={`drop-${s.index}`}
+                  data-testid={`flow-drop-${s.index}`}
+                  data-direction={drop.up ? 'up' : 'down'}
+                  d={peelPath(nodeLeft(node, model.slot) + NODE_WIDTH, drop.top, drop.w, drop.up)}
+                  fill={`url(#lf-drop-${plotId}-${drop.node})`}
+                >
+                  <title>
+                    {formatCount(drop.people)} reached {s.event} and went no further.
+                  </title>
+                </path>
+              )
+            })}
+            {/* Links next, so a node's own edge always sits on top of the
              * bands meeting it rather than being overdrawn by them. */}
             {model.links.map((link: SankeyLink) => {
               const src = model.nodes[link.from] as SankeyNode
               const dst = model.nodes[link.to] as SankeyNode
               const from = steps[link.from] as StepResult
               const to = steps[link.to] as StepResult
-              const x0 = nodeLeft(src) + NODE_WIDTH
-              const x1 = nodeLeft(dst)
+              const x0 = nodeLeft(src, model.slot) + NODE_WIDTH
+              const x1 = nodeLeft(dst, model.slot)
               return (
                 <path
                   key={`link-${from.index}-${to.index}`}
@@ -349,26 +516,26 @@ export function FunnelFlow(props: {
                       ? BRANCH_FILL_OPACITY
                       : LINK_FILL_OPACITY
                   }
-                  stroke={`var(--chart-funnel-${src.ramp})`}
-                  strokeWidth={1.5}
-                  /* DASHED MEANS THIS FLOW WENT THROUGH THE OPTIONAL STEP.
+                  /* A HAIRLINE OF THE BAND'S OWN HUE, and nothing else --
+                   * no dash.
                    *
-                   * The tint cannot carry that. An optional node borrows its
-                   * branch point's ramp step rather than consuming one, so on
-                   * a three-stage funnel with one optional step the spine is
-                   * two stages long and EVERY link leaves a ramp-1 node --
-                   * three bands, one colour, reported from a real funnel as
-                   * flows that collide. Texture is the channel ADR 006 leaves
-                   * free, it survives colour-blindness, and it echoes the
-                   * dashed `optional` badge on the node itself. Solid is the
-                   * required chain; dashed went via the branch. */
-                  strokeDasharray={
-                    link.kind === 'branch' || link.kind === 'continue' ? '7 4' : undefined
-                  }
-                  /* The plot stretches horizontally, so a stroke in user
-                   * space would come out thicker on one axis than the other
-                   * and would change with the card's width. */
-                  vectorEffect="non-scaling-stroke"
+                   * The optional legs used to be dashed, on the argument that
+                   * an optional node borrows its branch point's ramp step so
+                   * several bands can share one colour and texture is the
+                   * channel ADR 006 leaves free. The argument holds and the
+                   * result was still wrong: a dash tracing every edge of
+                   * every optional band was the loudest thing on the chart,
+                   * and it is what made the plot look unfinished rather than
+                   * considered. Reported, twice.
+                   *
+                   * What carries the distinction instead is the weight the
+                   * two already had -- 0.3 against 0.62 -- now that the bands
+                   * no longer collide and can be seen at all, plus the word
+                   * `optional` under the stage name. A hairline in the fill's
+                   * own hue defines the edge without competing with it. */
+                  stroke={`var(--chart-funnel-${src.ramp})`}
+                  strokeOpacity={0.5}
+                  strokeWidth={0.75}
                 >
                   <title>
                     {from.event} → {to.event}: {formatCount(link.people)} people,{' '}
@@ -385,10 +552,16 @@ export function FunnelFlow(props: {
                   key={`node-${s.index}`}
                   data-testid={`flow-node-${s.index}`}
                   data-optional={optional ? 'true' : undefined}
-                  x={r(nodeLeft(node))}
+                  x={r(nodeLeft(node, model.slot))}
                   y={r(node.y)}
                   width={NODE_WIDTH}
                   height={r(node.height)}
+                  /* Rounded to a full cap, which only became possible once
+                   * the model was measured in pixels -- in the stretched
+                   * space this replaced, a radius rendered as an oval whose
+                   * shape changed with the card's width. Capped at half the
+                   * height so a node at the floor stays a shape. */
+                  rx={r(Math.min(NODE_RADIUS, node.height / 2))}
                   /* A solid ramp fill on EVERY node, optional included. The
                    * bars this replaced marked an optional step by painting
                    * it in the palest token and outlining it, because on one
@@ -406,7 +579,6 @@ export function FunnelFlow(props: {
                    * node an object rather than a darker patch of band. */
                   stroke="var(--lf-surface)"
                   strokeWidth={1.5}
-                  vectorEffect="non-scaling-stroke"
                 >
                   <title>
                     {s.event}
@@ -452,36 +624,43 @@ export function FunnelFlow(props: {
                    * Drawn on the node's exact box with a non-scaling stroke,
                    * the stroke straddles the edge and the clearance is equal
                    * on all four sides IN PIXELS, whatever the stretch. */
+                  /* A RING AROUND the node, not on its edge -- and that is
+                   * now possible where it was not before. Units are square,
+                   * so a fixed inset is the same distance on all four sides
+                   * and the mark can stand clear of the node instead of
+                   * straddling it. Clamped into the plot so a full-height
+                   * node's ring keeps its top and bottom edges. */
+                  const top = Math.max(0, node.y - SELECT_INSET)
+                  const bottom = Math.min(model.height, node.y + node.height + SELECT_INSET)
+                  const box = {
+                    x: r(nodeLeft(node, model.slot) - SELECT_INSET),
+                    y: r(top),
+                    width: NODE_WIDTH + SELECT_INSET * 2,
+                    height: r(bottom - top),
+                    rx: r(Math.min(NODE_RADIUS + SELECT_INSET, (bottom - top) / 2)),
+                  }
                   return (
                     <g key={`selected-${node.step}`}>
                       {/* TWO rings, and the outer one is not decoration. The
                        * mark has to read against whatever it traces, and stage
-                       * one is the darkest step of the ramp while `--primary`
+                       * one is the darkest step of the ramp while the accent
                        * is copper -- rendered, the single ring vanished into
                        * the node it was marking. A surface-coloured halo under
                        * a copper ring separates the mark from both the node and
                        * the band that starts immediately beside it. */}
                       <rect
-                        x={r(nodeLeft(node))}
-                        y={r(node.y)}
-                        width={NODE_WIDTH}
-                        height={r(node.height)}
+                        {...box}
                         fill="none"
                         stroke="var(--lf-surface)"
                         strokeWidth={5}
-                        vectorEffect="non-scaling-stroke"
                         pointerEvents="none"
                       />
                       <rect
                         data-testid={`flow-node-${(steps[node.step] as StepResult).index}-selected`}
-                        x={r(nodeLeft(node))}
-                        y={r(node.y)}
-                        width={NODE_WIDTH}
-                        height={r(node.height)}
+                        {...box}
                         fill="none"
                         stroke="var(--lf-accent)"
                         strokeWidth={2}
-                        vectorEffect="non-scaling-stroke"
                         pointerEvents="none"
                       />
                     </g>
@@ -531,7 +710,7 @@ export function FunnelFlow(props: {
                      * target instead of colouring beside it. */
                     className="absolute -translate-x-1/2 border-0 bg-transparent p-0 hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
                     style={{
-                      left: `${pct(nodeLeft(node) + NODE_WIDTH / 2)}%`,
+                      left: `${pct(nodeLeft(node, model.slot) + NODE_WIDTH / 2)}%`,
                       top: `${r(top)}px`,
                       height: `${r(height)}px`,
                       width: '28px',
@@ -568,20 +747,56 @@ export function FunnelFlow(props: {
            * separately would hear a row of bare numbers with nothing saying
            * which flow each belongs to. */}
           <div className="pointer-events-none absolute inset-0" aria-hidden="true">
+            {/* What each ribbon is, in words. The ribbon draws the size of
+             * the loss and fades out; the number is what an operator copies
+             * into a ticket, and without it the shape is a mood rather than
+             * a measurement. Placed at the ribbon's far end, where it has
+             * faded enough not to sit on top of its own fill. */}
+            {model.drops.map((drop: SankeyDrop) => {
+              const node = model.nodes[drop.node] as SankeyNode
+              const s = steps[drop.node] as StepResult
+              const x = nodeLeft(node, model.slot) + NODE_WIDTH + PEEL_DX
+              const y = drop.top + (drop.up ? -PEEL_DY : PEEL_DY) + drop.w / 2
+              return (
+                <span
+                  key={`drop-label-${s.index}`}
+                  data-testid={`flow-drop-${s.index}-label`}
+                  className="absolute -translate-y-1/2 whitespace-nowrap text-xs tabular-nums text-muted-foreground"
+                  style={{ left: `${pct(x)}%`, top: `${r(y)}px`, textShadow: HALO }}
+                >
+                  {formatCount(drop.people)} dropped
+                </span>
+              )
+            })}
             {model.links.map((link: SankeyLink) => {
               const src = model.nodes[link.from] as SankeyNode
               const dst = model.nodes[link.to] as SankeyNode
               const from = steps[link.from] as StepResult
               const to = steps[link.to] as StepResult
-              const x0 = nodeLeft(src) + NODE_WIDTH
-              const x1 = nodeLeft(dst)
+              const x0 = nodeLeft(src, model.slot) + NODE_WIDTH
+              const x1 = nodeLeft(dst, model.slot)
               const midY = (link.y0 + link.w0 / 2 + (link.y1 + link.w1 / 2)) / 2
               return (
                 <span
                   key={`rate-${from.index}-${to.index}`}
                   data-testid={`flow-rate-${from.index}-${to.index}`}
-                  className="absolute -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded-sm bg-background px-1 text-xs font-medium tabular-nums text-foreground"
-                  style={{ left: `${pct((x0 + x1) / 2)}%`, top: `${r(midY)}px` }}
+                  /* A HALO, not a chip. The chip this replaces was a
+                   * surface-coloured rectangle behind every label, which is
+                   * correct about contrast and wrong about what it looks
+                   * like: a row of little boxes floating over the plot reads
+                   * as tooltips someone forgot to dismiss. A halo puts the
+                   * same surface under the glyphs only, so the label sits ON
+                   * the band.
+                   *
+                   * `text-shadow` rather than `-webkit-text-stroke`, which
+                   * was tried: a text stroke paints OVER the glyph, thinning
+                   * it into an outline instead of backing it. */
+                  className="absolute -translate-x-1/2 -translate-y-1/2 whitespace-nowrap px-1 text-xs font-semibold tabular-nums text-foreground"
+                  style={{
+                    left: `${pct((x0 + x1) / 2)}%`,
+                    top: `${r(midY)}px`,
+                    textShadow: HALO,
+                  }}
                 >
                   {formatCount(link.people)} · {formatPercent(link.rate)}
                 </span>

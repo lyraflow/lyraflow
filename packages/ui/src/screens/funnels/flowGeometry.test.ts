@@ -6,7 +6,6 @@ import {
   barHeight,
   biggestLeak,
   branchSlots,
-  plotWidth,
   rampIndex,
   rampIndexes,
   spineSlots,
@@ -77,18 +76,6 @@ describe('rampIndex', () => {
         expect(r).toBeLessThanOrEqual(RAMP_STEPS)
       }
     }
-  })
-})
-
-describe('plotWidth', () => {
-  it('is one slot per step', () => {
-    expect(plotWidth(2)).toBe(200)
-    expect(plotWidth(8)).toBe(800)
-  })
-
-  it('never collapses to zero for an empty step list', () => {
-    // A zero-width viewBox makes the whole SVG undrawable rather than empty.
-    expect(plotWidth(0)).toBeGreaterThan(0)
   })
 })
 

@@ -177,17 +177,31 @@ function tilesEveryNodeEdge(links: readonly [number, number][], nodeCount: numbe
   const bands = links.map(([from, to]) => band(from, to))
   expect(screen.getAllByTestId(/^flow-link-/)).toHaveLength(bands.length)
 
-  /** Bands stack DOWN FROM a node's top edge, disjoint, one gap apart.
+  /** Bands stack disjoint and flush against ONE edge of the node, with the
+   * drop-off taking whatever is left at the other.
    *
-   * FLUSH, and they no longer end at the node's bottom. Both are the design:
-   * a band is drawn at its own people count on the plot's single scale, so
-   * the space left under them is exactly the drop-off and any excess is
-   * exactly a double-count. A gap between them would add to the extent and
-   * manufacture an overflow where none exists. What this walk owns is that
-   * the renderer lays the model out faithfully -- top edge, no overlap, no
-   * space invented. The scale is pinned in `sankey.test.ts`. */
-  const spans = (edges: { start: number; thickness: number }[], node: ReturnType<typeof box>) => {
-    let cursor = node.y
+   * Flush, and not spanning the node: a band is drawn at its own people
+   * count on the plot's single scale, so the space beside them is exactly
+   * the drop-off and any excess is exactly a double count. A gap between
+   * them would add to the extent and manufacture an overflow where none
+   * exists.
+   *
+   * WHICH edge they anchor to is the thing this pins, and it is not
+   * cosmetic. A drop-off ribbon leaves a node away from the flow -- down off
+   * a required node, up off a branch node, which is itself lifted above the
+   * required line. So the drop takes the node's outward edge and the bands
+   * take the other: a required node's bands start at its top, a branch
+   * node's END at its foot. Anchoring both at the top sends a branch node's
+   * ribbon up THROUGH its own outgoing band and the bypass beneath it, which
+   * is the collision this redesign existed to remove. The scale itself is
+   * pinned in `sankey.test.ts`. */
+  const spans = (
+    edges: { start: number; thickness: number }[],
+    node: ReturnType<typeof box>,
+    anchor: 'top' | 'bottom',
+  ) => {
+    const total = edges.reduce((t, e) => t + e.thickness, 0)
+    let cursor = anchor === 'top' ? node.y : node.y + node.height - total
     for (const edge of edges) {
       // A zero-thickness band would let two of them claim one offset and
       // still stack, so the disjointness this walk asserts would mean nothing.
@@ -199,18 +213,24 @@ function tilesEveryNodeEdge(links: readonly [number, number][], nodeCount: numbe
 
   for (let index = 1; index <= nodeCount; index++) {
     const node = box(index)
+    const optional =
+      screen.getByTestId(`flow-node-${index}`).getAttribute('data-optional') === 'true'
     const out = bands.filter((b) => b.from === index)
     const into = bands.filter((b) => b.to === index)
     if (out.length > 0) {
       spans(
         out.map((b) => ({ start: b.y0, thickness: b.w0 })),
         node,
+        optional ? 'bottom' : 'top',
       )
     }
     if (into.length > 0) {
       spans(
         into.map((b) => ({ start: b.y1, thickness: b.w1 })),
         node,
+        // The INCOMING side always fills from the top: a drop-off is
+        // something that leaves a node, so it never displaces an arrival.
+        'top',
       )
     }
   }
@@ -313,31 +333,185 @@ describe('FunnelFlow', () => {
     expect(screen.queryByTestId('flow-step-1-where')).not.toBeInTheDocument()
   })
 
-  it('traces the selected node exactly, from the node’s own coordinates', () => {
-    // FOUND BY RENDERING, twice. The mark used to live on the HTML hit
+  it('draws a ribbon for every population that stops at a step', () => {
+    // A drop-off used to be nothing at all -- the space under a node's bands,
+    // and the reader was left to infer a number from an absence. On a step
+    // that loses a third of its traffic that absence is most of the node's
+    // height, and it read as a rendering fault. Reported.
+    render(<FunnelFlow result={BRANCHED} />)
+    const ribbon = screen.getByTestId('flow-drop-1')
+    expect(ribbon.getAttribute('d')).toMatch(/^M /)
+    // Its fill is the fade, never a flat colour: a ribbon that held its
+    // weight to the end would read as a path to somewhere.
+    expect(ribbon.getAttribute('fill')).toMatch(/^url\(#/)
+    // And the count is said in words, because a shape is a mood until it
+    // carries a number an operator can put in a ticket.
+    expect(screen.getByTestId('flow-drop-1-label').textContent).toMatch(/^\d+ dropped$/)
+  })
+
+  it('sends each ribbon away from the flow — down off a step, up off a branch', () => {
+    render(<FunnelFlow result={BRANCHED} />)
+    const ribbons = screen.getAllByTestId(/^flow-drop-\d+$/)
+    expect(ribbons.length).toBeGreaterThan(0)
+    for (const ribbon of ribbons) {
+      const index = ribbon.getAttribute('data-testid')?.replace('flow-drop-', '')
+      const optional =
+        screen.getByTestId(`flow-node-${index}`).getAttribute('data-optional') === 'true'
+      expect(ribbon.getAttribute('data-direction')).toBe(optional ? 'up' : 'down')
+    }
+    // Both directions have to actually occur, or the rule above is satisfied
+    // by a renderer that always says the same thing.
+    const dirs = ribbons.map((rb) => rb.getAttribute('data-direction'))
+    expect(dirs).toContain('up')
+    expect(dirs).toContain('down')
+    // And the PATH has to go where the attribute says. Asserting the label
+    // alone let a renderer that drew every ribbon downward pass -- found by
+    // mutation, and it is the failure that would actually reach a screen:
+    // the attribute is invisible and the geometry is the whole point.
+    for (const ribbon of ribbons) {
+      const ys = [...(ribbon.getAttribute('d') ?? '').matchAll(/-?[\d.]+ (-?[\d.]+)/g)].map((m) =>
+        Number(m[1]),
+      )
+      const [start, , far] = ys as [number, number, number]
+      if (ribbon.getAttribute('data-direction') === 'up') expect(far).toBeLessThan(start)
+      else expect(far).toBeGreaterThan(start)
+    }
+  })
+
+  it('gives no step the funnel ends on a ribbon', () => {
+    // Nobody can fail to do a step that does not exist.
+    render(<FunnelFlow result={BRANCHED} />)
+    expect(screen.queryByTestId(`flow-drop-${BRANCHED.steps.length}`)).not.toBeInTheDocument()
+  })
+
+  it('never dashes a band', () => {
+    // The optional legs used to be dashed, and the argument for it was sound
+    // -- an optional node borrows its branch point's ramp step, so several
+    // bands can share one colour, and texture is the channel ADR 006 leaves
+    // free. The result was still wrong: a dash tracing every edge of every
+    // optional band was the loudest thing on the chart and is what made it
+    // look unfinished. Reported twice. Weight carries it now.
+    render(<FunnelFlow result={BRANCHED} />)
+    for (const band of screen.getAllByTestId(/^flow-link-/)) {
+      expect(band.getAttribute('stroke-dasharray')).toBeNull()
+    }
+  })
+
+  it('caps every node, and never past half its own height', () => {
+    // Only possible because the model is measured in pixels: in the
+    // stretched space this replaced, a radius rendered as an oval whose
+    // shape changed with the card's width, which is why nodes were square.
+    render(<FunnelFlow result={BRANCHED} />)
+    for (const node of screen.getAllByTestId(/^flow-node-\d+$/)) {
+      const rx = Number(node.getAttribute('rx'))
+      const height = Number(node.getAttribute('height'))
+      const width = Number(node.getAttribute('width'))
+      expect(rx).toBeGreaterThan(0)
+      expect(rx).toBeLessThanOrEqual(Math.min(width / 2, height / 2) + 1e-9)
+    }
+  })
+
+  it('gives each plot its own gradient ids, so two funnels cannot swap fades', () => {
+    // A `defs` id is document-wide. Two of these on one screen sharing an id
+    // is a defect that only appears on the second one.
+    const { container: a } = render(<FunnelFlow result={BRANCHED} />)
+    const { container: b } = render(<FunnelFlow result={BRANCHED} />)
+    const ids = (root: Element) =>
+      Array.from(root.querySelectorAll('linearGradient')).map((g) => g.id)
+    // What the ribbons actually POINT AT, not only what the defs declare.
+    // Asserting unique ids alone let a renderer keep unique gradients and
+    // reference them by a shared name -- found by mutation, and it is the
+    // worse bug of the two: the second funnel silently paints with the
+    // first funnel's fade.
+    const refs = (root: Element) =>
+      Array.from(root.querySelectorAll('[data-testid^="flow-drop-"]'))
+        .map((el) => el.getAttribute('fill') ?? '')
+        .filter((f) => f.startsWith('url('))
+    expect(ids(a).length).toBeGreaterThan(0)
+    expect(refs(a).length).toBe(ids(a).length)
+    expect(ids(a).some((id) => ids(b).includes(id))).toBe(false)
+    expect(refs(a).some((ref) => refs(b).includes(ref))).toBe(false)
+    // Every reference resolves inside its OWN plot.
+    for (const ref of refs(a)) {
+      expect(ids(a)).toContain(ref.slice(5, -1))
+    }
+  })
+
+  it('backs every label on the plot with the surface, so it reads over any band', () => {
+    // A label lands wherever its band goes and bands overlap, so there is no
+    // one colour underneath to have measured against. This used to be a
+    // surface-coloured chip behind each label, which is correct about
+    // contrast and reads as a row of tooltips someone forgot to dismiss; a
+    // halo puts the same surface under the glyphs only. Without it the
+    // numbers disappear into the darker bands, which no other test would
+    // notice -- the text is present and correctly positioned either way.
+    render(<FunnelFlow result={BRANCHED} />)
+    for (const label of [
+      ...screen.getAllByTestId(/^flow-rate-/),
+      ...screen.getAllByTestId(/^flow-drop-\d+-label$/),
+    ]) {
+      expect((label as HTMLElement).style.textShadow).toContain('--lf-surface')
+    }
+  })
+
+  it('draws a node the same width however many stages share the plot', () => {
+    // A node used to be a share of its slot, so it was a sliver on a long
+    // funnel and a slab on a short one. A pixel width is what makes the cap
+    // a real radius and the selection inset square, and it is invisible
+    // until you put two funnels of different lengths side by side.
+    const short = result({
+      entered: 10,
+      converted: 5,
+      conversion_rate: 0.5,
+      steps: [
+        step({ index: 1, event: 'a', people: 10, from_previous: 1, from_start: 1 }),
+        step({ index: 2, event: 'b', people: 5, from_previous: 0.5, from_start: 0.5 }),
+      ],
+    })
+    const widthOf = (container: Element) =>
+      Number(container.querySelector('[data-testid="flow-node-1"]')?.getAttribute('width'))
+    const { container: a } = render(<FunnelFlow result={short} />)
+    const { container: b } = render(<FunnelFlow result={BRANCHED} />)
+    expect(widthOf(a)).toBeGreaterThan(0)
+    expect(widthOf(b)).toBe(widthOf(a))
+  })
+
+  it('rings the selected node with equal clearance on all four sides', () => {
+    // FOUND BY RENDERING, three times, and the shape of the fix changed each
+    // time the coordinate space did. It began as an outline on the HTML hit
     // target, which is a fixed 28px because a pointer needs more room than a
-    // 12-unit node -- and the plot stretches horizontally, so at most card
-    // widths the node draws WIDER than that and the outline sat inside the
-    // bar it was marking. Moved into the SVG it was then given three units of
-    // padding, which is NOT square here: `preserveAspectRatio` is `none`, so
-    // those three units drew about fifteen pixels of clearance beside the bar
-    // against three above it, and on a full-height node the padded top edge
-    // fell outside the viewport and was clipped away entirely.
+    // node -- the plot stretched horizontally, so at most card widths the
+    // node drew WIDER than that and the mark sat inside the bar. Moved into
+    // the SVG and padded by three units, the padding was not square: a unit
+    // was worth about five times as much horizontally as vertically, so it
+    // drew fifteen pixels of clearance beside the bar against three above,
+    // and on a full-height node the padded top fell outside the viewport and
+    // was clipped, leaving two vertical lines with nothing closing them.
     //
-    // So the mark is the node's box, to the unit, on all four attributes --
-    // equality, not a tolerance around a padding. The clearance comes from a
-    // non-scaling stroke straddling the edge, which is equal in PIXELS
-    // whatever the stretch, and no arithmetic here can drift out of true.
+    // The model is measured in pixels now, so a fixed inset IS square, and
+    // this asserts the clearance rather than the coordinates: equal on every
+    // side, and the same number on both axes. A stretched space cannot
+    // satisfy that, which is what makes it the right thing to pin.
     render(<FunnelFlow result={BRANCHED} selectedStep={2} onSelectStep={vi.fn()} />)
     const node = screen.getByTestId('flow-node-2')
     const mark = screen.getByTestId('flow-node-2-selected')
     const n = (el: Element, a: string) => Number(el.getAttribute(a))
-    for (const a of ['x', 'y', 'width', 'height']) {
-      expect(n(mark, a)).toBe(n(node, a))
-    }
-    // And the clearance is the stroke, not geometry -- a scaling stroke would
-    // be five times thicker on the vertical edges than the horizontal ones.
-    expect(mark.getAttribute('vector-effect')).toBe('non-scaling-stroke')
+    const left = n(node, 'x') - n(mark, 'x')
+    const right = n(mark, 'x') + n(mark, 'width') - (n(node, 'x') + n(node, 'width'))
+    const above = n(node, 'y') - n(mark, 'y')
+    const below = n(mark, 'y') + n(mark, 'height') - (n(node, 'y') + n(node, 'height'))
+    expect(left).toBeGreaterThan(0)
+    for (const side of [right, above, below]) expect(side).toBeCloseTo(left, 5)
+  })
+
+  it('rounds the selection ring to follow the node’s own cap', () => {
+    // A square ring around a pill traces a shape the node does not have.
+    render(<FunnelFlow result={BRANCHED} selectedStep={2} onSelectStep={vi.fn()} />)
+    const node = screen.getByTestId('flow-node-2')
+    const mark = screen.getByTestId('flow-node-2-selected')
+    const n = (el: Element, a: string) => Number(el.getAttribute(a))
+    expect(n(node, 'rx')).toBeGreaterThan(0)
+    expect(n(mark, 'rx')).toBeGreaterThan(n(node, 'rx'))
   })
 
   it('marks only the selected node, and nothing when none is selected', () => {

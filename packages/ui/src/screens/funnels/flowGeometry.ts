@@ -1,20 +1,6 @@
 import type { StepResult } from '../../api/types.js'
 
 /**
- * The plot's own coordinate space, in viewBox units.
- *
- * Each step owns a slot `SLOT_WIDTH` wide. `sankey.ts` places every node at
- * its slot and spans each link across the gap between two of them;
- * `FunnelFlow` renders that model and computes no geometry of its own.
- *
- * Slots rather than measured pixels because the text above and below the
- * plot is HTML in a `repeat(N, 1fr)` grid -- glyphs stay crisp and
- * unscaled, geometry scales, and neither needs to measure the other at
- * runtime.
- */
-export const SLOT_WIDTH = 100
-
-/**
  * The height of a node every entrant reached, in viewBox units.
  *
  * Deliberately NOT exported. It used to be `PLOT_HEIGHT`, and it was the
@@ -172,11 +158,6 @@ export function barHeight(people: number, entered: number): number {
 export function scaleHeight(people: number, entered: number): number {
   if (entered <= 0) return 0
   return Math.round((people / entered) * BAR_SCALE * 100) / 100
-}
-
-/** The plot's total width in viewBox units. */
-export function plotWidth(totalSteps: number): number {
-  return Math.max(1, totalSteps) * SLOT_WIDTH
 }
 
 /**
