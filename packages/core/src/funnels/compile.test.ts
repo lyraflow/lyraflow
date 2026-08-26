@@ -517,7 +517,10 @@ describe('optional steps', () => {
 
   it('emits one branch aggregate per optional step', () => {
     const q = compileFunnel({ ...base, definition: withOptional })
-    expect((q.sql.match(/windowFunnel/g) ?? []).length).toBe(2)
+    // Counting `branch_` aggregates, NOT every windowFunnel in the query.
+    // The total was a proxy for this and broke the moment a second chain per
+    // optional step arrived; it would break again on the next one.
+    expect((q.sql.match(/AS branch_\d/g) ?? []).length).toBe(1)
     expect(q.sql).toContain('AS branch_0')
     expect(q.sql).not.toContain('AS branch_1')
   })
