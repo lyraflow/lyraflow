@@ -13,6 +13,7 @@ import type { Cursor } from '../segments/cursor.js'
 import { Params, chDateTime } from '../segments/params.js'
 import { attributeColumns, wherePredicate } from '../segments/predicates.js'
 import type { FunnelDefinition, FunnelStep } from './ast.js'
+import { funnelSpine } from './spine.js'
 import { funnelCostWarnings, validateFunnel, validateRange } from './validate.js'
 
 /**
@@ -103,10 +104,21 @@ export function compileFunnel(opts: {
    * `person_count`, uncursored and unpaged, for a caller that must compute a
    * count in the SAME request as the page rather than reuse a run's own
    * `steps[i].people` -- which was computed at a different instant.
+   *
+   * `'skipped'` is optional steps ONLY: reached the required step this one
+   * branches off, and did not do this one inside the window. It is the
+   * complement of `'reached'` at that branch point, and it is the list an
+   * operator actually chases -- "who started a subscription and never
+   * submitted a video".
+   *
+   * `'dropped'` on an optional step, and `'skipped'` on a required one, are
+   * both refused by the route rather than answered approximately: "stopped
+   * exactly at a step that is not on the chain" is not a population, and a
+   * caller shown one would read it as `'skipped'`.
    */
   peopleAt?: {
     step: number
-    mode: 'reached' | 'dropped'
+    mode: 'reached' | 'dropped' | 'skipped'
     select: 'ids' | 'members' | 'count'
     cursor?: Cursor
   }
@@ -205,6 +217,23 @@ export function compileFunnel(opts: {
     // a funnel the caller did not ask about.
     return i === 0 ? `(${cond} AND timestamp < ${until})` : cond
   })
+  // The required steps are the chain that conversion is measured over; each
+  // optional step gets a chain of its own -- the required steps before it,
+  // then itself. Every chain starts at `conditions[<first required>]`, which
+  // carries the entry bound, so no chain can be entered outside the range.
+  //
+  // `validateFunnel` above has already refused an optional first step, so
+  // that first required step is `conditions[0]`.
+  const spine = funnelSpine(definition.steps)
+  const spineConditions = spine.required.map((i) => conditions[i] as string)
+  const branchChains = spine.optional.map((k) => {
+    const rank = spine.placements[k]?.spineRank ?? 0
+    return [
+      ...spine.required.slice(0, rank).map((i) => conditions[i] as string),
+      conditions[k] as string,
+    ]
+  })
+
   // Built after the conditions, which is what populates `eventParams`.
   const eventList = [...eventParams.values()].join(', ')
   // MILLISECONDS, not seconds, and not the DateTime64 column itself.
@@ -246,6 +275,21 @@ export function compileFunnel(opts: {
     ? `\n  AND ${RESOLVED_PERSON_ALIAS} IN (${segmentPersonSql})`
     : ''
 
+  // One aggregate per optional step, ALWAYS emitted -- including on a
+  // people-list request that reads only one of them.
+  //
+  // Emitting only what a projection needs would save some per-person CPU and
+  // reintroduce the seam this block exists to close: a second spelling of
+  // the per-person pass is how one of them ends up without the suppression
+  // filter. The cost is bounded by MAX_OPTIONAL_STEPS and is aggregate work
+  // over rows already read, never another scan.
+  const branchSelects = branchChains
+    .map(
+      (chain, j) =>
+        `\n    windowFunnel(${windowParam})(toUInt64(toUnixTimestamp64Milli(timestamp)), ${chain.join(', ')}) AS branch_${j},`,
+    )
+    .join('')
+
   /**
    * The per-person pass, shared by both projections above it. Written once so
    * the histogram and the drop-off list cannot disagree about who reached
@@ -255,8 +299,8 @@ export function compileFunnel(opts: {
   const perPerson = `
   SELECT
     ${resolved} AS ${RESOLVED_PERSON_ALIAS},
-    windowFunnel(${windowParam})(toUInt64(toUnixTimestamp64Milli(timestamp)), ${conditions.join(', ')}) AS level,
-    minIf(timestamp, ${conditions[0]}) AS entered_at
+    windowFunnel(${windowParam})(toUInt64(toUnixTimestamp64Milli(timestamp)), ${spineConditions.join(', ')}) AS level,${branchSelects}
+    minIf(timestamp, ${spineConditions[0]}) AS entered_at
   FROM (
     SELECT project_id, anonymous_id, user_id, timestamp, event_name,
            properties, properties_num, event_id${attributeSelect}
@@ -286,11 +330,28 @@ export function compileFunnel(opts: {
       : ''
 
   if (people) {
-    const level = params.add(people.step, 'UInt32')
-    // `>=` for "reached", `=` for "stopped here". The two differ by a factor
-    // of three on a real funnel, so this is the one line where a wrong
-    // operator answers a different question with full confidence.
-    const levelPredicate = people.mode === 'reached' ? `level >= ${level}` : `level = ${level}`
+    const placement = spine.placements[people.step - 1]
+
+    // Every `params.add` sits INSIDE the branch that reads it. A placeholder
+    // the SQL never references is a bound value the next reader has to prove
+    // is harmless, and the two paths here bind different things.
+    let levelPredicate: string
+    if (placement?.branch !== undefined) {
+      const branchLevel = params.add(placement.branch.level, 'UInt32')
+      levelPredicate =
+        people.mode === 'skipped'
+          ? `level >= ${params.add(placement.spineRank, 'UInt32')} AND branch_${placement.branch.index} < ${branchLevel}`
+          : `branch_${placement.branch.index} >= ${branchLevel}`
+    } else {
+      // BY SPINE RANK, never by definition position. The two agree exactly
+      // until an optional step sits before this one, so binding the position
+      // compiles a query that runs, returns nobody, and looks fine.
+      const level = params.add(placement?.spineRank ?? people.step, 'UInt32')
+      // `>=` for "reached", `=` for "stopped here". The two differ by a
+      // factor of three on a real funnel, so this is the one line where a
+      // wrong operator answers a different question with full confidence.
+      levelPredicate = people.mode === 'reached' ? `level >= ${level}` : `level = ${level}`
+    }
 
     if (people.select === 'count') {
       return {
@@ -345,10 +406,17 @@ LIMIT ${MEMBER_PAGE_SIZE}`,
     }
   }
 
+  const optionalCounts = spine.optional
+    .map((k, j) => {
+      const level = params.add(spine.placements[k]?.branch?.level ?? 1, 'UInt32')
+      return `,\n  countIf(branch_${j} >= ${level}) AS optional_${j}`
+    })
+    .join('')
+
   const sql = `SELECT
   level,
   count() AS people,
-  countIf(entered_at > ${partialBoundary}) AS partial
+  countIf(entered_at > ${partialBoundary}) AS partial${optionalCounts}
 FROM (${perPerson})
 WHERE level > 0${segmentFilter}
 GROUP BY level`

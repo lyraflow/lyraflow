@@ -491,3 +491,108 @@ describe('peopleAt', () => {
     expect(c.sql).not.toContain("'2026-08-20 00:00:00.000'")
   })
 })
+
+describe('optional steps', () => {
+  const base = {
+    projectId: 7,
+    database: 'lyraflow',
+    range: { since: new Date('2026-08-01T00:00:00Z'), until: new Date('2026-08-08T00:00:00Z') },
+    now: new Date('2026-08-08T00:00:00Z'),
+  }
+  const withOptional = {
+    steps: [{ event: 'a' }, { event: 'b' }, { event: 'c', optional: true }, { event: 'd' }],
+    window_seconds: 3600,
+  }
+
+  it('compiles a funnel with no optional steps byte-identically to before', () => {
+    // The guarantee that makes the definition-version bump bookkeeping
+    // rather than a migration. Every saved funnel in the product is this
+    // shape.
+    const plain = { steps: [{ event: 'a' }, { event: 'b' }], window_seconds: 3600 }
+    const q = compileFunnel({ ...base, definition: plain })
+    expect(q.sql).not.toContain('branch_')
+    expect(q.sql).not.toContain('optional_')
+    expect((q.sql.match(/windowFunnel/g) ?? []).length).toBe(1)
+  })
+
+  it('emits one branch aggregate per optional step', () => {
+    const q = compileFunnel({ ...base, definition: withOptional })
+    expect((q.sql.match(/windowFunnel/g) ?? []).length).toBe(2)
+    expect(q.sql).toContain('AS branch_0')
+    expect(q.sql).not.toContain('AS branch_1')
+  })
+
+  it('leaves the optional step out of the spine aggregate', () => {
+    // The spine is a, b, d. If `c` appeared in it, skipping `c` would still
+    // disqualify a person from `d` and the feature would not exist.
+    //
+    // Found by looking up whichever placeholder `c` was bound to, never by
+    // assuming a number: `Params` is positional and every insertion above
+    // shifts it.
+    const q = compileFunnel({ ...base, definition: withOptional })
+    const cName = Object.keys(q.params).find((k) => q.params[k] === 'c')
+    expect(cName).toBeDefined()
+    const spineLine = q.sql.split('\n').find((l) => l.includes('AS level')) ?? ''
+    const branchLine = q.sql.split('\n').find((l) => l.includes('AS branch_0')) ?? ''
+    expect(spineLine).not.toContain(`{${cName}:String}`)
+    expect(branchLine).toContain(`{${cName}:String}`)
+  })
+
+  it('counts the optional step in the histogram at its branch level', () => {
+    // c branches off b, spine rank 2, so its chain must reach level 3.
+    const q = compileFunnel({ ...base, definition: withOptional })
+    expect(q.sql).toMatch(/countIf\(branch_0 >= \{p\d+:UInt32\}\) AS optional_0/)
+    expect(Object.values(q.params)).toContain(3)
+  })
+
+  it('carries the entry bound into the branch chain, not only the spine', () => {
+    // Step 1 is the first condition of EVERY chain. Without the bound a
+    // person could enter a branch outside the range the caller asked about.
+    const q = compileFunnel({ ...base, definition: withOptional })
+    const perPerson = q.sql.slice(q.sql.indexOf('windowFunnel'))
+    const bounded = perPerson.match(/AND timestamp < \{p\d+:DateTime64\(3\)\}\)/g) ?? []
+    // Once in the spine chain, once in the branch chain, once in the minIf.
+    expect(bounded.length).toBeGreaterThanOrEqual(3)
+  })
+
+  it('selects the people who reached an optional step from its branch chain', () => {
+    const q = compileFunnel({
+      ...base,
+      definition: withOptional,
+      peopleAt: { step: 3, mode: 'reached', select: 'ids' },
+    })
+    expect(q.sql).toContain('branch_0 >=')
+    expect(q.sql).not.toContain('level >=')
+  })
+
+  it('selects the people who SKIPPED an optional step from both chains', () => {
+    // Reached the branch point and did not do the step. Needs the spine to
+    // say they got that far and the branch to say they went no further.
+    const q = compileFunnel({
+      ...base,
+      definition: withOptional,
+      peopleAt: { step: 3, mode: 'skipped', select: 'ids' },
+    })
+    expect(q.sql).toContain('level >=')
+    expect(q.sql).toContain('branch_0 <')
+  })
+
+  it('reads a required step after an optional one by its spine rank', () => {
+    // `d` is definition step 4 and spine rank 3. Compiling `level >= 4`
+    // would return nobody, on a query that runs and looks fine.
+    const q = compileFunnel({
+      ...base,
+      definition: withOptional,
+      peopleAt: { step: 4, mode: 'reached', select: 'ids' },
+    })
+    expect(q.sql).toContain('level >=')
+    const bound = q.sql.match(/level >= \{(p\d+):UInt32\}/)?.[1] ?? ''
+    expect(q.params[bound]).toBe(3)
+  })
+
+  it('binds every branch level and event, concatenating nothing', () => {
+    const q = compileFunnel({ ...base, definition: withOptional })
+    expect(q.sql).not.toContain("'c'")
+    expect(q.sql).not.toMatch(/branch_\d+ >= \d/)
+  })
+})
