@@ -640,6 +640,44 @@ describe('optional steps', () => {
     expect(at('c')).toBeLessThan(at('d'))
   })
 
+  it('rejoins the NEXT required step, not the LAST one', () => {
+    // `withOptional` above -- and every other optional fixture in the repo --
+    // places the optional step so that the required step it rejoins IS the
+    // funnel's last required step, which makes `spine.required[rank]` and
+    // `spine.required.at(-1)` indistinguishable. Here they are not: `b`
+    // branches off `a` and rejoins `c`, with `d` still to come. Reading the
+    // last required step instead would build the chain `a, b, d` -- a query
+    // that runs, and answers "went on to CONVERT through b" while the
+    // response calls it `continued`.
+    const rejoinsEarly = {
+      steps: [{ event: 'a' }, { event: 'b', optional: true }, { event: 'c' }, { event: 'd' }],
+      window_seconds: 3600,
+    }
+    const q = compileFunnel({ ...base, definition: rejoinsEarly })
+    const line = q.sql.split('\n').find((l) => l.includes('AS full_0')) ?? ''
+    // Position, not presence -- same reasoning as the ordering test above:
+    // `windowFunnel` counts conditions matched IN SEQUENCE.
+    const at = (event: string) => {
+      const name = Object.keys(q.params).find((key) => q.params[key] === event)
+      expect(name).toBeDefined()
+      const i = line.indexOf(`{${name}:String}`)
+      expect(i).toBeGreaterThanOrEqual(0)
+      return i
+    }
+    expect(at('a')).toBeLessThan(at('b'))
+    expect(at('b')).toBeLessThan(at('c'))
+    // `d` is a required step of this funnel and so has a placeholder of its
+    // own; it must not appear on THIS chain.
+    const dName = Object.keys(q.params).find((key) => q.params[key] === 'd')
+    expect(dName).toBeDefined()
+    expect(line).not.toContain(`{${dName}:String}`)
+    // Three conditions -- a, b, c -- so `continued_0` is bound at 3, not at
+    // the 4 a rejoin on the last required step would make it.
+    const m = q.sql.match(/countIf\(full_0 >= \{(p\d+):UInt32\}\) AS continued_0/)
+    expect(m).not.toBeNull()
+    expect(q.params[m?.[1] ?? '']).toBe(3)
+  })
+
   it('counts continued at the full chain length, bound as a value', () => {
     const q = compileFunnel({ ...base, definition: withOptional })
     const m = q.sql.match(/countIf\(full_0 >= \{(p\d+):UInt32\}\) AS continued_0/)
