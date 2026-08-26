@@ -18,16 +18,28 @@ export function RejectionsTable(props: {
    * none accepted". `Feed` derives this from the poll's own null-ness.
    */
   loadFailed?: boolean
+  /** The window these were fetched over, named as the picker names it. Same
+   * job as `AcceptedTable`'s: this table's empty state was a claim about
+   * everything ever received, made by a query bounded at 24 hours. */
+  rangeLabel?: string
 }) {
-  const { rejections, loadFailed = false } = props
+  const { rejections, loadFailed = false, rangeLabel } = props
 
   if (rejections.length === 0) {
     // See `AcceptedTable`: the "could not load" message lives in `Feed`'s
     // banner, once, rather than repeated (and risking drifting) here.
     if (loadFailed) return null
+    /* Bounded to the window, like the accepted tab beside it. "Everything
+     * received has been accepted" was a claim about the project's whole
+     * history from a query that saw one day of it -- and a rejection an
+     * operator is hunting is, by definition, one they have not seen yet. */
     return (
-      <p className="px-2 py-10 text-center text-sm text-muted-foreground">
-        No rejections. Everything received has been accepted.
+      <p
+        data-testid="rejected-empty"
+        className="px-2 py-10 text-center text-sm text-muted-foreground"
+      >
+        No rejections{rangeLabel == null ? '' : ` in the ${rangeLabel.toLowerCase()}`}. Everything
+        received in this window has been accepted.
       </p>
     )
   }

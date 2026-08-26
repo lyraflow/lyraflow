@@ -4,11 +4,11 @@ import type { CostWarning } from '@lyraflow/core/segments/validate.js'
 import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, X } from 'lucide-react'
 import type { ApiClient } from '../../api/client.js'
 import type { FunnelStep } from '../../api/types.js'
+import { EventCombobox } from '../../components/EventCombobox.js'
 import { Button } from '../../components/ui/button.js'
 import { newCondition } from '../segments/GroupCard.js'
 import { TreeEditor } from '../segments/TreeEditor.js'
 import { WherePredicates } from '../segments/WherePredicates.js'
-import { EventCombobox } from './EventCombobox.js'
 import { stepSummary } from './stepSummary.js'
 
 /** A funnel needs at least two steps to mean anything -- one step has no

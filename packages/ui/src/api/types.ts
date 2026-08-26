@@ -227,6 +227,11 @@ export interface StatsQuery {
   interval?: '1m' | '1h' | '1d'
   since?: string
   until?: string
+  /** One event name. The same field `EventsQuery` carries, because the feed
+   * draws this aggregate directly above the table that query fills and a
+   * filter reaching only one of them would put two different questions on
+   * one screen. */
+  event?: string
 }
 export interface RejectionsQuery {
   limit?: number

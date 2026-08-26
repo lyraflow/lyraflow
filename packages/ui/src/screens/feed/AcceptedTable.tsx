@@ -129,8 +129,16 @@ export function AcceptedTable(props: {
    * even once this table has genuinely-confirmed-empty data to show later.
    */
   loadFailed?: boolean
+  /** The window the rows were fetched over, named the way the picker names
+   * it, so the empty state can say what it actually looked at. Optional:
+   * the table renders correctly without one and simply says less. */
+  rangeLabel?: string
+  /** The event name the feed is filtered to, or `undefined` for no filter.
+   * An empty result under a filter has a different remedy from an empty
+   * result without one, and the copy has to offer the right one. */
+  filteredEvent?: string
 }) {
-  const { events, loadFailed = false } = props
+  const { events, loadFailed = false, rangeLabel, filteredEvent } = props
 
   // Keyed by `event_id`, never by row index: this table is re-rendered from
   // a fresh poll every few seconds and a new event shifts every index down
@@ -147,10 +155,33 @@ export function AcceptedTable(props: {
     // here would either duplicate that banner's words or, worse, drift
     // from them over time.
     if (loadFailed) return null
+    /* NAMES THE WINDOW, AND NEVER SAYS "yet".
+     *
+     * This used to read "No events yet. Send one and it will show up here
+     * within a few seconds." -- a claim about the PROJECT, made by a query
+     * that only ever looked at one window. Reported by an operator with
+     * plenty of data whose last event was eight days old: the screen told
+     * him he had none, and the fix he needed was to widen the range, which
+     * the sentence gave him no reason to think existed.
+     *
+     * Distinguishing "nothing in this window" from "nothing ever" needs a
+     * second, unbounded query, and an unbounded query is what this screen's
+     * range control exists to avoid. So it says the true, narrower thing. */
     return (
-      <p className="px-2 py-10 text-center text-sm text-muted-foreground">
-        No events yet. Send one and it will show up here within a few seconds.
-      </p>
+      <div className="px-2 py-10 text-center text-sm text-muted-foreground">
+        <p data-testid="accepted-empty">
+          No events{filteredEvent == null ? '' : ` named ${filteredEvent}`}
+          {rangeLabel == null
+            ? ''
+            : ` in the ${rangeLabel.toLowerCase().replace(/^last /, 'last ')}`}
+          .
+        </p>
+        <p className="mt-1">
+          {filteredEvent == null
+            ? 'Try a wider range, or send an event and it will appear here within a few seconds.'
+            : 'Try a wider range, or clear the filter.'}
+        </p>
+      </div>
     )
   }
 

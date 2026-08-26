@@ -5,8 +5,24 @@ import { formatBucketTime } from './format.js'
 const CHART_HEIGHT_PX = 56
 const MIN_BAR_HEIGHT_PX = 2
 
-/** Matches the `interval: '1m'` Feed always requests for this chart. */
-const BUCKET_MS = 60_000
+/**
+ * How wide one bucket is, per resolution the stats route can return.
+ *
+ * This chart used to assume `1m` and nothing else, because the feed always
+ * asked for sixty minutes at minute resolution. Once the range became a
+ * choice that assumption became a crash: a 90-day window zero-filled by the
+ * minute is 129,600 buckets, `Math.max(0, ...buckets)` spread that many
+ * arguments onto the stack, and the screen died with a `RangeError` rather
+ * than drawing anything. Found by widening the range in a test, not by
+ * reading the code.
+ */
+const BUCKET_MS_BY_INTERVAL = {
+  '1m': 60_000,
+  '1h': 60 * 60_000,
+  '1d': 24 * 60 * 60_000,
+} as const
+
+export type SparklineInterval = keyof typeof BUCKET_MS_BY_INTERVAL
 
 /**
  * Fills every minute between `since` and `until` with a zero bucket when
@@ -20,12 +36,17 @@ const BUCKET_MS = 60_000
  * bucket boundary ClickHouse's own `toStartOfInterval` produces, so a
  * returned bucket's ISO string always finds its slot in the map.
  */
-function zeroFill(buckets: StatsBucket[], since: string, until: string): StatsBucket[] {
+function zeroFill(
+  buckets: StatsBucket[],
+  since: string,
+  until: string,
+  bucketMs: number,
+): StatsBucket[] {
   const byBucket = new Map(buckets.map((b) => [b.bucket, b.events]))
-  const start = Math.floor(new Date(since).getTime() / BUCKET_MS) * BUCKET_MS
-  const end = Math.floor(new Date(until).getTime() / BUCKET_MS) * BUCKET_MS
+  const start = Math.floor(new Date(since).getTime() / bucketMs) * bucketMs
+  const end = Math.floor(new Date(until).getTime() / bucketMs) * bucketMs
   const out: StatsBucket[] = []
-  for (let t = start; t <= end; t += BUCKET_MS) {
+  for (let t = start; t <= end; t += bucketMs) {
     const iso = new Date(t).toISOString()
     out.push({ bucket: iso, events: byBucket.get(iso) ?? 0 })
   }
@@ -66,16 +87,37 @@ function readoutTransform(centrePercent: number): string {
  * before any poll has resolved, has neither -- that state falls back to
  * the raw (empty) `buckets` array, which correctly shows "No data yet".
  */
-export function Sparkline(props: { buckets: StatsBucket[]; since?: string; until?: string }) {
-  const { buckets: raw, since, until } = props
+export function Sparkline(props: {
+  buckets: StatsBucket[]
+  since?: string
+  until?: string
+  /** The resolution the buckets were requested at. Defaults to `1m`, which
+   * is what this chart assumed unconditionally before the feed's range
+   * became a choice. */
+  interval?: SparklineInterval
+}) {
+  const { buckets: raw, since, until, interval = '1m' } = props
+  const bucketMs = BUCKET_MS_BY_INTERVAL[interval]
+  const unit = interval === '1m' ? 'minute' : interval === '1h' ? 'hour' : 'day'
   const [hovered, setHovered] = useState<number | null>(null)
-  const buckets = since !== undefined && until !== undefined ? zeroFill(raw, since, until) : raw
+  const buckets =
+    since !== undefined && until !== undefined ? zeroFill(raw, since, until, bucketMs) : raw
 
   // The tallest bucket actually observed, which is what the peak label
   // reports; `scale` floors it at 1 only so a window of pure zeros cannot
   // divide by zero. Reporting `scale` as the peak would print "peak 1"
   // over an hour of silence.
-  const peak = Math.max(0, ...buckets.map((b) => b.events))
+  // `reduce`, never `Math.max(0, ...buckets)`: a spread passes one argument
+  // per bucket and overflows the stack once there are enough of them, which
+  // is how the 90-day window crashed the screen.
+  //
+  // BELT AND BRACES, and worth saying so plainly -- putting the spread back
+  // does NOT reproduce that crash and no test here fails for it. What fixes
+  // it is `interval`, which keeps the bucket count near a hundred instead of
+  // near a hundred thousand. Read this line as the guard and you might
+  // "simplify" the interval plumbing away, which is the change that actually
+  // breaks.
+  const peak = buckets.reduce((m, b) => (b.events > m ? b.events : m), 0)
   const scale = Math.max(1, peak)
   const total = buckets.reduce((sum, b) => sum + b.events, 0)
 
@@ -92,9 +134,9 @@ export function Sparkline(props: { buckets: StatsBucket[]; since?: string; until
   // `buckets.length` already equals the window's bucket count regardless
   // of how sparse the traffic was, so the label reads "over the last 60
   // minutes" identically through an outage and through steady traffic.
-  const windowMinutes =
+  const windowUnits =
     since !== undefined && until !== undefined
-      ? Math.round((new Date(until).getTime() - new Date(since).getTime()) / BUCKET_MS)
+      ? Math.round((new Date(until).getTime() - new Date(since).getTime()) / bucketMs)
       : buckets.length
 
   const active = hovered != null ? buckets[hovered] : undefined
@@ -142,7 +184,7 @@ export function Sparkline(props: { buckets: StatsBucket[]; since?: string; until
             className="flex items-end gap-px border-border border-b"
             style={{ height: CHART_HEIGHT_PX }}
             role="img"
-            aria-label={`Events per minute over the last ${windowMinutes} minutes: ${total.toLocaleString()} events, peaking at ${peak.toLocaleString()} in one minute`}
+            aria-label={`Events per ${unit} over the last ${windowUnits} ${unit}s: ${total.toLocaleString()} events, peaking at ${peak.toLocaleString()} in one ${unit}`}
             onMouseLeave={() => setHovered(null)}
           >
             {buckets.map((bucket, index) => {

@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { userEvent } from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
@@ -6,6 +6,7 @@ import type { ApiClient } from '../api/client.js'
 import { ApiError } from '../api/client.js'
 import { ProjectProvider } from '../app/ProjectContext.js'
 import { DEFAULT_POLL_INTERVAL_MS, Feed } from './Feed.js'
+import { HISTORICAL_POLL_MS } from './feed/range.js'
 
 /** The fields `GET /v1/events` sends for an event that carried none of the
  * optional context -- spelled out once so a fixture below can override only
@@ -91,7 +92,17 @@ function fakeClient(over: { events?: typeof EVENTS } = {}) {
       next_offset: REJECTIONS.length,
     })),
     stats: vi.fn(async () => ({ buckets: BUCKETS })),
-  } as unknown as ApiClient & { events: Mock; rejections: Mock; stats: Mock }
+    /* The filter bar's event field reads the project's event catalogue on
+     * mount. Stubbed here rather than left off: without it every test on
+     * this screen dies inside `EventCombobox` with `client.schemaEvents is
+     * not a function`, which says nothing about the feed. */
+    schemaEvents: vi.fn(async () => ['signup', 'checkout']),
+  } as unknown as ApiClient & {
+    events: Mock
+    rejections: Mock
+    stats: Mock
+    schemaEvents: Mock
+  }
 }
 
 /** Succeeds once, then fails — for the "keeps its rows on error" test. */
@@ -310,12 +321,197 @@ describe('Feed', () => {
     expect(client.events.mock.calls[0]?.[1]).toHaveProperty('limit')
   })
 
-  // Matrix row 1 (no data, no error): the only case where "No events yet"
-  // is an honest thing to say.
+  describe('range and filter', () => {
+    const argsOf = (m: Mock, call = 0) => m.mock.calls[call]?.[1]
+
+    it('sends ONE window to all three polls', async () => {
+      // The defect this whole control set exists for. The events poll used
+      // to send no `since` at all and inherit the server's 24-hour default,
+      // the rejections poll asked for 24 hours explicitly, and the chart
+      // above them was hard-coded to sixty minutes -- so the chart and the
+      // table under it disagreed by a factor of twenty-four, permanently,
+      // with nothing on the screen saying so.
+      const client = fakeClient()
+      renderFeed({ client })
+      await waitFor(() => expect(client.stats).toHaveBeenCalled())
+      const e = argsOf(client.events)
+      const r = argsOf(client.rejections)
+      const st = argsOf(client.stats)
+      for (const q of [e, r, st]) {
+        expect(q.since).toEqual(expect.any(String))
+        expect(q.until).toEqual(expect.any(String))
+      }
+      // Within a second of each other: each poll resolves the window at its
+      // own call time, so they are not byte-identical and must not be
+      // asserted as such.
+      const spans = [e, r, st].map((q) => new Date(q.until).getTime() - new Date(q.since).getTime())
+      for (const span of spans) expect(Math.abs(span - 24 * 3_600_000)).toBeLessThan(2000)
+      // ...and it ENDS NOW. The span alone is satisfied by any 24 hours in
+      // history -- found by mutation, with a window frozen at the epoch --
+      // and a feed showing a correct-width window of last year is worse
+      // than one showing nothing.
+      for (const q of [e, r, st]) {
+        expect(Math.abs(Date.now() - new Date(q.until).getTime())).toBeLessThan(5000)
+      }
+    })
+
+    it('re-asks all three polls when the range changes, with the new span', async () => {
+      const client = fakeClient()
+      renderFeed({ client })
+      await waitFor(() => expect(client.stats).toHaveBeenCalled())
+
+      await userEvent.selectOptions(screen.getByTestId('feed-range'), '7d')
+
+      await waitFor(() => {
+        const q = client.events.mock.calls.at(-1)?.[1]
+        const span = new Date(q.until).getTime() - new Date(q.since).getTime()
+        expect(Math.abs(span - 7 * 24 * 3_600_000)).toBeLessThan(2000)
+      })
+      for (const m of [client.rejections, client.stats]) {
+        const q = m.mock.calls.at(-1)?.[1]
+        const span = new Date(q.until).getTime() - new Date(q.since).getTime()
+        expect(Math.abs(span - 7 * 24 * 3_600_000)).toBeLessThan(2000)
+      }
+    })
+
+    it('sends the resolution the chosen span requires, not a fixed one', async () => {
+      // `1m` at 24 hours is 1440 buckets against a server cap of 1000 -- an
+      // unconditional 400. The pairing is the reason range and interval are
+      // one choice rather than two.
+      const client = fakeClient()
+      renderFeed({ client })
+      await waitFor(() => expect(client.stats).toHaveBeenCalled())
+      expect(argsOf(client.stats).interval).toBe('1h')
+
+      await userEvent.selectOptions(screen.getByTestId('feed-range'), '1h')
+      await waitFor(() => expect(client.stats.mock.calls.at(-1)?.[1].interval).toBe('1m'))
+
+      await userEvent.selectOptions(screen.getByTestId('feed-range'), '90d')
+      await waitFor(() => expect(client.stats.mock.calls.at(-1)?.[1].interval).toBe('1d'))
+    })
+
+    it('sends the event filter to the chart AND the table, together', async () => {
+      // Half of this is why the server grew an `event` parameter on stats.
+      // A filter reaching only the table leaves a chart counting everything
+      // above a table showing one event, with nothing saying they were
+      // asked different questions.
+      const client = fakeClient()
+      renderFeed({ client })
+      await waitFor(() => expect(client.stats).toHaveBeenCalled())
+      expect(argsOf(client.events).event).toBeUndefined()
+      expect(argsOf(client.stats).event).toBeUndefined()
+
+      await userEvent.type(screen.getByLabelText(/filter by event/i), 'checkout')
+      await waitFor(() => expect(client.events.mock.calls.at(-1)?.[1].event).toBe('checkout'))
+      expect(client.stats.mock.calls.at(-1)?.[1].event).toBe('checkout')
+    })
+
+    it('never filters the REJECTED tab by event name', async () => {
+      // A rejection is a payload the server refused, and the reason may be
+      // that its event name is missing or unparseable. Filtering this tab by
+      // name would hide exactly the rows an operator opened it for.
+      const client = fakeClient()
+      renderFeed({ client })
+      await userEvent.type(screen.getByLabelText(/filter by event/i), 'checkout')
+      await waitFor(() => expect(client.events.mock.calls.at(-1)?.[1].event).toBe('checkout'))
+
+      // FORCING A FRESH REJECTIONS CALL, and without this the test proved
+      // nothing -- found by mutation. The rejections poll does not depend on
+      // the filter, so it does not re-fire when one is typed, and its last
+      // call was made before the filter existed. Changing the range is a
+      // dependency it DOES have, so this re-polls it with the filter set.
+      const callsBefore = client.rejections.mock.calls.length
+      await userEvent.selectOptions(screen.getByTestId('feed-range'), '7d')
+      await waitFor(() => expect(client.rejections.mock.calls.length).toBeGreaterThan(callsBefore))
+      for (const call of client.rejections.mock.calls) {
+        expect(call[1].event).toBeUndefined()
+      }
+    })
+
+    it('clears the filter back to no parameter, not to an empty name', async () => {
+      // `''` and "absent" are different requests: one asks for events named
+      // nothing, the other asks for all of them.
+      const client = fakeClient()
+      renderFeed({ client })
+      await userEvent.type(screen.getByLabelText(/filter by event/i), 'checkout')
+      await waitFor(() => expect(client.events.mock.calls.at(-1)?.[1].event).toBe('checkout'))
+      await userEvent.click(screen.getByTestId('feed-clear-event'))
+      await waitFor(() => expect(client.events.mock.calls.at(-1)?.[1].event).toBeUndefined())
+    })
+
+    it('slows the poll down on a range nobody can watch change', async () => {
+      // Re-scanning ninety days every three seconds asks an expensive
+      // question twenty times a minute and answers it with a number that
+      // cannot visibly move.
+      //
+      // `fireEvent.change` rather than `userEvent` OR a hand-assigned
+      // `select.value`, and both alternatives were tried. Assigning the
+      // value directly does not move the range at all: React tracks an
+      // input's value on the node and treats a direct assignment as no
+      // change, so the dispatched event is swallowed and a build ignoring
+      // `range.pollMs` passed -- found by mutation. `userEvent` goes through
+      // the tracker correctly but waits on real delays it cannot take from
+      // frozen timers, and hangs. `fireEvent` uses the native setter and
+      // needs no clock.
+      vi.useFakeTimers()
+      try {
+        const client = fakeClient()
+        renderFeed({ client })
+        await vi.advanceTimersByTimeAsync(0)
+        const live = client.events.mock.calls.length
+        await vi.advanceTimersByTimeAsync(DEFAULT_POLL_INTERVAL_MS * 2)
+        expect(client.events.mock.calls.length).toBeGreaterThan(live)
+
+        fireEvent.change(screen.getByTestId('feed-range'), { target: { value: '90d' } })
+        await vi.advanceTimersByTimeAsync(0)
+        // No `waitFor` inside a fake-timer block: it polls on the very
+        // timers that are frozen, so it can only ever time out. Advancing
+        // explicitly is both the fix and the more precise assertion.
+        expect(client.stats.mock.calls.at(-1)?.[1].interval).toBe('1d')
+
+        // The switch itself re-polls; the question is the cadence AFTER it.
+        const before = client.events.mock.calls.length
+        await vi.advanceTimersByTimeAsync(DEFAULT_POLL_INTERVAL_MS * 2)
+        expect(client.events.mock.calls.length).toBe(before)
+        // ...and it does still poll, just far less often -- a cadence of
+        // "never" would also satisfy the line above.
+        await vi.advanceTimersByTimeAsync(HISTORICAL_POLL_MS)
+        expect(client.events.mock.calls.length).toBeGreaterThan(before)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('names the window it looked at, and never claims the project is empty', async () => {
+      // THE REPORTED DEFECT. "No events yet" is a claim about the project,
+      // made by a query that only ever saw one window -- an operator with
+      // eight-day-old data was told he had none, with no hint that a range
+      // control was the remedy.
+      const client = fakeClient({ events: [] })
+      renderFeed({ client })
+      const empty = await screen.findByTestId('accepted-empty')
+      expect(empty.textContent).toMatch(/last 24 hours/i)
+      expect(empty.textContent).not.toMatch(/yet/i)
+      expect(screen.getByText(/wider range/i)).toBeInTheDocument()
+    })
+
+    it('names the FILTER too when one is set, and offers clearing it', async () => {
+      const client = fakeClient({ events: [] })
+      renderFeed({ client })
+      await userEvent.type(screen.getByLabelText(/filter by event/i), 'checkout')
+      await waitFor(() =>
+        expect(screen.getByTestId('accepted-empty').textContent).toMatch(/checkout/),
+      )
+      expect(screen.getByText(/clear the filter/i)).toBeInTheDocument()
+    })
+  })
+
+  // Matrix row 1 (no data, no error): the only case where an empty state is
+  // an honest thing to show at all. WHAT it says is pinned separately below.
   it('shows an empty state rather than a blank table', async () => {
     const client = fakeClient({ events: [] })
     renderFeed({ client })
-    expect(await screen.findByText(/no events yet/i)).toBeInTheDocument()
+    expect(await screen.findByTestId('accepted-empty')).toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     // Fix round 2 on #82: the asymmetric half of the badge fix. A confirmed
     // zero (the events poll succeeded and returned nothing) must show a

@@ -183,6 +183,21 @@ const StatsQuery = z.object({
   since: z.string().datetime().optional(),
   until: z.string().datetime().optional(),
   interval: z.enum(['1m', '1h', '1d']).default('1h'),
+  /**
+   * One event name, narrowing the aggregate the same way `Query.event`
+   * narrows the feed above -- same field, same ceiling, same semantics.
+   *
+   * It exists because the two are read TOGETHER. The feed screen draws this
+   * aggregate as a chart directly above the table `/v1/events` fills, so an
+   * event filter that reached only one of them would leave a chart counting
+   * everything above a table showing one event, with nothing on the screen
+   * saying they were answering different questions.
+   *
+   * Independent of `group_by`: filtering to one event and grouping by event
+   * name is a legitimate (if thin) request, and rejecting the combination
+   * would be a rule the caller has to learn for no reason.
+   */
+  event: z.string().max(128).optional(),
   group_by: z.literal('event_name').optional(),
 })
 
@@ -579,7 +594,7 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
 
     const q = StatsQuery.safeParse(req.query)
     if (!q.success) return reply.code(400).send({ error: 'invalid_query' })
-    const { since, until, interval, group_by } = q.data
+    const { since, until, interval, event, group_by } = q.data
     const groupBy = group_by === 'event_name'
 
     const sinceDate = since
@@ -616,6 +631,14 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
     // guard never counted, past the ceiling it was meant to enforce.
     const sinceClause = ` AND timestamp >= ${params.add(chDateTime(sinceDate), 'DateTime64(3)')}`
     const untilClause = ` AND timestamp <= ${params.add(chDateTime(untilDate), 'DateTime64(3)')}`
+    // INSIDE the inner select, beside the window clauses, not in the outer
+    // `WHERE` -- the inner select is what `LIMIT 1 BY project_id, event_id`
+    // dedups over, and its per-row memory is the ceiling this route's
+    // default-window comment measures. Narrowing there makes the filter cut
+    // the scan; narrowing outside would read every event in the window and
+    // throw most of them away, which is the shape that exhausts memory.
+    const eventClause =
+      event === undefined ? '' : ` AND event_name = ${params.add(event, 'String')}`
 
     // The identical suppression derivation the feed uses above:
     // `notSuppressedExpr` against each event's own timestamp, inside the
@@ -648,7 +671,7 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
       FROM (
         SELECT project_id, event_id, timestamp, event_name, anonymous_id, user_id
         FROM events
-        WHERE project_id = ${projectParam}${sinceClause}${untilClause}
+        WHERE project_id = ${projectParam}${sinceClause}${untilClause}${eventClause}
         LIMIT 1 BY project_id, event_id
       ) AS e
       WHERE ${notSuppressed}

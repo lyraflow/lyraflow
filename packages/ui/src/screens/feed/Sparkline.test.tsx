@@ -150,4 +150,65 @@ describe('Sparkline', () => {
     rerender(<Sparkline buckets={[]} since={bucketIso(0)} until={bucketIso(1)} />)
     expect(screen.getByText('peak 0')).toBeInTheDocument()
   })
+
+  it('charts a 90-day window without dying, and at day resolution', () => {
+    // FOUND BY WIDENING THE RANGE IN A TEST, not by reading the code. This
+    // chart assumed `1m` unconditionally, because the feed only ever asked
+    // for sixty minutes -- so a 90-day window zero-filled by the minute is
+    // 129,600 buckets, `Math.max(0, ...buckets)` spread that many arguments
+    // onto the stack, and the whole screen died with a `RangeError` instead
+    // of drawing anything. Not a rendering glitch: the Feed's own polling
+    // test failed a completely unrelated assertion because of it.
+    const until = new Date('2026-08-26T00:00:00.000Z')
+    const since = new Date(until.getTime() - 90 * 24 * 3_600_000)
+    render(
+      <Sparkline
+        buckets={[{ bucket: '2026-07-01T00:00:00.000Z', events: 4 }]}
+        since={since.toISOString()}
+        until={until.toISOString()}
+        interval="1d"
+      />,
+    )
+    const chart = screen.getByRole('img')
+    // 90 days, one bucket each -- not 129,600, and not the one bucket the
+    // API actually returned.
+    expect(chart.getAttribute('aria-label')).toMatch(/over the last 90 days/)
+    expect(chart.getAttribute('aria-label')).toMatch(/peaking at 4 in one day/)
+  })
+
+  it('names the unit it was actually asked for', () => {
+    // The label read "per minute ... in one minute" whatever the window
+    // was, which on a 7-day chart at hourly resolution is a false statement
+    // about every number beside it.
+    const until = new Date('2026-08-26T00:00:00.000Z')
+    const since = new Date(until.getTime() - 6 * 3_600_000)
+    render(
+      <Sparkline
+        buckets={[{ bucket: '2026-08-25T20:00:00.000Z', events: 2 }]}
+        since={since.toISOString()}
+        until={until.toISOString()}
+        interval="1h"
+      />,
+    )
+    const label = screen.getByRole('img').getAttribute('aria-label') ?? ''
+    expect(label).toMatch(/per hour over the last 6 hours/)
+    expect(label).not.toMatch(/minute/)
+  })
+
+  it('zero-fills on the requested interval’s own boundaries', () => {
+    // The fill has to land on the same boundary `toStartOfInterval`
+    // produces, or a returned bucket never finds its slot and reads as zero
+    // beside a phantom bar. Six hourly slots, one of which has the data.
+    const until = new Date('2026-08-26T05:30:00.000Z')
+    const since = new Date('2026-08-26T00:30:00.000Z')
+    render(
+      <Sparkline
+        buckets={[{ bucket: '2026-08-26T03:00:00.000Z', events: 9 }]}
+        since={since.toISOString()}
+        until={until.toISOString()}
+        interval="1h"
+      />,
+    )
+    expect(screen.getByRole('img').getAttribute('aria-label')).toMatch(/9 events, peaking at 9/)
+  })
 })

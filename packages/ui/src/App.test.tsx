@@ -26,6 +26,10 @@ function client(over: Partial<Record<string, unknown>> = {}) {
     events: vi.fn(async () => ({ events: [], next_cursor: null })),
     stats: vi.fn(async () => ({ buckets: [] })),
     rejections: vi.fn(async () => ({ rejections: [], has_more: false, next_offset: 0 })),
+    /* The feed's filter bar reads the project's event catalogue on mount.
+     * Without this every App test that lands on the feed dies inside
+     * `EventCombobox`, which says nothing about the App. */
+    schemaEvents: vi.fn(async () => []),
     project: vi.fn(async () => ({
       name: PLACEHOLDER_PROJECT.name,
       slug: PLACEHOLDER_PROJECT.slug,
