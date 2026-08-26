@@ -89,3 +89,108 @@ describe('summarise', () => {
     expect(summarise([], steps).steps.map((s) => s.index)).toEqual([1, 2, 3])
   })
 })
+
+describe('summarise with optional steps', () => {
+  // a -> b -> [c optional] -> d.  Spine is a, b, d.
+  const withOptional: FunnelStep[] = [
+    { event: 'a' },
+    { event: 'b' },
+    { event: 'c', optional: true },
+    { event: 'd' },
+  ]
+
+  it('measures conversion over the required steps only', () => {
+    // Spine levels: 10 stopped at a, 6 stopped at b, 4 reached d.
+    // Of those, 5 also did the optional c.
+    const rows: LevelRow[] = [
+      { level: 1, people: 10, partial: 0, optionalReached: [0] },
+      { level: 2, people: 6, partial: 0, optionalReached: [2] },
+      { level: 3, people: 4, partial: 0, optionalReached: [3] },
+    ]
+    const r = summarise(rows, withOptional)
+    expect(r.entered).toBe(20)
+    expect(r.converted).toBe(4)
+    expect(r.conversion_rate).toBeCloseTo(0.2)
+  })
+
+  it('does not let the optional step shift the required steps after it', () => {
+    // THE regression this guards. `d` reads spine rank 3, not definition
+    // position 4. Reading by position gives it 0 and the funnel silently
+    // reports nobody converting.
+    const rows: LevelRow[] = [
+      { level: 1, people: 10, partial: 0, optionalReached: [0] },
+      { level: 2, people: 6, partial: 0, optionalReached: [2] },
+      { level: 3, people: 4, partial: 0, optionalReached: [3] },
+    ]
+    const r = summarise(rows, withOptional)
+    expect(r.steps.map((s) => s.people)).toEqual([20, 10, 5, 4])
+    expect(r.steps[3]?.event).toBe('d')
+    expect(r.steps[3]?.people).toBe(4)
+  })
+
+  it('rates the step after an optional one against the required step before it', () => {
+    const rows: LevelRow[] = [
+      { level: 1, people: 10, partial: 0, optionalReached: [0] },
+      { level: 2, people: 6, partial: 0, optionalReached: [2] },
+      { level: 3, people: 4, partial: 0, optionalReached: [3] },
+    ]
+    const r = summarise(rows, withOptional)
+    // d is 4 of b's 10 -- NOT 4 of c's 5.
+    expect(r.steps[3]?.from_previous).toBeCloseTo(0.4)
+    expect(r.steps[3]?.from_start).toBeCloseTo(0.2)
+  })
+
+  it('rates an optional step against the required step it branches off', () => {
+    const rows: LevelRow[] = [
+      { level: 1, people: 10, partial: 0, optionalReached: [0] },
+      { level: 2, people: 6, partial: 0, optionalReached: [2] },
+      { level: 3, people: 4, partial: 0, optionalReached: [3] },
+    ]
+    const r = summarise(rows, withOptional)
+    expect(r.steps[2]?.optional).toBe(true)
+    expect(r.steps[2]?.people).toBe(5)
+    expect(r.steps[2]?.from_previous).toBeCloseTo(0.5) // 5 of b's 10
+    expect(r.steps[2]?.from_start).toBeCloseTo(0.25) // 5 of 20
+  })
+
+  it('reports skipped as the people at the branch point who did not do it', () => {
+    const rows: LevelRow[] = [
+      { level: 1, people: 10, partial: 0, optionalReached: [0] },
+      { level: 2, people: 6, partial: 0, optionalReached: [2] },
+      { level: 3, people: 4, partial: 0, optionalReached: [3] },
+    ]
+    const r = summarise(rows, withOptional)
+    expect(r.steps[2]?.skipped).toBe(5) // b's 10 minus c's 5
+  })
+
+  it('leaves required steps free of the optional-only fields', () => {
+    // A required step carrying `skipped: 0` would read as "nobody skipped
+    // this", which is a claim about a step that cannot be skipped.
+    const r = summarise([], withOptional)
+    expect(r.steps[0]?.optional).toBeUndefined()
+    expect(r.steps[0]?.skipped).toBeUndefined()
+    expect(r.steps[3]?.skipped).toBeUndefined()
+  })
+
+  it('folds a level beyond the SPINE length into the last required step', () => {
+    // The clamp is against the spine's length (3), not the definition's (4).
+    const rows: LevelRow[] = [{ level: 9, people: 2, partial: 0, optionalReached: [0] }]
+    const r = summarise(rows, withOptional)
+    expect(r.steps).toHaveLength(4)
+    expect(r.steps[3]?.people).toBe(2)
+  })
+
+  it('reports zeroes rather than NaN when nobody entered', () => {
+    const r = summarise([], withOptional)
+    expect(r.steps.every((s) => Number.isFinite(s.from_previous))).toBe(true)
+    expect(r.steps.every((s) => Number.isFinite(s.from_start))).toBe(true)
+    expect(r.steps[2]?.skipped).toBe(0)
+  })
+
+  it('treats an absent optionalReached as zero rather than NaN', () => {
+    // A row from a funnel with no optional steps omits the field entirely.
+    const r = summarise([{ level: 3, people: 4, partial: 0 }], withOptional)
+    expect(r.steps[2]?.people).toBe(0)
+    expect(Number.isFinite(r.steps[2]?.from_previous ?? Number.NaN)).toBe(true)
+  })
+})
