@@ -205,14 +205,16 @@ export function sankeyModel(steps: readonly StepResult[], entered: number): Sank
     inCursor.set(l.to, y1 + l.w1)
   }
 
-  // 5. overlap = max(0, sum of the touching links' people - node.people),
-  //    outgoing where a node has outgoing links, incoming for the last.
+  // 5. overlap = max(0, Σ(outgoing people) - people, Σ(incoming people) -
+  //    people), checked on BOTH sides always. A node with outgoing links can
+  //    still double-count on its incoming side -- whether a double-count is
+  //    visible must not depend on whether the node happens to be last.
   for (const [i, node] of nodes.entries()) {
     const out = links.filter((l) => l.from === i)
     const into = links.filter((l) => l.to === i)
-    const touching = out.length > 0 ? out : into
-    const sum = touching.reduce((t, l) => t + l.people, 0)
-    node.overlap = Math.max(0, sum - node.people)
+    const outSum = out.reduce((t, l) => t + l.people, 0)
+    const inSum = into.reduce((t, l) => t + l.people, 0)
+    node.overlap = Math.max(0, outSum - node.people, inSum - node.people)
   }
 
   // 6. height = the tallest extent any node reaches, so the caller sizes its

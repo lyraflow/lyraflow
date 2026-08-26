@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { StepResult } from '../../api/types.js'
-import { sankeyModel } from './sankey.js'
+import { SLOT_WIDTH, plotWidth } from './flowGeometry.js'
+import { type SankeyLink, type SankeyNode, sankeyModel } from './sankey.js'
 
 const step = (o: Partial<StepResult> & { index: number; event: string }): StepResult =>
   ({ people: 0, from_previous: 1, from_start: 1, ...o }) as StepResult
@@ -35,6 +36,9 @@ describe('sankeyModel', () => {
     expect(m.links.every((l) => l.kind === 'chain')).toBe(true)
     expect(m.links[0]).toMatchObject({ from: 0, to: 1, people: 80 })
     expect(m.links[1]).toMatchObject({ from: 1, to: 2, people: 40 })
+    // 'chain' takes the server's own from_previous, unmodified.
+    expect(m.links[0]?.rate).toBeCloseTo(0.8, 5)
+    expect(m.links[1]?.rate).toBeCloseTo(0.5, 5)
   })
 
   it('puts every node of a linear funnel on one centre line', () => {
@@ -51,14 +55,26 @@ describe('sankeyModel', () => {
     expect(m.links.find((l) => l.kind === 'continue')).toMatchObject({ from: 1, to: 2, people: 50 })
     // 70 reached c, 50 of them through b.
     expect(m.links.find((l) => l.kind === 'bypass')).toMatchObject({ from: 0, to: 2, people: 20 })
+    // branch: 60/100 against a. continue: 50/60 against b. bypass: 20/100
+    // against a -- the SOURCE, not the 70-person destination.
+    expect(m.links.find((l) => l.kind === 'branch')?.rate).toBeCloseTo(0.6, 5)
+    expect(m.links.find((l) => l.kind === 'continue')?.rate).toBeCloseTo(50 / 60, 5)
+    expect(m.links.find((l) => l.kind === 'bypass')?.rate).toBeCloseTo(0.2, 5)
   })
 
-  it('offsets an optional node off the centre line the required ones share', () => {
+  it("offsets an optional node's bottom BRANCH_GAP above the centre line the required nodes share", () => {
     const m = sankeyModel(BRANCHED, 100)
-    const required = m.nodes.filter((n) => !n.optional).map((n) => n.y + n.height / 2)
+    const required = m.nodes.filter((n) => !n.optional)
+    const requiredCentre = (required[0]?.y ?? 0) + (required[0]?.height ?? 0) / 2
+    for (const n of required) {
+      expect(n.y + n.height / 2).toBeCloseTo(requiredCentre, 5)
+    }
     const optional = m.nodes.find((n) => n.optional)
-    expect(new Set(required.map((c) => Math.round(c)))).toHaveLength(1)
-    expect(Math.round(optional?.y ?? 0)).toBeLessThan(Math.round(required[0] as number))
+    expect(optional).toBeDefined()
+    const optionalBottom = (optional?.y ?? 0) + (optional?.height ?? 0)
+    // The gap is pinned to its literal value, not to whatever constant the
+    // module happens to use internally -- a shrunk gap must fail this too.
+    expect(requiredCentre - optionalBottom).toBeCloseTo(24, 5)
   })
 
   it('fills each node exactly with the links that touch it', () => {
@@ -143,11 +159,80 @@ describe('sankeyModel', () => {
     expect(m.nodes[3]?.overlap).toBe(60)
   })
 
-  it("gives an optional node its branch point's ramp step, not the next one", () => {
+  it('reports overlap on the incoming side too, even when the node has outgoing links', () => {
+    // a -> [b opt, c opt, both branching off a] -> d -> e. b and c both claim
+    // the same people reaching d: a real 60-person double-count, even though
+    // d ALSO has an outgoing (chain) link on to e. Whether that double-count
+    // is visible must not depend on d happening to be the last node.
+    const doubled: StepResult[] = [
+      step({ index: 1, event: 'a', people: 100, from_previous: 1, from_start: 1 }),
+      step({
+        index: 2,
+        event: 'b',
+        people: 90,
+        from_previous: 0.9,
+        from_start: 0.9,
+        optional: true,
+        skipped: 10,
+        continued: 80,
+      }),
+      step({
+        index: 3,
+        event: 'c',
+        people: 90,
+        from_previous: 0.9,
+        from_start: 0.9,
+        optional: true,
+        skipped: 10,
+        continued: 80,
+      }),
+      step({ index: 4, event: 'd', people: 100, from_previous: 1, from_start: 1 }),
+      step({ index: 5, event: 'e', people: 90, from_previous: 0.9, from_start: 0.9 }),
+    ]
+    const m = sankeyModel(doubled, 100)
+    expect(m.nodes[3]?.overlap).toBe(60)
+  })
+
+  it("gives each node its ramp step, with an optional taking its branch point's", () => {
     const m = sankeyModel(BRANCHED, 100)
-    const branchPoint = m.nodes[0]
-    const optional = m.nodes.find((n) => n.optional)
-    expect(optional?.ramp).toBe(branchPoint?.ramp)
+    expect(m.nodes.map((n) => n.ramp)).toEqual([1, 1, 2])
+  })
+
+  it('stacks the links leaving one node along disjoint ranges of its edge', () => {
+    const m = sankeyModel(BRANCHED, 100)
+    const a = m.nodes[0] as SankeyNode
+    const out = m.links.filter((l) => l.from === 0).sort((x, y) => x.y0 - y.y0)
+    expect(out).toHaveLength(2)
+    const [first, second] = out as [SankeyLink, SankeyLink]
+    expect(first.y0).toBeCloseTo(a.y, 5)
+    expect(first.y0 + first.w0).toBeCloseTo(second.y0, 5)
+    expect(second.y0 + second.w0).toBeCloseTo(a.y + a.height, 5)
+  })
+
+  it('stacks the links arriving at one node along disjoint ranges of its edge', () => {
+    const m = sankeyModel(BRANCHED, 100)
+    const c = m.nodes[2] as SankeyNode
+    const into = m.links.filter((l) => l.to === 2).sort((x, y) => x.y1 - y.y1)
+    expect(into).toHaveLength(2)
+    const [first, second] = into as [SankeyLink, SankeyLink]
+    expect(first.y1).toBeCloseTo(c.y, 5)
+    expect(first.y1 + first.w1).toBeCloseTo(second.y1, 5)
+    expect(second.y1 + second.w1).toBeCloseTo(c.y + c.height, 5)
+  })
+
+  it('sizes the model to the tallest extent reached and the full plot width', () => {
+    const m = sankeyModel(BRANCHED, 100)
+    // The offset branch above the centre line must not be clipped.
+    expect(m.height).toBeCloseTo(222, 5)
+    expect(m.width).toBe(plotWidth(BRANCHED.length))
+  })
+
+  it('places each node at its definition index and slot', () => {
+    const m = sankeyModel(LINEAR, 100)
+    m.nodes.forEach((n, i) => {
+      expect(n.step).toBe(i)
+      expect(n.x).toBe(i * SLOT_WIDTH)
+    })
   })
 
   it('reports zeroes rather than NaN on a funnel nobody entered', () => {
