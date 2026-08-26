@@ -1,22 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import type { StepResult } from '../../api/types.js'
 import {
-  BAR_WIDTH,
-  LABEL_HEIGHT,
   MIN_BAR_HEIGHT,
-  PLOT_HEIGHT,
   RAMP_STEPS,
   barHeight,
-  barX,
   biggestLeak,
-  branchPath,
   branchSlots,
-  labelColumns,
   plotWidth,
   rampIndex,
   rampIndexes,
-  ribbonLabelY,
-  ribbonPath,
   spineSlots,
   spineSteps,
 } from './flowGeometry.js'
@@ -34,9 +26,13 @@ describe('barHeight', () => {
     // The bar says "this share of everyone who entered", which is what
     // `from_start` reports. Scaling against the previous step instead would
     // draw every surviving step at full height and hide the funnel entirely.
-    expect(barHeight(100, 100)).toBe(PLOT_HEIGHT)
-    expect(barHeight(50, 100)).toBe(PLOT_HEIGHT / 2)
-    expect(barHeight(25, 100)).toBe(PLOT_HEIGHT / 4)
+    // `BAR_SCALE` is 180 and is deliberately not exported -- the plot's own
+    // height is a computed maximum now, not a constant -- so these are
+    // pinned to the literal heights rather than to a shared symbol that
+    // could be changed on both sides at once.
+    expect(barHeight(100, 100)).toBe(180)
+    expect(barHeight(50, 100)).toBe(90)
+    expect(barHeight(25, 100)).toBe(45)
   })
 
   it('never returns NaN when nobody entered', () => {
@@ -81,64 +77,6 @@ describe('rampIndex', () => {
         expect(r).toBeLessThanOrEqual(RAMP_STEPS)
       }
     }
-  })
-})
-
-describe('ribbonPath', () => {
-  it('anchors both ends to the baseline so the taper is the drop-off', () => {
-    // A constant-thickness ribbon would say the loss happens AT the bar. The
-    // top edge falling from one bar's top to the next's is what draws the
-    // loss where it occurs.
-    const d = ribbonPath(PLOT_HEIGHT, PLOT_HEIGHT / 2, 0, 1)
-    expect(d).toBe(
-      `M ${BAR_WIDTH + 28} 0 C ${(BAR_WIDTH + 28 + 128) / 2} 0, ${(BAR_WIDTH + 28 + 128) / 2} 90, 128 90 L 128 180 L ${BAR_WIDTH + 28} 180 Z`,
-    )
-  })
-
-  it('starts where the source bar ends and lands where the next one starts', () => {
-    const d = ribbonPath(100, 40, 2, 3)
-    expect(d.startsWith(`M ${barX(2) + BAR_WIDTH} ${PLOT_HEIGHT - 100} `)).toBe(true)
-    expect(d).toContain(`${barX(3)} ${PLOT_HEIGHT - 40}`)
-  })
-
-  it('emits no NaN for a zero-entrant funnel', () => {
-    expect(ribbonPath(barHeight(0, 0), barHeight(0, 0), 0, 1)).not.toContain('NaN')
-  })
-})
-
-describe('ribbonLabelY', () => {
-  it('centres the label on the ribbon at its own midpoint', () => {
-    // Both bars full height: the ribbon is a full-height slab, so its middle
-    // is the plot's middle, less half a line box.
-    expect(ribbonLabelY(PLOT_HEIGHT, PLOT_HEIGHT)).toBe(PLOT_HEIGHT / 2 - LABEL_HEIGHT / 2)
-  })
-
-  it('uses the mean of the two ends, which is exactly where the curve is', () => {
-    // ribbonPath's cubic has both control points at the horizontal midpoint,
-    // making its y-component a 1D Bezier with P0=P1 and P2=P3 -- so the
-    // curve at the centre IS the mean. If this drifts, the label stops
-    // sitting on the ribbon it names.
-    const from = 180
-    const to = 60
-    const topAtCentre = PLOT_HEIGHT - (from + to) / 2 // 60
-    const thickness = PLOT_HEIGHT - topAtCentre // 120
-    expect(ribbonLabelY(from, to)).toBe(topAtCentre + thickness / 2 - LABEL_HEIGHT / 2)
-  })
-
-  it('lifts the label above a ribbon too thin to hold it', () => {
-    // Two near-empty steps leave a wedge thinner than a line of text. A
-    // centred label would spill over both edges and be legible against
-    // neither the ribbon nor the surface.
-    const y = ribbonLabelY(4, 4)
-    expect(y).toBeLessThan(PLOT_HEIGHT - 4 - LABEL_HEIGHT)
-    expect(y).toBeGreaterThanOrEqual(0)
-  })
-
-  it('never returns a negative offset', () => {
-    // A negative top would push the label out of the plot and, in a
-    // scrolling card, out of view entirely.
-    expect(ribbonLabelY(PLOT_HEIGHT, PLOT_HEIGHT - 1)).toBeGreaterThanOrEqual(0)
-    expect(ribbonLabelY(0, 0)).toBeGreaterThanOrEqual(0)
   })
 })
 
@@ -209,15 +147,6 @@ describe('geometry with optional steps', () => {
     ...(optional ? { optional, skipped: 0 } : {}),
   })
 
-  it('spans the spine ribbon across an optional slot', () => {
-    // Slot 1 to slot 3, not slot 1 to slot 2. Routing the ribbon THROUGH the
-    // optional step would draw a loss that did not happen, which is worse
-    // than the stacked bars this plot replaced.
-    const path = ribbonPath(100, 50, 1, 3)
-    expect(path).toContain(`M ${barX(1) + BAR_WIDTH}`)
-    expect(path).toContain(`${barX(3)}`)
-  })
-
   it('excludes optional steps from the spine', () => {
     const steps = [s('a', 10), s('b', 8), s('c', 3, true), s('d', 5)]
     expect(spineSteps(steps).map((x) => x.event)).toEqual(['a', 'b', 'd'])
@@ -253,8 +182,8 @@ describe('geometry with optional steps', () => {
     expect(spineSteps(steps)).toHaveLength(3)
   })
 
-  it('names the definition-order slot of every spine step, so a ribbon spans rather than routes', () => {
-    // The pairs the ribbons are drawn between are consecutive entries HERE,
+  it('names the definition-order slot of every spine step, so the chain spans rather than routes', () => {
+    // The pairs the chain links run between are consecutive entries HERE,
     // not consecutive definition positions. Two optional steps in a row must
     // still yield one pair, spanning both slots.
     expect(spineSlots([s('a', 10), s('b', 8), s('c', 3, true), s('d', 5)])).toEqual([0, 1, 3])
@@ -268,103 +197,5 @@ describe('geometry with optional steps', () => {
     // `levels.ts` computed its `from_previous` against.
     const steps = [s('a', 10), s('b', 8), s('c', 3, true), s('d', 2, true), s('e', 5)]
     expect(branchSlots(steps)).toEqual([null, null, 1, 1, null])
-  })
-
-  it('draws a branch connector as an open curve that cannot read as a taper', () => {
-    // A tapering ribbon means "the loss happened between these two stages".
-    // Nothing was lost between a required step and the branch hanging off
-    // it, so the connector is a stroked line with no area at all -- no
-    // baseline leg, no close.
-    const d = branchPath(180, 60, 1, 2)
-    expect(d.startsWith(`M ${barX(1) + BAR_WIDTH} ${PLOT_HEIGHT - 180}`)).toBe(true)
-    expect(d).toContain(`${barX(2)} ${PLOT_HEIGHT - 60}`)
-    expect(d).not.toContain('Z')
-    expect(d).not.toContain('L')
-  })
-
-  it('emits no NaN from a branch connector on a zero-entrant funnel', () => {
-    expect(branchPath(barHeight(0, 0), barHeight(0, 0), 0, 1)).not.toContain('NaN')
-  })
-})
-
-describe('ribbonLabelY over a spanned slot', () => {
-  it('lifts the label clear of a branch bar standing in the slot the ribbon spans', () => {
-    // FOUND BY RENDERING IT. A spanning ribbon's centre is the middle of the
-    // branch's own slot, so the label printed across the branch bar's dashed
-    // outline with the dashes running through the glyphs.
-    const from = 180
-    const to = 90
-    const bar = 30
-    const centred = ribbonLabelY(from, to)
-    const lifted = ribbonLabelY(from, to, bar)
-    expect(lifted).toBeLessThan(centred)
-    // Above the ribbon's own thickness at the centre, which is 135 here --
-    // clearing the bar alone would still leave it inside the ribbon.
-    expect(lifted).toBeLessThanOrEqual(PLOT_HEIGHT - 135 - LABEL_HEIGHT)
-  })
-
-  it('clears a branch TALLER than the ribbon it stands in, not just a short one', () => {
-    // The branch can be taller than the chain at that point -- a side path
-    // most people take. Lifting only above the ribbon would put the label
-    // straight back on the bar.
-    const lifted = ribbonLabelY(40, 20, 150)
-    expect(lifted).toBeLessThanOrEqual(PLOT_HEIGHT - 150 - LABEL_HEIGHT)
-    expect(lifted).toBeGreaterThanOrEqual(0)
-  })
-
-  it('never returns a negative offset for a full-height branch', () => {
-    expect(ribbonLabelY(PLOT_HEIGHT, PLOT_HEIGHT, PLOT_HEIGHT)).toBeGreaterThanOrEqual(0)
-  })
-
-  it('drops the label inside the ribbon when a tall branch leaves no surface above it', () => {
-    // MEASURED. Entered 200, step 1 = 200, the optional step = 195, the next
-    // required step = 190. The branch stands 175.5 tall, so lifting clear of
-    // it wants a NEGATIVE offset -- and clamping that at 0 put the label
-    // straight back across the dashed outline it was lifted to avoid, whose
-    // top edge is at 4.5. A branch taken by ~90%+ of entrants is the
-    // ordinary shape for an optional step most people take, not an exotic
-    // one.
-    const bar = barHeight(195, 200)
-    const y = ribbonLabelY(barHeight(200, 200), barHeight(190, 200), bar)
-    expect(y).toBeGreaterThan(PLOT_HEIGHT - bar)
-    // And still on the plot, rather than hanging off the bottom of it.
-    expect(y + LABEL_HEIGHT).toBeLessThanOrEqual(PLOT_HEIGHT)
-  })
-
-  it('is unchanged when nothing is spanned, which is every ribbon on a funnel with no branches', () => {
-    expect(ribbonLabelY(PLOT_HEIGHT, PLOT_HEIGHT, 0)).toBe(ribbonLabelY(PLOT_HEIGHT, PLOT_HEIGHT))
-    expect(ribbonLabelY(4, 4, 0)).toBe(ribbonLabelY(4, 4))
-  })
-})
-
-describe('labelColumns', () => {
-  it('centres an adjacent pair across its own two slots, exactly as before', () => {
-    // Every ribbon on a funnel with no optional steps is this case, and its
-    // placement must not move: the midpoint of two adjacent slots IS the
-    // ribbon's midpoint.
-    expect(labelColumns(0, 1)).toEqual({ start: 1, span: 2 })
-    expect(labelColumns(3, 4)).toEqual({ start: 4, span: 2 })
-  })
-
-  it('anchors a spanning ribbon at its ARRIVAL gap, never over the slot it passes', () => {
-    // FOUND ON A REAL FUNNEL. A ribbon from step 1 to step 3 has its midpoint
-    // in the middle of step 2's slot, so a centred label lands squarely on
-    // the branch bar standing there and reads as that step's rate -- next to
-    // the branch's own, different, percentage. Anchored at the arrival gap it
-    // sits beside the bar the ribbon lands on, where nothing else is drawn.
-    expect(labelColumns(0, 2)).toEqual({ start: 2, span: 2 })
-  })
-
-  it('anchors at the arrival gap however many slots are spanned', () => {
-    expect(labelColumns(0, 3)).toEqual({ start: 3, span: 2 })
-    expect(labelColumns(1, 4)).toEqual({ start: 4, span: 2 })
-  })
-
-  it('never overlaps the branch label that shares the branch point', () => {
-    // The branch ribbon leaves the same bar and labels itself across slots
-    // 1-2; the spanning ribbon must not also sit there.
-    const branch = labelColumns(0, 1)
-    const spine = labelColumns(0, 2)
-    expect(branch.start + branch.span).toBeLessThanOrEqual(spine.start + 1)
   })
 })

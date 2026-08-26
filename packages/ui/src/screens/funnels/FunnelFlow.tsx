@@ -1,23 +1,82 @@
-import { Fragment } from 'react'
 import type { FunnelRunResult, FunnelStep, StepResult } from '../../api/types.js'
 import { wherePhrase } from '../segments/vocabulary.js'
-import {
-  BAR_WIDTH,
-  PLOT_HEIGHT,
-  barHeight,
-  barX,
-  biggestLeak,
-  branchPath,
-  branchSlots,
-  labelColumns,
-  plotWidth,
-  rampIndexes,
-  ribbonLabelY,
-  ribbonPath,
-  spineSlots,
-  spineSteps,
-} from './flowGeometry.js'
+import { SLOT_WIDTH, biggestLeak, branchSlots, spineSteps } from './flowGeometry.js'
 import { formatCount, formatPercent } from './format.js'
+import { type SankeyLink, type SankeyNode, sankeyModel } from './sankey.js'
+
+/**
+ * How wide a node stands in its slot, in viewBox units.
+ *
+ * NARROW on purpose. In a Sankey the links carry the quantity and the node
+ * is only the place they meet, so a node wide enough to read as a bar
+ * re-tells the story the band beside it already told -- which is what the
+ * bars this replaced did. The plot stretches horizontally, so this is 8% of
+ * a slot rather than a pixel count: at the widest the plot is ever drawn
+ * (200px per step, see `plot` below) it lands at 16px, and it shrinks with
+ * the card rather than swallowing a narrow one.
+ */
+const NODE_WIDTH = 8
+
+/**
+ * Where a node sits horizontally inside its slot.
+ *
+ * `SankeyModel` gives a node an `x` and no width -- the width is a visual
+ * judgement, so the placement that follows from it is the renderer's too.
+ * Centred rather than flush left: the text rows above and below are a
+ * `repeat(N, 1fr)` grid whose columns ARE the slots, so a centred node
+ * stands under its own name without either measuring the other, and the
+ * plot gets a symmetric half-slot margin instead of a whole empty slot on
+ * the right.
+ */
+function nodeLeft(node: SankeyNode): number {
+  return node.x + (SLOT_WIDTH - NODE_WIDTH) / 2
+}
+
+/** Two decimals is past what any screen can resolve and keeps the `d`
+ * attribute readable in a DOM dump. */
+function r(n: number): number {
+  return Math.round(n * 100) / 100
+}
+
+/**
+ * One link, as a closed band from `(x0, y0)` of thickness `w0` to
+ * `(x1, y1)` of thickness `w1`.
+ *
+ * Both edges are the same cubic with its control points at the horizontal
+ * midpoint, which is what gives the flat-then-turn-then-flat shape that
+ * reads as a flow. The band TAPERS whenever the two ends disagree, and that
+ * is not a drawing of loss: `sankey.ts` scales each end to fill the node it
+ * touches, so the taper is what keeps the geometry adding up at both nodes
+ * while the printed counts stay the true ones.
+ */
+function bandPath(x0: number, y0: number, w0: number, x1: number, y1: number, w1: number): string {
+  const mid = (x0 + x1) / 2
+  return [
+    `M ${r(x0)} ${r(y0)}`,
+    `C ${r(mid)} ${r(y0)}, ${r(mid)} ${r(y1)}, ${r(x1)} ${r(y1)}`,
+    `L ${r(x1)} ${r(y1 + w1)}`,
+    `C ${r(mid)} ${r(y1 + w1)}, ${r(mid)} ${r(y0 + w0)}, ${r(x0)} ${r(y0 + w0)}`,
+    'Z',
+  ].join(' ')
+}
+
+/**
+ * Translucent, and this is the one place opacity is right.
+ *
+ * The ribbons this replaced used a token that already IS the blend, because
+ * a single ribbon over an unknown surface came out grey. A Sankey's links
+ * CROSS, and the reader has to see which one passes in front of which -- so
+ * the blend has to happen against whatever is underneath rather than
+ * against a surface guessed at build time. Each band still carries a
+ * full-opacity outline in its own tint, which is what keeps its edges
+ * findable where two of them overlap.
+ */
+const LINK_FILL_OPACITY = 0.55
+
+/** A click target smaller than this is not a click target. A node can be two
+ * viewBox units tall (`MIN_BAR_HEIGHT`, a step nobody reached), so the
+ * button is centred on the node and grown to something a pointer can hit. */
+const HIT_MIN_HEIGHT = 24
 
 /**
  * The predicates narrowing the step at position `i`, or `null` when this
@@ -52,37 +111,57 @@ function whereFor(
 }
 
 /**
- * A funnel result as a left-to-right flow: one bar per stage, a tapering
- * ribbon carrying the survivors between them.
+ * A funnel result as a Sankey: one node per step, and a band per population
+ * moving between them.
  *
- * **The ribbon is the point.** Stacked bars show each stage's size and leave
- * the reader to subtract; the taper draws the loss between the two stages it
- * happened between. That is the one thing the previous rendering could not
- * say, and the reason this exists rather than a restyle.
+ * **This component computes no geometry.** `sankeyModel` owns every
+ * position, thickness and offset, including how tall the plot has to be --
+ * an optional node is lifted OFF the required centre line, so the extent is
+ * a computed maximum rather than a constant, and sizing the viewBox from
+ * anything else clips the branch. What is left here is a width for a node,
+ * a path string per link, and where the text goes.
  *
- * **Colour is ORDINAL, not categorical.** Funnel stages have an order that
- * changes the meaning if you swap them, so they take one hue in monotone
- * lightness steps -- `--chart-funnel-1..7`, whose span was measured against
- * each mode's surface rather than chosen (see `theme.css`). A palette of
- * distinct hues, which is what the reference design for this screen used,
- * would spend the identity channel restating an order that position already
- * carries, and no hue ordering survives colour-blindness.
+ * **The fork is the point.** The tapering ribbon this replaced could only
+ * say "these two stages, and the loss between them"; it had one shape for
+ * one chain, and an optional step had to be drawn as an annotation hanging
+ * off it. A Sankey draws both legs out of a branch point as flows, rejoins
+ * them at the next required step, and lets the widths say how many took
+ * each -- which is the question an optional step exists to ask.
+ *
+ * **Colour is ORDINAL, not categorical** (ADR 006). Funnel stages have an
+ * order that changes the meaning if you swap them, so they take one hue in
+ * monotone lightness steps -- `--chart-funnel-1..7`, whose span was measured
+ * against each mode's surface rather than chosen (see `theme.css`). Each
+ * link is tinted from its SOURCE node, so a band stays traceable back to
+ * where it left even where two of them cross. A palette of distinct hues,
+ * which is what the reference design for this screen used, would spend the
+ * identity channel restating an order that position already carries, and no
+ * hue ordering survives colour-blindness.
  *
  * **Nothing here computes a rate.** `from_previous` and `from_start` both
  * arrive from the server, which returns both deliberately -- deriving one
  * from a chain of the other is "a multiplication every caller gets subtly
- * wrong in a different way" (`core/src/funnels/levels.ts`). The arithmetic
- * below is bar heights and path coordinates; the biggest-leak line is a
- * `max` over rates the server already sent.
+ * wrong in a different way" (`core/src/funnels/levels.ts`). A link's `rate`
+ * is the server's own where the server has one and `sankeyModel`'s guarded
+ * ratio where it does not; the biggest-leak line is a `max` over rates the
+ * server already sent.
  *
  * **Pure over its props**: no client, no fetch, no clock, same as
- * `StepBars`. `FunnelFlowOrBars` decides which of the two renders.
+ * `StepBars`. `FunnelFlowOrBars` decides which of the two renders -- and at
+ * 390px it is the bars, because eight steps sharing a phone screen leave
+ * 48px each and a Sankey needs room for its bands to separate.
  *
- * Text is HTML in a `repeat(N, 1fr)` grid above and below the plot, never
- * SVG `<text>`: the SVG stretches horizontally (`preserveAspectRatio="none"`)
- * so a glyph inside it would stretch with it. The grid and the plot share
- * the same slot count, which is what keeps a label over its own bar without
- * either measuring the other.
+ * Text is HTML, never SVG `<text>`: the plot stretches horizontally
+ * (`preserveAspectRatio="none"`) so a glyph inside it would stretch with it.
+ * The step rows are a `repeat(N, 1fr)` grid sharing the plot's slots; the
+ * link labels are absolutely positioned from the model's own coordinates,
+ * which is exact because the viewBox height IS the pixel height and only
+ * the horizontal axis scales.
+ *
+ * Each node and each link also carries an SVG `<title>`, which is the
+ * browser's own hover tooltip. That is where the long form goes -- both
+ * endpoints of a band, and the sentence explaining a double count -- so the
+ * text drawn on the plot can stay short enough to fit on it.
  */
 export function FunnelFlow(props: {
   result: FunnelRunResult
@@ -104,22 +183,26 @@ export function FunnelFlow(props: {
   const { result, definition, selectedStep, onSelectStep } = props
   const steps = result.steps
   const total = steps.length
-  const heights = steps.map((s) => barHeight(s.people, result.entered))
-  /* One slot per DEFINITION step, and the spine is what the ribbons are
-   * drawn between: `slots` is the definition-order position of each required
-   * step, so a pair of consecutive entries can be two slots apart, or three.
-   * `branches` says which required step each optional step hangs off. */
-  const slots = spineSlots(steps)
+  const model = sankeyModel(steps, result.entered)
+  /** `branchSlots` still, and only for the WORDS: an optional step's rate is
+   * a share of the required step it hangs off, and the row under the plot
+   * has to name which one. The model draws the branch; this names it, from
+   * the same function, so the two can never disagree. */
   const branches = branchSlots(steps)
-  const ramp = rampIndexes(steps)
   const leak = biggestLeak(spineSteps(steps), result.entered)
   const columns = { gridTemplateColumns: `repeat(${Math.max(1, total)}, minmax(0, 1fr))` }
   /* A cap, not a width: the plot still shrinks to whatever room it is given.
-   * Without it a two-step funnel spreads two bars across the whole card and
-   * each one lands ~240px wide, which reads as two blocks rather than as a
-   * flow. Per-step rather than absolute so a six-step funnel still fills a
-   * wide screen. */
+   * Without it a two-step funnel spreads two nodes across the whole card and
+   * the band between them lands ~700px long, which reads as a bridge rather
+   * than as a flow. Per-step rather than absolute so a six-step funnel still
+   * fills a wide screen. */
   const plot = { maxWidth: `${Math.max(1, total) * 200}px` }
+  /** A viewBox x as a percentage of the plot's own width. The SVG is
+   * `width="100%"` over a viewBox of `model.width`, so this is exactly where
+   * that coordinate lands however wide the card is -- no measuring, no
+   * resize observer. Vertical needs no equivalent: the viewBox height IS the
+   * pixel height, so a y is already a CSS offset. */
+  const pct = (x: number) => (x / model.width) * 100
 
   return (
     <div data-testid="funnel-flow" className="flex min-w-0 flex-col gap-2">
@@ -134,7 +217,7 @@ export function FunnelFlow(props: {
        * the plot starts where every other line on the screen starts. */}
       <div className="mr-auto flex w-full min-w-0 flex-col gap-2" style={plot}>
         {/* Stage names, above the plot as in a column chart -- the reader
-         * needs to know what a bar IS before they read how tall it is. */}
+         * needs to know what a node IS before they read how big it is. */}
         <div className="grid gap-1" style={columns}>
           {steps.map((s, i) => {
             const where = whereFor(definition, i, s)
@@ -143,7 +226,7 @@ export function FunnelFlow(props: {
                 <p className="truncate text-sm font-medium" title={s.event}>
                   {s.event}
                 </p>
-                {/* Said in WORDS, not only in the dash on the bar. The dash
+                {/* Said in WORDS, not only in the node's offset. The offset
                  * is what carries the branch at a glance; a reader who has
                  * not learned what it means still has to be told, and
                  * "optional" is one word. */}
@@ -171,9 +254,10 @@ export function FunnelFlow(props: {
 
         <div className="relative">
           {/* `height` in pixels equal to the viewBox height, so the vertical
-           * scale is exactly 1 and only the horizontal axis stretches. Under a
-           * vertical stretch every `rx` distorts and a 4px corner becomes
-           * whatever the container's aspect ratio makes it. */}
+           * scale is exactly 1 and only the horizontal axis stretches. That
+           * is what lets the label layer position from model coordinates
+           * directly, and it is why `model.height` -- a computed maximum,
+           * not a constant -- has to be read for both. */}
           <svg
             role="img"
             aria-label={`Funnel flow: ${steps
@@ -183,242 +267,178 @@ export function FunnelFlow(props: {
                   : `${s.event} ${formatPercent(s.from_start)}`,
               )
               .join(', ')}`}
-            viewBox={`0 0 ${plotWidth(total)} ${PLOT_HEIGHT}`}
+            viewBox={`0 0 ${model.width} ${model.height}`}
             preserveAspectRatio="none"
             width="100%"
-            height={PLOT_HEIGHT}
+            height={model.height}
             className="block"
           >
             <title>Funnel flow</title>
-            {/* Ribbons first, so a bar's own edge always sits on top of the
-             * ribbon meeting it rather than being overdrawn by it.
-             *
-             * One per consecutive pair on the SPINE, spanning whatever slots
-             * lie between them. NOT one per adjacent slot: a ribbon routed
-             * into an optional step and out again would draw two losses that
-             * did not happen, between stages that are not consecutive. The
-             * spine is the chain; an optional step is a branch off it, and
-             * the flow past it is undisturbed, which is exactly what a
-             * ribbon at full geometry across its slot says. */}
-            {slots.slice(0, -1).map((from, k) => {
-              const to = slots[k + 1] as number
-              const source = steps[from] as StepResult
+            {/* Links first, so a node's own edge always sits on top of the
+             * bands meeting it rather than being overdrawn by them. */}
+            {model.links.map((link: SankeyLink) => {
+              const src = model.nodes[link.from] as SankeyNode
+              const dst = model.nodes[link.to] as SankeyNode
+              const from = steps[link.from] as StepResult
+              const to = steps[link.to] as StepResult
+              const x0 = nodeLeft(src) + NODE_WIDTH
+              const x1 = nodeLeft(dst)
               return (
                 <path
-                  key={`ribbon-${source.index}`}
-                  data-testid={`flow-ribbon-${source.index}`}
-                  d={ribbonPath(heights[from] as number, heights[to] as number, from, to)}
-                  fill="var(--chart-funnel-ribbon)"
-                />
+                  key={`link-${from.index}-${to.index}`}
+                  data-testid={`flow-link-${from.index}-${to.index}`}
+                  data-kind={link.kind}
+                  d={bandPath(x0, link.y0, link.w0, x1, link.y1, link.w1)}
+                  /* The SOURCE node's ramp step, never the destination's.
+                   * Two bands arriving at one node came from different
+                   * places and are different populations; tinting by where
+                   * they land would paint them identically at exactly the
+                   * point the reader is trying to tell them apart. */
+                  fill={`var(--chart-funnel-${src.ramp})`}
+                  fillOpacity={LINK_FILL_OPACITY}
+                  stroke={`var(--chart-funnel-${src.ramp})`}
+                  strokeWidth={1}
+                  /* The plot stretches horizontally, so a stroke in user
+                   * space would come out thicker on one axis than the other
+                   * and would change with the card's width. */
+                  vectorEffect="non-scaling-stroke"
+                >
+                  <title>
+                    {from.event} → {to.event}: {formatCount(link.people)} people,{' '}
+                    {formatPercent(link.rate)} of {from.event}
+                  </title>
+                </path>
               )
             })}
-            {/* The thread from a branch point to the step hanging off it.
-             * Stroked and dashed, with NO fill and no baseline legs -- see
-             * `branchPath`. A wedge here would say the people who skipped
-             * this step were lost, and they were not: they carried on down
-             * the spine, which is the ribbon passing behind this. */}
-            {branches.map((from, i) =>
-              from == null ? null : (
-                <Fragment key={`branch-${(steps[i] as StepResult).index}`}>
-                  {/* THE BRANCH IS A FLOW, AND IT GETS A WEDGE.
-                   *
-                   * This was a stroked thread with no fill, on the reasoning
-                   * that a wedge would say the people who skipped this step
-                   * were lost. They are not lost -- but a thread made one
-                   * path out of the branch point look like the funnel and
-                   * the other look like an annotation, which is the thing an
-                   * operator actually reported. Both legs are real
-                   * populations and both are drawn as flows; the spine
-                   * ribbon carrying on at full geometry behind this is what
-                   * says nobody was lost. */}
-                  <path
-                    data-testid={`flow-branch-${(steps[i] as StepResult).index}`}
-                    d={ribbonPath(heights[from] as number, heights[i] as number, from, i)}
-                    fill={`var(--chart-funnel-${ramp[i]})`}
-                    /* Translucent, so it reads as a distinct wedge ON TOP OF
-                     * the spine ribbon rather than beside it. A funnel that
-                     * converts everyone draws that ribbon as a flat
-                     * full-height band, and an opaque branch in the same
-                     * token vanished into it completely. */
-                    fillOpacity={0.45}
-                  />
-                  <path
-                    data-testid={`flow-branch-edge-${(steps[i] as StepResult).index}`}
-                    d={branchPath(heights[from] as number, heights[i] as number, from, i)}
-                    fill="none"
-                    stroke={`var(--chart-funnel-${ramp[i]})`}
-                    strokeWidth={1.5}
-                    strokeDasharray="4 3"
-                    /* The plot stretches horizontally, so a stroke in user
-                     * space would come out thicker on one axis than the other
-                     * and the dash pattern would stretch with the container.
-                     * This keeps both in screen space, which is the only way a
-                     * dash reads as the same dash at every card width. */
-                    vectorEffect="non-scaling-stroke"
-                  />
-                </Fragment>
-              ),
-            )}
-            {steps.map((s, i) => {
-              const optional = s.optional === true
+            {model.nodes.map((node: SankeyNode) => {
+              const s = steps[node.step] as StepResult
+              const optional = node.optional
               return (
                 <rect
-                  key={`bar-${s.index}`}
-                  data-testid={`flow-bar-${s.index}`}
+                  key={`node-${s.index}`}
+                  data-testid={`flow-node-${s.index}`}
                   data-optional={optional ? 'true' : undefined}
-                  x={barX(i)}
-                  y={PLOT_HEIGHT - (heights[i] as number)}
-                  width={BAR_WIDTH}
-                  height={heights[i] as number}
-                  rx={4}
-                  /* Optional: the palest token in the set -- the same one the
-                   * ribbons use -- outlined in its branch point's ramp step.
-                   * Subordinate by weight rather than by hue, and the outline
-                   * is what ties it to the stage it hangs off. A solid ramp
-                   * fill would make it look like a stage of its own, which is
-                   * the one thing it must not look like. */
-                  fill={optional ? 'var(--chart-funnel-ribbon)' : `var(--chart-funnel-${ramp[i]})`}
-                  stroke={optional ? `var(--chart-funnel-${ramp[i]})` : undefined}
-                  strokeWidth={optional ? 1.5 : undefined}
-                  strokeDasharray={optional ? '4 3' : undefined}
-                  vectorEffect={optional ? 'non-scaling-stroke' : undefined}
-                />
+                  x={r(nodeLeft(node))}
+                  y={r(node.y)}
+                  width={NODE_WIDTH}
+                  height={r(node.height)}
+                  /* A solid ramp fill on EVERY node, optional included. The
+                   * bars this replaced marked an optional step by painting
+                   * it in the palest token and outlining it, because on one
+                   * baseline there was nothing else to mark it with. Here
+                   * the node is lifted clear of the required line and both
+                   * its legs are drawn, so the geometry says "off to the
+                   * side" far louder than a fill ever did -- and the ramp
+                   * step it borrows says which stage it hangs off. */
+                  fill={`var(--chart-funnel-${node.ramp})`}
+                >
+                  <title>
+                    {s.event}
+                    {optional ? ' (optional)' : ''}: {formatCount(node.people)} people.
+                    {node.overlap > 0
+                      ? ` ${formatCount(node.overlap)} also reached a step out of order, so two paths count them.`
+                      : ''}
+                  </title>
+                </rect>
               )
             })}
           </svg>
 
-          {/* One transparent, full-slot button per step -- its OWN layer,
-           * never inside the rate-label grid below. That grid is
-           * `pointer-events-none` wholesale (a label must never swallow a
-           * click meant for the ribbon or bar under it), so a button placed
-           * inside it would be permanently unclickable. This layer sits
-           * BENEATH the label layer in source order: sharing one grid would
-           * also collide the two at `gridRow: 1` -- labels span two columns
-           * each (they name a transition between two slots) and buttons span
-           * one, so placing them together would leave stacking order
-           * dependent on source position, which the label layer's own
-           * comment already relies on for something else (see below) and
-           * should not have to arbitrate here too.
+          {/* One transparent button per NODE -- its OWN layer, never inside
+           * the label layer below. That layer is `pointer-events-none`
+           * wholesale (a label must never swallow a click meant for the band
+           * under it), so a button placed inside it would be permanently
+           * unclickable.
+           *
+           * On the node rather than over the whole slot, which is where it
+           * used to be: a slot-wide target now covers the bands crossing it
+           * as well, and clicking a band to select the step it passes is a
+           * lie about what was clicked.
            *
            * Rendered only with `onSelectStep` -- the builder preview has no
            * funnel id to list people for, so nothing here must be
            * interactive: no button, no focus stop, no hover affordance. */}
           {onSelectStep != null && (
-            <div className="absolute inset-0 grid" style={columns}>
-              {steps.map((s, i) => (
-                <button
-                  key={`select-${s.index}`}
-                  type="button"
-                  data-testid={`flow-step-${s.index}-select`}
-                  aria-pressed={selectedStep === s.index}
-                  aria-label={`Show people at step ${s.index}: ${s.event}${s.optional === true ? ' (optional)' : ''}`}
-                  onClick={() => onSelectStep(s.index)}
-                  className="h-full w-full rounded-sm border-0 bg-transparent p-0 hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset aria-pressed:bg-accent/20"
-                  style={{ gridRow: 1, gridColumn: i + 1 }}
-                />
-              ))}
+            <div className="absolute inset-0">
+              {model.nodes.map((node: SankeyNode) => {
+                const s = steps[node.step] as StepResult
+                const height = Math.max(node.height, HIT_MIN_HEIGHT)
+                const centred = node.y + node.height / 2 - height / 2
+                /* Clamped into the plot: a node at the floor height sits
+                 * two units tall, and a target grown around it would
+                 * otherwise hang above the top edge or below the bottom. */
+                const top = Math.min(Math.max(0, centred), Math.max(0, model.height - height))
+                return (
+                  <button
+                    key={`select-${s.index}`}
+                    type="button"
+                    data-testid={`flow-step-${s.index}-select`}
+                    aria-pressed={selectedStep === s.index}
+                    aria-label={`Show people at step ${s.index}: ${s.event}${s.optional === true ? ' (optional)' : ''}`}
+                    onClick={() => onSelectStep(s.index)}
+                    /* Selected is an OUTLINE around the node, not a fill
+                     * behind it. FOUND BY RENDERING IT: the target is wider
+                     * than the node it selects (a node is 8 viewBox units;
+                     * a pointer needs more), so a filled highlight came out
+                     * as two pale vertical bars flanking the node -- which
+                     * on a chart made of vertical bars reads as two more
+                     * nodes, not as a selection. An outline traces the
+                     * target instead of colouring beside it. */
+                    className="absolute -translate-x-1/2 rounded-sm border-0 bg-transparent p-0 outline-offset-2 hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset aria-pressed:outline aria-pressed:outline-2 aria-pressed:outline-primary"
+                    style={{
+                      left: `${pct(nodeLeft(node) + NODE_WIDTH / 2)}%`,
+                      top: `${r(top)}px`,
+                      height: `${r(height)}px`,
+                      width: '28px',
+                    }}
+                  />
+                )
+              })}
             </div>
           )}
 
-          {/* The step-to-step rate, sitting on the ribbon it describes.
+          {/* Each band's own count and rate, on the band.
            *
            * HTML absolutely over the plot, never an SVG `<text>`: the plot
            * stretches horizontally, so a glyph inside it would stretch too.
            *
-           * A ribbon's centre falls exactly on the boundary between two
-           * slots -- `barX(i) + BAR_WIDTH` to `barX(i + 1)` is centred on
-           * `(i + 1) * SLOT_WIDTH` -- so a label spanning those two grid
-           * columns and centred within the span lands on the ribbon without
-           * measuring anything at runtime.
+           * At the band's MIDPOINT, and that needs no sampling: both edges
+           * are cubics whose control points sit at the horizontal midpoint,
+           * which makes the y-component a 1D Bezier with P0=P1 and P2=P3 --
+           * so at the centre the curve is exactly the mean of its two ends.
            *
-           * `from_previous`, NOT `from_start`: the number belongs to the
-           * TRANSITION it is drawn on -- how many of the previous step's
-           * people made it across. The cumulative share is already the big
-           * number under each bar; repeating it here would say the same
-           * thing twice while looking like it said something new.
+           * The count AND the rate, because neither answers the other's
+           * question: the width already says "this share of the node", and
+           * an operator copies the absolute number into a ticket. Both are
+           * the model's TRUE values, never the scaled widths.
            *
-           * `text-foreground` over the ribbon fill measures 11.62:1 in light
-           * and 8.44:1 in dark -- computed, not eyeballed -- and it is the
-           * ordinary text token in both modes, so a label lifted above a
-           * thin ribbon onto the surface keeps the validated pairing.
+           * On a chip in the surface token, not bare on the band. A label
+           * lands wherever its band goes and bands overlap, so there is no
+           * one colour underneath to have measured against; the chip puts
+           * `text-foreground` back on the surface it is the ordinary pairing
+           * for.
            *
            * `aria-hidden`: the SVG's own `aria-label` already reads the
            * funnel as a sentence, and a screen reader meeting these spans
-           * separately would hear a row of bare percentages with nothing
-           * saying which transition each belongs to. */}
-          <div
-            className="pointer-events-none absolute inset-0 grid"
-            style={columns}
-            aria-hidden="true"
-          >
-            {slots.slice(0, -1).map((from, k) => {
-              const to = slots[k + 1] as number
-              const source = steps[from] as StepResult
-              /* The tallest branch bar standing in a slot this ribbon spans
-               * across -- 0 when the two stages are adjacent, which is every
-               * ribbon on a funnel with no optional steps. See
-               * `ribbonLabelY`: without it the label prints across the
-               * branch's dashed outline. */
-              let spanned = 0
-              for (let s = from + 1; s < to; s++) {
-                spanned = Math.max(spanned, heights[s] as number)
-              }
+           * separately would hear a row of bare numbers with nothing saying
+           * which flow each belongs to. */}
+          <div className="pointer-events-none absolute inset-0" aria-hidden="true">
+            {model.links.map((link: SankeyLink) => {
+              const src = model.nodes[link.from] as SankeyNode
+              const dst = model.nodes[link.to] as SankeyNode
+              const from = steps[link.from] as StepResult
+              const to = steps[link.to] as StepResult
+              const x0 = nodeLeft(src) + NODE_WIDTH
+              const x1 = nodeLeft(dst)
+              const midY = (link.y0 + link.w0 / 2 + (link.y1 + link.w1 / 2)) / 2
               return (
                 <span
-                  key={`rate-${source.index}`}
-                  data-testid={`flow-rate-${source.index}`}
-                  className="justify-self-center self-start text-xs font-medium tabular-nums text-foreground"
-                  style={{
-                    /* `gridRow: 1` on EVERY label, and it is not decorative.
-                     * Their column spans overlap by one, so auto-placement
-                     * pushes each one onto a fresh row -- the labels came out
-                     * stacked down the page, the later ones outside the card
-                     * entirely. Pinning the row makes them overlay the plot,
-                     * which is the whole point of an absolute overlay. */
-                    gridRow: 1,
-                    /* `labelColumns` decides this, and only two cases exist.
-                     * An adjacent pair stays centred across its own two
-                     * slots, exactly where it has always been. A ribbon that
-                     * SPANS a slot is anchored at its arrival gap instead --
-                     * its midpoint is the middle of the branch's slot, so a
-                     * centred label printed on top of the branch bar,
-                     * directly above that step's own and different rate. */
-                    gridColumn: `${labelColumns(from, to).start} / span ${labelColumns(from, to).span}`,
-                    marginTop: `${ribbonLabelY(heights[from] as number, heights[to] as number, spanned)}px`,
-                  }}
+                  key={`rate-${from.index}-${to.index}`}
+                  data-testid={`flow-rate-${from.index}-${to.index}`}
+                  className="absolute -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded-sm bg-background px-1 text-xs font-medium tabular-nums text-foreground"
+                  style={{ left: `${pct((x0 + x1) / 2)}%`, top: `${r(midY)}px` }}
                 >
-                  {formatPercent((steps[to] as StepResult).from_previous)}
-                </span>
-              )
-            })}
-            {/* The branch's OWN rate, on the branch's own wedge.
-             *
-             * Without it the plot showed one percentage between two bars and
-             * left the reader to guess which of the two flows leaving the
-             * branch point it described. `from_previous` on an optional step
-             * is already a share of the step it hangs off, so this is the
-             * same measure the spine label carries, against the same
-             * denominator -- which is what makes the two comparable at a
-             * glance. Adjacent by construction (a branch hangs off the
-             * required step before it), so `labelColumns` centres it over
-             * its own gap and it cannot collide with the spanning label,
-             * which is anchored a gap further right. */}
-            {branches.map((from, i) => {
-              if (from == null) return null
-              const s = steps[i] as StepResult
-              const cols = labelColumns(from, i)
-              return (
-                <span
-                  key={`branch-rate-${s.index}`}
-                  data-testid={`flow-branch-rate-${s.index}`}
-                  className="justify-self-center self-start text-xs font-medium tabular-nums text-foreground"
-                  style={{
-                    gridRow: 1,
-                    gridColumn: `${cols.start} / span ${cols.span}`,
-                    marginTop: `${ribbonLabelY(heights[from] as number, heights[i] as number)}px`,
-                  }}
-                >
-                  {formatPercent(s.from_previous)}
+                  {formatCount(link.people)} · {formatPercent(link.rate)}
                 </span>
               )
             })}
@@ -426,81 +446,108 @@ export function FunnelFlow(props: {
         </div>
 
         {/* `from_start` as the headline and the count beneath it: the share is
-         * what the bar height already drew, so it reads as a label rather than
+         * what the node height already drew, so it reads as a label rather than
          * as new information, and the absolute number is what an operator
          * copies into a ticket. Both in text tokens, never in the series
-         * colour -- the bar above carries identity. */}
+         * colour -- the node above carries identity. */}
         <div className="grid gap-1" style={columns}>
           {steps.map((s, i) => {
             /* The required step this branch hangs off, from the SAME
-             * `branchSlots` the connector is drawn with -- so the name under
-             * the number and the thread on the plot can never disagree about
+             * `branchSlots` the model branches with -- so the name under
+             * the number and the band on the plot can never disagree about
              * which step the share is a share of. */
             const from = branches[i]
             const branchPoint = from == null ? null : (steps[from] as StepResult)
-            return s.optional === true ? (
-              /* `from_previous`, NOT `from_start`, as the headline -- and
-               * that is not a style choice. An optional step's rate is a
-               * share of the required step it branches off, so putting it
-               * where every other column puts a share of the ENTRANTS would
-               * print two different denominators in one row of numbers with
-               * nothing saying which is which. The words under it say whose
-               * share it is. */
+            const node = model.nodes[i] as SankeyNode
+            return (
               <div
                 key={s.index}
                 data-testid={`flow-step-${s.index}`}
                 className="min-w-0 text-center"
               >
-                <p className="text-base font-semibold tabular-nums">
-                  {formatPercent(s.from_previous)}
-                </p>
-                {/* NAMING the denominator, immediately under the number, and
-                 * this line is the whole reason the row is readable. Every
-                 * other bold percentage in it is a share of the ENTRANTS;
-                 * this one is a share of one required step. Same row, same
-                 * weight, different denominator -- and a number that looks
-                 * right while answering a slightly different question is
-                 * worse than no number. `StepBars` already says this on its
-                 * own sub-line; the wide chart said it nowhere. */}
-                {branchPoint != null && (
-                  <p
-                    data-testid={`flow-step-${s.index}-of`}
-                    className="truncate text-xs text-muted-foreground"
-                    title={`of ${branchPoint.event}`}
-                  >
-                    of {branchPoint.event}
-                  </p>
+                {s.optional === true ? (
+                  /* `from_previous`, NOT `from_start`, as the headline -- and
+                   * that is not a style choice. An optional step's rate is a
+                   * share of the required step it branches off, so putting it
+                   * where every other column puts a share of the ENTRANTS would
+                   * print two different denominators in one row of numbers with
+                   * nothing saying which is which. The words under it say whose
+                   * share it is. */
+                  <>
+                    <p className="text-base font-semibold tabular-nums">
+                      {formatPercent(s.from_previous)}
+                    </p>
+                    {/* NAMING the denominator, immediately under the number, and
+                     * this line is the whole reason the row is readable. Every
+                     * other bold percentage in it is a share of the ENTRANTS;
+                     * this one is a share of one required step. Same row, same
+                     * weight, different denominator -- and a number that looks
+                     * right while answering a slightly different question is
+                     * worse than no number. */}
+                    {branchPoint != null && (
+                      <p
+                        data-testid={`flow-step-${s.index}-of`}
+                        className="truncate text-xs text-muted-foreground"
+                        title={`of ${branchPoint.event}`}
+                      >
+                        of {branchPoint.event}
+                      </p>
+                    )}
+                    <p className="text-xs tabular-nums text-muted-foreground">
+                      {formatCount(s.people)} did
+                    </p>
+                    {/* The three counts cannot be read as one population, which
+                     * is why each carries its own verb rather than sharing a
+                     * separator. `skipped` is people who reached the branch
+                     * point and did NOT do this -- they are still in the funnel,
+                     * and a reader who takes them for a drop-off has the story
+                     * backwards. `continued` is the subset of the people who DID
+                     * do it that went on to the next required step, which is the
+                     * band leaving this node. */}
+                    {s.skipped != null && (
+                      <p
+                        data-testid={`flow-step-${s.index}-skipped`}
+                        className="text-xs tabular-nums text-muted-foreground"
+                      >
+                        {formatCount(s.skipped)} skipped
+                      </p>
+                    )}
+                    {s.continued != null && (
+                      <p
+                        data-testid={`flow-step-${s.index}-continued`}
+                        className="text-xs tabular-nums text-muted-foreground"
+                      >
+                        {formatCount(s.continued)} carried on
+                      </p>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <p className="text-base font-semibold tabular-nums">
+                      {formatPercent(s.from_start)}
+                    </p>
+                    <p className="text-xs tabular-nums text-muted-foreground">
+                      {formatCount(s.people)}
+                    </p>
+                  </>
                 )}
-                <p className="text-xs tabular-nums text-muted-foreground">
-                  {formatCount(s.people)} did
-                </p>
-                {/* The two counts cannot be read as one population, which is
-                 * why each carries its own verb rather than sharing a
-                 * middot with it. `skipped` is people who reached the branch
-                 * point and did NOT do this -- they are still in the funnel,
-                 * and a reader who takes them for a drop-off has the story
-                 * backwards. */}
-                {s.skipped != null && (
+                {/* A double count, said on the step it happens at -- and on a
+                 * REQUIRED step as readily as an optional one. Someone who
+                 * did the optional step after the next required one is on the
+                 * branch leg and on the bypass leg both, so the legs out of
+                 * their branch point add up to more than the branch point
+                 * has. The widths cannot show that (they are scaled to fit),
+                 * and silently scaling it away is how a chart becomes
+                 * something an operator stops trusting. */}
+                {node != null && node.overlap > 0 && (
                   <p
-                    data-testid={`flow-step-${s.index}-skipped`}
+                    data-testid={`flow-step-${s.index}-overlap`}
                     className="text-xs tabular-nums text-muted-foreground"
+                    title={`${formatCount(node.overlap)} also reached a step out of order, so two paths count them`}
                   >
-                    {formatCount(s.skipped)} skipped
+                    {formatCount(node.overlap)} counted twice
                   </p>
                 )}
-              </div>
-            ) : (
-              <div
-                key={s.index}
-                data-testid={`flow-step-${s.index}`}
-                className="min-w-0 text-center"
-              >
-                <p className="text-base font-semibold tabular-nums">
-                  {formatPercent(s.from_start)}
-                </p>
-                <p className="text-xs tabular-nums text-muted-foreground">
-                  {formatCount(s.people)}
-                </p>
               </div>
             )
           })}
