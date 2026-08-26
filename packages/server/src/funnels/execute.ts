@@ -61,6 +61,20 @@ export async function runFunnel(opts: {
         }
         return Number(raw)
       }),
+      optionalContinued: Array.from({ length: optionalCount }, (_, j) => {
+        const raw = dynamic[`continued_${j}`]
+        // Same rule as `optional_<j>`: THROWN, never defaulted. A missing
+        // column means the compiled query and this runner disagree about how
+        // many optional steps the definition has, and a silent zero would
+        // report every branch as a dead end -- a plausible number, which is
+        // the worst kind of wrong one.
+        if (raw === undefined) {
+          throw new Error(
+            `funnel histogram is missing continued_${j}; compiled query and definition disagree`,
+          )
+        }
+        return Number(raw)
+      }),
     }
   })
   return summarise(levels, opts.steps)

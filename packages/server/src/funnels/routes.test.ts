@@ -666,4 +666,18 @@ describe('people at an optional step', () => {
     expect(steps[0].optional).toBeUndefined()
     expect(steps[2].optional).toBeUndefined()
   })
+
+  it('puts continued on the wire for an optional step and nowhere else', () => {
+    // Deliberately a separate assertion from `optional` and `skipped`: all
+    // three are absent-by-default on a required step, and a client renders
+    // the branch's outgoing leg on this one.
+    return created(OPT).then(async (id) => {
+      const res = await call('POST', `/v1/funnels/${id}/run`, { days: 7 })
+      expect(res.statusCode).toBe(200)
+      const steps = res.json().steps
+      expect(typeof steps[1].continued).toBe('number')
+      expect(steps[0].continued).toBeUndefined()
+      expect(steps[2].continued).toBeUndefined()
+    })
+  })
 })
