@@ -37,7 +37,7 @@ one fix is contained in 0.3.0.
   three. The first and last steps of a funnel still cannot be optional,
   since they define entry and conversion, and a funnel may carry at most
   `MAX_OPTIONAL_STEPS` (2) of them inside the existing eight-step ceiling —
-  measured, not preferred: three optional steps' worst legal definition
+  measured, not preferred: one measured shape at three optional steps
   compiles past ClickHouse's 262,144-byte `max_query_size` and fails
   outright. `POST /v1/funnels/:id/people` accepts a third `mode`,
   `"skipped"`, for optional steps only; it and `/dropoff` refuse
@@ -49,13 +49,20 @@ one fix is contained in 0.3.0.
   smaller `converted`. **A saved funnel with three optional steps is now
   refused at save time** under this cap; nobody has one yet, but a caller
   scripting against the old limit will see a `400` where it used to see a
-  `201`.
+  `201`. One that was saved before this release cannot be RENAMED either:
+  `PATCH /v1/funnels/:id` cap-checks the definition the patch would produce,
+  so a name-only patch to such a funnel returns the same `400`. Listing and
+  reading it still work — one bad row does not break the list page.
 - **A compiled funnel that is too large to run is refused before it reaches
-  ClickHouse.** Past `MAX_COMPILED_QUERY_BYTES`, `POST /v1/funnels` and
-  `/preview` return a `400` naming what to remove — `where` predicates,
-  step audiences, or optional steps — instead of the request reaching
-  ClickHouse and failing there with a bare syntax error. The cap bounds the
-  failure; it does not fix it
+  ClickHouse.** Past `MAX_COMPILED_QUERY_BYTES`, every route that compiles a
+  funnel returns a `400` naming what to remove — `where` predicates, step
+  audiences, or optional steps — instead of the request reaching ClickHouse
+  and failing there with a bare syntax error. `POST /v1/funnels` and
+  `PATCH /v1/funnels/:id` compile the definition and discard the SQL for
+  exactly this reason, so a funnel that could never run is refused at save
+  time rather than saved with a `201` and then failing on every `/run`,
+  `/dropoff` and `/people` it is ever asked for. The cap bounds the failure;
+  it does not fix it
   ([#200](https://github.com/lyraflow/lyraflow/issues/200)).
 
 ### Changed
