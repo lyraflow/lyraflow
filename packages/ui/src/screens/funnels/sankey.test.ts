@@ -74,23 +74,73 @@ describe('sankeyModel', () => {
     const optionalBottom = (optional?.y ?? 0) + (optional?.height ?? 0)
     // The gap is pinned to its literal value, not to whatever constant the
     // module happens to use internally -- a shrunk gap must fail this too.
-    expect(requiredCentre - optionalBottom).toBeCloseTo(24, 5)
+    expect(requiredCentre - optionalBottom).toBeCloseTo(32, 5)
   })
 
-  it('fills each node exactly with the links that touch it', () => {
-    // THE CONSERVATION RULE. Widths always add up; the counts are what carry
-    // the truth. Checked at BOTH ends, because a link may taper.
+  it('draws every band at ONE scale, so a thickness means the same people anywhere', () => {
+    // THE POINT OF THE DESIGN. Bands used to be scaled to fill each node's
+    // own edge, which made a width readable only against the one node it
+    // touched and left a funnel that converts everyone as a solid rectangle
+    // with no space in it. Now 2.8 units is one person everywhere on the
+    // plot -- 280 of scale over 100 entrants. Literals, so a moved scale
+    // fails here rather than passing quietly.
     const m = sankeyModel(BRANCHED, 100)
-    for (const [i, node] of m.nodes.entries()) {
-      const out = m.links.filter((l) => l.from === i)
-      const into = m.links.filter((l) => l.to === i)
-      if (out.length > 0) {
-        expect(out.reduce((t, l) => t + l.w0, 0)).toBeCloseTo(node.height, 5)
-      }
-      if (into.length > 0) {
-        expect(into.reduce((t, l) => t + l.w1, 0)).toBeCloseTo(node.height, 5)
-      }
-    }
+    const branch = m.links.find((l) => l.kind === 'branch') as SankeyLink
+    const carry = m.links.find((l) => l.kind === 'continue') as SankeyLink
+    const bypass = m.links.find((l) => l.kind === 'bypass') as SankeyLink
+    expect(branch.w0).toBeCloseTo(60 * 2.8, 5)
+    expect(carry.w0).toBeCloseTo(50 * 2.8, 5)
+    expect(bypass.w0).toBeCloseTo(20 * 2.8, 5)
+    // The nodes are on that same scale, which is what makes a band and a
+    // node comparable at a glance.
+    expect((m.nodes[1] as SankeyNode).height).toBeCloseTo(60 * 2.8, 5)
+  })
+
+  it('gives a band one thickness, because it carries one quantity', () => {
+    // No taper. A band that narrows between its ends says the number changed
+    // on the way, and it did not.
+    const m = sankeyModel(BRANCHED, 100)
+    for (const l of m.links) expect(l.w1).toBeCloseTo(l.w0, 5)
+  })
+
+  it('leaves the drop-off as space under a node rather than filling the edge', () => {
+    // `a` holds 100 people and 80 leave on a leg, so 20 people's worth of its
+    // edge is empty. That space IS the drop-off, and it is the first thing a
+    // reader looks for.
+    const m = sankeyModel(BRANCHED, 100)
+    const a = m.nodes[0] as SankeyNode
+    const drawn = m.links.filter((l) => l.from === 0).reduce((t, l) => t + l.w0, 0)
+    expect(drawn).toBeCloseTo(80 * 2.8, 5)
+    expect(a.height - drawn).toBeCloseTo(20 * 2.8, 5)
+  })
+
+  it('lets the bands exceed a node where two paths claim the same person', () => {
+    // The mirror of the drop-off case, and it must not be hidden: someone who
+    // took the optional step out of order is genuinely on two legs, so the
+    // stack genuinely runs past the node. These are funnel 6's real numbers.
+    const overlapping: StepResult[] = [
+      step({ index: 1, event: 'a', people: 51, from_previous: 1, from_start: 1 }),
+      step({
+        index: 2,
+        event: 'b',
+        people: 19,
+        from_previous: 0.373,
+        from_start: 0.373,
+        optional: true,
+        skipped: 32,
+        continued: 16,
+      }),
+      step({ index: 3, event: 'c', people: 51, from_previous: 1, from_start: 1 }),
+    ]
+    const m = sankeyModel(overlapping, 51)
+    const a = m.nodes[0] as SankeyNode
+    const out = m.links.filter((l) => l.from === 0)
+    expect(out.reduce((t, l) => t + l.people, 0)).toBe(54)
+    expect(a.overlap).toBe(3)
+    expect(out.reduce((t, l) => t + l.w0, 0)).toBeGreaterThan(a.height)
+    // And the viewBox grows to hold it rather than clipping the very thing
+    // the reader needs to see.
+    expect(m.height).toBeGreaterThanOrEqual(Math.max(...m.links.map((l) => l.y0 + l.w0)))
   })
 
   it('prints the true counts even where the widths were scaled', () => {
@@ -198,7 +248,7 @@ describe('sankeyModel', () => {
     // to the module's own constant.
     const b = m.nodes[1] as SankeyNode
     const c = m.nodes[2] as SankeyNode
-    expect(b.y - (c.y + c.height)).toBeCloseTo(24, 5)
+    expect(b.y - (c.y + c.height)).toBeCloseTo(32, 5)
   })
 
   it("gives each node its ramp step, with an optional taking its branch point's", () => {
@@ -206,32 +256,32 @@ describe('sankeyModel', () => {
     expect(m.nodes.map((n) => n.ramp)).toEqual([1, 1, 2])
   })
 
-  it('stacks the links leaving one node along disjoint ranges of its edge', () => {
+  it('stacks the links leaving one node from its top edge, a gap between each', () => {
     const m = sankeyModel(BRANCHED, 100)
     const a = m.nodes[0] as SankeyNode
     const out = m.links.filter((l) => l.from === 0).sort((x, y) => x.y0 - y.y0)
     expect(out).toHaveLength(2)
     const [first, second] = out as [SankeyLink, SankeyLink]
     expect(first.y0).toBeCloseTo(a.y, 5)
-    expect(first.y0 + first.w0).toBeCloseTo(second.y0, 5)
-    expect(second.y0 + second.w0).toBeCloseTo(a.y + a.height, 5)
+    // Literal 16, not the module's LINK_GAP -- asserting against the
+    // constant survives the constant moving and stops pinning it.
+    expect(first.y0 + first.w0 + 16).toBeCloseTo(second.y0, 5)
   })
 
-  it('stacks the links arriving at one node along disjoint ranges of its edge', () => {
+  it('stacks the links arriving at one node from its top edge, a gap between each', () => {
     const m = sankeyModel(BRANCHED, 100)
     const c = m.nodes[2] as SankeyNode
     const into = m.links.filter((l) => l.to === 2).sort((x, y) => x.y1 - y.y1)
     expect(into).toHaveLength(2)
     const [first, second] = into as [SankeyLink, SankeyLink]
     expect(first.y1).toBeCloseTo(c.y, 5)
-    expect(first.y1 + first.w1).toBeCloseTo(second.y1, 5)
-    expect(second.y1 + second.w1).toBeCloseTo(c.y + c.height, 5)
+    expect(first.y1 + first.w1 + 16).toBeCloseTo(second.y1, 5)
   })
 
   it('sizes the model to the tallest extent reached and the full plot width', () => {
     const m = sankeyModel(BRANCHED, 100)
     // The offset branch above the centre line must not be clipped.
-    expect(m.height).toBeCloseTo(222, 5)
+    expect(m.height).toBeCloseTo(340, 5)
     expect(m.width).toBe(plotWidth(BRANCHED.length))
   })
 

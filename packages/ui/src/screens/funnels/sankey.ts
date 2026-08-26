@@ -6,12 +6,22 @@ import {
   branchSlots,
   plotWidth,
   rampIndexes,
+  scaleHeight,
   spineSlots,
 } from './flowGeometry.js'
 
 /** Vertical gap between the required centre line and an offset branch, and
  * between two branches stacked off the same step. */
-const BRANCH_GAP = 24
+const BRANCH_GAP = 32
+
+/** Vertical space between two bands stacked on one node's edge.
+ *
+ * Without it the bands are flush and the plot reads as one slab: a funnel
+ * that converts everyone draws every node full height and every band filling
+ * it, so the fork between a branch and the flow past it disappears into a
+ * hairline. This is the separation, and it is why `w0`/`w1` are scaled
+ * against the node's height MINUS the gaps rather than against the height. */
+const LINK_GAP = 16
 
 export interface SankeyNode {
   step: number // 0-based index into result.steps
@@ -182,20 +192,28 @@ export function sankeyModel(steps: readonly StepResult[], entered: number): Sank
     })
   }
 
-  // 3. THICKNESS. w0 fills the source, w1 fills the destination, so a link
-  //    TAPERS where the two populations disagree. Geometry always adds up;
-  //    the printed counts above are never scaled.
-  const outTotals = new Map<number, number>()
-  const inTotals = new Map<number, number>()
+  // 3. THICKNESS -- ONE SCALE FOR THE WHOLE PLOT.
+  //
+  //    A band is drawn at its own people count through the same scale as
+  //    every node, so `w0 === w1`: a band carries one quantity and has one
+  //    thickness. It does not taper, and it is comparable to every other
+  //    band and node on the chart.
+  //
+  //    This replaced scaling each node's bands to fill its edge exactly.
+  //    That guaranteed the geometry always "added up", at the cost of the
+  //    two things a flow diagram is read for: a width meant something only
+  //    against the one node it touched, and a node's edge was always fully
+  //    covered, so a funnel that converts everyone drew as a solid rectangle
+  //    with no space anywhere in it. Reported from a real funnel.
+  //
+  //    What the plot now shows instead: the space under a node's bands IS
+  //    its drop-off, and where bands exceed a node the paths genuinely
+  //    overlap -- someone counted on two legs because they took a step out
+  //    of order. `node.overlap` names that number, and it is real rather
+  //    than an artefact of the drawing.
   for (const l of links) {
-    outTotals.set(l.from, (outTotals.get(l.from) ?? 0) + l.people)
-    inTotals.set(l.to, (inTotals.get(l.to) ?? 0) + l.people)
-  }
-  for (const l of links) {
-    const src = nodes[l.from] as SankeyNode
-    const dst = nodes[l.to] as SankeyNode
-    l.w0 = share(l.people, outTotals.get(l.from) ?? 0, src.height)
-    l.w1 = share(l.people, inTotals.get(l.to) ?? 0, dst.height)
+    l.w0 = scaleHeight(l.people, entered)
+    l.w1 = l.w0
   }
 
   // 4. y0 / y1 stack the links along each node's edge in link order, so two
@@ -207,10 +225,10 @@ export function sankeyModel(steps: readonly StepResult[], entered: number): Sank
     const dst = nodes[l.to] as SankeyNode
     const y0 = outCursor.get(l.from) ?? src.y
     l.y0 = y0
-    outCursor.set(l.from, y0 + l.w0)
+    outCursor.set(l.from, y0 + l.w0 + LINK_GAP)
     const y1 = inCursor.get(l.to) ?? dst.y
     l.y1 = y1
-    inCursor.set(l.to, y1 + l.w1)
+    inCursor.set(l.to, y1 + l.w1 + LINK_GAP)
   }
 
   // 5. overlap = max(0, Σ(outgoing people) - people, Σ(incoming people) -
@@ -225,9 +243,17 @@ export function sankeyModel(steps: readonly StepResult[], entered: number): Sank
     node.overlap = Math.max(0, outSum - node.people, inSum - node.people)
   }
 
-  // 6. height = the tallest extent any node reaches, so the caller sizes its
-  //    own viewBox; width = plotWidth(steps.length).
-  const height = nodes.length > 0 ? Math.max(...nodes.map((n) => n.y + n.height)) : 0
+  // 6. height = the tallest extent anything reaches, NODES AND BANDS BOTH.
+  //
+  //    Bands are no longer scaled to fit their node, so where two paths
+  //    claim the same person the stack genuinely runs past the node's own
+  //    edge. Sizing the viewBox from the nodes alone would clip exactly the
+  //    thing the reader most needs to see, and clip it silently.
+  const extents = [
+    ...nodes.map((n) => n.y + n.height),
+    ...links.map((l) => Math.max(l.y0 + l.w0, l.y1 + l.w1)),
+  ]
+  const height = extents.length > 0 ? Math.max(...extents) : 0
 
   return { nodes, links, width: plotWidth(steps.length), height }
 }

@@ -177,16 +177,27 @@ function tilesEveryNodeEdge(links: readonly [number, number][], nodeCount: numbe
   const bands = links.map(([from, to]) => band(from, to))
   expect(screen.getAllByTestId(/^flow-link-/)).toHaveLength(bands.length)
 
+  // The literal 16, not the module's own `LINK_GAP`. Asserting against the
+  // constant would keep passing if the constant moved, which is how a test
+  // that names a value stops pinning it.
+  const GAP = 16
+  /** Bands stack DOWN FROM a node's top edge, disjoint, one gap apart.
+   *
+   * They no longer end at the node's bottom, and that is the design: a band
+   * is drawn at its own people count on the plot's single scale, so the space
+   * left under them is the drop-off and any excess is a genuine double-count.
+   * What this walk still owns is that the renderer lays the model out
+   * faithfully -- start at the top, no overlap, one gap between. The scale
+   * itself is pinned in `sankey.test.ts`, against the people counts. */
   const spans = (edges: { start: number; thickness: number }[], node: ReturnType<typeof box>) => {
     let cursor = node.y
     for (const edge of edges) {
       // A zero-thickness band would let two of them claim one offset and
-      // still tile, so the disjointness this walk asserts would mean nothing.
+      // still stack, so the disjointness this walk asserts would mean nothing.
       expect(edge.thickness).toBeGreaterThan(0)
       expect(edge.start).toBeCloseTo(cursor, 1)
-      cursor += edge.thickness
+      cursor += edge.thickness + GAP
     }
-    expect(cursor).toBeCloseTo(node.y + node.height, 1)
   }
 
   for (let index = 1; index <= nodeCount; index++) {
@@ -215,8 +226,8 @@ describe('FunnelFlow', () => {
     // Pinned by VALUE, not by shape: 100/100 is the full scale and 25/100 a
     // quarter of it. A test asserting only "has a height" would pass against
     // a chart that drew every node the same.
-    expect(screen.getByTestId('flow-node-1')).toHaveAttribute('height', '180')
-    expect(screen.getByTestId('flow-node-2')).toHaveAttribute('height', '45')
+    expect(screen.getByTestId('flow-node-1')).toHaveAttribute('height', '280')
+    expect(screen.getByTestId('flow-node-2')).toHaveAttribute('height', '70')
   })
 
   it('labels each step with from_start, not from_previous', () => {
@@ -305,14 +316,16 @@ describe('FunnelFlow', () => {
     expect(screen.queryByTestId('flow-step-1-where')).not.toBeInTheDocument()
   })
 
-  it('caps the plot so a two-step funnel does not draw one enormous band', () => {
-    // Found by rendering: uncapped, two steps spread across a wide card put
-    // ~700px of band between them, which reads as a bridge rather than a
-    // flow. A cap, not a width -- the plot still shrinks to whatever room it
-    // gets.
+  it('bounds the plot PER STAGE, so two steps do not bridge and eight do not compress', () => {
+    // Both bounds answer a rendering finding. The ceiling: uncapped, two
+    // steps across a wide card put ~700px of band between them and read as
+    // a bridge. The floor: capping the WHOLE plot at 200px a stage pinned a
+    // three-stage funnel to 600px on any screen -- reported as squeezed.
+    // Per stage, both can hold. Literals, so a moved constant fails here.
     render(<FunnelFlow result={result()} />)
     expect(screen.getByTestId('funnel-flow').querySelector('[style*="max-width"]')).toHaveStyle({
-      maxWidth: '400px',
+      minWidth: '290px',
+      maxWidth: '640px',
     })
   })
 

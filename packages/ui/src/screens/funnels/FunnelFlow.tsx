@@ -15,7 +15,18 @@ import { type SankeyLink, type SankeyNode, sankeyModel } from './sankey.js'
  * (200px per step, see `plot` below) it lands at 16px, and it shrinks with
  * the card rather than swallowing a narrow one.
  */
-const NODE_WIDTH = 8
+const NODE_WIDTH = 12
+
+/** The narrowest a stage may get before the plot scrolls instead of
+ * compressing. Eight stages at this width is about 1160px, which is wider
+ * than the card on a laptop -- so a long funnel scrolls, which is the honest
+ * failure: a stage you can read and must scroll to beats eight you cannot. */
+const MIN_SLOT_PX = 145
+
+/** The widest a stage may get. Past this a two-stage funnel stops reading as
+ * a flow and starts reading as a bridge between two distant posts -- found
+ * by rendering, and the reason a cap exists at all. */
+const MAX_SLOT_PX = 320
 
 /**
  * Where a node sits horizontally inside its slot.
@@ -71,7 +82,17 @@ function bandPath(x0: number, y0: number, w0: number, x1: number, y1: number, w1
  * full-opacity outline in its own tint, which is what keeps its edges
  * findable where two of them overlap.
  */
-const LINK_FILL_OPACITY = 0.55
+const LINK_FILL_OPACITY = 0.62
+
+/** The optional path, drawn recessive.
+ *
+ * On a funnel that converts everyone, every band fills the edge it touches
+ * and the plot has no whitespace to separate anything with -- so figure and
+ * ground have to come from weight instead. The required chain reads as the
+ * body of the funnel; the flow that detours through an optional step reads
+ * as lighter, and the dash says which is which a second time for anyone who
+ * cannot see the difference in weight. */
+const BRANCH_FILL_OPACITY = 0.3
 
 /** A click target smaller than this is not a click target. A node can be two
  * viewBox units tall (`MIN_BAR_HEIGHT`, a step nobody reached), so the
@@ -204,7 +225,24 @@ export function FunnelFlow(props: {
    * the band between them lands ~700px long, which reads as a bridge rather
    * than as a flow. Per-step rather than absolute so a six-step funnel still
    * fills a wide screen. */
-  const plot = { maxWidth: `${Math.max(1, total) * 200}px` }
+  /* FULL WIDTH, with a FLOOR per stage rather than a cap on the whole plot.
+   *
+   * This was `maxWidth: total * 200px`, which pinned a three-stage funnel to
+   * 600px however wide the screen was -- reported as "squeezed into a very
+   * narrow width", and it was. A cap answers the wrong question: the risk is
+   * not a chart that is too wide, it is a stage too narrow to read. So the
+   * plot fills its container between a floor and a ceiling PER STAGE, and
+   * both bounds answer a real finding. The floor: an eight-stage funnel
+   * scrolls rather than compressing every stage into an unreadable sliver.
+   * The ceiling: a two-stage funnel across a wide card put ~700px of band
+   * between two nodes, which reads as a bridge rather than a flow -- that
+   * was the reason for the original cap, and it still holds. What was wrong
+   * was capping the WHOLE plot at 200px a stage, which pinned a three-stage
+   * funnel to 600px on any screen. Per stage, both bounds can be true. */
+  const plot = {
+    minWidth: `${Math.max(1, total) * MIN_SLOT_PX}px`,
+    maxWidth: `${Math.max(1, total) * MAX_SLOT_PX}px`,
+  }
   /** A viewBox x as a percentage of the plot's own width. The SVG is
    * `width="100%"` over a viewBox of `model.width`, so this is exactly where
    * that coordinate lands however wide the card is -- no measuring, no
@@ -213,7 +251,7 @@ export function FunnelFlow(props: {
   const pct = (x: number) => (x / model.width) * 100
 
   return (
-    <div data-testid="funnel-flow" className="flex min-w-0 flex-col gap-2">
+    <div data-testid="funnel-flow" className="flex min-w-0 flex-col gap-2 overflow-x-auto">
       {/* The cap wraps the PLOT only. Wrapping the sentences below it too
        * was the first attempt and it re-flowed "loses 35.1% of the previous
        * step" onto two lines inside a card with 800px of empty space beside
@@ -223,7 +261,7 @@ export function FunnelFlow(props: {
        * sentences beneath it starting at the left edge -- two different
        * origins on one block. `mr-auto` takes up the slack on the right so
        * the plot starts where every other line on the screen starts. */}
-      <div className="mr-auto flex w-full min-w-0 flex-col gap-2" style={plot}>
+      <div className="flex w-full flex-col gap-2" style={plot}>
         {/* Stage names, above the plot as in a column chart -- the reader
          * needs to know what a node IS before they read how big it is. */}
         <div className="grid gap-1" style={columns}>
@@ -306,9 +344,27 @@ export function FunnelFlow(props: {
                    * a shortfall in legibility. What keeps the two findable
                    * where they overlap is the outline, not the fill. */
                   fill={`var(--chart-funnel-${src.ramp})`}
-                  fillOpacity={LINK_FILL_OPACITY}
+                  fillOpacity={
+                    link.kind === 'branch' || link.kind === 'continue'
+                      ? BRANCH_FILL_OPACITY
+                      : LINK_FILL_OPACITY
+                  }
                   stroke={`var(--chart-funnel-${src.ramp})`}
-                  strokeWidth={1}
+                  strokeWidth={1.5}
+                  /* DASHED MEANS THIS FLOW WENT THROUGH THE OPTIONAL STEP.
+                   *
+                   * The tint cannot carry that. An optional node borrows its
+                   * branch point's ramp step rather than consuming one, so on
+                   * a three-stage funnel with one optional step the spine is
+                   * two stages long and EVERY link leaves a ramp-1 node --
+                   * three bands, one colour, reported from a real funnel as
+                   * flows that collide. Texture is the channel ADR 006 leaves
+                   * free, it survives colour-blindness, and it echoes the
+                   * dashed `optional` badge on the node itself. Solid is the
+                   * required chain; dashed went via the branch. */
+                  strokeDasharray={
+                    link.kind === 'branch' || link.kind === 'continue' ? '7 4' : undefined
+                  }
                   /* The plot stretches horizontally, so a stroke in user
                    * space would come out thicker on one axis than the other
                    * and would change with the card's width. */
@@ -342,6 +398,15 @@ export function FunnelFlow(props: {
                    * side" far louder than a fill ever did -- and the ramp
                    * step it borrows says which stage it hangs off. */
                   fill={`var(--chart-funnel-${node.ramp})`}
+                  /* A hairline of the surface between the node and the bands
+                   * meeting it. Bands are drawn at 0.55 and a node at full
+                   * opacity, which separates them on paper but not where a
+                   * band is the same ramp step as the node it lands on --
+                   * exactly the case on a short funnel. The halo makes the
+                   * node an object rather than a darker patch of band. */
+                  stroke="var(--background)"
+                  strokeWidth={1.5}
+                  vectorEffect="non-scaling-stroke"
                 >
                   <title>
                     {s.event}

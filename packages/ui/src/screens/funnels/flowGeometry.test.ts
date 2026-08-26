@@ -30,9 +30,9 @@ describe('barHeight', () => {
     // height is a computed maximum now, not a constant -- so these are
     // pinned to the literal heights rather than to a shared symbol that
     // could be changed on both sides at once.
-    expect(barHeight(100, 100)).toBe(180)
-    expect(barHeight(50, 100)).toBe(90)
-    expect(barHeight(25, 100)).toBe(45)
+    expect(barHeight(100, 100)).toBe(280)
+    expect(barHeight(50, 100)).toBe(140)
+    expect(barHeight(25, 100)).toBe(70)
   })
 
   it('never returns NaN when nobody entered', () => {

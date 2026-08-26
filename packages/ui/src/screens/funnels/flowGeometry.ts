@@ -25,7 +25,7 @@ export const SLOT_WIDTH = 100
  * constant, and a module-level `PLOT_HEIGHT` would keep asserting the
  * premise that is gone. This is only what `barHeight` measures against.
  */
-const BAR_SCALE = 180
+const BAR_SCALE = 280
 
 /** Nodes never vanish entirely: a step that converted nobody still has a
  * position on the page, and a zero-height rectangle reads as a rendering
@@ -152,8 +152,26 @@ export function rampIndexes(steps: readonly StepResult[]): number[] {
  */
 export function barHeight(people: number, entered: number): number {
   if (entered <= 0) return MIN_BAR_HEIGHT
-  const scaled = (people / entered) * BAR_SCALE
-  return Math.max(MIN_BAR_HEIGHT, Math.round(scaled * 100) / 100)
+  return Math.max(MIN_BAR_HEIGHT, scaleHeight(people, entered))
+}
+
+/**
+ * The same scale as `barHeight`, WITHOUT the minimum.
+ *
+ * ONE SCALE FOR THE WHOLE PLOT is the point. A band drawn through this is
+ * directly comparable to a node drawn through `barHeight` and to every other
+ * band, so a thickness means the same number of people wherever it appears.
+ * Bands were previously scaled to fill each node's edge, which made a width
+ * readable only against the one node it touched and left a funnel that
+ * converts everyone as a solid rectangle with no space in it.
+ *
+ * No floor, unlike `barHeight`: a node that nobody reached still needs a
+ * position on the page, but a band carrying nobody must draw as nothing. A
+ * two-unit sliver for zero people is a line an operator would try to read.
+ */
+export function scaleHeight(people: number, entered: number): number {
+  if (entered <= 0) return 0
+  return Math.round((people / entered) * BAR_SCALE * 100) / 100
 }
 
 /** The plot's total width in viewBox units. */

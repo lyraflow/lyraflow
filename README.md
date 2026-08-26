@@ -1720,17 +1720,29 @@ step hangs off it as a branch, and the people counted in `continued` rejoin
 the spine at the next required step — a fork that rejoins, the same shape
 described above.
 
-**What the widths mean, and what the numbers mean.** Band widths are scaled
-so that every band touching a node fills that node's edge exactly, at both
-ends — a band tapers between the two nodes it connects. Every printed count
-and rate on a band is the true value from the run response, never scaled to
-fit. **The consequence: a band's width is comparable only within one node's
-edge, not across the chart.** On a funnel where `onboarded` has 800 people
-and one of its outgoing bands carries 300 of them onward, that band is drawn
-at 300/580 ≈ 52% of `onboarded`'s height — because the rest of that height
-belongs to `onboarded`'s other outgoing bands — while the printed rate on it
-reads 37.5% (300/800). The count and the rate sit on the band for exactly
-this reason: read them, not the width.
+**What the widths mean.** Every node and every band is drawn on **one
+scale**, set by the number of people who entered. A given thickness means the
+same number of people wherever it appears, so bands are comparable to each
+other and to the nodes they touch, anywhere on the chart.
+
+Two things follow, and both are the point rather than side effects.
+
+**The space under a node's bands is its drop-off.** A node holding 800 people
+whose outgoing bands carry 500 of them leaves 300 people's worth of its edge
+empty, and that gap is drawn where the loss happened.
+
+**Bands can run past a node, and that means something too.** Someone who does
+an optional step *after* a later step is counted on both legs leaving the step
+before it — genuinely on two paths, because the funnel cannot tell which came
+first. Where that happens the stack extends past the node's own edge, and the
+node's caption names the number: `3 counted twice`. It is the same
+`windowFunnel` limit documented above under ordering, seen from the chart.
+
+An earlier version scaled each node's bands to fill its edge exactly. The
+geometry always added up, at the cost of both readings above: a width meant
+something only against the one node it touched, and a node's edge was always
+fully covered — so a funnel that converts everyone drew as a solid rectangle
+with no space anywhere in it.
 
 A funnel may have up to `MAX_OPTIONAL_STEPS` (2) optional steps, inside the
 same eight-step ceiling as before. Each optional step costs two extra
