@@ -146,9 +146,12 @@ describe('Sparkline', () => {
         until={bucketIso(1)}
       />,
     )
-    expect(screen.getByText('peak 7')).toBeInTheDocument()
+    // Substring, because the peak now shares its line with the window's
+    // total -- the two answer different questions ("how big did it get" and
+    // "how much was there") and both are cheap to print once.
+    expect(screen.getByText(/peak 7\b/)).toBeInTheDocument()
     rerender(<Sparkline buckets={[]} since={bucketIso(0)} until={bucketIso(1)} />)
-    expect(screen.getByText('peak 0')).toBeInTheDocument()
+    expect(screen.getByText(/peak 0\b/)).toBeInTheDocument()
   })
 
   it('charts a 90-day window without dying, and at day resolution', () => {
@@ -210,5 +213,128 @@ describe('Sparkline', () => {
       />,
     )
     expect(screen.getByRole('img').getAttribute('aria-label')).toMatch(/9 events, peaking at 9/)
+  })
+
+  it('names the unit in the VISIBLE caption, not only the accessible one', () => {
+    // The bug this redesign started from. `aria-label` had been taught the
+    // interval and the caption beside the chart had not, so a 90-day daily
+    // chart printed "events/min" in the one place a sighted operator reads
+    // -- with "peak 1,883" next to it, a per-DAY number.
+    const until = new Date('2026-08-26T00:00:00.000Z')
+    const since = new Date(until.getTime() - 5 * 86_400_000)
+    render(
+      <Sparkline
+        buckets={[{ bucket: '2026-08-24T00:00:00.000Z', events: 7 }]}
+        since={since.toISOString()}
+        until={until.toISOString()}
+        interval="1d"
+      />,
+    )
+    expect(screen.getByText('events/day')).toBeInTheDocument()
+    expect(screen.queryByText('events/min')).not.toBeInTheDocument()
+  })
+
+  it('names the hovered bucket at the resolution it was bucketed at', async () => {
+    // `formatBucketTime` returned `HH:MM` unconditionally, so every bar on a
+    // daily chart read "00:00" -- the same string ninety times, in the
+    // readout whose entire job is to say WHICH bar you are pointing at.
+    const until = new Date('2026-08-26T00:00:00.000Z')
+    const since = new Date(until.getTime() - 3 * 86_400_000)
+    render(
+      <Sparkline
+        buckets={[
+          { bucket: '2026-08-24T00:00:00.000Z', events: 4 },
+          { bucket: '2026-08-25T00:00:00.000Z', events: 9 },
+        ]}
+        since={since.toISOString()}
+        until={until.toISOString()}
+        interval="1d"
+      />,
+    )
+    const columns = document.querySelectorAll('[data-bucket]')
+    await userEvent.hover(columns[2] as Element)
+    const readout = await screen.findByText(/9 events/)
+    expect(readout.parentElement?.textContent).not.toMatch(/00:00/)
+    expect(readout.parentElement?.textContent).toMatch(/Aug/)
+  })
+
+  it('marks the window’s start, middle and end under the plot', () => {
+    // Ninety bars with nothing under them can say something spiked and not
+    // when, and "when" is the whole question a spike raises. Taken from the
+    // ZERO-FILLED series, so they are the window's own edges rather than
+    // whichever buckets carried traffic -- on a sparse window those differ
+    // by weeks.
+    const until = new Date('2026-08-26T00:00:00.000Z')
+    const since = new Date(until.getTime() - 4 * 86_400_000)
+    render(
+      <Sparkline
+        buckets={[{ bucket: '2026-08-25T00:00:00.000Z', events: 3 }]}
+        since={since.toISOString()}
+        until={until.toISOString()}
+        interval="1d"
+      />,
+    )
+    // The window is 22-26 Aug; only the 25th carried traffic. All THREE
+    // marks asserted -- checking the two ends alone let the middle one be
+    // deleted with the suite green, found by mutation, and the middle is
+    // the mark that makes the other two into a scale rather than a pair of
+    // captions.
+    expect(screen.getByText('Aug 22')).toBeInTheDocument()
+    expect(screen.getByText('Aug 24')).toBeInTheDocument()
+    expect(screen.getByText('Aug 26')).toBeInTheDocument()
+  })
+
+  it('lifts a small value clear of the floor beside a huge peak', () => {
+    // THE READABILITY DEFECT, and the reason the scale is not linear. A real
+    // 90-day window peaks near 1,883 events in a day against a baseline near
+    // 5. Linearly the baseline is 0.3% of the peak, floors at the minimum
+    // bar height, and eighty-five days of real traffic draw as one flat
+    // line. This asserts the small bar is well clear of that floor -- which
+    // a linear scale cannot satisfy at these numbers.
+    render(
+      <Sparkline
+        buckets={[
+          { bucket: '2026-08-24T00:00:00.000Z', events: 5 },
+          { bucket: '2026-08-25T00:00:00.000Z', events: 1883 },
+        ]}
+      />,
+    )
+    const bars = document.querySelectorAll('[data-bucket] > div')
+    const small = Number.parseFloat((bars[0] as HTMLElement).style.height)
+    const big = Number.parseFloat((bars[1] as HTMLElement).style.height)
+    expect(small).toBeGreaterThan(4)
+    // ...and the spike still unmistakably dominates, which is what a
+    // logarithmic scale would have cost: at these numbers log draws 1,883
+    // barely three times a 5, and the one thing worth seeing stops looking
+    // like an event.
+    expect(big).toBeGreaterThan(small * 5)
+  })
+
+  it('still draws nothing at all for a bucket with no events', () => {
+    // The scale must not lift zero off the baseline. A mark on a chart means
+    // "some", and an hour of silence rendering as a dotted line of small
+    // values is the false negative this screen exists to prevent.
+    render(
+      <Sparkline
+        buckets={[
+          { bucket: '2026-08-24T00:00:00.000Z', events: 0 },
+          { bucket: '2026-08-25T00:00:00.000Z', events: 40 },
+        ]}
+      />,
+    )
+    const bars = document.querySelectorAll('[data-bucket] > div')
+    expect(Number.parseFloat((bars[0] as HTMLElement).style.height)).toBe(0)
+  })
+
+  it('says which scale it is using, so a bar is not read as proportional', () => {
+    render(
+      <Sparkline
+        buckets={[
+          { bucket: '2026-08-24T00:00:00.000Z', events: 5 },
+          { bucket: '2026-08-25T00:00:00.000Z', events: 50 },
+        ]}
+      />,
+    )
+    expect(screen.getByText(/square-root scale/i)).toBeInTheDocument()
   })
 })

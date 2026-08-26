@@ -2,8 +2,39 @@ import { useState } from 'react'
 import type { StatsBucket } from '../../api/types.js'
 import { formatBucketTime } from './format.js'
 
-const CHART_HEIGHT_PX = 56
+/** Tall enough that a bar has somewhere to go. At 56 -- what this was --
+ * ninety days of a quiet baseline against one spike drew as a featureless
+ * strip with a hook on the end. */
+const CHART_HEIGHT_PX = 96
 const MIN_BAR_HEIGHT_PX = 2
+
+/**
+ * Bar heights are on a SQUARE-ROOT scale, and the chart says so in words.
+ *
+ * A linear scale is the honest default and it stops working at this shape.
+ * A real 90-day window here peaks at 1,883 events in a day against a
+ * baseline near 5: linearly the baseline is 0.3% of the peak, floors at the
+ * minimum bar height, and eighty-five days of real traffic render as one
+ * flat line. The chart answers "is anything moving", and it was answering it
+ * with a shrug.
+ *
+ * Square root rather than logarithmic, and that was chosen by rendering all
+ * three. Log makes the baseline fully readable and costs too much for it: at
+ * these numbers a 1,883-event spike draws barely three times a 5-event day,
+ * so the one thing an operator opened the screen to see stops looking like
+ * an event at all. Square root keeps the spike unmistakably dominant while
+ * lifting the baseline off the floor.
+ *
+ * Zero is still exactly zero and order is still preserved, so nothing the
+ * chart claims becomes false -- but a bar is no longer proportional to its
+ * count, which is why the caption states the scale rather than leaving the
+ * reader to assume the usual one. The exact number is on the hover readout
+ * and the peak is on the header.
+ */
+function barFraction(events: number, peak: number): number {
+  if (events <= 0 || peak <= 0) return 0
+  return Math.sqrt(events) / Math.sqrt(peak)
+}
 
 /**
  * How wide one bucket is, per resolution the stats route can return.
@@ -99,6 +130,7 @@ export function Sparkline(props: {
   const { buckets: raw, since, until, interval = '1m' } = props
   const bucketMs = BUCKET_MS_BY_INTERVAL[interval]
   const unit = interval === '1m' ? 'minute' : interval === '1h' ? 'hour' : 'day'
+  const unitShort = interval === '1m' ? 'min' : unit
   const [hovered, setHovered] = useState<number | null>(null)
   const buckets =
     since !== undefined && until !== undefined ? zeroFill(raw, since, until, bucketMs) : raw
@@ -139,6 +171,19 @@ export function Sparkline(props: {
       ? Math.round((new Date(until).getTime() - new Date(since).getTime()) / bucketMs)
       : buckets.length
 
+  /** First, middle and last bucket -- the marks under the plot. Taken from
+   * the ZERO-FILLED series, so they are the window's own edges rather than
+   * whichever buckets happened to carry traffic; on a sparse window the two
+   * differ by weeks. */
+  const edges: [string, string, string] =
+    buckets.length > 0
+      ? [
+          (buckets[0] as StatsBucket).bucket,
+          (buckets[Math.floor((buckets.length - 1) / 2)] as StatsBucket).bucket,
+          (buckets[buckets.length - 1] as StatsBucket).bucket,
+        ]
+      : ['', '', '']
+
   const active = hovered != null ? buckets[hovered] : undefined
   // Percent across the chart of the hovered column's centre -- the readout
   // anchors to this rather than to the pointer, so it names one bar
@@ -146,16 +191,33 @@ export function Sparkline(props: {
   const activeCentre = hovered != null ? ((hovered + 0.5) / buckets.length) * 100 : 0
 
   return (
-    <div className="flex items-stretch gap-4 rounded-lg border border-border bg-card px-4 py-3">
+    /* A COLUMN, not a row. The unit and the peak used to sit in a fixed
+     * block down the right-hand side, which on a wide card spent a couple
+     * of hundred pixels of chart width on two short strings -- and chart
+     * width is bars. Above the plot they cost one line and give it back. */
+    <div className="flex min-w-0 flex-col rounded-lg border border-border bg-card px-4 py-3">
+      <div className="mb-2.5 flex items-baseline justify-between gap-4">
+        <span className="font-medium text-foreground text-xs">events/{unitShort}</span>
+        {hasTrend && (
+          /* The peak names what the tallest bar is worth. Without it the
+           * bars are only shaped relative to each other, so one event in an
+           * otherwise silent hour draws exactly the same chart as a
+           * thousand -- and under a square-root scale that is truer still,
+           * because height is no longer proportional to count. */
+          <span className="tabular-nums text-muted-foreground text-xs">
+            peak {peak.toLocaleString()} · {total.toLocaleString()} total
+          </span>
+        )}
+      </div>
       {!hasTrend ? (
         <div
-          className="flex flex-1 items-center text-sm text-muted-foreground"
+          className="flex items-center text-muted-foreground text-sm"
           style={{ height: CHART_HEIGHT_PX }}
         >
           {buckets.length === 0 ? 'No data yet' : 'Not enough events yet to chart a trend'}
         </div>
       ) : (
-        <div className="relative min-w-0 flex-1">
+        <div className="relative min-w-0">
           {/* Anchored to the hovered column and drawn over the chart's own
            * top edge, so it never displaces the bars underneath it --
            * moving the pointer along the row must not reflow the thing
@@ -171,7 +233,10 @@ export function Sparkline(props: {
               <span className="font-medium text-foreground">
                 {active.events.toLocaleString()} {active.events === 1 ? 'event' : 'events'}
               </span>
-              <span className="text-muted-foreground"> · {formatBucketTime(active.bucket)}</span>
+              <span className="text-muted-foreground">
+                {' '}
+                · {formatBucketTime(active.bucket, interval)}
+              </span>
             </div>
           )}
           {/* The baseline is the container's own bottom border rather than
@@ -193,7 +258,7 @@ export function Sparkline(props: {
                   ? 0
                   : Math.max(
                       MIN_BAR_HEIGHT_PX,
-                      Math.round((bucket.events / scale) * CHART_HEIGHT_PX),
+                      Math.round(barFraction(bucket.events, scale) * CHART_HEIGHT_PX),
                     )
               const dimmed = hovered != null && hovered !== index
               // buckets are a fixed-order time series from the API on every
@@ -209,25 +274,34 @@ export function Sparkline(props: {
                   onMouseEnter={() => setHovered(index)}
                 >
                   <div
-                    className={`w-full rounded-t-xs transition-colors ${dimmed ? 'bg-primary/30' : 'bg-primary'}`}
+                    className={`w-full rounded-t-[2px] transition-colors ${dimmed ? 'bg-primary/30' : 'bg-primary'}`}
                     style={{ height: heightPx }}
                   />
                 </div>
               )
             })}
           </div>
+          {/* WHEN, in three marks. Ninety bars with nothing under them can
+           * show that something spiked and not when -- and "when" is the
+           * whole question an operator brings to a spike. Three rather than
+           * one per bar: a tick under every column is unreadable at this
+           * density, and the ends plus the middle are enough to place
+           * anything by eye. */}
+          <div
+            className="mt-1.5 flex justify-between tabular-nums text-[11px] text-muted-foreground"
+            aria-hidden="true"
+          >
+            <span>{formatBucketTime(edges[0], interval)}</span>
+            <span>{formatBucketTime(edges[1], interval)}</span>
+            <span>{formatBucketTime(edges[2], interval)}</span>
+          </div>
+          {/* The scale, said plainly. A bar is not proportional to its count
+           * and a reader is entitled to assume it is unless told. */}
+          <p className="mt-2 text-[11px] text-muted-foreground">
+            Heights use a square-root scale, so a quiet {unit} stays visible beside a spike.
+          </p>
         </div>
       )}
-      <div className="flex shrink-0 flex-col justify-center text-right text-sm">
-        <span className="text-muted-foreground">events/min</span>
-        {/* The peak names what the tallest bar is worth. Without it the
-         * bars are only shaped relative to each other, so one event in an
-         * otherwise silent hour draws exactly the same chart as a
-         * thousand. */}
-        {hasTrend && (
-          <span className="text-muted-foreground text-xs">peak {peak.toLocaleString()}</span>
-        )}
-      </div>
     </div>
   )
 }
