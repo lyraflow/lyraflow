@@ -21,6 +21,7 @@ import { parseNumericId } from '../numeric-id.js'
 import { type WalkCursor, makeWalkCursorCodec } from '../query/walk-cursor.js'
 import { SegmentTimeoutError, runSegment } from '../segments/execute.js'
 import { SegmentStore, StoredTreeError } from '../segments/store.js'
+import { describeWindow } from './duration.js'
 import { runDropoff, runFunnel, runPeople } from './execute.js'
 import {
   DuplicateFunnelNameError,
@@ -311,7 +312,7 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
     if (result.partial_window_entrants > 0) {
       warnings.push({
         path: 'range',
-        reason: `${result.partial_window_entrants} of the people who entered did so too recently to have had the full ${funnel.windowSeconds}-second window, and can still convert`,
+        reason: `${result.partial_window_entrants} of the people who entered did so too recently to have had the full ${describeWindow(funnel.windowSeconds)} window, and can still convert`,
       })
     }
     return {
