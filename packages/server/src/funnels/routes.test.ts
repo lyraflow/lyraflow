@@ -583,3 +583,87 @@ describe('funnel people route', () => {
     // that) -- a row's own shape, with real data, is pinned there.
   })
 })
+
+/** A stored funnel with the given steps, returning its id. */
+const created = async (steps: object[]): Promise<number> => {
+  const res = await call('POST', '/v1/funnels', {
+    name: `opt-${randomUUID()}`,
+    steps,
+    window_seconds: 3600,
+  })
+  expect(res.statusCode).toBe(201)
+  return res.json().id
+}
+const OPT = [{ event: 'a' }, { event: 'b', optional: true }, { event: 'c' }]
+
+describe('people at an optional step', () => {
+  it('accepts mode `skipped` on an optional step', async () => {
+    const id = await created(OPT)
+    const res = await call('POST', `/v1/funnels/${id}/people`, {
+      step: 2,
+      mode: 'skipped',
+      days: 7,
+    })
+    expect(res.statusCode).toBe(200)
+  })
+
+  it('refuses mode `dropped` on an optional step', async () => {
+    // "stopped exactly at a step that is not on the chain" is not a
+    // population, and a caller shown one would read it as `skipped`.
+    const id = await created(OPT)
+    const res = await call('POST', `/v1/funnels/${id}/people`, {
+      step: 2,
+      mode: 'dropped',
+      days: 7,
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().code).toBe('mode')
+  })
+
+  it('refuses mode `skipped` on a required step', async () => {
+    const id = await created(OPT)
+    const res = await call('POST', `/v1/funnels/${id}/people`, {
+      step: 3,
+      mode: 'skipped',
+      days: 7,
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().code).toBe('mode')
+  })
+
+  it('refuses /dropoff on an optional step', async () => {
+    // The route hard-codes `mode: 'dropped'`, so without this it would
+    // answer a different question rather than refuse.
+    const id = await created(OPT)
+    const res = await call('POST', `/v1/funnels/${id}/dropoff`, { step: 2, days: 7 })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().code).toBe('mode')
+  })
+
+  it('still serves /dropoff on a required step of the same funnel', async () => {
+    const id = await created(OPT)
+    const res = await call('POST', `/v1/funnels/${id}/dropoff`, { step: 3, days: 7 })
+    expect(res.statusCode).toBe(200)
+  })
+
+  it('rejects an optional first step at create', async () => {
+    const res = await call('POST', '/v1/funnels', {
+      name: 'bad-optional-first',
+      steps: [{ event: 'a', optional: true }, { event: 'b' }],
+      window_seconds: 3600,
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().code).toBe('steps')
+  })
+
+  it('marks the optional step in a run response', async () => {
+    const id = await created(OPT)
+    const res = await call('POST', `/v1/funnels/${id}/run`, { days: 7 })
+    expect(res.statusCode).toBe(200)
+    const steps = res.json().steps
+    expect(steps[1].optional).toBe(true)
+    expect(typeof steps[1].skipped).toBe('number')
+    expect(steps[0].optional).toBeUndefined()
+    expect(steps[2].optional).toBeUndefined()
+  })
+})

@@ -132,7 +132,11 @@ const PeopleBody = z.object({
   // No default: `reached` (level >= step) and `dropped` (level = step) differ
   // by a factor of three on a real funnel, and whichever way a default fell,
   // the other reading is what a caller gets by accident.
-  mode: z.enum(['reached', 'dropped']),
+  //
+  // `skipped` is optional steps only: reached the required step this one
+  // branches off, and did not do this one. It is the complement of
+  // `reached` at that branch point.
+  mode: z.enum(['reached', 'dropped', 'skipped']),
   cursor: z.string().optional(),
   since: z.string().datetime().optional(),
   until: z.string().datetime().optional(),
@@ -141,6 +145,20 @@ const PeopleBody = z.object({
 /** See `numeric-id.ts`'s `parseNumericId` for the shape this enforces and why. */
 function parseId(raw: string): number | null {
   return parseNumericId(raw)
+}
+
+/**
+ * Whether a step index names an optional step. 1-indexed, matching every
+ * other `step` on these routes.
+ *
+ * The two modes it gates are refused rather than approximated: `dropped` on
+ * an optional step is "stopped exactly at a step that is not on the chain",
+ * which is not a population, and `skipped` on a required step means nothing
+ * at all. Answering either would hand back a number for a different
+ * question with full confidence.
+ */
+function stepIsOptional(steps: FunnelStep[], step: number): boolean {
+  return steps[step - 1]?.optional === true
 }
 
 export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): void {
@@ -195,7 +213,7 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
     now: Date,
     peopleAt?: {
       step: number
-      mode: 'reached' | 'dropped'
+      mode: 'reached' | 'dropped' | 'skipped'
       select: 'ids' | 'members' | 'count'
       cursor?: Cursor
     },
@@ -522,6 +540,16 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
         .send({ error: `step must be between 1 and ${funnel.steps.length}`, code: 'step' })
     }
 
+    // `/dropoff` hard-codes `mode: 'dropped'`, so on an optional step it
+    // would silently answer a different question. `/people` is the route
+    // with the vocabulary for this.
+    if (stepIsOptional(funnel.steps, body.data.step)) {
+      return reply.code(400).send({
+        error: `step ${body.data.step} is optional; use POST /v1/funnels/${id}/people with \`reached\` or \`skipped\``,
+        code: 'mode',
+      })
+    }
+
     const signingKey = walkCursors.signingKey(project)
     let walk: WalkCursor | undefined
     try {
@@ -628,6 +656,20 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
       return reply
         .code(400)
         .send({ error: `step must be between 1 and ${funnel.steps.length}`, code: 'step' })
+    }
+
+    const optionalStep = stepIsOptional(funnel.steps, body.data.step)
+    if (optionalStep && body.data.mode === 'dropped') {
+      return reply.code(400).send({
+        error: `step ${body.data.step} is optional; ask for \`reached\` or \`skipped\` rather than \`dropped\``,
+        code: 'mode',
+      })
+    }
+    if (!optionalStep && body.data.mode === 'skipped') {
+      return reply.code(400).send({
+        error: `step ${body.data.step} is required, so nobody can skip it; ask for \`reached\` or \`dropped\``,
+        code: 'mode',
+      })
     }
 
     const signingKey = peopleCursors.signingKey(project)
