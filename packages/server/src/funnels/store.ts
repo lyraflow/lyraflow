@@ -479,6 +479,18 @@ export class FunnelStore {
         return null
       }
 
+      // Same upper bound as `#hydrate`, and just as necessary here: this row
+      // is parsed and diffed directly, never through `#hydrate`, and a PATCH
+      // that reaches the UPDATE below would stamp `definition_version` back
+      // DOWN to this build's constant and overwrite `steps` with a
+      // Zod-stripped, re-serialised copy -- destroying the evidence the row
+      // was ever newer, not just serving a stale read. Thrown inside this
+      // `try`, so the surrounding `catch` rolls back and `finally` releases
+      // the client exactly as any other failure here does.
+      if (existingRow.definition_version > FUNNEL_DEFINITION_VERSION) {
+        throw new StoredDefinitionError(existingRow.definition_version)
+      }
+
       const parsedCurrentSteps = StoredSteps.safeParse(existingRow.steps)
       const resetsSummary = definitionChanged(patch, {
         steps: parsedCurrentSteps.success ? parsedCurrentSteps.data : null,

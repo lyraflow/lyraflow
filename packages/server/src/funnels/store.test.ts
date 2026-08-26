@@ -714,3 +714,70 @@ describe('an optional-only edit', () => {
     expect(updated?.lastEntered).toBe(100)
   })
 })
+
+describe('a definition from a newer build, on the write path', () => {
+  it('refuses a PATCH that carries steps, without touching the stored row', async () => {
+    // `update()` reads and diffs `existingRow` itself -- it never goes
+    // through `#hydrate` -- so the read-path guard alone does not cover it.
+    // Left unguarded, a PATCH here would diff against a Zod-stripped copy of
+    // the newer row, then overwrite it: `definition_version` stamped back
+    // DOWN to this build's constant and `steps` replaced by the stripped,
+    // re-serialised copy. That is data loss, not a stale read, so this test
+    // proves the row survives -- not just that the call throws.
+    const original = [{ event: 'a' }, { event: 'b' }]
+    const id = await insertFunnelRow({
+      name: 'future, patched',
+      definitionVersion: FUNNEL_DEFINITION_VERSION + 1,
+      steps: original,
+      windowSeconds: 3600,
+    })
+
+    await expect(
+      store.update(projectId, id, { steps: [{ event: 'x' }, { event: 'y' }] }),
+    ).rejects.toBeInstanceOf(StoredDefinitionError)
+
+    const row = await pg.query<{ definition_version: number; steps: unknown }>(
+      'SELECT definition_version, steps FROM funnels WHERE project_id = $1 AND id = $2',
+      [projectId, id],
+    )
+    expect(row.rows[0]?.definition_version).toBe(FUNNEL_DEFINITION_VERSION + 1)
+    expect(row.rows[0]?.steps).toEqual(original)
+  })
+
+  it('names the version it refused', async () => {
+    const id = await insertFunnelRow({
+      name: 'future, named',
+      definitionVersion: FUNNEL_DEFINITION_VERSION + 1,
+      steps: [{ event: 'a' }, { event: 'b' }],
+      windowSeconds: 3600,
+    })
+    await store.update(projectId, id, { steps: [{ event: 'x' }, { event: 'y' }] }).then(
+      () => expect.unreachable('should have thrown'),
+      (err) =>
+        expect((err as StoredDefinitionError).definitionVersion).toBe(
+          FUNNEL_DEFINITION_VERSION + 1,
+        ),
+    )
+  })
+
+  it('also refuses a PATCH that never mentions steps, because it still reads and diffs the row', async () => {
+    // A rejection alone would also happen without the guard: without it,
+    // this PATCH commits the rename and only THEN throws from the
+    // `#hydrate` call at the end of `update()`, because the returned row
+    // still carries the newer version. That is worse than a stale read -- a
+    // caller sees an error and reasonably assumes nothing happened, while
+    // the rename went through. So this asserts the row is untouched, not
+    // merely that the call rejected.
+    const id = await insertFunnelRow({
+      name: 'future, renamed',
+      definitionVersion: FUNNEL_DEFINITION_VERSION + 1,
+      steps: [{ event: 'a' }, { event: 'b' }],
+      windowSeconds: 3600,
+    })
+    await expect(store.update(projectId, id, { name: 'x' })).rejects.toBeInstanceOf(
+      StoredDefinitionError,
+    )
+    const row = await pg.query<{ name: string }>('SELECT name FROM funnels WHERE id = $1', [id])
+    expect(row.rows[0]?.name).toBe('future, renamed')
+  })
+})
