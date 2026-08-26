@@ -9,11 +9,19 @@ import { runCompiled } from '../segments/execute.js'
  * histogram arrives as text and is widened here rather than in `summarise`,
  * which stays a pure function over numbers and needs no database to test.
  *
- * `Record<string, string>` rather than a fixed shape because the projection
- * carries one `optional_<j>` column per optional step -- a count known from
- * the definition, not from the type.
+ * The three base columns stay NAMED, with NO index signature on this type --
+ * a renamed SQL alias in `compile.ts`, or a typo reading one of them below,
+ * is then a compile error rather than a silent `Number(undefined)` ->
+ * `NaN` at runtime. The dynamic `optional_<j>` columns -- one per optional
+ * step, a count known from the definition, not from this type -- are read
+ * through an explicit cast confined to the one call site that needs it,
+ * below; their absence IS caught, at runtime, by the throw there.
  */
-type HistogramRow = Record<string, string>
+interface HistogramRow {
+  level: string
+  people: string
+  partial: string
+}
 
 /**
  * Runs a compiled funnel and turns its histogram into per-step counts.
@@ -30,25 +38,31 @@ export async function runFunnel(opts: {
 }): Promise<FunnelResult> {
   const optionalCount = opts.steps.filter((s) => s.optional === true).length
   const rows = await runCompiled<HistogramRow>(opts.client, opts.compiled)
-  const levels: LevelRow[] = rows.map((r) => ({
-    level: Number(r.level),
-    people: Number(r.people),
-    partial: Number(r.partial),
-    optionalReached: Array.from({ length: optionalCount }, (_, j) => {
-      const raw = r[`optional_${j}`]
-      // THROWN, not defaulted to zero. A missing column means the compiler
-      // and this runner disagree about how many optional steps the
-      // definition has, and a silent zero would report every optional step
-      // as reached by nobody -- a plausible number, which is the worst kind
-      // of wrong one.
-      if (raw === undefined) {
-        throw new Error(
-          `funnel histogram is missing optional_${j}; compiled query and definition disagree`,
-        )
-      }
-      return Number(raw)
-    }),
-  }))
+  const levels: LevelRow[] = rows.map((r) => {
+    // Cast confined to this one dynamic read -- `r.level`, `r.people` and
+    // `r.partial` stay typed against the named interface above, so a typo
+    // or a renamed SQL alias in any of THOSE three is still a compile error.
+    const dynamic = r as unknown as Record<string, string | undefined>
+    return {
+      level: Number(r.level),
+      people: Number(r.people),
+      partial: Number(r.partial),
+      optionalReached: Array.from({ length: optionalCount }, (_, j) => {
+        const raw = dynamic[`optional_${j}`]
+        // THROWN, not defaulted to zero. A missing column means the compiler
+        // and this runner disagree about how many optional steps the
+        // definition has, and a silent zero would report every optional step
+        // as reached by nobody -- a plausible number, which is the worst kind
+        // of wrong one.
+        if (raw === undefined) {
+          throw new Error(
+            `funnel histogram is missing optional_${j}; compiled query and definition disagree`,
+          )
+        }
+        return Number(raw)
+      }),
+    }
+  })
   return summarise(levels, opts.steps)
 }
 
