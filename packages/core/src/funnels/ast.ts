@@ -37,6 +37,18 @@ export const FunnelStep = z.object({
    * than against their own entry; the builder says so out loud.
    */
   audience: FilterNode.optional(),
+  /**
+   * Whether a person may reach the steps AFTER this one without having done
+   * this one. Absent means required, which is what every step was until v3.
+   *
+   * `windowFunnel` has no skip -- its three modes all make it stricter -- so
+   * this is not a flag threaded into the existing aggregate. It selects a
+   * SECOND chain over the same rows: the required steps before this one,
+   * plus this one. See `spine.ts`, which derives those chains, and the
+   * design doc for why conversion is then measured over the required steps
+   * alone rather than over some merged level.
+   */
+  optional: z.boolean().optional(),
 })
 export type FunnelStep = z.infer<typeof FunnelStep>
 
@@ -72,5 +84,12 @@ export type FunnelDefinition = z.infer<typeof FunnelDefinition>
  * `definition_version >= 2` is the only way to do that without parsing every
  * row, which is exactly what this column is for. Every new write carries 2
  * whether or not any step has an audience; readers accept 1 and 2.
+ *
+ * 3 since optional steps. This is the DANGEROUS kind of bump, not the
+ * bookkeeping kind: a v3 definition parses cleanly under a v2 reader, which
+ * strips the unknown `optional` key and runs every step as required. The
+ * funnel then reports a smaller `converted` with no error anywhere. That is
+ * why `store.ts` must refuse a row whose version is above this constant --
+ * a reader that merely parses is not enough here.
  */
-export const FUNNEL_DEFINITION_VERSION = 2
+export const FUNNEL_DEFINITION_VERSION = 3

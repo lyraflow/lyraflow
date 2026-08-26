@@ -18,6 +18,19 @@ import type { FunnelDefinition } from './ast.js'
  */
 export const MAX_FUNNEL_STEPS = 8
 /**
+ * Optional steps per funnel.
+ *
+ * Each one costs a second `windowFunnel` over rows the scan already reads --
+ * aggregate work, never another scan -- so the cost is linear rather than
+ * 2^n. First and last being required already bounds this at
+ * `MAX_FUNNEL_STEPS - 2`; 3 is a starting value chosen to keep the
+ * per-person aggregate work near today's, to be confirmed by measuring a
+ * funnel at the cap against a live ClickHouse. Lower it if that measurement
+ * says so. Do not raise it without one. Same standing as
+ * `MAX_FUNNEL_BEHAVIOR_NODES`.
+ */
+export const MAX_OPTIONAL_STEPS = 3
+/**
  * 30 days. Past this a funnel is a retention question, which is a different
  * report with a different output shape — answering it through this endpoint
  * would produce a number that looks like a conversion rate and is not one.
@@ -87,6 +100,26 @@ export function validateFunnel(def: FunnelDefinition): void {
     throw new FunnelValidationError(
       `the conversion window may be at most ${MAX_WINDOW_SECONDS} seconds (30 days)`,
       'window',
+    )
+  }
+  // The first step defines ENTRY -- it is what carries the `timestamp <
+  // until` bound into every chain -- and the last defines CONVERSION.
+  // Optional leaves both undefined.
+  //
+  // "at least two required steps" is deliberately NOT checked here.
+  // `steps.min(2)` and these two rules already force it, so the check could
+  // never fire and its test could never fail.
+  if (def.steps[0]?.optional === true) {
+    throw new FunnelValidationError('the first step of a funnel cannot be optional', 'steps')
+  }
+  if (def.steps[def.steps.length - 1]?.optional === true) {
+    throw new FunnelValidationError('the last step of a funnel cannot be optional', 'steps')
+  }
+  const optionalCount = def.steps.filter((s) => s.optional === true).length
+  if (optionalCount > MAX_OPTIONAL_STEPS) {
+    throw new FunnelValidationError(
+      `a funnel may have at most ${MAX_OPTIONAL_STEPS} optional steps; this one has ${optionalCount}`,
+      'steps',
     )
   }
   let behaviours = 0

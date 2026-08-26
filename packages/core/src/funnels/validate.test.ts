@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import type { FilterNode } from '../segments/ast.js'
-import type { FunnelDefinition } from './ast.js'
+import type { FunnelDefinition, FunnelStep } from './ast.js'
 import {
   FunnelValidationError,
   MAX_FUNNEL_BEHAVIOR_NODES,
   MAX_FUNNEL_STEPS,
+  MAX_OPTIONAL_STEPS,
   MAX_WINDOW_SECONDS,
   funnelCostWarnings,
   validateFunnel,
@@ -218,5 +219,48 @@ describe('audiences', () => {
       until: new Date('2026-08-08T00:00:00Z'),
     }
     expect(funnelCostWarnings(def, range)).toEqual([])
+  })
+})
+
+describe('optional step rules', () => {
+  // Scoped inside the describe, not module-level: the file already has a
+  // top-level `def` helper (steps: number) above, and a second module-level
+  // `const def` of the same name would not compile.
+  const req = (event: string) => ({ event })
+  const opt = (event: string) => ({ event, optional: true })
+  const def = (steps: FunnelStep[]) => ({ steps, window_seconds: 3600 })
+
+  it('accepts an optional step in the middle', () => {
+    expect(() => validateFunnel(def([req('a'), req('b'), opt('c'), req('d')]))).not.toThrow()
+  })
+
+  it('refuses an optional first step', () => {
+    // Step 1 defines ENTRY -- it is what bounds `entered_at` to the range.
+    expect(() => validateFunnel(def([opt('a'), req('b'), req('c')]))).toThrow(/first step/i)
+  })
+
+  it('refuses an optional last step', () => {
+    // The last step defines CONVERSION. Optional leaves it undefined.
+    expect(() => validateFunnel(def([req('a'), req('b'), opt('c')]))).toThrow(/last step/i)
+  })
+
+  it(`refuses more than ${MAX_OPTIONAL_STEPS} optional steps`, () => {
+    const steps = [req('a'), opt('b'), opt('c'), opt('d'), opt('e'), req('f')]
+    expect(() => validateFunnel(def(steps))).toThrow(new RegExp(`at most ${MAX_OPTIONAL_STEPS}`))
+  })
+
+  it(`accepts exactly ${MAX_OPTIONAL_STEPS} optional steps`, () => {
+    const steps = [req('a'), opt('b'), opt('c'), opt('d'), req('e')]
+    expect(() => validateFunnel(def(steps))).not.toThrow()
+  })
+
+  it('reports an optional-step violation under the `steps` code', () => {
+    try {
+      validateFunnel(def([opt('a'), req('b')]))
+      throw new Error('expected validateFunnel to throw')
+    } catch (err) {
+      expect(err).toBeInstanceOf(FunnelValidationError)
+      expect((err as FunnelValidationError).code).toBe('steps')
+    }
   })
 })
