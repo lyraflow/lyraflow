@@ -667,17 +667,22 @@ describe('people at an optional step', () => {
     expect(steps[2].optional).toBeUndefined()
   })
 
-  it('puts continued on the wire for an optional step and nowhere else', () => {
-    // Deliberately a separate assertion from `optional` and `skipped`: all
-    // three are absent-by-default on a required step, and a client renders
-    // the branch's outgoing leg on this one.
+  it('carries continued on the wire for an optional step, and omits it on required ones', () => {
+    // SHAPE, NOT VALUE. This fixture ingests no events, so every count is 0
+    // and `continued` cannot diverge from `optional` or from a defaulted
+    // zero -- neither a missing-column default nor reading the wrong column
+    // is detectable here. The VALUE is pinned in semantics.test.ts, against
+    // ingested rows where the two legs genuinely differ.
+    //
+    // What this DOES pin is the field's presence rule, which is a real wire
+    // guarantee: absent on a required step rather than zero, matching
+    // `optional` and `skipped`.
     return created(OPT).then(async (id) => {
       const res = await call('POST', `/v1/funnels/${id}/run`, { days: 7 })
       expect(res.statusCode).toBe(200)
-      const steps = res.json().steps
-      expect(typeof steps[1].continued).toBe('number')
-      expect(steps[0].continued).toBeUndefined()
-      expect(steps[2].continued).toBeUndefined()
+      expect(res.json().steps[1]).toHaveProperty('continued')
+      expect(res.json().steps[0].continued).toBeUndefined()
+      expect(res.json().steps[2].continued).toBeUndefined()
     })
   })
 })
