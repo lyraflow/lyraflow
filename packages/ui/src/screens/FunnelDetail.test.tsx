@@ -1486,4 +1486,49 @@ describe('FunnelDetail — an optional step seeds a different pair of counts', (
       if (body.step !== 3) expect(body.mode).not.toBe('skipped')
     }
   })
+
+  it('takes the shape from the RESULT when the definition disagrees, and never asks for `dropped` on a branch', async () => {
+    // Same rule as `FunnelFlow`'s and `StepBars`' own disagreement tests, and
+    // the consequence here is the worst of the three. `funnel` and `result`
+    // arrive from two INDEPENDENT requests, so the definition on screen can
+    // be newer than the numbers -- step 3 has since been made required, and
+    // nothing has re-run. Reading optionality from the definition builds the
+    // people toggle for a required step: it offers `Dropped here`, and the
+    // server 400s that mode on the step the run says is optional.
+    //
+    // The result wins because the result is what the numbers were computed
+    // from, and the server decides mode legality from the definition it ran.
+    const stale: Funnel = {
+      ...branchedFunnel(),
+      steps: [
+        { event: 'signup' },
+        { event: 'onboarded' },
+        { event: 'video_submitted' },
+        { event: 'purchase' },
+      ],
+    }
+    const client = fakeClient({
+      funnel: vi.fn(async () => stale),
+      runFunnel: vi.fn(async () => branchedRun()),
+      funnelPeople: pending(),
+    })
+    renderDetail(client)
+    await screen.findByTestId('funnel-step-1')
+    await userEvent.click(screen.getByTestId('funnel-step-3'))
+
+    expect(screen.getByRole('button', { name: 'Did video_submitted (30)' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Did not (50)' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /dropped/i })).toBeNull()
+
+    await waitFor(() =>
+      expect(client.funnelPeople).toHaveBeenCalledWith(
+        1,
+        FUNNEL.id,
+        expect.objectContaining({ step: 3, mode: 'reached' }),
+      ),
+    )
+    for (const call of client.funnelPeople.mock.calls) {
+      expect((call[2] as { mode: string }).mode).not.toBe('dropped')
+    }
+  })
 })

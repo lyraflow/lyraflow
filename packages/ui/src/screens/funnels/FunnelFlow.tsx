@@ -373,8 +373,14 @@ export function FunnelFlow(props: {
          * copies into a ticket. Both in text tokens, never in the series
          * colour -- the bar above carries identity. */}
         <div className="grid gap-1" style={columns}>
-          {steps.map((s) =>
-            s.optional === true ? (
+          {steps.map((s, i) => {
+            /* The required step this branch hangs off, from the SAME
+             * `branchSlots` the connector is drawn with -- so the name under
+             * the number and the thread on the plot can never disagree about
+             * which step the share is a share of. */
+            const from = branches[i]
+            const branchPoint = from == null ? null : (steps[from] as StepResult)
+            return s.optional === true ? (
               /* `from_previous`, NOT `from_start`, as the headline -- and
                * that is not a style choice. An optional step's rate is a
                * share of the required step it branches off, so putting it
@@ -390,6 +396,23 @@ export function FunnelFlow(props: {
                 <p className="text-base font-semibold tabular-nums">
                   {formatPercent(s.from_previous)}
                 </p>
+                {/* NAMING the denominator, immediately under the number, and
+                 * this line is the whole reason the row is readable. Every
+                 * other bold percentage in it is a share of the ENTRANTS;
+                 * this one is a share of one required step. Same row, same
+                 * weight, different denominator -- and a number that looks
+                 * right while answering a slightly different question is
+                 * worse than no number. `StepBars` already says this on its
+                 * own sub-line; the wide chart said it nowhere. */}
+                {branchPoint != null && (
+                  <p
+                    data-testid={`flow-step-${s.index}-of`}
+                    className="truncate text-xs text-muted-foreground"
+                    title={`of ${branchPoint.event}`}
+                  >
+                    of {branchPoint.event}
+                  </p>
+                )}
                 <p className="text-xs tabular-nums text-muted-foreground">
                   {formatCount(s.people)} did
                 </p>
@@ -421,8 +444,8 @@ export function FunnelFlow(props: {
                   {formatCount(s.people)}
                 </p>
               </div>
-            ),
-          )}
+            )
+          })}
         </div>
       </div>
 

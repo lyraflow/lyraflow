@@ -394,6 +394,23 @@ describe('FunnelFlow with an optional step', () => {
     expect(cell).not.toHaveTextContent('30.0%')
   })
 
+  it('names the branch point beside the branch percentage, so the row has one denominator per number', () => {
+    // Every other bold percentage in that row is a share of the ENTRANTS.
+    // This one is 37.5% of step 2, and nothing about its position, weight or
+    // format says so -- a number that looks right while answering a slightly
+    // different question. The name is the only thing that separates them.
+    // `StepBars` has said this since it was written; the wide chart did not.
+    render(<FunnelFlow result={BRANCHED} />)
+    expect(screen.getByTestId('flow-step-3-of')).toHaveTextContent('of onboarded')
+    // The step it branches OFF, not the slot beside it. Step 3 sits next to
+    // step 4, and naming step 4 would be a plausible-looking lie.
+    expect(screen.getByTestId('flow-step-3-of')).not.toHaveTextContent('purchase')
+    // A required column's share needs no qualifier: `from_start` is the
+    // denominator every other number in the row already uses.
+    expect(screen.queryByTestId('flow-step-4-of')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('flow-step-2-of')).not.toBeInTheDocument()
+  })
+
   it('never names the branch as the biggest leak, even when it is the steepest number on screen', () => {
     // The branch loses 62.5% of its branch point and step 4 loses 50%. The
     // branch is not in the chain, so it is not in the comparison -- naming
