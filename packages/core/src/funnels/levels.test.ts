@@ -174,10 +174,19 @@ describe('summarise with optional steps', () => {
 
   it('folds a level beyond the SPINE length into the last required step', () => {
     // The clamp is against the spine's length (3), not the definition's (4).
-    const rows: LevelRow[] = [{ level: 9, people: 2, partial: 0, optionalReached: [0] }]
+    // A second row at level 3 makes the two clamps disagree: under the new
+    // (spine-length) clamp, min(9, 3) and min(3, 3) both land in
+    // stoppedAt[3], summing to 2 + 5 = 7. Under the old (definition-length)
+    // clamp, min(9, 4) = 4 and min(3, 4) = 3 land in DIFFERENT buckets, so
+    // the last step (read by definition position, atLeast[4]) would see
+    // only the level-9 row's 2 people -- not 7.
+    const rows: LevelRow[] = [
+      { level: 9, people: 2, partial: 0, optionalReached: [0] },
+      { level: 3, people: 5, partial: 0, optionalReached: [0] },
+    ]
     const r = summarise(rows, withOptional)
     expect(r.steps).toHaveLength(4)
-    expect(r.steps[3]?.people).toBe(2)
+    expect(r.steps[3]?.people).toBe(7)
   })
 
   it('reports zeroes rather than NaN when nobody entered', () => {
@@ -192,5 +201,46 @@ describe('summarise with optional steps', () => {
     const r = summarise([{ level: 3, people: 4, partial: 0 }], withOptional)
     expect(r.steps[2]?.people).toBe(0)
     expect(Number.isFinite(r.steps[2]?.from_previous ?? Number.NaN)).toBe(true)
+  })
+
+  it('rates two adjacent optional steps against the SAME required step, not each other', () => {
+    // a -> [b optional] -> [c optional] -> d.  Spine is a, d -- both b and c
+    // branch off a (spineRank 1). b sits immediately after a, so "branch
+    // point" and "step before it by definition position" happen to be the
+    // same number for b. They are NOT the same for c: c's positional
+    // predecessor is b (an optional step with no `atLeast` entry of its
+    // own), while c's real branch point is still a.
+    const adjacentOptional: FunnelStep[] = [
+      { event: 'a' },
+      { event: 'b', optional: true },
+      { event: 'c', optional: true },
+      { event: 'd' },
+    ]
+    const rows: LevelRow[] = [
+      // Stopped at a (never reached d). Of these 10, 4 also did b, 1 also did c.
+      { level: 1, people: 10, partial: 0, optionalReached: [4, 1] },
+      // Reached d. Of these 6, 3 also did b, 5 also did c.
+      { level: 2, people: 6, partial: 0, optionalReached: [3, 5] },
+    ]
+    const r = summarise(rows, adjacentOptional)
+
+    // By hand: entered = 10 + 6 = 16 (everyone did a). converted = 6 (did d).
+    // b's total = 4 + 3 = 7, branch point = a's count = entered = 16.
+    //   from_previous = 7 / 16 = 0.4375, skipped = 16 - 7 = 9.
+    // c's total = 1 + 5 = 6, branch point is ALSO a's count = 16 (not b's 7,
+    // and not d's 6, both of which a positional reading could produce).
+    //   from_previous = 6 / 16 = 0.375, skipped = 16 - 6 = 10.
+    expect(r.entered).toBe(16)
+    expect(r.converted).toBe(6)
+
+    expect(r.steps[1]?.optional).toBe(true)
+    expect(r.steps[1]?.people).toBe(7)
+    expect(r.steps[1]?.from_previous).toBeCloseTo(0.4375)
+    expect(r.steps[1]?.skipped).toBe(9)
+
+    expect(r.steps[2]?.optional).toBe(true)
+    expect(r.steps[2]?.people).toBe(6)
+    expect(r.steps[2]?.from_previous).toBeCloseTo(0.375)
+    expect(r.steps[2]?.skipped).toBe(10)
   })
 })
