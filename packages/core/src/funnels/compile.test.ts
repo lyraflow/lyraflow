@@ -619,15 +619,23 @@ describe('optional steps', () => {
     expect(q.sql).not.toContain('AS full_1')
   })
 
-  it('carries the full chain through to the NEXT required step', () => {
-    // [a, b, c(optional), d] -- full_0 must be a, b, c, d and reach level 4.
+  it('carries the full chain through to the NEXT required step, in order', () => {
     const q = compileFunnel({ ...base, definition: withOptional })
     const line = q.sql.split('\n').find((l) => l.includes('AS full_0')) ?? ''
-    for (const event of ['a', 'b', 'c', 'd']) {
+    // Position, not just presence. `windowFunnel` counts conditions matched
+    // IN SEQUENCE, so the argument order IS the meaning: a chain of
+    // a, b, d, c contains the same four placeholders and answers a
+    // different question.
+    const at = (event: string) => {
       const name = Object.keys(q.params).find((key) => q.params[key] === event)
       expect(name).toBeDefined()
-      expect(line).toContain(`{${name}:String}`)
+      const i = line.indexOf(`{${name}:String}`)
+      expect(i).toBeGreaterThanOrEqual(0)
+      return i
     }
+    expect(at('a')).toBeLessThan(at('b'))
+    expect(at('b')).toBeLessThan(at('c'))
+    expect(at('c')).toBeLessThan(at('d'))
   })
 
   it('counts continued at the full chain length, bound as a value', () => {
