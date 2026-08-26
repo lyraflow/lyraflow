@@ -12,10 +12,11 @@ import { runCompiled } from '../segments/execute.js'
  * The three base columns stay NAMED, with NO index signature on this type --
  * a renamed SQL alias in `compile.ts`, or a typo reading one of them below,
  * is then a compile error rather than a silent `Number(undefined)` ->
- * `NaN` at runtime. The dynamic `optional_<j>` columns -- one per optional
- * step, a count known from the definition, not from this type -- are read
- * through an explicit cast confined to the one call site that needs it,
- * below; their absence IS caught, at runtime, by the throw there.
+ * `NaN` at runtime. The dynamic `optional_<j>` and `continued_<j>` columns --
+ * one pair per optional step, a count known from the definition, not from
+ * this type -- are read through an explicit cast confined to the one call
+ * site that needs it, below; their absence IS caught, at runtime, by the
+ * throw there.
  */
 interface HistogramRow {
   level: string

@@ -20,16 +20,24 @@ export const MAX_FUNNEL_STEPS = 8
 /**
  * Optional steps per funnel.
  *
- * Each one costs a second `windowFunnel` over rows the scan already reads --
- * aggregate work, never another scan -- so the cost is linear rather than
- * 2^n. First and last being required already bounds this at
- * `MAX_FUNNEL_STEPS - 2`; 3 is a starting value chosen to keep the
- * per-person aggregate work near today's, to be confirmed by measuring a
- * funnel at the cap against a live ClickHouse. Lower it if that measurement
- * says so. Do not raise it without one. Same standing as
- * `MAX_FUNNEL_BEHAVIOR_NODES`.
+ * Each one now costs TWO extra `windowFunnel`s over rows the scan already
+ * reads -- a branch chain and a full chain (see `compile.ts`) -- and both
+ * chains COPY the SQL text of every required condition before them,
+ * audience subqueries included. That is aggregate work, not another scan,
+ * but it is not free text: measured against a live ClickHouse with the
+ * worst legal shape -- `MAX_FUNNEL_STEPS` (8) steps, audiences spread to
+ * exactly `MAX_FUNNEL_BEHAVIOR_NODES` (25) behavioural nodes, a `where` on
+ * every step -- the compiled query grows with the optional count: 75,627
+ * bytes at 0 optional, 156,762 at 1, 189,567 at 2, 270,733 at 3. ClickHouse
+ * refuses anything past its default `max_query_size` of 262,144 bytes
+ * (SYNTAX_ERROR, "Max query size exceeded"), which 3 optional steps clears
+ * by over 8KB -- not slow, outright broken. 2 optional steps stays under
+ * that ceiling with headroom (~72KB) and executed in under 500ms on the
+ * same data. First and last being required already bounds this at
+ * `MAX_FUNNEL_STEPS - 2`; 2 is the number that measurement supports. Lower
+ * it further if a later measurement says so. Do not raise it without one.
  */
-export const MAX_OPTIONAL_STEPS = 3
+export const MAX_OPTIONAL_STEPS = 2
 /**
  * 30 days. Past this a funnel is a retention question, which is a different
  * report with a different output shape — answering it through this endpoint

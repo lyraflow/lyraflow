@@ -245,12 +245,12 @@ describe('optional step rules', () => {
   })
 
   it(`refuses more than ${MAX_OPTIONAL_STEPS} optional steps`, () => {
-    const steps = [req('a'), opt('b'), opt('c'), opt('d'), opt('e'), req('f')]
+    const steps = [req('a'), opt('b'), opt('c'), opt('d'), req('e')]
     expect(() => validateFunnel(def(steps))).toThrow(new RegExp(`at most ${MAX_OPTIONAL_STEPS}`))
   })
 
   it(`accepts exactly ${MAX_OPTIONAL_STEPS} optional steps`, () => {
-    const steps = [req('a'), opt('b'), opt('c'), opt('d'), req('e')]
+    const steps = [req('a'), opt('b'), opt('c'), req('d')]
     expect(() => validateFunnel(def(steps))).not.toThrow()
   })
 
