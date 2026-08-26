@@ -541,8 +541,9 @@ describe('optional steps', () => {
   it('counts the optional step in the histogram at its branch level', () => {
     // c branches off b, spine rank 2, so its chain must reach level 3.
     const q = compileFunnel({ ...base, definition: withOptional })
-    expect(q.sql).toMatch(/countIf\(branch_0 >= \{p\d+:UInt32\}\) AS optional_0/)
-    expect(Object.values(q.params)).toContain(3)
+    const bound = q.sql.match(/countIf\(branch_0 >= \{(p\d+):UInt32\}\) AS optional_0/)?.[1] ?? ''
+    expect(bound).not.toBe('')
+    expect(q.params[bound]).toBe(3)
   })
 
   it('carries the entry bound into the branch chain, not only the spine', () => {
@@ -563,6 +564,10 @@ describe('optional steps', () => {
     })
     expect(q.sql).toContain('branch_0 >=')
     expect(q.sql).not.toContain('level >=')
+    const bound = q.sql.match(/branch_0 >= \{(p\d+):UInt32\}/)?.[1] ?? ''
+    expect(bound).not.toBe('')
+    // c branches off b, spine rank 2, so reaching the branch means level 3.
+    expect(q.params[bound]).toBe(3)
   })
 
   it('selects the people who SKIPPED an optional step from both chains', () => {
@@ -575,6 +580,13 @@ describe('optional steps', () => {
     })
     expect(q.sql).toContain('level >=')
     expect(q.sql).toContain('branch_0 <')
+    const levelBound = q.sql.match(/level >= \{(p\d+):UInt32\}/)?.[1] ?? ''
+    const branchBound = q.sql.match(/branch_0 < \{(p\d+):UInt32\}/)?.[1] ?? ''
+    expect(levelBound).not.toBe('')
+    expect(branchBound).not.toBe('')
+    // Reached spine rank 2 (a, b) and did not also reach branch level 3 (c).
+    expect(q.params[levelBound]).toBe(2)
+    expect(q.params[branchBound]).toBe(3)
   })
 
   it('reads a required step after an optional one by its spine rank', () => {
