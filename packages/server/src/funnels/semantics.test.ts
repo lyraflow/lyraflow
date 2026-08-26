@@ -1923,6 +1923,11 @@ describe('optional steps, against real rows', () => {
   })
 
   it('measures two adjacent optional steps independently off the same required step', async () => {
+    // ASYMMETRIC on purpose: two people do `video_submitted`, one does
+    // `avatar_set`, so `steps[2]` and `steps[3]` read DIFFERENT numbers.
+    // A symmetric 1-and-1 population can't tell branch_0 apart from branch_1
+    // -- swapping which branch feeds which optional step, or wiring both
+    // optional steps to the same branch, would still read 1, 1, 1, 1, 2.
     const two = [
       { event: '$page-adj' },
       { event: 'signed_up-adj' },
@@ -1930,7 +1935,13 @@ describe('optional steps, against real rows', () => {
       { event: 'avatar_set-adj', optional: true },
       { event: 'subscription_started-adj' },
     ]
-    await journey('vid', [
+    await journey('vid1', [
+      '$page-adj',
+      'signed_up-adj',
+      'video_submitted-adj',
+      'subscription_started-adj',
+    ])
+    await journey('vid2', [
       '$page-adj',
       'signed_up-adj',
       'video_submitted-adj',
@@ -1943,11 +1954,11 @@ describe('optional steps, against real rows', () => {
       'subscription_started-adj',
     ])
     const r = await runOpt(two)
-    expect(r.steps[2].people).toBe(1)
+    expect(r.steps[2].people).toBe(2)
     expect(r.steps[3].people).toBe(1)
     expect(r.steps[2].skipped).toBe(1)
-    expect(r.steps[3].skipped).toBe(1)
-    expect(r.converted).toBe(2)
+    expect(r.steps[3].skipped).toBe(2)
+    expect(r.converted).toBe(3)
   })
 
   it('serves the reached and skipped people lists as complements', async () => {
@@ -1961,6 +1972,11 @@ describe('optional steps, against real rows', () => {
       `video_submitted-${tag}`,
     ])
     await journey('didnt', [`$page-${tag}`, `signed_up-${tag}`, `subscription_started-${tag}`])
+    // Never reaches the branch point at all -- must appear in NEITHER list.
+    // This pins the `level >= spineRank` half of the `skipped` predicate:
+    // without it, "skipped" degrades to "didn't do the optional event",
+    // which this person also satisfies despite never having had the chance.
+    await journey('short', [`$page-${tag}`, `signed_up-${tag}`])
     const created = await app.inject({
       method: 'POST',
       url: '/v1/funnels',
