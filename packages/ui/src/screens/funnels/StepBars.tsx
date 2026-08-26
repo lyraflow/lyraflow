@@ -162,14 +162,20 @@ export function StepBars(props: {
              * not do this step; they are still in the funnel, and a reader
              * who takes them for a drop-off has the story backwards. Its own
              * line, with its own verb, so the two counts cannot be read as
-             * one. */}
+             * one.
+             *
+             * "skipped it", and NOT "skipped it and carried on": `FunnelFlow`
+             * -- the same screen at a wider viewport -- prints "skipped" and
+             * "carried on" as two DIFFERENT populations, `skipped` and
+             * `continued`. One phrase meaning two things across two
+             * renderings of one funnel is worse than the shorter label. */}
             {optional && step.skipped != null && (
               <p
                 data-testid={`funnel-step-${step.index}-skipped`}
                 className="min-w-0 break-words text-xs tabular-nums text-muted-foreground"
               >
                 {branchPoint != null && `of ${branchPoint.event} · `}
-                {formatCount(step.skipped)} skipped it and carried on
+                {formatCount(step.skipped)} skipped it
               </p>
             )}
             {/* Between the step's own name and its own bar, deliberately.
