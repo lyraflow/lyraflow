@@ -404,7 +404,7 @@ export function FunnelFlow(props: {
                    * band is the same ramp step as the node it lands on --
                    * exactly the case on a short funnel. The halo makes the
                    * node an object rather than a darker patch of band. */
-                  stroke="var(--background)"
+                  stroke="var(--lf-surface)"
                   strokeWidth={1.5}
                   vectorEffect="non-scaling-stroke"
                 >
@@ -418,6 +418,75 @@ export function FunnelFlow(props: {
                 </rect>
               )
             })}
+            {/* The selected node's outline, IN THE SVG and drawn from the
+             * node's own coordinates.
+             *
+             * It used to live on the HTML hit target, which is a fixed 28px
+             * wide because a pointer needs more room than a 12-unit node. The
+             * plot stretches horizontally, so the node renders wider than that
+             * at most card widths and the outline sat INSIDE the bar it was
+             * meant to mark -- with rounded corners on a square node and an
+             * offset pushing it further out of true. A hit target and a mark
+             * are two different jobs: the target stays generous and invisible,
+             * the mark traces the node exactly because it is built from the
+             * same numbers. */}
+            {selectedStep != null &&
+              model.nodes
+                .filter(
+                  (node: SankeyNode) => (steps[node.step] as StepResult).index === selectedStep,
+                )
+                .map((node: SankeyNode) => {
+                  /* THE MARK IS THE NODE'S OWN BOX -- no padding around it,
+                   * and that is a correction of two rendered attempts.
+                   *
+                   * viewBox units are not square here: `preserveAspectRatio`
+                   * is `none`, so one unit is worth about five times as much
+                   * horizontally as vertically at a typical card width. A
+                   * padding of three units drew three pixels of clearance
+                   * above the bar and fifteen beside it -- a box visibly
+                   * wider than the thing it marked. The same padding also put
+                   * the top edge of a full-height node's ring above y = 0,
+                   * where the viewport clips it, and the mark rendered as two
+                   * vertical lines with no top or bottom to close it.
+                   *
+                   * Drawn on the node's exact box with a non-scaling stroke,
+                   * the stroke straddles the edge and the clearance is equal
+                   * on all four sides IN PIXELS, whatever the stretch. */
+                  return (
+                    <g key={`selected-${node.step}`}>
+                      {/* TWO rings, and the outer one is not decoration. The
+                       * mark has to read against whatever it traces, and stage
+                       * one is the darkest step of the ramp while `--primary`
+                       * is copper -- rendered, the single ring vanished into
+                       * the node it was marking. A surface-coloured halo under
+                       * a copper ring separates the mark from both the node and
+                       * the band that starts immediately beside it. */}
+                      <rect
+                        x={r(nodeLeft(node))}
+                        y={r(node.y)}
+                        width={NODE_WIDTH}
+                        height={r(node.height)}
+                        fill="none"
+                        stroke="var(--lf-surface)"
+                        strokeWidth={5}
+                        vectorEffect="non-scaling-stroke"
+                        pointerEvents="none"
+                      />
+                      <rect
+                        data-testid={`flow-node-${(steps[node.step] as StepResult).index}-selected`}
+                        x={r(nodeLeft(node))}
+                        y={r(node.y)}
+                        width={NODE_WIDTH}
+                        height={r(node.height)}
+                        fill="none"
+                        stroke="var(--lf-accent)"
+                        strokeWidth={2}
+                        vectorEffect="non-scaling-stroke"
+                        pointerEvents="none"
+                      />
+                    </g>
+                  )
+                })}
           </svg>
 
           {/* One transparent button per NODE -- its OWN layer, never inside
@@ -460,7 +529,7 @@ export function FunnelFlow(props: {
                      * on a chart made of vertical bars reads as two more
                      * nodes, not as a selection. An outline traces the
                      * target instead of colouring beside it. */
-                    className="absolute -translate-x-1/2 rounded-sm border-0 bg-transparent p-0 outline-offset-2 hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset aria-pressed:outline aria-pressed:outline-2 aria-pressed:outline-primary"
+                    className="absolute -translate-x-1/2 border-0 bg-transparent p-0 hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
                     style={{
                       left: `${pct(nodeLeft(node) + NODE_WIDTH / 2)}%`,
                       top: `${r(top)}px`,

@@ -177,18 +177,15 @@ function tilesEveryNodeEdge(links: readonly [number, number][], nodeCount: numbe
   const bands = links.map(([from, to]) => band(from, to))
   expect(screen.getAllByTestId(/^flow-link-/)).toHaveLength(bands.length)
 
-  // The literal 16, not the module's own `LINK_GAP`. Asserting against the
-  // constant would keep passing if the constant moved, which is how a test
-  // that names a value stops pinning it.
-  const GAP = 16
   /** Bands stack DOWN FROM a node's top edge, disjoint, one gap apart.
    *
-   * They no longer end at the node's bottom, and that is the design: a band
-   * is drawn at its own people count on the plot's single scale, so the space
-   * left under them is the drop-off and any excess is a genuine double-count.
-   * What this walk still owns is that the renderer lays the model out
-   * faithfully -- start at the top, no overlap, one gap between. The scale
-   * itself is pinned in `sankey.test.ts`, against the people counts. */
+   * FLUSH, and they no longer end at the node's bottom. Both are the design:
+   * a band is drawn at its own people count on the plot's single scale, so
+   * the space left under them is exactly the drop-off and any excess is
+   * exactly a double-count. A gap between them would add to the extent and
+   * manufacture an overflow where none exists. What this walk owns is that
+   * the renderer lays the model out faithfully -- top edge, no overlap, no
+   * space invented. The scale is pinned in `sankey.test.ts`. */
   const spans = (edges: { start: number; thickness: number }[], node: ReturnType<typeof box>) => {
     let cursor = node.y
     for (const edge of edges) {
@@ -196,7 +193,7 @@ function tilesEveryNodeEdge(links: readonly [number, number][], nodeCount: numbe
       // still stack, so the disjointness this walk asserts would mean nothing.
       expect(edge.thickness).toBeGreaterThan(0)
       expect(edge.start).toBeCloseTo(cursor, 1)
-      cursor += edge.thickness + GAP
+      cursor += edge.thickness
     }
   }
 
@@ -314,6 +311,59 @@ describe('FunnelFlow', () => {
     ]
     render(<FunnelFlow result={result()} definition={stale} />)
     expect(screen.queryByTestId('flow-step-1-where')).not.toBeInTheDocument()
+  })
+
+  it('traces the selected node exactly, from the node’s own coordinates', () => {
+    // FOUND BY RENDERING, twice. The mark used to live on the HTML hit
+    // target, which is a fixed 28px because a pointer needs more room than a
+    // 12-unit node -- and the plot stretches horizontally, so at most card
+    // widths the node draws WIDER than that and the outline sat inside the
+    // bar it was marking. Moved into the SVG it was then given three units of
+    // padding, which is NOT square here: `preserveAspectRatio` is `none`, so
+    // those three units drew about fifteen pixels of clearance beside the bar
+    // against three above it, and on a full-height node the padded top edge
+    // fell outside the viewport and was clipped away entirely.
+    //
+    // So the mark is the node's box, to the unit, on all four attributes --
+    // equality, not a tolerance around a padding. The clearance comes from a
+    // non-scaling stroke straddling the edge, which is equal in PIXELS
+    // whatever the stretch, and no arithmetic here can drift out of true.
+    render(<FunnelFlow result={BRANCHED} selectedStep={2} onSelectStep={vi.fn()} />)
+    const node = screen.getByTestId('flow-node-2')
+    const mark = screen.getByTestId('flow-node-2-selected')
+    const n = (el: Element, a: string) => Number(el.getAttribute(a))
+    for (const a of ['x', 'y', 'width', 'height']) {
+      expect(n(mark, a)).toBe(n(node, a))
+    }
+    // And the clearance is the stroke, not geometry -- a scaling stroke would
+    // be five times thicker on the vertical edges than the horizontal ones.
+    expect(mark.getAttribute('vector-effect')).toBe('non-scaling-stroke')
+  })
+
+  it('marks only the selected node, and nothing when none is selected', () => {
+    const { unmount } = render(
+      <FunnelFlow result={BRANCHED} selectedStep={2} onSelectStep={vi.fn()} />,
+    )
+    expect(screen.getAllByTestId(/^flow-node-\d+-selected$/)).toHaveLength(1)
+    unmount()
+    render(<FunnelFlow result={BRANCHED} onSelectStep={vi.fn()} />)
+    expect(screen.queryByTestId(/^flow-node-\d+-selected$/)).not.toBeInTheDocument()
+  })
+
+  it('paints only with tokens this stylesheet actually defines', () => {
+    // FOUND BY RENDERING, and no other test could have caught it: a
+    // `stroke="var(--primary)"` asserts identically whether or not the token
+    // exists, so two references to tokens this design system does not have
+    // -- `--primary` and `--background` -- drew nothing at all for as long
+    // as they were there. Every colour here comes from the `--lf-` system or
+    // the funnel ramp; anything else is a name that resolves to nothing.
+    render(<FunnelFlow result={BRANCHED} selectedStep={2} onSelectStep={vi.fn()} />)
+    const svg = screen.getByTestId('funnel-flow').querySelector('svg') as SVGElement
+    const used = [...svg.outerHTML.matchAll(/var\((--[a-z0-9-]+)\)/g)].map((m) => m[1])
+    expect(used.length).toBeGreaterThan(0)
+    for (const token of used) {
+      expect(token).toMatch(/^--(lf-|chart-funnel-)/)
+    }
   })
 
   it('bounds the plot PER STAGE, so two steps do not bridge and eight do not compress', () => {

@@ -256,26 +256,28 @@ describe('sankeyModel', () => {
     expect(m.nodes.map((n) => n.ramp)).toEqual([1, 1, 2])
   })
 
-  it('stacks the links leaving one node from its top edge, a gap between each', () => {
+  it('stacks the links leaving one node flush from its top edge', () => {
     const m = sankeyModel(BRANCHED, 100)
     const a = m.nodes[0] as SankeyNode
     const out = m.links.filter((l) => l.from === 0).sort((x, y) => x.y0 - y.y0)
     expect(out).toHaveLength(2)
     const [first, second] = out as [SankeyLink, SankeyLink]
     expect(first.y0).toBeCloseTo(a.y, 5)
-    // Literal 16, not the module's LINK_GAP -- asserting against the
-    // constant survives the constant moving and stops pinning it.
-    expect(first.y0 + first.w0 + 16).toBeCloseTo(second.y0, 5)
+    // FLUSH, no gap. A gap made the stack's extent `people + gaps`, so two
+    // bands covering all of a node's people still ran past its edge -- an
+    // overflow that means "two paths claim one person" drawn where nothing
+    // overlapped. Flush, the extent IS the people.
+    expect(first.y0 + first.w0).toBeCloseTo(second.y0, 5)
   })
 
-  it('stacks the links arriving at one node from its top edge, a gap between each', () => {
+  it('stacks the links arriving at one node flush from its top edge', () => {
     const m = sankeyModel(BRANCHED, 100)
     const c = m.nodes[2] as SankeyNode
     const into = m.links.filter((l) => l.to === 2).sort((x, y) => x.y1 - y.y1)
     expect(into).toHaveLength(2)
     const [first, second] = into as [SankeyLink, SankeyLink]
     expect(first.y1).toBeCloseTo(c.y, 5)
-    expect(first.y1 + first.w1 + 16).toBeCloseTo(second.y1, 5)
+    expect(first.y1 + first.w1).toBeCloseTo(second.y1, 5)
   })
 
   it('sizes the model to the tallest extent reached and the full plot width', () => {

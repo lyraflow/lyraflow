@@ -14,14 +14,21 @@ import {
  * between two branches stacked off the same step. */
 const BRANCH_GAP = 32
 
-/** Vertical space between two bands stacked on one node's edge.
+/* NO GAP BETWEEN BANDS AT A NODE'S EDGE, deliberately, and this was tried the
+ * other way first.
  *
- * Without it the bands are flush and the plot reads as one slab: a funnel
- * that converts everyone draws every node full height and every band filling
- * it, so the fork between a branch and the flow past it disappears into a
- * hairline. This is the separation, and it is why `w0`/`w1` are scaled
- * against the node's height MINUS the gaps rather than against the height. */
-const LINK_GAP = 16
+ * A 16-unit gap was added to stop bands merging into one mass. It did, and it
+ * cost two things that matter more. The stack's extent became `people + gaps`,
+ * so two bands accounting for every one of a node's people still ran past its
+ * edge -- an overflow that means "two paths claim the same person" was being
+ * drawn where nothing overlapped at all. And at a node with drop-off it split
+ * the empty space in two: a gap between the bands and the real remainder
+ * below, reading as two different quantities when only one exists.
+ *
+ * Flush, the stack's extent IS the sum of its people. Space under the bands is
+ * exactly the drop-off, and anything past the edge is exactly a double-count.
+ * What separates the bands instead is the drop-off itself where there is any,
+ * and the weight and dash of the optional path where there is not. */
 
 export interface SankeyNode {
   step: number // 0-based index into result.steps
@@ -225,10 +232,10 @@ export function sankeyModel(steps: readonly StepResult[], entered: number): Sank
     const dst = nodes[l.to] as SankeyNode
     const y0 = outCursor.get(l.from) ?? src.y
     l.y0 = y0
-    outCursor.set(l.from, y0 + l.w0 + LINK_GAP)
+    outCursor.set(l.from, y0 + l.w0)
     const y1 = inCursor.get(l.to) ?? dst.y
     l.y1 = y1
-    inCursor.set(l.to, y1 + l.w1 + LINK_GAP)
+    inCursor.set(l.to, y1 + l.w1)
   }
 
   // 5. overlap = max(0, Σ(outgoing people) - people, Σ(incoming people) -
