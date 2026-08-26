@@ -21,7 +21,15 @@ export interface SankeyNode {
   x: number // left edge, viewBox units
   y: number // top edge, viewBox units
   height: number
-  /** People counted on more than one leg leaving this node, or 0. */
+  /**
+   * How many people are counted twice on ONE side of this node -- outgoing
+   * or incoming, whichever exceeds the node's own `people` -- or 0.
+   *
+   * Checked on both sides always, not only the side a node happens to have:
+   * a node with outgoing links can still double-count on its incoming side
+   * (two optional steps both claiming the same person on their way in), and
+   * that must stay visible whether or not the node also sits last.
+   */
   overlap: number
 }
 

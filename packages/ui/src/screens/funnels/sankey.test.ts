@@ -159,7 +159,7 @@ describe('sankeyModel', () => {
     expect(m.nodes[3]?.overlap).toBe(60)
   })
 
-  it('reports overlap on the incoming side too, even when the node has outgoing links', () => {
+  it('reports overlap on the incoming side too, and keeps two branches off one step apart by BRANCH_GAP', () => {
     // a -> [b opt, c opt, both branching off a] -> d -> e. b and c both claim
     // the same people reaching d: a real 60-person double-count, even though
     // d ALSO has an outgoing (chain) link on to e. Whether that double-count
@@ -191,6 +191,14 @@ describe('sankeyModel', () => {
     ]
     const m = sankeyModel(doubled, 100)
     expect(m.nodes[3]?.overlap).toBe(60)
+    // b and c both hang off the same branch point (a). b is placed first,
+    // sitting closer to the centre line; c stacks above it. The gap between
+    // b's top and c's bottom is the SAME BRANCH_GAP that separates the
+    // centre line from the first branch -- pinned to its literal value, not
+    // to the module's own constant.
+    const b = m.nodes[1] as SankeyNode
+    const c = m.nodes[2] as SankeyNode
+    expect(b.y - (c.y + c.height)).toBeCloseTo(24, 5)
   })
 
   it("gives each node its ramp step, with an optional taking its branch point's", () => {
