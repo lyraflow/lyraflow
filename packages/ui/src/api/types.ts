@@ -316,10 +316,13 @@ export interface RangeBody {
  * matching the server -- `reached` (level >= step) and `dropped` (level =
  * step) differ by a large factor on a real funnel, and whichever default
  * was picked, the other reading is the one a caller would get by accident.
+ *
+ * `skipped` is optional steps only, and the two others are refused on one:
+ * the server 400s rather than answering a neighbouring question.
  */
 export interface FunnelPeopleQuery {
   step: number
-  mode: 'reached' | 'dropped'
+  mode: 'reached' | 'dropped' | 'skipped'
   since?: string
   until?: string
   cursor?: string

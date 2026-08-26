@@ -1,3 +1,4 @@
+import { MAX_OPTIONAL_STEPS } from '@lyraflow/core/funnels/validate.js'
 import type { FilterNode, Group, WherePredicate } from '@lyraflow/core/segments/ast.js'
 import type { CostWarning } from '@lyraflow/core/segments/validate.js'
 import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, X } from 'lucide-react'
@@ -130,6 +131,25 @@ export function StepRows(props: {
       }),
     )
   }
+  /**
+   * Same rule as `updateWhere` and `updateAudience`: the KEY is dropped
+   * rather than set to `false`. `FunnelStep.optional` is `.optional()`, so
+   * "absent" is the shape a step that never had one is stored with, and a
+   * step whose toggle was turned back off must round-trip to exactly that --
+   * not to a step carrying a field that only looks the same once
+   * `JSON.stringify` has quietly dropped it. `stepsEqual` on the server
+   * normalises both spellings, but a definition that differs from the one
+   * that was saved is still a definition nobody wrote.
+   */
+  function updateOptional(i: number, optional: boolean) {
+    onChange(
+      steps.map((s, idx) => {
+        if (idx !== i) return s
+        const { optional: _previous, ...rest } = s
+        return optional ? { ...rest, optional: true } : rest
+      }),
+    )
+  }
 
   /**
    * This step's warnings, by the `steps.<i>.` prefix `funnelCostWarnings`
@@ -164,6 +184,35 @@ export function StepRows(props: {
     onChange(next)
   }
 
+  // How many steps are ALREADY optional, funnel-wide -- the cap is on the
+  // whole definition, not per step, so every row's disabled check reads the
+  // same count.
+  const optionalStepCount = steps.filter((s) => s.optional).length
+
+  /**
+   * The two rules the server refuses at save must be unreachable here
+   * rather than merely rejected: the server's 400 for either one carries no
+   * `detail[]`, so `describeError` can only render `This funnel could not
+   * be read: steps` -- which names neither rule. Returns the reason to show
+   * beside a disabled toggle, or `null` when this step's toggle is enabled.
+   *
+   * An already-optional step is exempted from the cap check on purpose: an
+   * operator must be able to undo their way back under it, not get stuck
+   * once it is reached.
+   */
+  function optionalDisabledReason(i: number, step: FunnelStep): string | null {
+    if (i === 0) {
+      return 'The first step defines when someone enters the funnel, so it cannot be optional.'
+    }
+    if (i === steps.length - 1) {
+      return 'The last step defines conversion, so it cannot be optional.'
+    }
+    if (!step.optional && optionalStepCount >= MAX_OPTIONAL_STEPS) {
+      return `A funnel may have at most ${MAX_OPTIONAL_STEPS} optional steps.`
+    }
+    return null
+  }
+
   return (
     <div className="flex flex-col gap-3">
       {steps.map((step, i) => {
@@ -174,6 +223,7 @@ export function StepRows(props: {
         // scope to offer.
         const scopeEvent = step.event.trim() === '' ? undefined : step.event
         const isCollapsed = collapsed.includes(i)
+        const disabledReason = optionalDisabledReason(i, step)
         return (
           <div
             // biome-ignore lint/suspicious/noArrayIndexKey: steps have no stable id of their own and this list is reordered/removed by index, matching that index is exactly the identity `moveStep`/`removeStep` need.
@@ -256,6 +306,29 @@ export function StepRows(props: {
                   label="Event"
                   accessibleName={`Step ${i + 1} event`}
                 />
+                {/* First/last and the cap are made UNREACHABLE here rather
+                 * than rejected at save: the server's 400 for either rule
+                 * has no `detail[]`, so `describeError` can only render
+                 * `This funnel could not be read: steps`, naming neither
+                 * rule. An already-optional step stays enabled past the cap
+                 * so an operator can undo their way back under it. */}
+                <div className="flex flex-col gap-1">
+                  <Button
+                    type="button"
+                    variant={step.optional === true ? 'default' : 'outline'}
+                    size="sm"
+                    className="self-start"
+                    aria-pressed={step.optional === true}
+                    disabled={disabledReason !== null}
+                    onClick={() => updateOptional(i, !step.optional)}
+                  >
+                    Optional
+                  </Button>
+                  <p className="text-xs text-muted-foreground">
+                    {disabledReason ??
+                      'People who skip this step still count towards the steps after it. It counts any time after the previous required step, within the window — including after a later step.'}
+                  </p>
+                </div>
                 {/* `id` is this step's POSITION, which makes each row's test id
                  * (`step-2-where-0`) name both the step and the predicate. A
                  * single shared id would make "adds to the step you clicked"
