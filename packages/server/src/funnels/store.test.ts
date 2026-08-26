@@ -605,3 +605,112 @@ describe('the cached summary records what it ran over (#91)', () => {
     expect(row?.lastRange?.since).toBe(OTHER.since.toISOString())
   })
 })
+
+/**
+ * A funnel row written straight to Postgres, at a version of the caller's
+ * choosing. `store.create` always stamps the CURRENT constant, so a row
+ * claiming to come from a newer build is unreachable through it -- and that
+ * row is the whole point of the tests below.
+ */
+async function insertFunnelRow(opts: {
+  name: string
+  definitionVersion: number
+  steps: object[]
+  windowSeconds: number
+}): Promise<number> {
+  const r = await pg.query<{ id: string }>(
+    `INSERT INTO funnels (project_id, name, definition_version, steps, window_seconds)
+     VALUES ($1, $2, $3, $4::jsonb, $5) RETURNING id`,
+    [projectId, opts.name, opts.definitionVersion, JSON.stringify(opts.steps), opts.windowSeconds],
+  )
+  return Number(r.rows[0]?.id)
+}
+
+describe('a definition from a newer build', () => {
+  it('refuses a row whose definition_version is above this build', async () => {
+    // Zod strips unknown keys, so a v4 row would parse CLEANLY here and lose
+    // whatever v4 added -- a smaller `converted` with no error anywhere.
+    // This is the case `012_funnels.sql` says the column exists for, and
+    // until now nothing checked it as an upper bound.
+    const id = await insertFunnelRow({
+      name: 'from the future',
+      definitionVersion: FUNNEL_DEFINITION_VERSION + 1,
+      steps: [{ event: 'a' }, { event: 'b' }],
+      windowSeconds: 3600,
+    })
+    await expect(store.get(projectId, id)).rejects.toBeInstanceOf(StoredDefinitionError)
+  })
+
+  it('names the version it refused', async () => {
+    const id = await insertFunnelRow({
+      name: 'named',
+      definitionVersion: FUNNEL_DEFINITION_VERSION + 1,
+      steps: [{ event: 'a' }, { event: 'b' }],
+      windowSeconds: 3600,
+    })
+    await store.get(projectId, id).then(
+      () => expect.unreachable('should have thrown'),
+      (err) =>
+        expect((err as StoredDefinitionError).definitionVersion).toBe(
+          FUNNEL_DEFINITION_VERSION + 1,
+        ),
+    )
+  })
+
+  it('still reads every version this build knows', async () => {
+    for (const v of [1, 2, FUNNEL_DEFINITION_VERSION]) {
+      const id = await insertFunnelRow({
+        name: `v${v}`,
+        definitionVersion: v,
+        steps: [{ event: 'a' }, { event: 'b' }],
+        windowSeconds: 3600,
+      })
+      await expect(store.get(projectId, id)).resolves.toBeTruthy()
+    }
+  })
+})
+
+describe('an optional-only edit', () => {
+  it('clears the cached counters', async () => {
+    // `definitionChanged` gates this. Marking a step optional changes what
+    // the funnel MEASURES more than most edits do, so a stale
+    // `last_converted` left behind makes the funnels list render a confident
+    // count for a definition that no longer exists.
+    const created = await store.create(projectId, 'opt edit', {
+      steps: [{ event: 'a' }, { event: 'b' }, { event: 'c' }],
+      window_seconds: 3600,
+    })
+    await store.recordRun(projectId, created.id, {
+      entered: 100,
+      converted: 10,
+      at: new Date(),
+      range: RANGE,
+    })
+    const updated = await store.update(projectId, created.id, {
+      steps: [{ event: 'a' }, { event: 'b', optional: true }, { event: 'c' }],
+    })
+    expect(updated?.lastEntered).toBeNull()
+    expect(updated?.lastConverted).toBeNull()
+    expect(updated?.lastEvaluatedAt).toBeNull()
+  })
+
+  it('treats absent and `optional: false` as the same definition', async () => {
+    // `optional` is `.optional()`, so "absent" is how a step that never had
+    // one is stored. A PATCH that spells the same thing the other way is not
+    // a change and must not clear a count that is still true.
+    const created = await store.create(projectId, 'same shape', {
+      steps: [{ event: 'a' }, { event: 'b' }],
+      window_seconds: 3600,
+    })
+    await store.recordRun(projectId, created.id, {
+      entered: 100,
+      converted: 10,
+      at: new Date(),
+      range: RANGE,
+    })
+    const updated = await store.update(projectId, created.id, {
+      steps: [{ event: 'a' }, { event: 'b', optional: false }],
+    })
+    expect(updated?.lastEntered).toBe(100)
+  })
+})
