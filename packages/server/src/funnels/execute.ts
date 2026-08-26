@@ -12,10 +12,11 @@ import { runCompiled } from '../segments/execute.js'
  * The three base columns stay NAMED, with NO index signature on this type --
  * a renamed SQL alias in `compile.ts`, or a typo reading one of them below,
  * is then a compile error rather than a silent `Number(undefined)` ->
- * `NaN` at runtime. The dynamic `optional_<j>` columns -- one per optional
- * step, a count known from the definition, not from this type -- are read
- * through an explicit cast confined to the one call site that needs it,
- * below; their absence IS caught, at runtime, by the throw there.
+ * `NaN` at runtime. The dynamic `optional_<j>` and `continued_<j>` columns --
+ * one pair per optional step, a count known from the definition, not from
+ * this type -- are read through an explicit cast confined to the one call
+ * site that needs it, below; their absence IS caught, at runtime, by the
+ * throw there.
  */
 interface HistogramRow {
   level: string
@@ -57,6 +58,20 @@ export async function runFunnel(opts: {
         if (raw === undefined) {
           throw new Error(
             `funnel histogram is missing optional_${j}; compiled query and definition disagree`,
+          )
+        }
+        return Number(raw)
+      }),
+      optionalContinued: Array.from({ length: optionalCount }, (_, j) => {
+        const raw = dynamic[`continued_${j}`]
+        // Same rule as `optional_<j>`: THROWN, never defaulted. A missing
+        // column means the compiled query and this runner disagree about how
+        // many optional steps the definition has, and a silent zero would
+        // report every branch as a dead end -- a plausible number, which is
+        // the worst kind of wrong one.
+        if (raw === undefined) {
+          throw new Error(
+            `funnel histogram is missing continued_${j}; compiled query and definition disagree`,
           )
         }
         return Number(raw)

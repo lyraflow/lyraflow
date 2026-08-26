@@ -14,7 +14,13 @@ import { Params, chDateTime } from '../segments/params.js'
 import { attributeColumns, wherePredicate } from '../segments/predicates.js'
 import type { FunnelDefinition, FunnelStep } from './ast.js'
 import { funnelSpine } from './spine.js'
-import { funnelCostWarnings, validateFunnel, validateRange } from './validate.js'
+import {
+  FunnelValidationError,
+  MAX_COMPILED_QUERY_BYTES,
+  funnelCostWarnings,
+  validateFunnel,
+  validateRange,
+} from './validate.js'
 
 /**
  * One step's condition: the event name, ANDed with any predicates on that
@@ -233,6 +239,24 @@ export function compileFunnel(opts: {
       conditions[k] as string,
     ]
   })
+  // The branch chain ends AT the optional step, which answers "did they do
+  // it" and nothing else. A chart that draws the step as a node needs its
+  // OUTGOING flow too, or the node is a dead end: people walk in and vanish.
+  //
+  // `null` when no required step follows -- `validateFunnel` refuses an
+  // optional last step so the API cannot reach it, but `funnelSpine` is pure
+  // over whatever it is handed and indexing past the end would be a crash
+  // rather than a refusal.
+  const fullChains = spine.optional.map((k) => {
+    const rank = spine.placements[k]?.spineRank ?? 0
+    const next = spine.required[rank]
+    if (next === undefined) return null
+    return [
+      ...spine.required.slice(0, rank).map((i) => conditions[i] as string),
+      conditions[k] as string,
+      conditions[next] as string,
+    ]
+  })
 
   // Built after the conditions, which is what populates `eventParams`.
   const eventList = [...eventParams.values()].join(', ')
@@ -289,6 +313,13 @@ export function compileFunnel(opts: {
         `\n    windowFunnel(${windowParam})(toUInt64(toUnixTimestamp64Milli(timestamp)), ${chain.join(', ')}) AS branch_${j},`,
     )
     .join('')
+  const fullSelects = fullChains
+    .map((chain, j) =>
+      chain === null
+        ? ''
+        : `\n    windowFunnel(${windowParam})(toUInt64(toUnixTimestamp64Milli(timestamp)), ${chain.join(', ')}) AS full_${j},`,
+    )
+    .join('')
 
   /**
    * The per-person pass, shared by both projections above it. Written once so
@@ -299,7 +330,7 @@ export function compileFunnel(opts: {
   const perPerson = `
   SELECT
     ${resolved} AS ${RESOLVED_PERSON_ALIAS},
-    windowFunnel(${windowParam})(toUInt64(toUnixTimestamp64Milli(timestamp)), ${spineConditions.join(', ')}) AS level,${branchSelects}
+    windowFunnel(${windowParam})(toUInt64(toUnixTimestamp64Milli(timestamp)), ${spineConditions.join(', ')}) AS level,${branchSelects}${fullSelects}
     minIf(timestamp, ${spineConditions[0]}) AS entered_at
   FROM (
     SELECT project_id, anonymous_id, user_id, timestamp, event_name,
@@ -316,6 +347,31 @@ export function compileFunnel(opts: {
 `
 
   const people = opts.peopleAt
+
+  /**
+   * Every shape this function can return -- the histogram, and all three
+   * `peopleAt` projections -- shares ONE `perPerson` subquery, which
+   * ALWAYS carries every branch and full chain regardless of which shape
+   * reads them (see the comment above `branchSelects`). That is the shared
+   * RISK, not a shared size: measured on the same definition, `members` is
+   * the largest of the four -- its two extra CTEs (`base`, `traits`) and
+   * its wider projection add roughly 5KB over the histogram -- while `ids`
+   * and `count` land a little BELOW it (`ids` has no traits join at all).
+   * Each of the four is measured on its OWN assembled SQL, at its own
+   * return site, for exactly that reason: a single check against the
+   * histogram's size would be wrong for `members`, the path most likely to
+   * cross the guard first.
+   */
+  const finalize = (sql: string): CompiledQuery => {
+    const bytes = Buffer.byteLength(sql, 'utf8')
+    if (bytes > MAX_COMPILED_QUERY_BYTES) {
+      throw new FunnelValidationError(
+        `this funnel compiles to a ${bytes}-byte query, past the ${MAX_COMPILED_QUERY_BYTES}-byte limit ClickHouse can parse; remove some \`where\` predicates, step audiences, or optional steps`,
+        'steps',
+      )
+    }
+    return { sql, params: params.values, warnings: funnelCostWarnings(definition, range) }
+  }
 
   // Ordered newest-entrant first, tie-broken by person_id, and paged by a
   // strictly lexicographic keyset — collapsing that to `entered_at <` alone
@@ -354,13 +410,9 @@ export function compileFunnel(opts: {
     }
 
     if (people.select === 'count') {
-      return {
-        sql: `SELECT count() AS person_count
+      return finalize(`SELECT count() AS person_count
 FROM (${perPerson})
-WHERE ${levelPredicate}${segmentFilter}`,
-        params: params.values,
-        warnings: funnelCostWarnings(definition, range),
-      }
+WHERE ${levelPredicate}${segmentFilter}`)
     }
 
     if (people.select === 'members') {
@@ -374,8 +426,7 @@ WHERE ${levelPredicate}${segmentFilter}`,
         baseCte({ database, projectId, params }),
         traitsCte({ database, projectId, params }),
       ]
-      return {
-        sql: `WITH
+      return finalize(`WITH
   ${ctes.join(',\n  ')}
 SELECT
   ${memberProjection()},
@@ -385,25 +436,18 @@ LEFT JOIN base USING (${RESOLVED_PERSON_ALIAS})
 LEFT JOIN traits USING (${RESOLVED_PERSON_ALIAS})
 WHERE ${levelPredicate}${segmentFilter}${peopleAfter}
 ORDER BY entered_at DESC, ${RESOLVED_PERSON_ALIAS} ASC
-LIMIT ${MEMBER_PAGE_SIZE}`,
-        params: params.values,
-        warnings: funnelCostWarnings(definition, range),
-      }
+LIMIT ${MEMBER_PAGE_SIZE}`)
     }
 
     // select === 'ids' -- exactly what `/dropoff` has always compiled, with
     // only the level predicate substituted. No traits join: a second scan of
     // person_traits on every existing caller's request is not this task's to
     // add.
-    return {
-      sql: `SELECT ${RESOLVED_PERSON_ALIAS}, entered_at
+    return finalize(`SELECT ${RESOLVED_PERSON_ALIAS}, entered_at
 FROM (${perPerson})
 WHERE ${levelPredicate}${segmentFilter}${peopleAfter}
 ORDER BY entered_at DESC, ${RESOLVED_PERSON_ALIAS} ASC
-LIMIT ${MEMBER_PAGE_SIZE}`,
-      params: params.values,
-      warnings: funnelCostWarnings(definition, range),
-    }
+LIMIT ${MEMBER_PAGE_SIZE}`)
   }
 
   const optionalCounts = spine.optional
@@ -413,17 +457,21 @@ LIMIT ${MEMBER_PAGE_SIZE}`,
     })
     .join('')
 
-  const sql = `SELECT
+  // `branch.level + 1` is the full chain's own length: the branch chain
+  // reaches `spineRank + 1`, and the full chain adds exactly one condition.
+  const continuedCounts = spine.optional
+    .map((k, j) => {
+      if (fullChains[j] === null) return ''
+      const level = params.add((spine.placements[k]?.branch?.level ?? 1) + 1, 'UInt32')
+      return `,\n  countIf(full_${j} >= ${level}) AS continued_${j}`
+    })
+    .join('')
+
+  return finalize(`SELECT
   level,
   count() AS people,
-  countIf(entered_at > ${partialBoundary}) AS partial${optionalCounts}
+  countIf(entered_at > ${partialBoundary}) AS partial${optionalCounts}${continuedCounts}
 FROM (${perPerson})
 WHERE level > 0${segmentFilter}
-GROUP BY level`
-
-  return {
-    sql,
-    params: params.values,
-    warnings: funnelCostWarnings(definition, range),
-  }
+GROUP BY level`)
 }

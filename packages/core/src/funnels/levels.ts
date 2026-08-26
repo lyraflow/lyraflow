@@ -25,6 +25,19 @@ export interface LevelRow {
    * histogram produced before v3.
    */
   optionalReached?: number[]
+  /**
+   * Of the people in this row, how many carried on THROUGH each optional step
+   * to the next required one -- one entry per optional step, in definition
+   * order, matching `funnelSpine().optional`.
+   *
+   * `optionalReached` is the leg INTO the step; this is the leg OUT of it.
+   * The difference between them is the step's own drop-off, which is what a
+   * node in a flow diagram needs in order not to be a dead end.
+   *
+   * Absent on a funnel with no optional steps, and on any row produced before
+   * the full chain existed.
+   */
+  optionalContinued?: number[]
 }
 
 export interface StepResult {
@@ -51,6 +64,16 @@ export interface StepResult {
    * rounded away.
    */
   skipped?: number
+  /**
+   * Optional steps only: of the people who reached this step, how many went
+   * on to the next REQUIRED step through it.
+   *
+   * A subset of `people` by construction -- the full chain's prefix is the
+   * branch chain verbatim, so anything reaching the longer chain reached the
+   * shorter one. Not clamped, for the same reason `skipped` is not: a value
+   * above `people` means the two chains disagreed, and that must be visible.
+   */
+  continued?: number
 }
 
 export interface FunnelResult {
@@ -95,6 +118,7 @@ export function summarise(rows: LevelRow[], steps: FunnelStep[]): FunnelResult {
   const spineLength = spine.required.length
   const stoppedAt = new Array<number>(spineLength + 2).fill(0)
   const optionalTotals = new Array<number>(spine.optional.length).fill(0)
+  const continuedTotals = new Array<number>(spine.optional.length).fill(0)
   let partialWindowEntrants = 0
 
   for (const row of rows) {
@@ -103,6 +127,9 @@ export function summarise(rows: LevelRow[], steps: FunnelStep[]): FunnelResult {
     // skipping them would only hide a compiler that disagreed.
     for (let j = 0; j < optionalTotals.length; j++) {
       optionalTotals[j] = (optionalTotals[j] ?? 0) + (row.optionalReached?.[j] ?? 0)
+    }
+    for (let j = 0; j < continuedTotals.length; j++) {
+      continuedTotals[j] = (continuedTotals[j] ?? 0) + (row.optionalContinued?.[j] ?? 0)
     }
     if (row.level < 1) continue
     // Clamped against the SPINE's length, not the definition's: the level
@@ -145,6 +172,7 @@ export function summarise(rows: LevelRow[], steps: FunnelStep[]): FunnelResult {
           from_start: rate(people, entered),
           optional: true as const,
           skipped: branchPoint - people,
+          continued: continuedTotals[placement.branch.index] ?? 0,
         }
       }
 

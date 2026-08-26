@@ -168,6 +168,113 @@ describe('funnel routes', () => {
     expect(res.json().code).toBe('steps')
   })
 
+  /**
+   * A definition that is legal in every dimension the API checks and still
+   * compiles past `MAX_COMPILED_QUERY_BYTES`: 8 steps (`MAX_FUNNEL_STEPS`),
+   * one of them optional, 10 `where` predicates each
+   * (`MAX_WHERE_PREDICATES`), and a per-step audience of exactly
+   * `MAX_TREE_NODES` (100) nodes carrying 25 behaviour nodes across the whole
+   * funnel (`MAX_FUNNEL_BEHAVIOR_NODES`) with the rest padded by traits,
+   * which cost nothing against that cap. The size comes from the PRODUCT of
+   * those dimensions, which no single cap can see.
+   *
+   * Close kin to `compile.test.ts`'s `oversizeDefinition()`, but NOT a copy:
+   * that one puts 99 leaves under one group, and the wire schema caps a
+   * group at 50 children, so it cannot be posted at all. Here the leaves are
+   * split across two nested groups — 1 + 2 + 97 = 100 nodes — which is the
+   * same total through a shape the API accepts.
+   *
+   * Measured at 239,814 bytes against a 230,000-byte guard. That is 4% of
+   * margin, not a lot: if the compiler ever emits less text this stops being
+   * over-size and this test fails loudly. Enlarge the fixture when that
+   * happens; do not relax the assertion.
+   */
+  const oversizeDefinition = () => {
+    const behaviour = (event: string) => ({
+      kind: 'behavior',
+      event,
+      aggregate: 'count',
+      window: { kind: 'last', n: 14, unit: 'days' },
+      operator: '=',
+      value: 1,
+    })
+    const trait = (key: string) => ({ kind: 'trait', key, operator: '=', value: 'x' })
+    const behaviourCounts = [4, 3, 3, 3, 3, 3, 3, 3] // sums to 25
+    const steps = behaviourCounts.map((n, i) => {
+      let evCounter = i * 100
+      const leaves = [
+        ...Array.from({ length: n }, () => behaviour(`ev_${evCounter++}`)),
+        ...Array.from({ length: 97 - n }, (_, t) => trait(`trait_${i}_${t}`)),
+      ]
+      const groups = []
+      for (let at = 0; at < leaves.length; at += 49) {
+        groups.push({ kind: 'group', op: 'and', children: leaves.slice(at, at + 49) })
+      }
+      return {
+        event: `step_${i}`,
+        where: Array.from({ length: 10 }, (_, w) => ({
+          property: `p${w}`,
+          operator: '=',
+          value: 1,
+        })),
+        audience: { kind: 'group', op: 'and', children: groups },
+        ...(i === 4 ? { optional: true } : {}),
+      }
+    })
+    return { steps, window_seconds: 3600 }
+  }
+
+  it('refuses a funnel too large to compile at CREATE, and does not save it', async () => {
+    // Without the compile at create this returned a 201 and then answered
+    // 400 on every /run, /dropoff and /people for the rest of the funnel's
+    // life -- unrunnable, undeletable-by-accident, and looking healthy in
+    // the list. `validateFunnel` cannot see it: every definition-level cap
+    // is satisfied, and the size comes from their PRODUCT.
+    const res = await call('POST', '/v1/funnels', {
+      name: 'too-large',
+      ...oversizeDefinition(),
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().code).toBe('steps')
+    // Names a lever, so an operator has something to remove.
+    expect(res.json().error).toMatch(/where|audience|optional/i)
+
+    // Refused AND not written. A 400 over a row that was inserted anyway
+    // would be the same trap with a worse error message.
+    const listed = await call('GET', '/v1/funnels')
+    expect(listed.json().funnels.map((f: { name: string }) => f.name)).not.toContain('too-large')
+  })
+
+  it('still saves an ordinary funnel with the compile guard in place', async () => {
+    // The other half of the guard: it must refuse the shape above and
+    // nothing else. An ordinary funnel compiles to a fraction of the cap.
+    const res = await call('POST', '/v1/funnels', {
+      name: 'ordinary',
+      steps: [
+        { event: '$page', where: [{ property: 'path', operator: '=', value: '/' }] },
+        { event: 'signed_up' },
+        { event: 'subscription_started', optional: true },
+        { event: 'invoice_paid' },
+      ],
+      window_seconds: 3600,
+    })
+    expect(res.statusCode).toBe(201)
+    expect((await call('GET', `/v1/funnels/${res.json().id}`)).statusCode).toBe(200)
+  })
+
+  it('refuses a PATCH that would make a saved funnel too large to compile', async () => {
+    // The other door into the table. Without the compile here a funnel that
+    // saved fine could be PATCHed into one that cannot run, which is the
+    // same trap arrived at a step later.
+    const created = await call('POST', '/v1/funnels', { name: 'signup', ...signup })
+    const id = created.json().id
+    const res = await call('PATCH', `/v1/funnels/${id}`, oversizeDefinition())
+    expect(res.statusCode).toBe(400)
+    expect(res.json().code).toBe('steps')
+    // Refused AND not written: the row still carries what it saved with.
+    expect((await call('GET', `/v1/funnels/${id}`)).json().steps).toEqual(signup.steps)
+  })
+
   it('rejects a PATCH that would raise the window past the cap', async () => {
     const created = await call('POST', '/v1/funnels', { name: 'signup', ...signup })
     const res = await call('PATCH', `/v1/funnels/${created.json().id}`, {
@@ -665,5 +772,24 @@ describe('people at an optional step', () => {
     expect(typeof steps[1].skipped).toBe('number')
     expect(steps[0].optional).toBeUndefined()
     expect(steps[2].optional).toBeUndefined()
+  })
+
+  it('carries continued on the wire for an optional step, and omits it on required ones', () => {
+    // SHAPE, NOT VALUE. This fixture ingests no events, so every count is 0
+    // and `continued` cannot diverge from `optional` or from a defaulted
+    // zero -- neither a missing-column default nor reading the wrong column
+    // is detectable here. The VALUE is pinned in semantics.test.ts, against
+    // ingested rows where the two legs genuinely differ.
+    //
+    // What this DOES pin is the field's presence rule, which is a real wire
+    // guarantee: absent on a required step rather than zero, matching
+    // `optional` and `skipped`.
+    return created(OPT).then(async (id) => {
+      const res = await call('POST', `/v1/funnels/${id}/run`, { days: 7 })
+      expect(res.statusCode).toBe(200)
+      expect(res.json().steps[1]).toHaveProperty('continued')
+      expect(res.json().steps[0].continued).toBeUndefined()
+      expect(res.json().steps[2].continued).toBeUndefined()
+    })
   })
 })

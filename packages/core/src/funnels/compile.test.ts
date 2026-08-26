@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
+import type { FilterNode } from '../segments/ast.js'
 import { Params } from '../segments/params.js'
+import type { FunnelStep } from './ast.js'
 import { compileFunnel } from './compile.js'
-import { FunnelValidationError } from './validate.js'
+import { FunnelValidationError, MAX_COMPILED_QUERY_BYTES } from './validate.js'
 
 const range = { since: new Date('2026-08-07T00:00:00Z'), until: new Date('2026-08-14T00:00:00Z') }
 // Well after `until`, so the default case is a fully-elapsed window.
@@ -517,7 +519,10 @@ describe('optional steps', () => {
 
   it('emits one branch aggregate per optional step', () => {
     const q = compileFunnel({ ...base, definition: withOptional })
-    expect((q.sql.match(/windowFunnel/g) ?? []).length).toBe(2)
+    // Counting `branch_` aggregates, NOT every windowFunnel in the query.
+    // The total was a proxy for this and broke the moment a second chain per
+    // optional step arrived; it would break again on the next one.
+    expect((q.sql.match(/AS branch_\d/g) ?? []).length).toBe(1)
     expect(q.sql).toContain('AS branch_0')
     expect(q.sql).not.toContain('AS branch_1')
   })
@@ -606,5 +611,220 @@ describe('optional steps', () => {
     const q = compileFunnel({ ...base, definition: withOptional })
     expect(q.sql).not.toContain("'c'")
     expect(q.sql).not.toMatch(/branch_\d+ >= \d/)
+  })
+
+  it('emits one full chain per optional step, alongside its branch chain', () => {
+    const q = compileFunnel({ ...base, definition: withOptional })
+    // spine + branch_0 + full_0
+    expect((q.sql.match(/windowFunnel/g) ?? []).length).toBe(3)
+    expect(q.sql).toContain('AS full_0')
+    expect(q.sql).not.toContain('AS full_1')
+  })
+
+  it('carries the full chain through to the NEXT required step, in order', () => {
+    const q = compileFunnel({ ...base, definition: withOptional })
+    const line = q.sql.split('\n').find((l) => l.includes('AS full_0')) ?? ''
+    // Position, not just presence. `windowFunnel` counts conditions matched
+    // IN SEQUENCE, so the argument order IS the meaning: a chain of
+    // a, b, d, c contains the same four placeholders and answers a
+    // different question.
+    const at = (event: string) => {
+      const name = Object.keys(q.params).find((key) => q.params[key] === event)
+      expect(name).toBeDefined()
+      const i = line.indexOf(`{${name}:String}`)
+      expect(i).toBeGreaterThanOrEqual(0)
+      return i
+    }
+    expect(at('a')).toBeLessThan(at('b'))
+    expect(at('b')).toBeLessThan(at('c'))
+    expect(at('c')).toBeLessThan(at('d'))
+  })
+
+  it('rejoins the NEXT required step, not the LAST one', () => {
+    // `withOptional` above -- and every other optional fixture in the repo --
+    // places the optional step so that the required step it rejoins IS the
+    // funnel's last required step, which makes `spine.required[rank]` and
+    // `spine.required.at(-1)` indistinguishable. Here they are not: `b`
+    // branches off `a` and rejoins `c`, with `d` still to come. Reading the
+    // last required step instead would build the chain `a, b, d` -- a query
+    // that runs, and answers "went on to CONVERT through b" while the
+    // response calls it `continued`.
+    const rejoinsEarly = {
+      steps: [{ event: 'a' }, { event: 'b', optional: true }, { event: 'c' }, { event: 'd' }],
+      window_seconds: 3600,
+    }
+    const q = compileFunnel({ ...base, definition: rejoinsEarly })
+    const line = q.sql.split('\n').find((l) => l.includes('AS full_0')) ?? ''
+    // Position, not presence -- same reasoning as the ordering test above:
+    // `windowFunnel` counts conditions matched IN SEQUENCE.
+    const at = (event: string) => {
+      const name = Object.keys(q.params).find((key) => q.params[key] === event)
+      expect(name).toBeDefined()
+      const i = line.indexOf(`{${name}:String}`)
+      expect(i).toBeGreaterThanOrEqual(0)
+      return i
+    }
+    expect(at('a')).toBeLessThan(at('b'))
+    expect(at('b')).toBeLessThan(at('c'))
+    // `d` is a required step of this funnel and so has a placeholder of its
+    // own; it must not appear on THIS chain.
+    const dName = Object.keys(q.params).find((key) => q.params[key] === 'd')
+    expect(dName).toBeDefined()
+    expect(line).not.toContain(`{${dName}:String}`)
+    // Three conditions -- a, b, c -- so `continued_0` is bound at 3, not at
+    // the 4 a rejoin on the last required step would make it.
+    const m = q.sql.match(/countIf\(full_0 >= \{(p\d+):UInt32\}\) AS continued_0/)
+    expect(m).not.toBeNull()
+    expect(q.params[m?.[1] ?? '']).toBe(3)
+  })
+
+  it('counts continued at the full chain length, bound as a value', () => {
+    const q = compileFunnel({ ...base, definition: withOptional })
+    const m = q.sql.match(/countIf\(full_0 >= \{(p\d+):UInt32\}\) AS continued_0/)
+    expect(m).not.toBeNull()
+    expect(q.params[m?.[1] ?? '']).toBe(4)
+  })
+
+  it('leaves a funnel with no optional steps at exactly one windowFunnel', () => {
+    const plain = { steps: [{ event: 'a' }, { event: 'b' }], window_seconds: 3600 }
+    const q = compileFunnel({ ...base, definition: plain })
+    expect((q.sql.match(/windowFunnel/g) ?? []).length).toBe(1)
+    expect(q.sql).not.toContain('full_')
+    expect(q.sql).not.toContain('continued_')
+  })
+
+  it('carries the entry bound into the full chain as well', () => {
+    const q = compileFunnel({ ...base, definition: withOptional })
+    const line = q.sql.split('\n').find((l) => l.includes('AS full_0')) ?? ''
+    expect(line).toMatch(/AND timestamp < \{p\d+:DateTime64\(3\)\}\)/)
+  })
+})
+
+describe('compiled query size guard', () => {
+  const guardBase = {
+    projectId: 7,
+    database: 'lyraflow',
+    range: { since: new Date('2026-08-07T00:00:00Z'), until: new Date('2026-08-14T00:00:00Z') },
+    now: new Date('2026-09-01T00:00:00Z'),
+  }
+
+  const behaviour = (event: string): FilterNode => ({
+    kind: 'behavior',
+    event,
+    aggregate: 'count',
+    window: { kind: 'last', n: 14, unit: 'days' },
+    operator: '=',
+    value: 1,
+  })
+  const trait = (key: string): FilterNode => ({ kind: 'trait', key, operator: '=', value: 'x' })
+  const group = (children: FilterNode[]): FilterNode => ({ kind: 'group', op: 'and', children })
+
+  it('pins an ordinary funnel is nowhere near the guard, and does not throw', () => {
+    // A handful of steps, one predicate and a small audience apiece --
+    // the common case, not the cap on anything.
+    const q = compileFunnel({
+      ...guardBase,
+      definition: {
+        steps: [
+          { event: '$page', where: [{ property: 'path', operator: '=', value: '/' }] },
+          { event: 'signed_up', audience: group([behaviour('docs_search')]) },
+          { event: 'subscription_started', optional: true },
+          { event: 'invoice_paid' },
+        ],
+        window_seconds: 3600,
+      },
+    })
+    // Well under the guard -- a fraction of it, not just short of it --
+    // so this pins headroom, not a coincidence of one measurement.
+    expect(Buffer.byteLength(q.sql, 'utf8')).toBeLessThan(MAX_COMPILED_QUERY_BYTES / 5)
+  })
+
+  // Every dimension stays inside its OWN cap -- 8 steps (MAX_FUNNEL_STEPS),
+  // 1 optional (under MAX_OPTIONAL_STEPS), 10 `where` per step
+  // (MAX_WHERE_PREDICATES), and each step's audience at exactly 100 nodes
+  // (MAX_TREE_NODES) with only enough `behavior` nodes to land at 25 in
+  // total across the funnel (MAX_FUNNEL_BEHAVIOR_NODES) -- the rest padded
+  // with `trait` nodes, which cost nothing against that cap. This is the
+  // shape the review found: legal everywhere, and still too large for
+  // ClickHouse to parse.
+  const oversizeDefinition = (): { steps: FunnelStep[]; window_seconds: number } => {
+    const behaviourCounts = [4, 3, 3, 3, 3, 3, 3, 3] // sums to 25
+    const steps: FunnelStep[] = behaviourCounts.map((n, i) => {
+      let evCounter = i * 100
+      const behaviours = Array.from({ length: n }, () => behaviour(`ev_${evCounter++}`))
+      const traits = Array.from({ length: 100 - 1 - n }, (_, t) => trait(`trait_${i}_${t}`))
+      return {
+        event: `step_${i}`,
+        where: Array.from({ length: 10 }, (_, w) => ({
+          property: `p${w}`,
+          operator: '=' as const,
+          value: 1,
+        })),
+        audience: group([...behaviours, ...traits]),
+        ...(i === 4 ? { optional: true as const } : {}),
+      }
+    })
+    return { steps, window_seconds: 3600 }
+  }
+
+  function expectOversizeThrow(compile: () => unknown): void {
+    expect(compile).toThrow(FunnelValidationError)
+    try {
+      compile()
+      throw new Error('expected compileFunnel to throw')
+    } catch (err) {
+      expect(err).toBeInstanceOf(FunnelValidationError)
+      expect((err as FunnelValidationError).code).toBe('steps')
+      // Names a lever, not just "too big" -- an operator needs something to
+      // remove, and this funnel has three independent things to try.
+      expect((err as FunnelValidationError).message).toMatch(/where|audience|optional/i)
+    }
+  }
+
+  it('throws on the histogram path -- the plain run, no peopleAt', () => {
+    const definition = oversizeDefinition()
+    expectOversizeThrow(() => compileFunnel({ ...guardBase, definition }))
+  })
+
+  // `finalize` is called at FOUR return sites -- the histogram above, and
+  // these three `peopleAt` projections. A guard proven only on the
+  // histogram implies coverage it does not have: the review replaced
+  // `finalize` with a pass-through on these three specifically, rebuilt,
+  // and every test up to this point still passed. `step: 4` names the
+  // required step right after the optional one (`i === 4` above is
+  // 1-indexed step 5, so its branch point is step 4) -- any legal step
+  // works, since the size comes from `perPerson`, shared by every shape,
+  // not from which step is asked about.
+  it('throws on the peopleAt "ids" path', () => {
+    const definition = oversizeDefinition()
+    expectOversizeThrow(() =>
+      compileFunnel({
+        ...guardBase,
+        definition,
+        peopleAt: { step: 4, mode: 'reached', select: 'ids' },
+      }),
+    )
+  })
+
+  it('throws on the peopleAt "members" path', () => {
+    const definition = oversizeDefinition()
+    expectOversizeThrow(() =>
+      compileFunnel({
+        ...guardBase,
+        definition,
+        peopleAt: { step: 4, mode: 'reached', select: 'members' },
+      }),
+    )
+  })
+
+  it('throws on the peopleAt "count" path', () => {
+    const definition = oversizeDefinition()
+    expectOversizeThrow(() =>
+      compileFunnel({
+        ...guardBase,
+        definition,
+        peopleAt: { step: 4, mode: 'reached', select: 'count' },
+      }),
+    )
   })
 })

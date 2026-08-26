@@ -3,7 +3,6 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import type { FunnelRunResult, FunnelStep, StepResult } from '../../api/types.js'
 import { FunnelFlow } from './FunnelFlow.js'
-import { BAR_WIDTH, PLOT_HEIGHT, SLOT_WIDTH, barX } from './flowGeometry.js'
 
 const step = (over: Partial<StepResult> & { index: number }): StepResult => ({
   event: `e${over.index}`,
@@ -30,20 +29,194 @@ function result(over: Partial<FunnelRunResult> = {}): FunnelRunResult {
   } as FunnelRunResult
 }
 
-describe('FunnelFlow', () => {
-  it('draws one bar per step, heights proportional to the entrant count', () => {
-    render(<FunnelFlow result={result()} />)
-    // Pinned by VALUE, not by shape: 100/100 is the full plot, 25/100 a
-    // quarter of it. A test asserting only "has a height" would pass against
-    // a chart that drew every bar the same.
-    expect(screen.getByTestId('flow-bar-1')).toHaveAttribute('height', String(PLOT_HEIGHT))
-    expect(screen.getByTestId('flow-bar-2')).toHaveAttribute('height', String(PLOT_HEIGHT / 4))
-  })
+// Step 3 of four is optional: it branches off step 2 and step 4 follows
+// step 2 on the spine. 30 of step 2's 80 took the branch, 50 did not, 24 of
+// the 30 went on to step 4, and step 4 has 40 -- deliberately unrelated
+// numbers, so a rendering that confuses the branch with the chain shows it.
+const BRANCHED = result({
+  entered: 100,
+  converted: 40,
+  conversion_rate: 0.4,
+  steps: [
+    step({ index: 1, event: 'signup', people: 100, from_previous: 1, from_start: 1 }),
+    step({ index: 2, event: 'onboarded', people: 80, from_previous: 0.8, from_start: 0.8 }),
+    step({
+      index: 3,
+      event: 'video_submitted',
+      people: 30,
+      from_previous: 0.375,
+      from_start: 0.3,
+      optional: true,
+      skipped: 50,
+      continued: 24,
+    }),
+    step({ index: 4, event: 'purchase', people: 40, from_previous: 0.5, from_start: 0.4 }),
+  ],
+})
 
-  it('draws one fewer ribbon than there are steps', () => {
+// Two optional steps hanging off ONE required step, which is the shape
+// that pushes the plot past the height a single bar can reach: the second
+// branch stacks above the first, above the required centre line.
+const TWO_BRANCHES = result({
+  entered: 100,
+  converted: 40,
+  conversion_rate: 0.4,
+  steps: [
+    step({ index: 1, event: 'a', people: 100, from_previous: 1, from_start: 1 }),
+    step({ index: 2, event: 'b', people: 80, from_previous: 0.8, from_start: 0.8 }),
+    step({
+      index: 3,
+      event: 'c',
+      people: 30,
+      from_previous: 0.375,
+      from_start: 0.3,
+      optional: true,
+      skipped: 50,
+      continued: 20,
+    }),
+    step({
+      index: 4,
+      event: 'd',
+      people: 20,
+      from_previous: 0.25,
+      from_start: 0.2,
+      optional: true,
+      skipped: 60,
+      continued: 10,
+    }),
+    step({ index: 5, event: 'e', people: 40, from_previous: 0.5, from_start: 0.4 }),
+  ],
+})
+
+// Every link `TWO_BRANCHES` produces, in the model's own order: chain 1->2,
+// branch 2->3, continue 3->5, branch 2->4, continue 4->5, bypass 2->5.
+// Three leave node 2 and three arrive at node 5, which is what makes this
+// the fixture that can see both edges of a node at once.
+const TWO_BRANCH_LINKS: [number, number][] = [
+  [1, 2],
+  [2, 3],
+  [3, 5],
+  [2, 4],
+  [4, 5],
+  [2, 5],
+]
+
+// Every link `BRANCHED` produces, in the model's own order: chain 1->2,
+// branch 2->3, continue 3->4, bypass 2->4. The one-optional shape is the one
+// the product actually ships, so the invariant below is asserted on it too
+// rather than living only on the five-node fixture.
+const BRANCHED_LINKS: [number, number][] = [
+  [1, 2],
+  [2, 3],
+  [3, 4],
+  [2, 4],
+]
+
+/**
+ * All four endpoints of a band, recovered from its `d`.
+ *
+ * `bandPath` writes `M x0 y0 C mid y0, mid y1, x1 y1 L x1 y1+w1 C mid y1+w1,
+ * mid y0+w0, x0 y0+w0 Z`, so dropping the command letters leaves sixteen
+ * numbers with every endpoint among them. Reading the SOURCE side alone --
+ * which is all this file used to do -- leaves `y1` and `w1` unread, and a
+ * band that arrives at the wrong place or the wrong thickness looks
+ * identical from here.
+ */
+function band(from: number, to: number) {
+  const d = screen.getByTestId(`flow-link-${from}-${to}`).getAttribute('d') ?? ''
+  const n = d
+    .trim()
+    .split(/[\s,]+/)
+    .filter((t) => t !== '' && !Number.isNaN(Number(t)))
+    .map(Number)
+  expect(n).toHaveLength(16)
+  const at = (i: number) => n[i] as number
+  return {
+    from,
+    to,
+    x0: at(0),
+    y0: at(1),
+    w0: at(15) - at(1),
+    x1: at(6),
+    y1: at(7),
+    w1: at(9) - at(7),
+  }
+}
+
+/** A node's drawn rectangle. */
+function box(index: number) {
+  const el = screen.getByTestId(`flow-node-${index}`)
+  const num = (name: string) => Number(el.getAttribute(name) ?? Number.NaN)
+  return { x: num('x'), y: num('y'), width: num('width'), height: num('height') }
+}
+
+/** The viewBox `width height` pair of an `<svg>`. */
+function viewBox(svg: Element | null): { width: number; height: number } {
+  const parts = (svg?.getAttribute('viewBox') ?? '').trim().split(/[\s,]+/)
+  return { width: Number(parts[2]), height: Number(parts[3]) }
+}
+
+/**
+ * The tiling invariant, on BOTH edges of every node of the funnel currently
+ * rendered.
+ *
+ * A band is a quadrilateral between two node edges, and on either side of a
+ * node the bands touching it are disjoint and together span that node
+ * exactly -- no gap, no overlap, nothing spilling past.
+ *
+ * **The edges are walked in the model's LINK order and deliberately not
+ * sorted by offset.** Sorting throws the stacking order away, and an
+ * invariant satisfied by any permutation is not the invariant `sankeyModel`
+ * step 4 promises -- it stacks the links "in link order". Reversing that
+ * iteration leaves every band still tiling its node, and sends the branch
+ * out of the BOTTOM of a node it is lifted above, crossing the bypass that
+ * should sit under it. `links` arrives here in the order the model emits, so
+ * walking it pins the order in the same loop that pins the tiling.
+ */
+function tilesEveryNodeEdge(links: readonly [number, number][], nodeCount: number) {
+  const bands = links.map(([from, to]) => band(from, to))
+  expect(screen.getAllByTestId(/^flow-link-/)).toHaveLength(bands.length)
+
+  const spans = (edges: { start: number; thickness: number }[], node: ReturnType<typeof box>) => {
+    let cursor = node.y
+    for (const edge of edges) {
+      // A zero-thickness band would let two of them claim one offset and
+      // still tile, so the disjointness this walk asserts would mean nothing.
+      expect(edge.thickness).toBeGreaterThan(0)
+      expect(edge.start).toBeCloseTo(cursor, 1)
+      cursor += edge.thickness
+    }
+    expect(cursor).toBeCloseTo(node.y + node.height, 1)
+  }
+
+  for (let index = 1; index <= nodeCount; index++) {
+    const node = box(index)
+    const out = bands.filter((b) => b.from === index)
+    const into = bands.filter((b) => b.to === index)
+    if (out.length > 0) {
+      spans(
+        out.map((b) => ({ start: b.y0, thickness: b.w0 })),
+        node,
+      )
+    }
+    if (into.length > 0) {
+      spans(
+        into.map((b) => ({ start: b.y1, thickness: b.w1 })),
+        node,
+      )
+    }
+  }
+  return bands
+}
+
+describe('FunnelFlow', () => {
+  it('draws one node per step, sized against the entrant count', () => {
     render(<FunnelFlow result={result()} />)
-    expect(screen.getByTestId('flow-ribbon-1')).toBeInTheDocument()
-    expect(screen.queryByTestId('flow-ribbon-2')).not.toBeInTheDocument()
+    // Pinned by VALUE, not by shape: 100/100 is the full scale and 25/100 a
+    // quarter of it. A test asserting only "has a height" would pass against
+    // a chart that drew every node the same.
+    expect(screen.getByTestId('flow-node-1')).toHaveAttribute('height', '180')
+    expect(screen.getByTestId('flow-node-2')).toHaveAttribute('height', '45')
   })
 
   it('labels each step with from_start, not from_previous', () => {
@@ -109,27 +282,6 @@ describe('FunnelFlow', () => {
     expect(screen.queryByTestId('funnel-biggest-leak')).not.toBeInTheDocument()
   })
 
-  it('renders an empty funnel without NaN reaching any attribute', () => {
-    // `entered === 0` is a real first-run state. A NaN in `height` or `d`
-    // makes the browser drop the attribute and collapse the plot -- and it
-    // is invisible to a test that only checks the component mounted.
-    const { container } = render(
-      <FunnelFlow
-        result={result({
-          entered: 0,
-          converted: 0,
-          conversion_rate: 0,
-          steps: [
-            step({ index: 1, event: 'a', people: 0, from_previous: 0, from_start: 0 }),
-            step({ index: 2, event: 'b', people: 0, from_previous: 0, from_start: 0 }),
-          ],
-        })}
-      />,
-    )
-    expect(container.innerHTML).not.toContain('NaN')
-    expect(screen.getByTestId('flow-bar-1')).toBeInTheDocument()
-  })
-
   it('shows a step’s where clause, and only against the step it belongs to', () => {
     const definition: FunnelStep[] = [
       { event: '$page', where: [{ property: 'path', operator: '=', value: '/docs' }] },
@@ -153,58 +305,11 @@ describe('FunnelFlow', () => {
     expect(screen.queryByTestId('flow-step-1-where')).not.toBeInTheDocument()
   })
 
-  it('labels each ribbon with from_previous, not from_start', () => {
-    // The number on a ribbon belongs to the TRANSITION it is drawn on. Step 3
-    // below is 40% of the previous step and 20% of the start; the ribbon into
-    // it must read 40%, while the number UNDER it reads 20%. Swapping them
-    // makes the chart say the same thing twice and look like it said two.
-    render(
-      <FunnelFlow
-        result={result({
-          entered: 100,
-          converted: 20,
-          conversion_rate: 0.2,
-          steps: [
-            step({ index: 1, event: 'a', people: 100, from_previous: 1, from_start: 1 }),
-            step({ index: 2, event: 'b', people: 50, from_previous: 0.5, from_start: 0.5 }),
-            step({ index: 3, event: 'c', people: 20, from_previous: 0.4, from_start: 0.2 }),
-          ],
-        })}
-      />,
-    )
-    expect(screen.getByTestId('flow-rate-2')).toHaveTextContent('40.0%')
-    expect(screen.getByTestId('flow-step-3')).toHaveTextContent('20.0%')
-  })
-
-  it('draws one rate label per ribbon, never one for the first step', () => {
-    // Step 1 has no incoming transition; a label there would have to be
-    // from_previous = 1, i.e. a permanent "100%" that means nothing.
-    render(<FunnelFlow result={result()} />)
-    // 25.0%, which is this fixture's step-2 `from_previous` -- not the 64.9%
-    // from the screenshot that prompted this feature.
-    expect(screen.getByTestId('flow-rate-1')).toHaveTextContent('25.0%')
-    expect(screen.queryByTestId('flow-rate-0')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('flow-rate-2')).not.toBeInTheDocument()
-  })
-
-  it('fills ribbons from their own token rather than a bar colour at reduced opacity', () => {
-    // FOUND BY RENDERING IT, not by reading it. The first version drew each
-    // ribbon as its source bar's colour at `opacity: 0.4`; blending a
-    // saturated copper toward the surface desaturates it, and the ribbons
-    // came out visibly GREY in light and olive in dark. Opacity over a
-    // surface the component does not know the colour of is the trap; a token
-    // that already IS the blend is the fix.
-    const { container } = render(<FunnelFlow result={result()} />)
-    const ribbon = screen.getByTestId('flow-ribbon-1')
-    expect(ribbon).toHaveAttribute('fill', 'var(--chart-funnel-ribbon)')
-    expect(ribbon).not.toHaveAttribute('opacity')
-    expect(container.innerHTML).not.toContain('opacity')
-  })
-
-  it('caps the plot so a two-step funnel does not draw two enormous blocks', () => {
-    // Also found by rendering: uncapped, two steps spread across a wide card
-    // put each bar at ~240px, which reads as two blocks rather than a flow.
-    // A cap, not a width -- the plot still shrinks to whatever room it gets.
+  it('caps the plot so a two-step funnel does not draw one enormous band', () => {
+    // Found by rendering: uncapped, two steps spread across a wide card put
+    // ~700px of band between them, which reads as a bridge rather than a
+    // flow. A cap, not a width -- the plot still shrinks to whatever room it
+    // gets.
     render(<FunnelFlow result={result()} />)
     expect(screen.getByTestId('funnel-flow').querySelector('[style*="max-width"]')).toHaveStyle({
       maxWidth: '400px',
@@ -214,7 +319,7 @@ describe('FunnelFlow', () => {
   it('keeps every step inside the seven colours the stylesheet defines', () => {
     // An eight-step funnel is legal (MAX_FUNNEL_STEPS) and the validated ramp
     // has seven steps. A `--chart-funnel-8` would resolve to nothing and the
-    // bar would render with no fill at all.
+    // node would render with no fill at all.
     const eight = Array.from({ length: 8 }, (_, i) =>
       step({
         index: i + 1,
@@ -229,10 +334,33 @@ describe('FunnelFlow', () => {
     expect(container.innerHTML).not.toContain('--chart-funnel-8')
     expect(container.innerHTML).toContain('--chart-funnel-7')
   })
+
+  it('sizes the viewBox from the model’s own height rather than a constant', () => {
+    // The one thing a constant cannot do. Two optional steps stack ABOVE the
+    // required centre line, so the plot has to be taller than any single
+    // node -- 228 units against a 180-unit full-height node. A hardcoded
+    // height clips the upper branch off the top, which is invisible to every
+    // assertion that only reads attributes on the nodes.
+    render(<FunnelFlow result={TWO_BRANCHES} />)
+    const svg = screen.getByRole('img')
+    const box = (svg.getAttribute('viewBox') ?? '').split(' ')
+    const height = Number(box[3])
+    const lowest = Math.max(
+      ...[1, 2, 3, 4, 5].map((i) => {
+        const n = screen.getByTestId(`flow-node-${i}`)
+        return Number(n.getAttribute('y') ?? 0) + Number(n.getAttribute('height') ?? 0)
+      }),
+    )
+    expect(height).toBeGreaterThanOrEqual(lowest)
+    expect(height).toBeGreaterThan(180)
+    // And the pixel height matches the viewBox height, which is what makes a
+    // model y a CSS offset for the label layer with no conversion.
+    expect(svg.getAttribute('height')).toBe(String(height))
+  })
 })
 
 describe('FunnelFlow selection', () => {
-  it("calls onSelectStep with the step's 1-indexed index when its slot is clicked", async () => {
+  it("calls onSelectStep with the step's 1-indexed index when its node is clicked", async () => {
     const user = userEvent.setup()
     const onSelectStep = vi.fn()
     render(<FunnelFlow result={result()} onSelectStep={onSelectStep} />)
@@ -259,6 +387,30 @@ describe('FunnelFlow selection', () => {
     expect(screen.queryAllByRole('button')).toHaveLength(0)
   })
 
+  it('puts the click target on the NODE, not across the whole slot', () => {
+    // A slot-wide target covers the bands crossing that slot as well, and
+    // clicking a band to select the step it merely passes is a lie about
+    // what was clicked. The target is centred on the node it selects, and
+    // grown only so a node at the floor height is still hittable.
+    render(<FunnelFlow result={BRANCHED} onSelectStep={() => {}} />)
+    const node = screen.getByTestId('flow-node-3')
+    const y = Number(node.getAttribute('y') ?? 0)
+    const height = Number(node.getAttribute('height') ?? 0)
+    const button = screen.getByTestId('flow-step-3-select')
+    const top = Number.parseFloat(button.style.top)
+    const buttonHeight = Number.parseFloat(button.style.height)
+    // Pinned to the node's OWN extent, not merely "the node's centre is
+    // somewhere inside it" -- a target spanning the whole plot satisfies
+    // that and is exactly the mutation this exists to catch. This node is
+    // 54 units tall, comfortably past the floor the target is grown to.
+    expect(height).toBeGreaterThan(24)
+    expect(top).toBeCloseTo(y, 5)
+    expect(buttonHeight).toBeCloseTo(height, 5)
+    // And a node's width, not a slot's -- a slot is 100 viewBox units and
+    // would be a percentage, not a fixed handful of pixels.
+    expect(button.style.width).toBe('28px')
+  })
+
   it('has no ancestor that disables pointer events -- any such ancestor makes the button permanently unclickable in a real browser, even though jsdom cannot detect that from a click alone', () => {
     // A structural check that a button merely sits OUTSIDE the label overlay
     // is a proxy for this, not the invariant itself: it is defeated by
@@ -281,117 +433,185 @@ describe('FunnelFlow selection', () => {
 })
 
 describe('FunnelFlow with an optional step', () => {
-  // Step 3 of four is optional: it branches off step 2 and step 4 follows
-  // step 2 on the spine. 30 of step 2's 80 took the branch, 50 did not, and
-  // 40 of the same 80 went on to step 4 -- deliberately unrelated numbers,
-  // so a rendering that confuses the branch with the chain shows it.
-  const BRANCHED = result({
-    entered: 100,
-    converted: 40,
-    conversion_rate: 0.4,
-    steps: [
-      step({ index: 1, event: 'signup', people: 100, from_previous: 1, from_start: 1 }),
-      step({ index: 2, event: 'onboarded', people: 80, from_previous: 0.8, from_start: 0.8 }),
-      step({
-        index: 3,
-        event: 'video_submitted',
-        people: 30,
-        from_previous: 0.375,
-        from_start: 0.3,
-        optional: true,
-        skipped: 50,
-      }),
-      step({ index: 4, event: 'purchase', people: 40, from_previous: 0.5, from_start: 0.4 }),
-    ],
-  })
-
-  it('draws one ribbon per SPINE pair, so a four-step funnel with a branch draws two, not three', () => {
+  it('draws one node per step and one link per model link', () => {
+    // BRANCHED is signup -> onboarded -> [video_submitted] -> purchase, so
+    // the spine is signup, onboarded, purchase and the links are:
+    // signup->onboarded (chain), onboarded->video (branch),
+    // video->purchase (continue), onboarded->purchase (bypass). FOUR.
     render(<FunnelFlow result={BRANCHED} />)
-    expect(screen.getByTestId('flow-ribbon-1')).toBeInTheDocument()
-    expect(screen.getByTestId('flow-ribbon-2')).toBeInTheDocument()
-    // Step 3 is the branch. A ribbon leaving it would be a third stage
-    // transition in a funnel that has two.
-    expect(screen.queryByTestId('flow-ribbon-3')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('flow-ribbon-4')).not.toBeInTheDocument()
+    expect(screen.getAllByTestId(/^flow-node-/)).toHaveLength(4)
+    expect(screen.getAllByTestId(/^flow-link-/)).toHaveLength(4)
   })
 
-  it('spans the spine ribbon ACROSS the optional slot at full geometry, from step 2 to step 4', () => {
-    // THE MUTATION THIS BLOCK EXISTS FOR. A ribbon routed 2 -> 3 -> 4 draws
-    // two losses that did not happen: 80 people did not become 30 and then
-    // 30 did not become 40. They went 80 -> 40 down the chain, and 30 of the
-    // 80 took a side branch on the way. The taper is a claim about where
-    // people were lost, so pointing it at a branch is not a cosmetic error.
+  it('labels every link with its own true count and rate', () => {
+    // `flow-link-{from.index}-{to.index}`, using StepResult.index, which is
+    // 1-based. onboarded is index 2 and video_submitted index 3.
     render(<FunnelFlow result={BRANCHED} />)
-    const d = screen.getByTestId('flow-ribbon-2').getAttribute('d') ?? ''
-    expect(d.startsWith(`M ${barX(1) + BAR_WIDTH} ${PLOT_HEIGHT - 144}`)).toBe(true)
-    expect(d).toContain(`${barX(3)} ${PLOT_HEIGHT - 72}`)
-    // Its height at both ends is step 2's and step 4's, untouched by the
-    // branch between them.
-    expect(d).not.toContain(`${PLOT_HEIGHT - 54}`)
+    const branch = screen.getByTestId('flow-link-2-3')
+    expect(branch).toHaveTextContent('37.5%')
+    expect(branch).toHaveTextContent('30')
   })
 
-  it('lets no ribbon start or land at the optional slot at all', () => {
-    // Stated over EVERY ribbon rather than over the two this fixture has, so
-    // it still holds for a funnel shaped differently. `barX(2)` is the
-    // optional bar's left edge and `barX(2) + BAR_WIDTH` its right; a ribbon
-    // touching either is one that treated the branch as a stage.
-    const { container } = render(<FunnelFlow result={BRANCHED} />)
-    const ribbons = [...container.querySelectorAll('[data-testid^="flow-ribbon-"]')]
-    expect(ribbons.length).toBeGreaterThan(0)
-    for (const ribbon of ribbons) {
-      const d = ribbon.getAttribute('d') ?? ''
-      expect(d).not.toContain(`M ${barX(2) + BAR_WIDTH} `)
-      expect(d).not.toContain(` ${barX(2)} `)
+  it('draws that same count and rate ON the band, not only in its tooltip', () => {
+    // The `<title>` above is the hover text; this is the label a reader sees
+    // without hovering, and a chart whose numbers exist only on hover has
+    // not drawn them. Both are asserted so neither can be deleted quietly.
+    render(<FunnelFlow result={BRANCHED} />)
+    const label = screen.getByTestId('flow-rate-2-3')
+    expect(label).toHaveTextContent('30')
+    expect(label).toHaveTextContent('37.5%')
+    // The bypass carries its OWN numbers, against its own source: 16 of
+    // onboarded's 80 reached purchase without the branch.
+    expect(screen.getByTestId('flow-rate-2-4')).toHaveTextContent('16')
+    expect(screen.getByTestId('flow-rate-2-4')).toHaveTextContent('20.0%')
+  })
+
+  it('tints a link from its SOURCE node, so a band says which stage it left', () => {
+    render(<FunnelFlow result={BRANCHED} />)
+    const link = screen.getByTestId('flow-link-2-3')
+    expect(link.getAttribute('fill')).toContain('--chart-funnel-')
+  })
+
+  it('tints by the source even where that DISAGREES with the destination', () => {
+    // The mutation the assertion above cannot catch: tinting every band by
+    // where it LANDS also puts `--chart-funnel-` in the attribute, and paints
+    // two bands arriving at one node identically at exactly the point a
+    // reader is trying to tell them apart. Three spine stages here, so the
+    // ramp runs 1, 2, 3 and the branch borrows 2 -- the continue link runs
+    // 2 -> 3 and must carry its source's 2, never its destination's 3.
+    render(<FunnelFlow result={BRANCHED} />)
+    expect(screen.getByTestId('flow-link-1-2')).toHaveAttribute('fill', 'var(--chart-funnel-1)')
+    expect(screen.getByTestId('flow-link-3-4')).toHaveAttribute('fill', 'var(--chart-funnel-2)')
+  })
+
+  it('tiles both edges of every node with the bands that touch it, and lays them out on the model’s x axis', () => {
+    // ONE test for a class of mutation, not one per mutation. The previous
+    // version of this read `y0` and `w0` off a single node's outgoing side,
+    // which pinned exactly the mutation it was written for and left the
+    // destination edge and the whole horizontal axis unread -- so `y1 -> y0`,
+    // `w1 -> w0`, a `nodeLeft` that ignores `node.x` and a constant viewBox
+    // width all passed the entire suite.
+    //
+    // The invariant instead, in `tilesEveryNodeEdge`: on EITHER side of a
+    // node the bands touching it are disjoint, stack in the model's own link
+    // order and together span that node exactly. That is the property
+    // `sankeyModel` computes `w0/y0` and `w1/y1` separately to provide, so
+    // any component that drops one of them breaks it somewhere.
+    //
+    // TWO_BRANCHES on purpose: three bands leave node 2, three arrive at
+    // node 5, and no band has y0 == y1 or w0 == w1. A fixture whose two
+    // axes coincide lets a swapped axis through, which is how the survivor
+    // survived.
+    // Both shapes: the one-optional funnel is what the product ships today,
+    // and it goes first so the five-node fixture cannot be the only place
+    // this invariant is ever checked.
+    const branched = render(<FunnelFlow result={BRANCHED} />)
+    tilesEveryNodeEdge(BRANCHED_LINKS, 4)
+    branched.unmount()
+
+    render(<FunnelFlow result={TWO_BRANCHES} />)
+    const bands = tilesEveryNodeEdge(TWO_BRANCH_LINKS, 5)
+    expect(bands.filter((b) => b.from === 2)).toHaveLength(3)
+    expect(bands.filter((b) => b.to === 5)).toHaveLength(3)
+
+    // The horizontal axis, which nothing read at all. Every band runs from
+    // its source node's right edge to its destination node's left edge.
+    for (const b of bands) {
+      expect(b.x0).toBeCloseTo(box(b.from).x + box(b.from).width, 5)
+      expect(b.x1).toBeCloseTo(box(b.to).x, 5)
+      expect(b.x1).toBeGreaterThan(b.x0)
     }
+    // And the nodes are spread evenly across the plot rather than sharing
+    // one slot -- which the per-band check above cannot see, because a
+    // `nodeLeft` that ignores `node.x` satisfies it with all five stacked in
+    // the same place.
+    const xs = [1, 2, 3, 4, 5].map((i) => box(i).x)
+    const pitch = (xs[1] as number) - (xs[0] as number)
+    expect(pitch).toBeGreaterThan(0)
+    for (let i = 1; i < xs.length; i++) {
+      expect((xs[i] as number) - (xs[i - 1] as number)).toBeCloseTo(pitch, 5)
+    }
+
+    // The viewBox is as wide as the layout it holds, with the same margin on
+    // both sides.
+    const width = viewBox(screen.getByRole('img')).width
+    const last = box(5)
+    expect(width - (last.x + last.width)).toBeCloseTo(xs[0] as number, 5)
+    // And a constant that happens to fit five steps is still a constant --
+    // exactly how a hardcoded HEIGHT survived the first round of this file.
+    // A shorter funnel gets a proportionally narrower viewBox.
+    const two = render(<FunnelFlow result={result()} />)
+    const narrower = viewBox(two.container.querySelector('svg')).width
+    expect(narrower).toBeLessThan(width)
+    expect(width / narrower).toBeCloseTo(5 / 2, 5)
   })
 
-  it('reads each ribbon label from the step the ribbon LANDS on, across the span', () => {
-    // Step 4's `from_previous` is a share of step 2, because step 2 is what
-    // precedes it on the spine. A label reading `steps[i + 1]` would print
-    // the branch's 37.5% on the chain's ribbon.
+  it('puts each band’s label at that band’s own midpoint', () => {
+    // The chip's TEXT was pinned and its placement was not: replacing the
+    // inline `left`/`top` with `0%` and `0px` stacks all six labels in the
+    // corner and the suite stays green. Each expected position is derived
+    // here from that chip's OWN band, so a chip with no position and a chip
+    // borrowing its neighbour's midpoint both fail.
+    render(<FunnelFlow result={TWO_BRANCHES} />)
+    const width = viewBox(screen.getByRole('img')).width
+    const seen = new Set<string>()
+    for (const [from, to] of TWO_BRANCH_LINKS) {
+      const b = band(from, to)
+      const chip = screen.getByTestId(`flow-rate-${from}-${to}`)
+      // The band's midpoint needs no sampling: both edges are cubics whose
+      // control points sit at the horizontal midpoint, so at the centre each
+      // edge is exactly the mean of its two ends.
+      const midY = (b.y0 + b.w0 / 2 + (b.y1 + b.w1 / 2)) / 2
+      expect(Number.parseFloat(chip.style.top)).toBeCloseTo(midY, 1)
+      expect(Number.parseFloat(chip.style.left)).toBeCloseTo(((b.x0 + b.x1) / 2 / width) * 100, 5)
+      seen.add(`${chip.style.left}|${chip.style.top}`)
+    }
+    // Six bands, six distinct positions -- the fixture cannot make the
+    // assertions above pass by coincidence.
+    expect(seen.size).toBe(TWO_BRANCH_LINKS.length)
+  })
+
+  it('gives an optional node its branch point’s ramp step rather than one of its own', () => {
     render(<FunnelFlow result={BRANCHED} />)
-    expect(screen.getByTestId('flow-rate-2')).toHaveTextContent('50.0%')
-    expect(screen.getByTestId('flow-rate-2')).not.toHaveTextContent('37.5%')
-    expect(screen.queryByTestId('flow-rate-3')).not.toBeInTheDocument()
+    expect(screen.getByTestId('flow-node-3').getAttribute('fill')).toContain('--chart-funnel-2')
   })
 
-  it('marks the branch wedge with a stroked, dashed leading edge off its own branch point', () => {
-    // The connector survives the wedge and is now the wedge's top EDGE. It
-    // used to be the whole branch, with no fill, on the reasoning that a
-    // taper would say the people who skipped were lost. It was reported as
-    // making one path out of the branch point look like the funnel and the
-    // other like an annotation, so the fill came back and the dash stayed:
-    // the dash is what marks this flow as the optional one.
+  it('paints the stages after a branch as though the branch were not there', () => {
+    // A branch that consumed a ramp step would repaint every later stage, so
+    // adding a side path would change the colour of stages it did not touch.
+    const { container } = render(<FunnelFlow result={BRANCHED} />)
+    expect(screen.getByTestId('flow-node-2')).toHaveAttribute('fill', 'var(--chart-funnel-2)')
+    expect(screen.getByTestId('flow-node-4')).toHaveAttribute('fill', 'var(--chart-funnel-3)')
+    expect(container.innerHTML).not.toContain('--chart-funnel-4')
+  })
+
+  it('lifts the optional node clear of the line the required nodes share', () => {
+    // The offset IS the marking now. The bars this replaced needed a dashed
+    // outline because everything stood on one baseline; here a node that is
+    // not on the chain is not on the chain's line, and a rendering that put
+    // it back would say a branch is a stage.
     render(<FunnelFlow result={BRANCHED} />)
-    const edge = screen.getByTestId('flow-branch-edge-3')
-    expect(edge).toHaveAttribute('fill', 'none')
-    expect(edge).toHaveAttribute('stroke-dasharray', '4 3')
-    const d = edge.getAttribute('d') ?? ''
-    // From step 2's bar, not from step 1's and not from the plot edge.
-    expect(d.startsWith(`M ${barX(1) + BAR_WIDTH} ${PLOT_HEIGHT - 144}`)).toBe(true)
-    // The EDGE carries no area of its own -- the wedge beneath it does.
-    expect(d).not.toContain('Z')
-    expect(d).not.toContain('L')
+    const centre = (id: string) => {
+      const n = screen.getByTestId(id)
+      return Number(n.getAttribute('y') ?? 0) + Number(n.getAttribute('height') ?? 0) / 2
+    }
+    expect(centre('flow-node-2')).toBeCloseTo(centre('flow-node-4'), 5)
+    const optional = screen.getByTestId('flow-node-3')
+    const bottom =
+      Number(optional.getAttribute('y') ?? 0) + Number(optional.getAttribute('height') ?? 0)
+    expect(bottom).toBeLessThan(centre('flow-node-2'))
+    expect(optional).toHaveAttribute('data-optional', 'true')
   })
 
-  it('marks the optional bar itself, in the dash and in words', () => {
-    render(<FunnelFlow result={BRANCHED} />)
-    const bar = screen.getByTestId('flow-bar-3')
-    expect(bar).toHaveAttribute('stroke-dasharray', '4 3')
-    expect(screen.getByTestId('flow-step-3-optional')).toHaveTextContent('optional')
-    // A required bar keeps its solid ramp fill and gains nothing.
-    expect(screen.getByTestId('flow-bar-4')).not.toHaveAttribute('stroke-dasharray')
-    expect(screen.queryByTestId('flow-step-4-optional')).not.toBeInTheDocument()
-  })
-
-  it('gives the optional step both of its numbers, each with its own verb', () => {
-    // 30 did it, 50 did not, and those 50 are still in the funnel. A reader
-    // who takes them for a drop-off has the story backwards, which is why
-    // the two counts never share a separator.
+  it('gives the optional step all three of its counts, each with its own verb', () => {
+    // 30 did it, 50 did not, 24 of the 30 carried on. Those 50 are still in
+    // the funnel; a reader who takes them for a drop-off has the story
+    // backwards, which is why the counts never share a separator.
     render(<FunnelFlow result={BRANCHED} />)
     const cell = screen.getByTestId('flow-step-3')
     expect(cell).toHaveTextContent('30 did')
     expect(screen.getByTestId('flow-step-3-skipped')).toHaveTextContent('50 skipped')
+    expect(screen.getByTestId('flow-step-3-continued')).toHaveTextContent('24 carried on')
     // `from_previous`, not `from_start`: 37.5% of the step it branches off,
     // not 30.0% of the entrants. Both are true; only one shares a
     // denominator with the words beside it.
@@ -400,18 +620,11 @@ describe('FunnelFlow with an optional step', () => {
   })
 
   it('names the branch point beside the branch percentage, so the row has one denominator per number', () => {
-    // Every other bold percentage in that row is a share of the ENTRANTS.
-    // This one is 37.5% of step 2, and nothing about its position, weight or
-    // format says so -- a number that looks right while answering a slightly
-    // different question. The name is the only thing that separates them.
-    // `StepBars` has said this since it was written; the wide chart did not.
     render(<FunnelFlow result={BRANCHED} />)
     expect(screen.getByTestId('flow-step-3-of')).toHaveTextContent('of onboarded')
     // The step it branches OFF, not the slot beside it. Step 3 sits next to
     // step 4, and naming step 4 would be a plausible-looking lie.
     expect(screen.getByTestId('flow-step-3-of')).not.toHaveTextContent('purchase')
-    // A required column's share needs no qualifier: `from_start` is the
-    // denominator every other number in the row already uses.
     expect(screen.queryByTestId('flow-step-4-of')).not.toBeInTheDocument()
     expect(screen.queryByTestId('flow-step-2-of')).not.toBeInTheDocument()
   })
@@ -425,18 +638,6 @@ describe('FunnelFlow with an optional step', () => {
     const leak = screen.getByTestId('funnel-biggest-leak')
     expect(leak).toHaveTextContent('purchase')
     expect(leak).not.toHaveTextContent('video_submitted')
-  })
-
-  it('paints the branch in its branch point’s ramp step rather than consuming one of its own', () => {
-    // Three spine stages, so the ramp runs 1, 2, 3. The branch borrows step
-    // 2 -- its branch point's -- and step 4 still gets 3. A branch that
-    // consumed a ramp step would repaint every later stage, so adding a
-    // side path would change the colour of stages it did not touch.
-    const { container } = render(<FunnelFlow result={BRANCHED} />)
-    expect(screen.getByTestId('flow-bar-2')).toHaveAttribute('fill', 'var(--chart-funnel-2)')
-    expect(screen.getByTestId('flow-bar-3')).toHaveAttribute('stroke', 'var(--chart-funnel-2)')
-    expect(screen.getByTestId('flow-bar-4')).toHaveAttribute('fill', 'var(--chart-funnel-3)')
-    expect(container.innerHTML).not.toContain('--chart-funnel-4')
   })
 
   it('renders as the RESULT says and shows no narrowing when the definition disagrees about optionality', () => {
@@ -456,9 +657,9 @@ describe('FunnelFlow with an optional step', () => {
     render(<FunnelFlow result={BRANCHED} definition={stale} />)
     expect(screen.queryByTestId('flow-step-3-where')).not.toBeInTheDocument()
     // Still drawn as a branch, because that is what the numbers are.
-    expect(screen.getByTestId('flow-bar-3')).toHaveAttribute('stroke-dasharray', '4 3')
+    expect(screen.getByTestId('flow-node-3')).toHaveAttribute('data-optional', 'true')
     expect(screen.getByTestId('flow-step-3-optional')).toBeInTheDocument()
-    expect(screen.queryByTestId('flow-ribbon-3')).not.toBeInTheDocument()
+    expect(screen.getByTestId('flow-link-2-4')).toBeInTheDocument()
   })
 
   it('keeps a clause on a step the definition DOES agree about', () => {
@@ -473,93 +674,132 @@ describe('FunnelFlow with an optional step', () => {
     expect(screen.getByTestId('flow-step-1-where')).toHaveTextContent('pro')
   })
 
-  it('draws two adjacent branches off the SAME required step, still with one spanning ribbon', () => {
-    // Both hang off step 2; the second does NOT hang off the first. One
-    // ribbon spans all three slots between step 2 and step 5.
-    const two = result({
-      entered: 100,
-      converted: 40,
-      conversion_rate: 0.4,
-      steps: [
-        step({ index: 1, event: 'a', people: 100, from_previous: 1, from_start: 1 }),
-        step({ index: 2, event: 'b', people: 80, from_previous: 0.8, from_start: 0.8 }),
-        step({
-          index: 3,
-          event: 'c',
-          people: 30,
-          from_previous: 0.375,
-          from_start: 0.3,
-          optional: true,
-          skipped: 50,
-        }),
-        step({
-          index: 4,
-          event: 'd',
-          people: 20,
-          from_previous: 0.25,
-          from_start: 0.2,
-          optional: true,
-          skipped: 60,
-        }),
-        step({ index: 5, event: 'e', people: 40, from_previous: 0.5, from_start: 0.4 }),
-      ],
-    })
-    render(<FunnelFlow result={two} />)
-    const d = screen.getByTestId('flow-ribbon-2').getAttribute('d') ?? ''
-    expect(d.startsWith(`M ${barX(1) + BAR_WIDTH} `)).toBe(true)
-    expect(d).toContain(`${barX(4)} `)
-    // Both connectors start at step 2's bar.
-    for (const id of ['flow-branch-3', 'flow-branch-4']) {
-      const branch = screen.getByTestId(id).getAttribute('d') ?? ''
-      expect(branch.startsWith(`M ${barX(1) + BAR_WIDTH} `)).toBe(true)
+  it('draws two adjacent branches off the SAME required step, both rejoining at the next one', () => {
+    // Both hang off step 2; the second does NOT hang off the first. So the
+    // links are chain 1->2, branch 2->3, branch 2->4, continue 3->5,
+    // continue 4->5 and bypass 2->5 -- and nothing runs 3->4.
+    render(<FunnelFlow result={TWO_BRANCHES} />)
+    expect(screen.getAllByTestId(/^flow-link-/)).toHaveLength(6)
+    for (const id of ['flow-link-2-3', 'flow-link-2-4', 'flow-link-3-5', 'flow-link-4-5']) {
+      expect(screen.getByTestId(id)).toBeInTheDocument()
+    }
+    expect(screen.queryByTestId('flow-link-3-4')).not.toBeInTheDocument()
+    // Stacked, not overlapping: the second branch sits clear above the first.
+    const top = (id: string) => Number(screen.getByTestId(id).getAttribute('y') ?? 0)
+    const bottom = (id: string) =>
+      top(id) + Number(screen.getByTestId(id).getAttribute('height') ?? 0)
+    expect(bottom('flow-node-4')).toBeLessThan(top('flow-node-3'))
+  })
+})
+
+describe('FunnelFlow on the shapes that are not a fork', () => {
+  // Someone did the optional step AFTER the last one, so the legs out of
+  // step 1 sum to 65 against a node of 60.
+  const OVERLAPPING = result({
+    entered: 60,
+    converted: 60,
+    conversion_rate: 1,
+    steps: [
+      step({ index: 1, event: 'a', people: 60, from_previous: 1, from_start: 1 }),
+      step({
+        index: 2,
+        event: 'b',
+        people: 30,
+        from_previous: 0.5,
+        from_start: 0.5,
+        optional: true,
+        skipped: 30,
+        continued: 25,
+      }),
+      step({ index: 3, event: 'c', people: 60, from_previous: 1, from_start: 1 }),
+    ],
+  })
+
+  const PLAIN = result({
+    entered: 100,
+    converted: 40,
+    conversion_rate: 0.4,
+    steps: [
+      step({ index: 1, event: 'a', people: 100, from_previous: 1, from_start: 1 }),
+      step({ index: 2, event: 'b', people: 80, from_previous: 0.8, from_start: 0.8 }),
+      step({ index: 3, event: 'c', people: 40, from_previous: 0.5, from_start: 0.4 }),
+    ],
+  })
+
+  // A brand-new project's first run. Every rate is 0 and every height is the
+  // floor; nothing may reach the DOM as NaN.
+  const EMPTY = result({
+    entered: 0,
+    converted: 0,
+    conversion_rate: 0,
+    steps: [
+      step({ index: 1, event: 'a', people: 0, from_previous: 0, from_start: 0 }),
+      step({
+        index: 2,
+        event: 'b',
+        people: 0,
+        from_previous: 0,
+        from_start: 0,
+        optional: true,
+        skipped: 0,
+        continued: 0,
+      }),
+      step({ index: 3, event: 'c', people: 0, from_previous: 0, from_start: 0 }),
+    ],
+  })
+
+  it('names the overlap on the node where the legs exceed it', () => {
+    render(<FunnelFlow result={OVERLAPPING} />)
+    expect(screen.getByTestId('flow-node-1')).toHaveTextContent(/also reached/i)
+  })
+
+  it('says the overlap in the row of numbers too, on a REQUIRED step', () => {
+    // The widths cannot show a double count -- they are scaled to fit -- so
+    // the only place it can be said is in words. And it is said on whichever
+    // step it happens at, which here is a required one: a rule that only
+    // covered optional steps would be silent on exactly this funnel.
+    render(<FunnelFlow result={OVERLAPPING} />)
+    expect(screen.getByTestId('flow-step-1-overlap')).toHaveTextContent('5')
+    expect(screen.queryByTestId('flow-step-3-overlap')).not.toBeInTheDocument()
+  })
+
+  it('renders a funnel with no optional steps as a straight chain', () => {
+    // This is every funnel in the product today, so it is the case that must
+    // not regress.
+    render(<FunnelFlow result={PLAIN} />)
+    expect(screen.getAllByTestId(/^flow-link-/)).toHaveLength(2)
+    for (const node of screen.getAllByTestId(/^flow-node-/)) {
+      expect(node).not.toHaveAttribute('data-optional')
     }
   })
 
-  it('draws the branch as a FILLED ribbon, so both paths out of a branch point read as flows', () => {
-    // A stroked thread made one path look like the funnel and the other like
-    // an annotation. The two legs leaving a branch point are both real
-    // populations and both get a wedge.
-    render(<FunnelFlow result={BRANCHED} />)
-    const branch = screen.getByTestId('flow-branch-3')
-    expect(branch.getAttribute('fill')).not.toBe('none')
-    expect(branch.getAttribute('d')).toContain('Z')
+  it('still reads as a funnel: one line, narrowing, each band the size of what survived', () => {
+    // A Sankey of a funnel with no branches has to be the funnel. Every node
+    // on one centre line, each smaller than the last, and the band between
+    // two of them the width of the step it lands on.
+    render(<FunnelFlow result={PLAIN} />)
+    const height = (id: string) => Number(screen.getByTestId(id).getAttribute('height') ?? 0)
+    const centre = (id: string) =>
+      Number(screen.getByTestId(id).getAttribute('y') ?? 0) + height(id) / 2
+    expect(centre('flow-node-1')).toBeCloseTo(centre('flow-node-2'), 5)
+    expect(centre('flow-node-2')).toBeCloseTo(centre('flow-node-3'), 5)
+    expect(height('flow-node-1')).toBeGreaterThan(height('flow-node-2'))
+    expect(height('flow-node-2')).toBeGreaterThan(height('flow-node-3'))
+    expect(screen.getByTestId('flow-rate-1-2')).toHaveTextContent('80.0%')
+    expect(screen.getByTestId('flow-rate-2-3')).toHaveTextContent('50.0%')
   })
 
-  it('gives the branch its own rate, measured against the step it hangs off', () => {
-    // 30 of onboarded's 80. NOT the spine's 50%, which belongs to the ribbon
-    // passing behind it.
-    render(<FunnelFlow result={BRANCHED} />)
-    expect(screen.getByTestId('flow-branch-rate-3')).toHaveTextContent('37.5%')
-    expect(screen.getByTestId('flow-branch-rate-3')).not.toHaveTextContent('50.0%')
+  it('draws no NaN into the SVG on a funnel nobody entered', () => {
+    render(<FunnelFlow result={EMPTY} />)
+    expect(document.body.innerHTML).not.toContain('NaN')
   })
 
-  it('keeps the spanning ribbon rate clear of the branch bar it passes', () => {
-    // THE DEFECT THIS FIXES. Centred across its own span, a ribbon from
-    // onboarded to purchase puts its label in the middle of video_submitted's
-    // slot -- on top of the branch bar, directly above that step's own and
-    // different percentage.
-    render(<FunnelFlow result={BRANCHED} />)
-    const cols = screen.getByTestId('flow-rate-2').style.gridColumn
-    const [start, span] = [Number(cols.split('/')[0]?.trim()), 2]
-    const centreX = (start - 1 + span / 2) * SLOT_WIDTH
-    // The branch bar stands at slot 2.
-    expect(centreX).toBeGreaterThan(barX(2) + BAR_WIDTH)
-  })
-
-  it('leaves label placement on a funnel with no branches exactly where it was', () => {
-    const plain = result({
-      entered: 100,
-      converted: 40,
-      conversion_rate: 0.4,
-      steps: [
-        step({ index: 1, event: 'signup', people: 100, from_previous: 1, from_start: 1 }),
-        step({ index: 2, event: 'onboarded', people: 80, from_previous: 0.8, from_start: 0.8 }),
-        step({ index: 3, event: 'purchase', people: 40, from_previous: 0.5, from_start: 0.4 }),
-      ],
-    })
-    render(<FunnelFlow result={plain} />)
-    expect(screen.getByTestId('flow-rate-1').style.gridColumn).toBe('1 / span 2')
-    expect(screen.getByTestId('flow-rate-2').style.gridColumn).toBe('2 / span 2')
-    expect(screen.queryByTestId('flow-branch-rate-1')).not.toBeInTheDocument()
+  it('still draws every node and link on a funnel nobody entered', () => {
+    // A guard that returns early on `entered === 0` also passes the NaN
+    // check above while drawing nothing at all. A brand-new project's first
+    // run must show the funnel it defined, at the floor.
+    render(<FunnelFlow result={EMPTY} />)
+    expect(screen.getAllByTestId(/^flow-node-/)).toHaveLength(3)
+    expect(screen.getAllByTestId(/^flow-link-/)).toHaveLength(3)
   })
 })

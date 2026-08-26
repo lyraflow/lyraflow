@@ -41,6 +41,26 @@ export interface FunnelDeps {
 const DEFAULT_RANGE_MS = 7 * 86_400_000
 
 /**
+ * The range `POST /v1/funnels` and `PATCH /v1/funnels/:id` compile against to
+ * measure a definition, discarding the SQL. See the note at the POST handler
+ * for why they compile at all.
+ *
+ * ANY range would do. The range reaches the compiled SQL as three
+ * fixed-width parameter PLACEHOLDERS (`{pN:DateTime64(3)}`), never as its
+ * literal timestamps, so the compiled byte count is the same whichever
+ * instants are passed -- which is what makes a size measured here binding on
+ * every later run, whatever range that run asks for.
+ *
+ * It is not entirely arbitrary: `compileFunnel` refuses a range whose `since`
+ * is not strictly before its `until`, so this must be a real span. A week,
+ * matching `DEFAULT_RANGE_MS`.
+ */
+const COMPILE_PROBE = {
+  range: { since: new Date(0), until: new Date(DEFAULT_RANGE_MS) },
+  now: new Date(DEFAULT_RANGE_MS),
+}
+
+/**
  * The furthest a caller may page through a funnel-step population, whether
  * that is `/dropoff` or `/people`. Same budget as the segment members walk,
  * and for the same reason: these endpoints preview a population, they do not
@@ -320,6 +340,26 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
     // until someone uses it.
     try {
       validateFunnel(definition.data)
+      // And cap-valid per definition is not small enough to RUN. The
+      // definition-level caps each bound one dimension; the compiled size is
+      // chains × prefix length × per-condition size, so a definition that
+      // clears every cap can still cross `MAX_COMPILED_QUERY_BYTES` — the
+      // same trap one line up, reached the other way. Compile once and throw
+      // the SQL away.
+      //
+      // `COMPILE_PROBE`, not the caller's range: the compiled size does not
+      // depend on the range at all, and its comment says why.
+      //
+      // A LOWER BOUND, not the worst case: a `segment_id` audience is stored
+      // in another table and embeds its own SQL at run time, which this does
+      // not resolve. `compileFunnel` still guards every run, so the effect of
+      // missing it here is a late refusal, not an unguarded one.
+      compileFunnel({
+        definition: definition.data,
+        projectId: project.id,
+        database,
+        ...COMPILE_PROBE,
+      })
     } catch (err) {
       if (err instanceof FunnelValidationError) {
         return reply.code(400).send({ error: err.message, code: err.code })
@@ -384,9 +424,19 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
     })
     if (!current) return reply.code(404).send({ error: 'funnel_not_found' })
     try {
-      validateFunnel({
+      const merged = {
         steps: patch.data.steps ?? current.steps,
         window_seconds: patch.data.window_seconds ?? current.windowSeconds,
+      }
+      validateFunnel(merged)
+      // Same guard as POST, for the same reason and on the same canonical
+      // range — see the note there. A PATCH is the other way a definition
+      // that cannot compile reaches the table.
+      compileFunnel({
+        definition: merged,
+        projectId: project.id,
+        database,
+        ...COMPILE_PROBE,
       })
     } catch (err) {
       if (err instanceof FunnelValidationError) {

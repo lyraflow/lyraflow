@@ -30,19 +30,50 @@ one fix is contained in 0.3.0.
   **conversion is now measured over the required steps alone**, so a funnel
   with no optional steps reports exactly what it always reported. An
   optional step branches off the last required step before it: its result
-  carries `optional: true` and a `skipped` count — the people who reached
-  that required step and did not do this one inside the window — while a
-  required step's result carries neither field. The first and last steps of
-  a funnel still cannot be optional, since they define entry and
-  conversion, and a funnel may carry at most `MAX_OPTIONAL_STEPS` (3) of
-  them inside the existing eight-step ceiling. `POST
-  /v1/funnels/:id/people` accepts a third `mode`, `"skipped"`, for optional
-  steps only; it and `/dropoff` refuse `mode: "dropped"` on an optional
-  step and `mode: "skipped"` on a required one, each with a `400`
-  (`code: "mode"`). `definition_version` moves to 3 for this — a build
-  reading a definition a newer build wrote now refuses it with a `400`
-  naming the version, on both read and write, rather than silently dropping
-  the field it does not understand and reporting a smaller `converted`.
+  carries `optional: true`, a `skipped` count — the people who reached
+  that required step and did not do this one inside the window — and a
+  `continued` count, the people who did do it and went on to the next
+  required step through it; a required step's result carries none of the
+  three. The first and last steps of a funnel still cannot be optional,
+  since they define entry and conversion, and a funnel may carry at most
+  `MAX_OPTIONAL_STEPS` (2) of them inside the existing eight-step ceiling —
+  measured, not preferred: one measured shape at three optional steps
+  compiles past ClickHouse's 262,144-byte `max_query_size` and fails
+  outright. `POST /v1/funnels/:id/people` accepts a third `mode`,
+  `"skipped"`, for optional steps only; it and `/dropoff` refuse
+  `mode: "dropped"` on an optional step and `mode: "skipped"` on a required
+  one, each with a `400` (`code: "mode"`). `definition_version` moves to 3
+  for this — a build reading a definition a newer build wrote now refuses
+  it with a `400` naming the version, on both read and write, rather than
+  silently dropping the field it does not understand and reporting a
+  smaller `converted`. **A saved funnel with three optional steps is now
+  refused at save time** under this cap; nobody has one yet, but a caller
+  scripting against the old limit will see a `400` where it used to see a
+  `201`. One that was saved before this release cannot be RENAMED either:
+  `PATCH /v1/funnels/:id` cap-checks the definition the patch would produce,
+  so a name-only patch to such a funnel returns the same `400`. Listing and
+  reading it still work — one bad row does not break the list page.
+- **A compiled funnel that is too large to run is refused before it reaches
+  ClickHouse.** Past `MAX_COMPILED_QUERY_BYTES`, every route that compiles a
+  funnel returns a `400` naming what to remove — `where` predicates, step
+  audiences, or optional steps — instead of the request reaching ClickHouse
+  and failing there with a bare syntax error. `POST /v1/funnels` and
+  `PATCH /v1/funnels/:id` compile the definition and discard the SQL for
+  exactly this reason, so a funnel that could never run is refused at save
+  time rather than saved with a `201` and then failing on every `/run`,
+  `/dropoff` and `/people` it is ever asked for. The cap bounds the failure;
+  it does not fix it
+  ([#200](https://github.com/lyraflow/lyraflow/issues/200)).
+
+### Changed
+
+- **The funnel chart is a flow diagram, not a stack of bars.** The required
+  steps form a spine, an optional step hangs off it as a branch, and the
+  people who continued through it rejoin the spine at the next required
+  step. Band widths are scaled to fill each node's edge exactly; the count
+  and rate printed on a band are always the true value, never scaled, so a
+  band's width is comparable only within one node's edge — not across the
+  chart.
 
 ## 0.9.0 — 2026-08-22
 

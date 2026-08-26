@@ -218,9 +218,11 @@ describe('summarise with optional steps', () => {
     ]
     const rows: LevelRow[] = [
       // Stopped at a (never reached d). Of these 10, 4 also did b, 1 also did c.
-      { level: 1, people: 10, partial: 0, optionalReached: [4, 1] },
+      // Of the 4 who did b, 2 carried on; of the 1 who did c, 1 carried on.
+      { level: 1, people: 10, partial: 0, optionalReached: [4, 1], optionalContinued: [2, 1] },
       // Reached d. Of these 6, 3 also did b, 5 also did c.
-      { level: 2, people: 6, partial: 0, optionalReached: [3, 5] },
+      // Of the 3 who did b, 1 carried on; of the 5 who did c, 4 carried on.
+      { level: 2, people: 6, partial: 0, optionalReached: [3, 5], optionalContinued: [1, 4] },
     ]
     const r = summarise(rows, adjacentOptional)
 
@@ -237,10 +239,56 @@ describe('summarise with optional steps', () => {
     expect(r.steps[1]?.people).toBe(7)
     expect(r.steps[1]?.from_previous).toBeCloseTo(0.4375)
     expect(r.steps[1]?.skipped).toBe(9)
+    // b's continued total = 2 + 1 = 3 -- its OWN total, not c's (5).
+    expect(r.steps[1]?.continued).toBe(3)
 
     expect(r.steps[2]?.optional).toBe(true)
     expect(r.steps[2]?.people).toBe(6)
     expect(r.steps[2]?.from_previous).toBeCloseTo(0.375)
     expect(r.steps[2]?.skipped).toBe(10)
+    // c's continued total = 1 + 4 = 5 -- its OWN total, not b's (3). b and c
+    // deliberately differ here so that reading the wrong branch's slot (by
+    // definition position instead of by branch.index) fails on a wrong VALUE,
+    // not merely an out-of-bounds default.
+    expect(r.steps[2]?.continued).toBe(5)
+  })
+
+  it('reports continued as the people who carried on through the optional step', () => {
+    const rows: LevelRow[] = [
+      { level: 1, people: 10, partial: 0, optionalReached: [0], optionalContinued: [0] },
+      { level: 2, people: 6, partial: 0, optionalReached: [2], optionalContinued: [1] },
+      { level: 3, people: 4, partial: 0, optionalReached: [3], optionalContinued: [3] },
+    ]
+    const r = summarise(rows, withOptional)
+    expect(r.steps[2]?.people).toBe(5)
+    expect(r.steps[2]?.continued).toBe(4)
+  })
+
+  it('does not clamp continued to people, even when the two chains disagree', () => {
+    // continued is a SUBSET of people by construction: the full chain's
+    // prefix is the branch chain verbatim. A row claiming continued > people
+    // is a compiler that disagrees with this module, and that disagreement
+    // must stay VISIBLE rather than being clamped away. Asserting the exact
+    // value (8, above people's 5) is the point: a clamped implementation
+    // (e.g. Math.min(continued, people)) would report 5 here and this test
+    // would catch it; asserting a `<=` inequality would not.
+    const rows: LevelRow[] = [
+      { level: 2, people: 8, partial: 0, optionalReached: [5], optionalContinued: [8] },
+    ]
+    const r = summarise(rows, withOptional)
+    expect(r.steps[2]?.continued).toBe(8)
+  })
+
+  it('leaves required steps free of continued, as of optional and skipped', () => {
+    const r = summarise([], withOptional)
+    expect(r.steps[0]?.continued).toBeUndefined()
+    expect(r.steps[3]?.continued).toBeUndefined()
+    expect(r.steps[2]?.continued).toBe(0)
+  })
+
+  it('treats an absent optionalContinued as zero rather than NaN', () => {
+    const r = summarise([{ level: 3, people: 4, partial: 0, optionalReached: [2] }], withOptional)
+    expect(r.steps[2]?.continued).toBe(0)
+    expect(Number.isFinite(r.steps[2]?.continued ?? Number.NaN)).toBe(true)
   })
 })

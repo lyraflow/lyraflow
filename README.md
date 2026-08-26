@@ -355,7 +355,7 @@ screens, reachable from the sidebar:
 
   Click a step and a Reached/Dropped panel opens beneath the chart — two
   different populations, each counted on its own rather than assumed from the
-  bar above (see *Who reached a step, or stopped there* under Funnels below).
+  chart above (see *Who reached a step, or stopped there* under Funnels below).
 
 - **Segments** — build a filter tree in the browser: `and`/`or` groups, traits,
   context, lifecycle bounds, and behaviours with their own `where` predicates.
@@ -1702,16 +1702,50 @@ An optional step branches off the last **required** step before it, not off
 whatever step precedes it in the definition — two optional steps back to
 back both branch from the same required step, not from each other. Its
 `from_previous` is a share of that branch point's population, not of the
-step written just above it. Its result carries `optional: true` and a
+step written just above it. Its result carries `optional: true`, a
 `skipped` count — the people who reached the branch point and did not do
-this step inside the window. A required step's result carries neither field.
+this step inside the window — and a `continued` count: of the people who
+*did* reach this step, how many went on to the next required step through
+it. `people` is the leg into the step and `continued` is the leg out of it;
+the gap between them is this step's own drop-off. A required step's result
+carries none of the three.
 
 **The first and last steps cannot be optional.** Step 1 defines entry — it
 is what bounds who enters within the range — and the last step defines
 conversion; making either optional leaves both undefined.
 
-A funnel may have up to `MAX_OPTIONAL_STEPS` (3) optional steps, inside the
-same eight-step ceiling as before.
+The funnel chart in the [Web UI](#web-ui) draws all of this as a flow
+diagram, not a stack of bars: the required steps form a spine, an optional
+step hangs off it as a branch, and the people counted in `continued` rejoin
+the spine at the next required step — a fork that rejoins, the same shape
+described above.
+
+**What the widths mean, and what the numbers mean.** Band widths are scaled
+so that every band touching a node fills that node's edge exactly, at both
+ends — a band tapers between the two nodes it connects. Every printed count
+and rate on a band is the true value from the run response, never scaled to
+fit. **The consequence: a band's width is comparable only within one node's
+edge, not across the chart.** On a funnel where `onboarded` has 800 people
+and one of its outgoing bands carries 300 of them onward, that band is drawn
+at 300/580 ≈ 52% of `onboarded`'s height — because the rest of that height
+belongs to `onboarded`'s other outgoing bands — while the printed rate on it
+reads 37.5% (300/800). The count and the rate sit on the band for exactly
+this reason: read them, not the width.
+
+A funnel may have up to `MAX_OPTIONAL_STEPS` (2) optional steps, inside the
+same eight-step ceiling as before. Each optional step costs two extra
+`windowFunnel` chains, and both copy the SQL text of every condition before
+them — one measured shape at three optional steps compiles past ClickHouse's
+262,144-byte `max_query_size` and fails outright, which is why the limit is 2
+and not 3.
+
+A funnel that compiles past that same limit some other way — enough `where`
+predicates or step audiences, even with two or fewer optional steps — is
+refused with a `400` before it ever reaches ClickHouse, naming what to
+remove: predicates, audiences, or optional steps. That cap bounds the
+failure; it does not fix it —
+[#200](https://github.com/lyraflow/lyraflow/issues/200) tracks compiling this
+down instead of capping it.
 
 **The limit worth knowing before you rely on this:** an optional step counts
 any time after the required step before it and inside the window —
@@ -1719,7 +1753,12 @@ any time after the required step before it and inside the window —
 afterward is still counted as having done the optional step.
 `windowFunnel` reports a chain length, not the instants it matched at, so
 "step 4 happened before step 5" is not a question this can answer without a
-different query shape.
+different query shape. That is also why the two bands leaving a branch point
+on the chart do not have to sum to the branch point's own count: someone who
+does the optional step *after* the required step it feeds into is counted on
+both legs leaving that branch point — once heading into the optional step,
+once heading straight past it on the required chain — the same
+order-blindness, seen from the chart instead of from `/dropoff`.
 
 ### The three clocks
 

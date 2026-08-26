@@ -2009,4 +2009,88 @@ describe('optional steps, against real rows', () => {
     )
     expect(ids.size).toBe(2)
   })
+
+  it('counts someone who carried on THROUGH the optional step', async () => {
+    const tag = 'through'
+    await journey('through', [
+      `$page-${tag}`,
+      `signed_up-${tag}`,
+      `subscription_started-${tag}`,
+      `video_submitted-${tag}`,
+      `subscription_canceled-${tag}`,
+    ])
+    const r = await runOpt(optSteps(tag))
+    expect(r.steps[3].people).toBe(1)
+    expect(r.steps[3].continued).toBe(1)
+  })
+
+  it('does not count someone who did the optional step and stopped', async () => {
+    const tag = 'stopped'
+    await journey('stopped', [
+      `$page-${tag}`,
+      `signed_up-${tag}`,
+      `subscription_started-${tag}`,
+      `video_submitted-${tag}`,
+    ])
+    const r = await runOpt(optSteps(tag))
+    expect(r.steps[3].people).toBe(1)
+    expect(r.steps[3].continued).toBe(0)
+  })
+
+  it('THE OVERLAP: someone who does the optional step AFTER the next required one', async () => {
+    // The fixture this suite has nothing like, and the one the whole
+    // conservation rule exists for. They reach the last step and they did the
+    // optional event -- but not on the way, so they are on the branch leg AND
+    // on the bypass leg, and the two outgoing legs from step 3 now overlap by
+    // exactly this person.
+    const tag = 'after'
+    await journey('after', [
+      `$page-${tag}`,
+      `signed_up-${tag}`,
+      `subscription_started-${tag}`,
+      `subscription_canceled-${tag}`,
+      `video_submitted-${tag}`,
+    ])
+    const r = await runOpt(optSteps(tag))
+    expect(r.steps[3].people).toBe(1)
+    expect(r.steps[3].continued).toBe(0)
+    expect(r.converted).toBe(1)
+  })
+
+  it('never reports continued above the people who reached the step', async () => {
+    const tag = 'subset'
+    await journey('s1', [
+      `$page-${tag}`,
+      `signed_up-${tag}`,
+      `subscription_started-${tag}`,
+      `video_submitted-${tag}`,
+      `subscription_canceled-${tag}`,
+    ])
+    await journey('s2', [
+      `$page-${tag}`,
+      `signed_up-${tag}`,
+      `subscription_started-${tag}`,
+      `video_submitted-${tag}`,
+    ])
+    const r = await runOpt(optSteps(tag))
+    expect(r.steps[3].people).toBe(2)
+    expect(r.steps[3].continued).toBe(1)
+  })
+
+  it('applies the window to the full chain, not only to the branch', async () => {
+    // Inside the window to the optional step, past it to the next required
+    // one: reached, but did not continue.
+    const w = 600
+    const tag = 'fullwin'
+    await journey('fullwin', [
+      [`$page-${tag}`, 0],
+      [`signed_up-${tag}`, 1_000],
+      [`subscription_started-${tag}`, 2_000],
+      [`video_submitted-${tag}`, 3_000],
+      [`subscription_canceled-${tag}`, w * 1000 + 1],
+    ])
+    const r = await runOpt(optSteps(tag), { window_seconds: w })
+    expect(r.steps[3].people).toBe(1)
+    expect(r.steps[3].continued).toBe(0)
+  })
 })
