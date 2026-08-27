@@ -293,15 +293,22 @@ The whole sequence, in order:
 
 1. **Branch `chore/release-X.Y.Z`.**
 
-2. **Bump the version in eight places.** Six manifests — `packages/{cli,core,db,sdk-browser,server,ui}/package.json` — and two constants that are compiled into shipped output:
+2. **Bump the version in nine places.** Six manifests — `packages/{cli,core,db,sdk-browser,server,ui}/package.json` — and three constants that are compiled into shipped output:
    - `packages/sdk-browser/src/index.ts` → `export const VERSION`
    - `packages/cli/src/api/output.ts` → `export const CLI_VERSION`
+   - `packages/server/src/version.ts` → `export const SERVER_VERSION`
+
+   Each of the three has a test asserting it equals its own package's manifest, so
+   forgetting one fails the suite rather than shipping quietly. `SERVER_VERSION` is the
+   one an operator actually reads: `GET /v1/meta` serves it to the Settings screen's
+   Install card, where it is quoted into bug reports and used to decide whether to
+   upgrade. A stale number there is worse than none, because it is believed.
 
    `CHANGELOG.md` opens by promising every package carries the same version. That has
    been false twice: `packages/ui` was scaffolded at `1.0.0` and missed by two
    consecutive release bumps, because a `sed` for the previous version number cannot
    match a package that was never on it. **Grep for the new version afterwards and count
-   eight**, rather than grepping for the old one and assuming.
+   nine**, rather than grepping for the old one and assuming.
 
    `SCHEMA_VERSION` in `packages/core/src/index.ts` is **not** part of this. It tracks
    migrations, bumps when one is added, and is unrelated to the release number.

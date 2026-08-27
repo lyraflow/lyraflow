@@ -6,6 +6,7 @@ import { SESSION_COOKIE, requireUiHeader } from '../auth/cookie.js'
 import type { ProjectCache } from '../auth/project-cache.js'
 import type { SessionStore } from '../auth/sessions.js'
 import { type Readiness, refuseIfDraining } from '../health.js'
+import { SERVER_VERSION } from '../version.js'
 import type { ProjectDeletionStore } from './deletion-store.js'
 
 export interface AdminProjectDeps {
@@ -93,6 +94,29 @@ export function registerAdminProjectRoutes(app: FastifyInstance, deps: AdminProj
     }
     return true
   }
+
+  /**
+   * What release this install is running. Read by the Settings screen's
+   * Install card, where an operator decides whether to upgrade and finds the
+   * number to quote into a bug report.
+   *
+   * Session-gated, not on `/health`, and that is the whole point: a version
+   * number tells a caller which published advisories apply to the install,
+   * and `/health` answers anything that can reach the port. It is
+   * instance-scoped for the same reason `/v1/projects` is -- "what version is
+   * this" names no project, so a server key cannot answer it.
+   *
+   * `/v1/meta` rather than `/v1/version` because the path is the expensive
+   * half to change later and the body is not. One field today; if the card
+   * ever wants the schema version or a build date beside it, they arrive here
+   * without a second route or a breaking rename. Adding one is a decision
+   * about what an install discloses about itself, and the test pinning this
+   * key set exactly is what makes it one.
+   */
+  app.get('/v1/meta', async (req, reply) => {
+    if (!(await requireSession(req, reply))) return
+    return { version: SERVER_VERSION }
+  })
 
   app.get('/v1/projects', async (req, reply) => {
     if (!(await requireSession(req, reply))) return

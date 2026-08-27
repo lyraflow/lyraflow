@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { act, render, screen } from '@testing-library/react'
 // Named import, not the brief's default one: without `esModuleInterop` (not
 // set anywhere in this repo's tsconfigs, and not worth adding for one test
 // file) `tsc -b` types a default import of this package as the whole module
@@ -8,6 +8,7 @@ import { userEvent } from '@testing-library/user-event'
 import type { ReactNode } from 'react'
 import { MemoryRouter } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
+import type { ApiClient } from '../api/client.js'
 import type { Project } from '../api/types.js'
 import { ProjectProvider, useProject } from './ProjectContext.js'
 import { Shell } from './Shell.js'
@@ -35,11 +36,41 @@ const PROJECTS = [
   },
 ]
 
+function fakeClient(over: Record<string, unknown> = {}) {
+  return {
+    meta: vi.fn(async () => ({ version: '0.10.0' })),
+    ...over,
+  } as unknown as ApiClient
+}
+
+/** A promise the test settles, so "before the answer arrives" is a real state. */
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (err: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
+function renderWithClient(client: ApiClient) {
+  return render(
+    <MemoryRouter initialEntries={['/feed']}>
+      <ProjectProvider projects={PROJECTS} initialId={1}>
+        <Shell email="admin@localhost" onLogout={vi.fn()} client={client}>
+          <p>content</p>
+        </Shell>
+      </ProjectProvider>
+    </MemoryRouter>,
+  )
+}
+
 function renderShell(onLogout = vi.fn()) {
   return render(
     <MemoryRouter initialEntries={['/feed']}>
       <ProjectProvider projects={PROJECTS} initialId={1}>
-        <Shell email="admin@localhost" onLogout={onLogout}>
+        <Shell email="admin@localhost" onLogout={onLogout} client={fakeClient()}>
           <p>content</p>
         </Shell>
       </ProjectProvider>
@@ -89,7 +120,7 @@ describe('Shell', () => {
     render(
       <MemoryRouter initialEntries={['/feed']}>
         <ProjectProvider projects={PROJECTS} initialId={2}>
-          <Shell email="admin@localhost" onLogout={vi.fn()}>
+          <Shell email="admin@localhost" onLogout={vi.fn()} client={fakeClient()}>
             <p>content</p>
           </Shell>
         </ProjectProvider>
@@ -112,7 +143,7 @@ describe('Shell', () => {
     render(
       <MemoryRouter initialEntries={['/feed']}>
         <ProjectProvider projects={PROJECTS} initialId={1}>
-          <Shell email="a@b.c" onLogout={vi.fn()}>
+          <Shell email="a@b.c" onLogout={vi.fn()} client={fakeClient()}>
             <Probe />
           </Shell>
         </ProjectProvider>
@@ -132,7 +163,7 @@ describe('Shell', () => {
     render(
       <MemoryRouter initialEntries={['/feed']}>
         <ProjectProvider projects={PROJECTS} initialId={1}>
-          <Shell email={null} onLogout={vi.fn()}>
+          <Shell email={null} onLogout={vi.fn()} client={fakeClient()}>
             <p>content</p>
           </Shell>
         </ProjectProvider>
@@ -168,7 +199,7 @@ describe('Shell', () => {
     render(
       <MemoryRouter initialEntries={['/funnels']}>
         <ProjectProvider projects={PROJECTS} initialId={1}>
-          <Shell email="a@b.c" onLogout={vi.fn()}>
+          <Shell email="a@b.c" onLogout={vi.fn()} client={fakeClient()}>
             {null}
           </Shell>
         </ProjectProvider>
@@ -188,7 +219,7 @@ describe('Shell', () => {
     render(
       <MemoryRouter initialEntries={['/']}>
         <ProjectProvider projects={PROJECTS} initialId={1}>
-          <Shell email="a@b.c" onLogout={vi.fn()}>
+          <Shell email="a@b.c" onLogout={vi.fn()} client={fakeClient()}>
             {null}
           </Shell>
         </ProjectProvider>
@@ -207,7 +238,7 @@ describe('Shell — archived projects in the switcher', () => {
     render(
       <MemoryRouter initialEntries={['/feed']}>
         <ProjectProvider projects={projects} initialId={initialId}>
-          <Shell email="admin@localhost" onLogout={vi.fn()}>
+          <Shell email="admin@localhost" onLogout={vi.fn()} client={fakeClient()}>
             <p>content</p>
           </Shell>
         </ProjectProvider>
@@ -294,7 +325,7 @@ describe('Shell — deleting projects in the switcher', () => {
   }
 
   it('omits a deleting project from the switcher', async () => {
-    render(<Shell email="a@example.com" onLogout={() => {}} />, {
+    render(<Shell email="a@example.com" onLogout={() => {}} client={fakeClient()} />, {
       wrapper: withProjects([acme, { ...other, deleting_at: NOW }]),
     })
     expect(screen.getByRole('button', { name: /Acme/ })).toBeInTheDocument()
@@ -364,5 +395,105 @@ describe('Shell — the GitHub link', () => {
     expect(screen.getByRole('link', { name: /star on github/i })).toBeInTheDocument()
     expect(container.querySelector('script')).toBeNull()
     expect(container.querySelector('iframe')).toBeNull()
+  })
+})
+
+describe('Shell — version', () => {
+  it('shows the running version in the sidebar', async () => {
+    renderWithClient(fakeClient())
+    expect(await screen.findByText('v0.10.0')).toBeInTheDocument()
+  })
+
+  // Deliberately NOT a skeleton, unlike the Settings card. There the value
+  // sits beside the label "Version", where a blank reads as "this install
+  // has none"; here it is standalone chrome, and absent-until-loaded is
+  // both honest and invisible.
+  it('shows nothing at all before the answer arrives', async () => {
+    const d = deferred<{ version: string }>()
+    renderWithClient(fakeClient({ meta: vi.fn(() => d.promise) }))
+    expect(screen.queryByTestId('sidebar-version')).not.toBeInTheDocument()
+    d.resolve({ version: '0.10.0' })
+    expect(await screen.findByText('v0.10.0')).toBeInTheDocument()
+  })
+
+  // The chrome is on every screen, so a failure here would follow an
+  // operator everywhere. The Settings card is the place that reports one,
+  // because it is the place that can explain it.
+  it('stays silent when the version cannot be read, rather than showing an error in the chrome', async () => {
+    // The rejection is DEFERRED and settled inside `act` rather than awaited
+    // with a bare `await Promise.resolve()`, which was the first shape of
+    // this test and was vacuous: it asserted the absence before the
+    // rejection had propagated into state, so it passed against a component
+    // that renders an error on failure. Caught by mutating exactly that.
+    // Settling inside `act` flushes the hook's catch and the re-render it
+    // schedules, so the assertions below run against the settled state.
+    const d = deferred<{ version: string }>()
+    renderWithClient(fakeClient({ meta: vi.fn(() => d.promise) }))
+    await act(async () => {
+      d.reject(new Error('offline'))
+      await d.promise.catch(() => {})
+    })
+    expect(screen.queryByTestId('sidebar-version')).not.toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('offers a changelog link beside the version', async () => {
+    renderWithClient(fakeClient())
+    await screen.findByText('v0.10.0')
+    const link = screen.getByRole('link', { name: /changelog/i })
+    expect(link).toHaveAttribute(
+      'href',
+      'https://github.com/lyraflow/lyraflow/blob/main/CHANGELOG.md',
+    )
+  })
+
+  // Absent until the version is, since it reads as a footnote to it -- a
+  // lone `[changelog]` under the nav with no version above it is chrome
+  // pointing at nothing.
+  it('does not offer the changelog link before the version arrives', () => {
+    const d = deferred<{ version: string }>()
+    renderWithClient(fakeClient({ meta: vi.fn(() => d.promise) }))
+    expect(screen.queryByRole('link', { name: /changelog/i })).not.toBeInTheDocument()
+  })
+
+  /**
+   * The third outbound GitHub link in this shell, and it needs the same
+   * guard as the other two for the same reason: without `noreferrer` the
+   * request carries this page's URL, which on a self-hosted install is the
+   * operator's own hostname. Pinned separately because nothing structural
+   * ties the three together -- each is a plain anchor someone can add
+   * without it.
+   */
+  it('does not leak the install hostname to GitHub through the changelog link', async () => {
+    renderWithClient(fakeClient())
+    await screen.findByText('v0.10.0')
+    const rel = screen.getByRole('link', { name: /changelog/i }).getAttribute('rel')
+    expect(rel).toContain('noreferrer')
+    expect(rel).toContain('noopener')
+  })
+
+  /**
+   * Pins the DECISION, not the rendering. Below `sm` this aside reflows from
+   * a vertical sidebar into a compact top bar -- the row that already scrolls
+   * horizontally at 390px, which is why the nav labels are `sr-only` there.
+   * The version is the least important thing in that row, so it is hidden
+   * rather than allowed to compete; the Settings Install card still carries
+   * it at every width.
+   *
+   * jsdom loads no Tailwind stylesheet (see this file's own note on `hidden`
+   * never actually hiding anything here), so visibility cannot be asserted.
+   * The class is the only available pin.
+   */
+  it('is hidden below sm, where the sidebar is a compact top bar', async () => {
+    renderWithClient(fakeClient())
+    await screen.findByText('v0.10.0')
+    const el = screen.getByTestId('sidebar-version')
+    // The decision is "not displayed below `sm`, displayed at `sm` and up".
+    // Which display value restores it (`block` when it was the version
+    // alone, `flex` now that it is a row) is not the decision, so the
+    // assertion does not pin one -- it pins that `hidden` is there and that
+    // some `sm:` display utility undoes it.
+    expect(el.className).toContain('hidden')
+    expect(el.className).toMatch(/\bsm:(block|flex|inline-flex)\b/)
   })
 })

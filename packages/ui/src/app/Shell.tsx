@@ -10,6 +10,7 @@ import {
 } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Link, NavLink, useLocation } from 'react-router'
+import type { ApiClient } from '../api/client.js'
 import type { Project } from '../api/types.js'
 import {
   DropdownMenu,
@@ -27,6 +28,7 @@ import {
 import { useProject } from './ProjectContext.js'
 import { ROUTES } from './Router.js'
 import { ThemeToggle } from './ThemeToggle.js'
+import { useVersion } from './useVersion.js'
 
 // Lucide's default stroke (2, on a 24-unit box) reads heavier than the
 // brand mark's (3.8, on a 100-unit box -- a ratio less than half as thick).
@@ -208,7 +210,21 @@ function AccountMenu(props: { email: string | null; onLogout(): void }) {
   )
 }
 
-export function Shell(props: { email: string | null; onLogout(): void; children?: ReactNode }) {
+export function Shell(props: {
+  email: string | null
+  onLogout(): void
+  client: ApiClient
+  children?: ReactNode
+}) {
+  /**
+   * No `onUnauthorized` passed, deliberately -- unlike the Settings card,
+   * which routes back to login on a 401 from the same fetch. This is chrome
+   * on every screen, and making a decorative element a third trigger for
+   * "sign out and bounce to login" (beside `App`'s session poll and `Feed`'s
+   * own detector) widens what a failed version read can do to an operator
+   * mid-task. It stays silent instead.
+   */
+  const { version } = useVersion(props.client)
   // `Router.tsx` answers `/` with the SAME element as `/feed` (a bare hard
   // refresh at the root has to land somewhere), but `NavLink`'s own
   // `isActive` match is computed from `to` against the current location, so
@@ -329,6 +345,48 @@ export function Shell(props: { email: string | null; onLogout(): void; children?
             <span className="sr-only sm:not-sr-only">Settings</span>
           </NavLink>
         </nav>
+        {/*
+         * `sm:mt-auto` pins it to the foot of the sidebar; `hidden sm:block`
+         * keeps it out of the compact top bar this aside becomes below `sm`,
+         * which already scrolls horizontally at 390px and is why the nav
+         * labels are `sr-only` there. Nothing is lost narrow: the Settings
+         * screen's Install card carries the version at every width, with the
+         * release-notes link this deliberately does not repeat.
+         */}
+        {version !== null && (
+          <p
+            data-testid="sidebar-version"
+            className="hidden text-xs text-muted-foreground sm:mt-auto sm:flex sm:items-center sm:gap-1.5 sm:px-4 sm:pb-4"
+          >
+            <span>v{version}</span>
+            {/*
+             * `CHANGELOG.md` on `main`, NOT this version's tag -- the two
+             * answer different questions and the card already answers the
+             * other one. Its "Release notes" link goes to
+             * `/releases/tag/v<version>`: what shipped in the version you are
+             * running. From a running install the useful question is the
+             * opposite one, what has shipped SINCE, and the file is
+             * newest-first so it opens on exactly that. It also cannot 404,
+             * which the tag link can before a release object exists.
+             *
+             * The brackets are part of the link text rather than decoration
+             * around it, so the accessible name contains the visible label
+             * (WCAG 2.5.3) instead of differing from it by punctuation.
+             *
+             * Third outbound GitHub link in this file, and `noreferrer` earns
+             * its place for the third time: see `StarOnGitHub` above. A
+             * self-hosted install's hostname is not GitHub's to learn.
+             */}
+            <a
+              href="https://github.com/lyraflow/lyraflow/blob/main/CHANGELOG.md"
+              target="_blank"
+              rel="noreferrer noopener"
+              className="underline hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2"
+            >
+              [changelog]
+            </a>
+          </p>
+        )}
       </aside>
       <div className="flex min-w-0 flex-1 flex-col">
         {/*

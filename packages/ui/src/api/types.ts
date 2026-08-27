@@ -40,6 +40,15 @@ export interface ProjectIdentity {
   write_key: string
 }
 
+/**
+ * `GET /v1/meta` -- facts about the install itself rather than any one
+ * project, which is why nothing here is project-scoped.
+ */
+export interface Meta {
+  /** The release the running server was built from, e.g. `0.10.0`. */
+  version: string
+}
+
 /** `GET /v1/project/usage` -- this calendar month's counts against the project's quota. */
 export interface Usage {
   month: string

@@ -9,6 +9,7 @@ import { ProjectCache, hashServerKey } from '../auth/project-cache.js'
 import { SessionStore, hashSessionToken } from '../auth/sessions.js'
 import { loadConfig } from '../config.js'
 import { Readiness } from '../health.js'
+import { SERVER_VERSION } from '../version.js'
 import { registerAdminProjectRoutes } from './admin-routes.js'
 import { ProjectDeletionStore } from './deletion-store.js'
 
@@ -399,6 +400,55 @@ describe('POST /v1/projects', () => {
   })
 })
 
+/**
+ * Instance-scoped, like the two routes above and for the same reason: "what
+ * version is this install running" names no project, so a server key (which
+ * names exactly one) cannot answer it. It shares their `requireSession`
+ * rather than growing a fourth copy of the gate, and the four tests below
+ * pin each of that gate's promises separately -- a suite that only proved
+ * "200 with a session" would pass against a route with no gate at all.
+ */
+describe('GET /v1/meta', () => {
+  it('reports the running version to a session', async () => {
+    const res = await app.inject({ method: 'GET', url: '/v1/meta', headers: sessionHeaders })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ version: SERVER_VERSION })
+  })
+
+  // Pins the exact key set, not merely that `version` is present. This
+  // response is read by a browser on an authenticated screen, so anything
+  // added here later (a commit sha, a hostname, the Node version) is a
+  // decision about what an install discloses about itself -- it should have
+  // to fail a test to arrive, rather than being appended in passing.
+  it('carries that field and no other', async () => {
+    const res = await app.inject({ method: 'GET', url: '/v1/meta', headers: sessionHeaders })
+    expect(Object.keys(res.json() as Record<string, unknown>)).toEqual(['version'])
+  })
+
+  // The whole reason this is not on `/health`: a version number tells an
+  // unauthenticated caller which advisories apply to the install. `/health`
+  // is reachable by anything that can reach the port.
+  it('refuses without a session', async () => {
+    const res = await app.inject({ method: 'GET', url: '/v1/meta', headers: uiHeaderOnly })
+    expect(res.statusCode).toBe(401)
+    expect(res.json()).toEqual({ error: 'invalid_session' })
+  })
+
+  it('refuses a server key: this route is session-only', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/v1/meta',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY, 'x-lyraflow-ui': '1' },
+    })
+    expect(res.statusCode).toBe(401)
+  })
+
+  it('refuses without the UI header', async () => {
+    const res = await app.inject({ method: 'GET', url: '/v1/meta', headers: { cookie } })
+    expect(res.statusCode).toBe(403)
+  })
+})
+
 // MINOR A from the feat/admin-sessions whole-branch review: these two
 // routes already gated correctly (the finding was about auth/routes.ts's
 // session/logout and no gate at all), but they are the reference points
@@ -449,6 +499,25 @@ describe('the drain gate', () => {
       headers: { cookie, 'x-lyraflow-ui': '1' },
       payload: { name: 'Admin Routes Should Not Be Created While Draining' },
     })
+    expect(res.statusCode).toBe(503)
+    expect(res.json()).toEqual({ error: 'draining' })
+    await local.close()
+  })
+
+  it('refuses GET /v1/meta with 503 draining', async () => {
+    const config = loadConfig({
+      LYRAFLOW_POSTGRES_URL: 'postgres://lyraflow:lyraflow@localhost:5433/lyraflow_test',
+      LYRAFLOW_CLICKHOUSE_URL: CH.url,
+      LYRAFLOW_CLICKHOUSE_USER: CH.username,
+      LYRAFLOW_CLICKHOUSE_PASSWORD: CH.password,
+      LYRAFLOW_CLICKHOUSE_DB: CH.database,
+    } as NodeJS.ProcessEnv)
+    const readiness = new Readiness()
+    readiness.markReady()
+    const local = buildApp({ config, pg, ch, readiness })
+    await local.ready()
+    readiness.markDraining()
+    const res = await local.inject({ method: 'GET', url: '/v1/meta', headers: sessionHeaders })
     expect(res.statusCode).toBe(503)
     expect(res.json()).toEqual({ error: 'draining' })
     await local.close()
