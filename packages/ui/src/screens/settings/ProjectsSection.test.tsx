@@ -211,6 +211,10 @@ describe('ProjectsSection — delete', () => {
           completed_at: null,
         }),
       ),
+      // The one test below renders a real `Shell`, whose sidebar footer
+      // reads the running version on mount. Nothing else in this file needs
+      // it.
+      meta: vi.fn(async () => ({ version: '0.10.0' })),
     } as unknown as ApiClient
   })
 
@@ -319,7 +323,7 @@ describe('ProjectsSection — delete', () => {
     render(
       <MemoryRouter initialEntries={['/settings']}>
         <ProjectProvider projects={[acme, other]} initialId={acme.id}>
-          <Shell email="a@example.com" onLogout={() => {}}>
+          <Shell email="a@example.com" onLogout={() => {}} client={client}>
             <ProjectsSection client={client} />
           </Shell>
         </ProjectProvider>

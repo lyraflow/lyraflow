@@ -573,7 +573,7 @@ describe('Settings — projects', () => {
     render(
       <MemoryRouter initialEntries={['/settings']}>
         <ProjectProvider projects={PROJECTS} initialId={1}>
-          <Shell email="admin@localhost" onLogout={vi.fn()}>
+          <Shell email="admin@localhost" onLogout={vi.fn()} client={client}>
             <Settings client={client} />
           </Shell>
         </ProjectProvider>
@@ -617,7 +617,7 @@ describe('Settings — projects', () => {
     render(
       <MemoryRouter initialEntries={['/settings']}>
         <ProjectProvider projects={PROJECTS} initialId={1}>
-          <Shell email="admin@localhost" onLogout={vi.fn()}>
+          <Shell email="admin@localhost" onLogout={vi.fn()} client={client}>
             <RetentionProbe id={1} />
             <Settings client={client} />
           </Shell>

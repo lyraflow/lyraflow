@@ -35,7 +35,9 @@ one fix is contained in 0.3.0.
   number tells a caller which published advisories apply to the install, and
   `/health` answers anything that can reach the port. The release-notes link
   carries `rel="noreferrer noopener"`, so an install's own hostname does not
-  travel to GitHub in a referrer.
+  travel to GitHub in a referrer. The version also appears as small dimmed
+  text at the foot of the sidebar, on every screen — hidden below `sm`,
+  where that sidebar reflows into a top bar that already scrolls at 390px.
 
 - **A link to the repository in the dashboard header**, beside the theme
   toggle — the label "Star on GitHub" at `sm` and wider, the star icon

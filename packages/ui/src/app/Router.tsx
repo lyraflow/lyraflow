@@ -133,7 +133,7 @@ export function AppRouter(props: {
   )
   return (
     <BrowserRouter>
-      <Shell email={props.email} onLogout={props.onLogout}>
+      <Shell email={props.email} onLogout={props.onLogout} client={props.client}>
         <Routes>
           <Route path="/" element={feed} />
           <Route path={ROUTES.feed} element={feed} />

@@ -1,6 +1,5 @@
-import { useEffect, useState } from 'react'
-import { ApiError } from '../../api/client.js'
 import type { ApiClient } from '../../api/client.js'
+import { useVersion } from '../../app/useVersion.js'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card.js'
 import { Skeleton } from '../../components/ui/skeleton.js'
 
@@ -21,31 +20,9 @@ import { Skeleton } from '../../components/ui/skeleton.js'
  */
 export function AboutSection(props: { client: ApiClient; onUnauthorized?: () => void }) {
   const { client, onUnauthorized } = props
-  const [version, setVersion] = useState<string | null>(null)
-  const [error, setError] = useState(false)
-
-  useEffect(() => {
-    let cancelled = false
-    client
-      .meta()
-      .then((meta) => {
-        if (!cancelled) setVersion(meta.version)
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return
-        // A 401 means the session is gone, exactly as the other sections on
-        // this screen treat one -- routed back to login rather than shown as
-        // the error below, which would read as a transient hiccup forever.
-        if (err instanceof ApiError && err.status === 401) {
-          onUnauthorized?.()
-          return
-        }
-        setError(true)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [client, onUnauthorized])
+  // Shared with the sidebar's footer -- see the hook for why the two fetch
+  // separately rather than sharing one result.
+  const { version, failed } = useVersion(client, onUnauthorized)
 
   return (
     <Card>
@@ -79,7 +56,7 @@ export function AboutSection(props: { client: ApiClient; onUnauthorized?: () => 
           </a>
         )}
 
-        {error && (
+        {failed && (
           <p role="alert" className="text-sm text-destructive">
             Could not read the version from the server. Reload to try again.
           </p>
