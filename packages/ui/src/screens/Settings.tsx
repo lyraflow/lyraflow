@@ -3,6 +3,7 @@ import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import type { ProjectIdentity, Usage } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
+import { AboutSection } from './settings/AboutSection.js'
 import { LimitsSection } from './settings/LimitsSection.js'
 import { ProjectsSection } from './settings/ProjectsSection.js'
 import { SnippetSection } from './settings/SnippetSection.js'
@@ -10,7 +11,8 @@ import { UsageSection } from './settings/UsageSection.js'
 
 /**
  * The install snippet, this month's usage, the editable limits for the
- * active project, and the project list with create-a-new-one.
+ * active project, the project list with create-a-new-one, and what release
+ * this install is running.
  */
 export function Settings(props: {
   client: ApiClient
@@ -121,6 +123,11 @@ export function Settings(props: {
         onSessionStale={onSessionStale}
         onUnauthorized={onUnauthorized}
       />
+      {/* Last, and fetching on its own -- the version is a property of the
+       * install rather than of the selected project, so it does not belong
+       * in the `[client, activeId]` effect above. See the section's own
+       * docstring. */}
+      <AboutSection client={client} onUnauthorized={onUnauthorized} />
     </div>
   )
 }

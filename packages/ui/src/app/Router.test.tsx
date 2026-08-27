@@ -35,6 +35,10 @@ function renderAt(path: string) {
       disabled_at: null,
     })),
     projects: vi.fn(async () => PROJECTS),
+    /* Settings' Install card reads the running version on mount. Without
+     * this every test that lands on /settings dies inside `AboutSection`,
+     * which says nothing about the router. */
+    meta: vi.fn(async () => ({ version: '0.10.0' })),
     funnels: vi.fn(async () => []),
     segments: vi.fn(async () => []),
   } as never
@@ -159,6 +163,7 @@ describe('AppRouter', () => {
         disabled_at: null,
       })),
       projects: vi.fn(async () => PROJECTS),
+      meta: vi.fn(async () => ({ version: '0.10.0' })),
     } as never
     render(
       <ProjectProvider projects={PROJECTS} initialId={1}>

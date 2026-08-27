@@ -21,6 +21,9 @@ function client(over: Partial<Record<string, unknown>> = {}) {
     authState: vi.fn(async () => ({ configured: true })),
     session: vi.fn(async () => ({ email: 'admin@localhost' })),
     projects: vi.fn(async () => [PLACEHOLDER_PROJECT]),
+    /* Settings' Install card reads the running version on mount -- same
+     * reason `schemaEvents` below is here. */
+    meta: vi.fn(async () => ({ version: '0.10.0' })),
     login: vi.fn(async () => ({ email: 'admin@localhost' })),
     logout: vi.fn(async () => {}),
     events: vi.fn(async () => ({ events: [], next_cursor: null })),

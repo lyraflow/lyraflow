@@ -25,6 +25,18 @@ one fix is contained in 0.3.0.
 
 ### Added
 
+- **The installed version, on the Settings screen.** A new Install card
+  reports what release the server is running, with a link to that version's
+  release notes. The number comes from `GET /v1/meta` rather than being
+  compiled into the dashboard bundle: the two agree in a real install, since
+  one image builds both from one commit, but the question being asked is
+  "what is running", and only the server can answer that. The route is
+  **session-authenticated and deliberately not on `/health`** — a version
+  number tells a caller which published advisories apply to the install, and
+  `/health` answers anything that can reach the port. The release-notes link
+  carries `rel="noreferrer noopener"`, so an install's own hostname does not
+  travel to GitHub in a referrer.
+
 - **A link to the repository in the dashboard header**, beside the theme
   toggle — the label "Star on GitHub" at `sm` and wider, the star icon
   alone below it. **It carries no star count, and that is the decision

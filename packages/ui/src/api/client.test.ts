@@ -43,6 +43,24 @@ describe('createClient', () => {
     expect(new Headers(init.headers).get('x-lyraflow-project')).toBeNull()
   })
 
+  // `meta()` is instance-scoped for the same reason `projects()` is: "what
+  // version is this install" names no project. Pinned here rather than in
+  // AboutSection.test.tsx, which drives a fake `ApiClient` and never reaches
+  // `call()` at all -- the header is only observable from this file.
+  it('does NOT send the project header on meta either', async () => {
+    const f = fakeFetch(200, { version: '0.10.0' })
+    await createClient(f as unknown as typeof fetch).meta()
+    const init = f.mock.calls[0]?.[1] as RequestInit
+    expect(new Headers(init.headers).get('x-lyraflow-project')).toBeNull()
+  })
+
+  it('reads the version off GET /v1/meta', async () => {
+    const f = fakeFetch(200, { version: '0.10.0' })
+    const meta = await createClient(f as unknown as typeof fetch).meta()
+    expect(f.mock.calls[0]?.[0]).toBe('/v1/meta')
+    expect(meta.version).toBe('0.10.0')
+  })
+
   // Invented: the brief's mutation table names this row a question rather
   // than a prescribed test, because Settings.test.tsx drives a fake
   // `ApiClient` object and never touches `call()` at all -- attaching the

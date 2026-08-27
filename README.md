@@ -666,6 +666,24 @@ the whole install rather than one project. `POST /v1/projects` takes
 exactly as `create-project` prints it once, and never served again by
 anything.
 
+### `GET /v1/meta`
+
+**What release this install is running**, as `{"version": "0.10.0"}`. The Settings
+screen's Install card reads it, which is where an operator finds the number to
+quote into a bug report or to compare against the latest release.
+
+**Session-cookie authenticated, like the two routes above**, and instance-scoped
+for the same reason — "what version is this" names no project, so a server key
+cannot answer it. It is deliberately **not** on `/health`: a version number tells
+a caller which published advisories apply to the install, and `/health` answers
+anything that can reach the port. Requiring a signed-in admin is the difference
+between an operator reading their own version and the internet reading it.
+
+`/v1/meta` rather than `/v1/version` because the path is the expensive half to
+change later and the body is not. It carries one field today; a second is a
+decision about what an install discloses about itself, not a field appended in
+passing.
+
 Sent directly from browser JavaScript (as opposed to a server-side SDK),
 ### Page views, and the `$` prefix
 

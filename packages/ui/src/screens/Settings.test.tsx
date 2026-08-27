@@ -79,6 +79,7 @@ function fakeClient(over: Record<string, unknown> = {}) {
       disabled_at: null,
     })),
     projects: vi.fn(async () => PROJECTS),
+    meta: vi.fn(async () => ({ version: '0.10.0' })),
     ...over,
   } as unknown as ApiClient & { project: Mock; usage: Mock }
 }
@@ -660,6 +661,13 @@ describe('Settings — projects', () => {
   })
 })
 
+describe('Settings — install', () => {
+  it('shows the version the server reports', async () => {
+    renderSettings()
+    expect(await screen.findByText('0.10.0')).toBeInTheDocument()
+  })
+})
+
 describe('Settings — unauthorized', () => {
   // IMPORTANT 3 from the whole-branch review: neither of Settings' own
   // fetches had any unauthorized detector before this fix -- a 401 fell
@@ -685,6 +693,26 @@ describe('Settings — unauthorized', () => {
     const onUnauthorized = vi.fn()
     const client = fakeClient({
       usage: vi.fn(async () => {
+        throw new ApiError(401, 'invalid_session')
+      }),
+    })
+    render(
+      <ProjectProvider projects={PROJECTS} initialId={1}>
+        <Settings client={client} onUnauthorized={onUnauthorized} />
+      </ProjectProvider>,
+    )
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalled())
+  })
+
+  // The Install card has its own fetch, so it needs the prop passed to it
+  // explicitly -- nothing structural carries it. Without this, dropping
+  // `onUnauthorized` at that one call site leaves an expired session on
+  // this screen with the card silently swallowing the 401, and every test
+  // in `AboutSection.test.tsx` still green.
+  it('calls onUnauthorized on a 401 from the version fetch too', async () => {
+    const onUnauthorized = vi.fn()
+    const client = fakeClient({
+      meta: vi.fn(async () => {
         throw new ApiError(401, 'invalid_session')
       }),
     })

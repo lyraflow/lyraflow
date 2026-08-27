@@ -9,6 +9,7 @@ import type {
   FunnelPeopleQuery,
   FunnelRunResult,
   FunnelStep,
+  Meta,
   PreviewOptions,
   Project,
   ProjectDeletion,
@@ -64,6 +65,12 @@ export interface ApiClient {
   // (MINOR from the whole-branch review). Typing this `string` was simply
   // false for that real response shape.
   session(): Promise<{ email: string | null }>
+  /**
+   * What release this install is running, for the Settings screen's Install
+   * card. Instance-scoped like `projects()` -- "what version is this" names
+   * no project, so this must not carry the project header.
+   */
+  meta(): Promise<Meta>
   projects(): Promise<Project[]>
   // Instance-scoped like `projects()` -- "does this name collide" has no
   // project to resolve against, so this must not carry the project header.
@@ -301,6 +308,9 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
       call('/v1/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
     logout: () => call('/v1/auth/logout', { method: 'POST' }),
     session: () => call('/v1/auth/session'),
+    // No third argument, deliberately -- see `createProject` just below for
+    // the same reasoning. This route is instance-scoped.
+    meta: () => call<Meta>('/v1/meta'),
     projects: async () => (await call<{ projects: Project[] }>('/v1/projects')).projects,
     // No third argument -- deliberately. This route is instance-scoped:
     // "create a project" has no existing project to resolve, and sending
