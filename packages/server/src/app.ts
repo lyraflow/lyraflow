@@ -34,6 +34,7 @@ import { ProjectDeletionStore } from './project/deletion-store.js'
 import { purgeProject } from './project/purge.js'
 import { registerProjectRoutes } from './project/routes.js'
 import { ProjectPurgeWorker } from './project/worker.js'
+import { registerReportRoutes } from './reports/routes.js'
 import { logDroppedPartition } from './retention/logging.js'
 import { RetentionStore } from './retention/store.js'
 import { RetentionWorker } from './retention/worker.js'
@@ -399,6 +400,11 @@ export function buildApp(input: {
     pg,
     database: config.ch.database,
   })
+  // Ad hoc, unstored, and sharing the funnel routes' dependencies exactly --
+  // a retention grid scans the same table, resolves the same people and
+  // applies the same suppression, so a second set of ceilings here would be
+  // one more thing to keep in agreement.
+  registerReportRoutes(app, { authenticate, ch, pg, database: config.ch.database })
   registerSchemaRoutes(app, { authenticate, ch })
   registerProjectRoutes(app, { authenticate, pg, projects })
   // Session-only and NOT given `authenticate` -- see admin-routes.ts's own

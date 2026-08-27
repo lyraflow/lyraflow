@@ -31,7 +31,12 @@ export class SegmentTimeoutError extends Error {
  */
 export async function runCompiled<T>(
   client: ClickHouseClient,
-  compiled: CompiledQuery,
+  // `sql` and `params` only, rather than a whole `CompiledQuery`. This runs
+  // compiled retention grids too, and those carry no `warnings` -- widening
+  // the parameter to what the function actually reads is honest, where giving
+  // retention an empty `warnings` array to satisfy a type would be a field
+  // invented for the compiler rather than for a caller.
+  compiled: Pick<CompiledQuery, 'sql' | 'params'>,
 ): Promise<T[]> {
   try {
     const r = await client.query({

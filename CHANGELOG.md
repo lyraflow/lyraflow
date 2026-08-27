@@ -25,6 +25,36 @@ one fix is contained in 0.3.0.
 
 ### Added
 
+- **Retention grids** (**#72**, the retention half of the v0.2 reporting
+  line). `POST /v1/reports/retention` and a **Retention** screen: of the
+  people who did one thing in a period, how many came back and did another in
+  the periods after it. Both events are chosen — `signed_up` then
+  `project_created` is the question neither same-event retention nor pure
+  acquisition retention can ask — and `*` on either side means "any event", so
+  first-seen cohorts and any-activity returns are the same report rather than
+  two.
+
+  **An unfinished period is `null`, never `0`.** A cell is only measured once
+  its period has closed, and the grid shows a dash with a count of how many
+  cells are waiting. A retention grid that reported unfinished periods as zero
+  would show a collapse in its newest cohorts, in exactly the corner a reader
+  scans for a trend; that is the standard way this chart lies and it is the
+  decision the report's honesty rests on.
+
+  Cohorts are calendar-anchored in UTC, weeks start Monday, and a person
+  belongs to the cohort of their **first** start event inside the range and to
+  exactly one cohort per run. `since`/`until` bound who *enters*; the scan
+  runs on past `until` for as long as the last cohort needs to be measured,
+  the same entry/observation split funnels make. Person resolution, `event_id`
+  deduplication, the deletion boundary and an optional `segment_id` are all
+  the ones the funnel engine already uses.
+
+  **No stored retention reports, deliberately.** A grid is two event names, a
+  granularity and a range — small enough to live in the URL, which is how the
+  screen is shareable as a link without a store, a migration or a second set
+  of CRUD routes. No `SCHEMA_VERSION` change.
+
+
 - **Predicates can ask more than "is it equal to".** Segment conditions and
   funnel-step `where` clauses offered seven operators — equality and ordering
   — on every one of the four condition kinds. Four families join them
