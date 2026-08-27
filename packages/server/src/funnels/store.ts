@@ -189,12 +189,21 @@ function audienceEqual(a: FilterNode | undefined, b: FilterNode | undefined): bo
  * keep today's bug while looking fixed. `where` order IS significant here —
  * it is compared positionally, same as `steps` order — because this compares
  * two definitions for exact equality, not for equivalence.
+ *
+ * The field list here is HAND-WRITTEN, which is how `optional` came to be
+ * added: a new field does not join it by itself, and one that does not is
+ * ignored silently. Anything added to `FunnelStep` must be added here in the
+ * same change.
  */
 function stepsEqual(a: FunnelStep[], b: FunnelStep[]): boolean {
   if (a.length !== b.length) return false
   return a.every((stepA, i) => {
     const stepB = b[i]
     if (!stepB || stepA.event !== stepB.event) return false
+    // Normalised, because `optional` is `.optional()`: absent and `false`
+    // are the same definition, and a PATCH spelling one as the other must
+    // not clear a count that is still true.
+    if ((stepA.optional ?? false) !== (stepB.optional ?? false)) return false
     if (!audienceEqual(stepA.audience, stepB.audience)) return false
     const whereA = stepA.where ?? []
     const whereB = stepB.where ?? []
@@ -284,6 +293,16 @@ export class FunnelStore {
     // or have been written by an older build. Parsing here makes a stale
     // definition a named 400 rather than SQL compiled from something
     // unexpected.
+    //
+    // ABOVE this build's constant, not merely unparseable. Zod strips unknown
+    // keys, so a row written by a newer build parses cleanly here and
+    // silently loses whatever that build added -- `optional` was the first
+    // field where that produces a wrong NUMBER rather than a missing
+    // control. A definition this build cannot fully read is a named 400,
+    // never a quiet reinterpretation.
+    if (row.definition_version > FUNNEL_DEFINITION_VERSION) {
+      throw new StoredDefinitionError(row.definition_version)
+    }
     const parsed = StoredSteps.safeParse(row.steps)
     if (!parsed.success) throw new StoredDefinitionError(row.definition_version)
     return {
@@ -458,6 +477,18 @@ export class FunnelStore {
       if (!existingRow) {
         await client.query('ROLLBACK')
         return null
+      }
+
+      // Same upper bound as `#hydrate`, and just as necessary here: this row
+      // is parsed and diffed directly, never through `#hydrate`, and a PATCH
+      // that reaches the UPDATE below would stamp `definition_version` back
+      // DOWN to this build's constant and overwrite `steps` with a
+      // Zod-stripped, re-serialised copy -- destroying the evidence the row
+      // was ever newer, not just serving a stale read. Thrown inside this
+      // `try`, so the surrounding `catch` rolls back and `finally` releases
+      // the client exactly as any other failure here does.
+      if (existingRow.definition_version > FUNNEL_DEFINITION_VERSION) {
+        throw new StoredDefinitionError(existingRow.definition_version)
       }
 
       const parsedCurrentSteps = StoredSteps.safeParse(existingRow.steps)

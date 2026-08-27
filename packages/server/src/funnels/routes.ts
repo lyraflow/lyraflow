@@ -21,6 +21,7 @@ import { parseNumericId } from '../numeric-id.js'
 import { type WalkCursor, makeWalkCursorCodec } from '../query/walk-cursor.js'
 import { SegmentTimeoutError, runSegment } from '../segments/execute.js'
 import { SegmentStore, StoredTreeError } from '../segments/store.js'
+import { describeWindow } from './duration.js'
 import { runDropoff, runFunnel, runPeople } from './execute.js'
 import {
   DuplicateFunnelNameError,
@@ -39,6 +40,26 @@ export interface FunnelDeps {
 }
 
 const DEFAULT_RANGE_MS = 7 * 86_400_000
+
+/**
+ * The range `POST /v1/funnels` and `PATCH /v1/funnels/:id` compile against to
+ * measure a definition, discarding the SQL. See the note at the POST handler
+ * for why they compile at all.
+ *
+ * ANY range would do. The range reaches the compiled SQL as three
+ * fixed-width parameter PLACEHOLDERS (`{pN:DateTime64(3)}`), never as its
+ * literal timestamps, so the compiled byte count is the same whichever
+ * instants are passed -- which is what makes a size measured here binding on
+ * every later run, whatever range that run asks for.
+ *
+ * It is not entirely arbitrary: `compileFunnel` refuses a range whose `since`
+ * is not strictly before its `until`, so this must be a real span. A week,
+ * matching `DEFAULT_RANGE_MS`.
+ */
+const COMPILE_PROBE = {
+  range: { since: new Date(0), until: new Date(DEFAULT_RANGE_MS) },
+  now: new Date(DEFAULT_RANGE_MS),
+}
 
 /**
  * The furthest a caller may page through a funnel-step population, whether
@@ -132,7 +153,11 @@ const PeopleBody = z.object({
   // No default: `reached` (level >= step) and `dropped` (level = step) differ
   // by a factor of three on a real funnel, and whichever way a default fell,
   // the other reading is what a caller gets by accident.
-  mode: z.enum(['reached', 'dropped']),
+  //
+  // `skipped` is optional steps only: reached the required step this one
+  // branches off, and did not do this one. It is the complement of
+  // `reached` at that branch point.
+  mode: z.enum(['reached', 'dropped', 'skipped']),
   cursor: z.string().optional(),
   since: z.string().datetime().optional(),
   until: z.string().datetime().optional(),
@@ -141,6 +166,20 @@ const PeopleBody = z.object({
 /** See `numeric-id.ts`'s `parseNumericId` for the shape this enforces and why. */
 function parseId(raw: string): number | null {
   return parseNumericId(raw)
+}
+
+/**
+ * Whether a step index names an optional step. 1-indexed, matching every
+ * other `step` on these routes.
+ *
+ * The two modes it gates are refused rather than approximated: `dropped` on
+ * an optional step is "stopped exactly at a step that is not on the chain",
+ * which is not a population, and `skipped` on a required step means nothing
+ * at all. Answering either would hand back a number for a different
+ * question with full confidence.
+ */
+function stepIsOptional(steps: FunnelStep[], step: number): boolean {
+  return steps[step - 1]?.optional === true
 }
 
 export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): void {
@@ -195,7 +234,7 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
     now: Date,
     peopleAt?: {
       step: number
-      mode: 'reached' | 'dropped'
+      mode: 'reached' | 'dropped' | 'skipped'
       select: 'ids' | 'members' | 'count'
       cursor?: Cursor
     },
@@ -273,7 +312,7 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
     if (result.partial_window_entrants > 0) {
       warnings.push({
         path: 'range',
-        reason: `${result.partial_window_entrants} of the people who entered did so too recently to have had the full ${funnel.windowSeconds}-second window, and can still convert`,
+        reason: `${result.partial_window_entrants} of the people who entered did so too recently to have had the full ${describeWindow(funnel.windowSeconds)} window, and can still convert`,
       })
     }
     return {
@@ -302,6 +341,26 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
     // until someone uses it.
     try {
       validateFunnel(definition.data)
+      // And cap-valid per definition is not small enough to RUN. The
+      // definition-level caps each bound one dimension; the compiled size is
+      // chains × prefix length × per-condition size, so a definition that
+      // clears every cap can still cross `MAX_COMPILED_QUERY_BYTES` — the
+      // same trap one line up, reached the other way. Compile once and throw
+      // the SQL away.
+      //
+      // `COMPILE_PROBE`, not the caller's range: the compiled size does not
+      // depend on the range at all, and its comment says why.
+      //
+      // A LOWER BOUND, not the worst case: a `segment_id` audience is stored
+      // in another table and embeds its own SQL at run time, which this does
+      // not resolve. `compileFunnel` still guards every run, so the effect of
+      // missing it here is a late refusal, not an unguarded one.
+      compileFunnel({
+        definition: definition.data,
+        projectId: project.id,
+        database,
+        ...COMPILE_PROBE,
+      })
     } catch (err) {
       if (err instanceof FunnelValidationError) {
         return reply.code(400).send({ error: err.message, code: err.code })
@@ -366,9 +425,19 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
     })
     if (!current) return reply.code(404).send({ error: 'funnel_not_found' })
     try {
-      validateFunnel({
+      const merged = {
         steps: patch.data.steps ?? current.steps,
         window_seconds: patch.data.window_seconds ?? current.windowSeconds,
+      }
+      validateFunnel(merged)
+      // Same guard as POST, for the same reason and on the same canonical
+      // range — see the note there. A PATCH is the other way a definition
+      // that cannot compile reaches the table.
+      compileFunnel({
+        definition: merged,
+        projectId: project.id,
+        database,
+        ...COMPILE_PROBE,
       })
     } catch (err) {
       if (err instanceof FunnelValidationError) {
@@ -522,6 +591,16 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
         .send({ error: `step must be between 1 and ${funnel.steps.length}`, code: 'step' })
     }
 
+    // `/dropoff` hard-codes `mode: 'dropped'`, so on an optional step it
+    // would silently answer a different question. `/people` is the route
+    // with the vocabulary for this.
+    if (stepIsOptional(funnel.steps, body.data.step)) {
+      return reply.code(400).send({
+        error: `step ${body.data.step} is optional; use POST /v1/funnels/${id}/people with \`reached\` or \`skipped\``,
+        code: 'mode',
+      })
+    }
+
     const signingKey = walkCursors.signingKey(project)
     let walk: WalkCursor | undefined
     try {
@@ -628,6 +707,20 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
       return reply
         .code(400)
         .send({ error: `step must be between 1 and ${funnel.steps.length}`, code: 'step' })
+    }
+
+    const optionalStep = stepIsOptional(funnel.steps, body.data.step)
+    if (optionalStep && body.data.mode === 'dropped') {
+      return reply.code(400).send({
+        error: `step ${body.data.step} is optional; ask for \`reached\` or \`skipped\` rather than \`dropped\``,
+        code: 'mode',
+      })
+    }
+    if (!optionalStep && body.data.mode === 'skipped') {
+      return reply.code(400).send({
+        error: `step ${body.data.step} is required, so nobody can skip it; ask for \`reached\` or \`dropped\``,
+        code: 'mode',
+      })
     }
 
     const signingKey = peopleCursors.signingKey(project)

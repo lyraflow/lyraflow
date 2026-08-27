@@ -86,6 +86,23 @@ describe('stepLabel', () => {
     expect(label).not.toContain('!=')
     expect(label).not.toContain('<=')
   })
+
+  it('marks an optional step, the other way two funnels can read alike and measure differently', () => {
+    // Same events in the same order with step 2 optional is a DIFFERENT
+    // population -- the people who skipped it still reach step 3 -- and the
+    // funnels list renders both through this one function. The same
+    // ambiguity the predicates were added here to remove.
+    expect(stepLabel({ event: 'docs_view', optional: true })).toBe('docs_view (optional)')
+    expect(
+      stepLabel({
+        event: 'docs_view',
+        optional: true,
+        where: [{ property: 'page', operator: '=', value: 'changelog' }],
+      }),
+    ).toBe('docs_view (optional) (where page is changelog)')
+    // A required step is untouched, so the marker means what it says.
+    expect(stepLabel({ event: 'docs_view' })).toBe('docs_view')
+  })
 })
 
 describe('stepChain', () => {

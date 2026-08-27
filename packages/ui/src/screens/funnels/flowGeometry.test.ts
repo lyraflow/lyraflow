@@ -1,18 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import type { StepResult } from '../../api/types.js'
 import {
-  BAR_WIDTH,
-  LABEL_HEIGHT,
   MIN_BAR_HEIGHT,
-  PLOT_HEIGHT,
   RAMP_STEPS,
   barHeight,
-  barX,
   biggestLeak,
-  plotWidth,
+  branchSlots,
   rampIndex,
-  ribbonLabelY,
-  ribbonPath,
+  rampIndexes,
+  spineSlots,
+  spineSteps,
 } from './flowGeometry.js'
 
 const step = (over: Partial<StepResult> & { index: number }): StepResult => ({
@@ -28,9 +25,13 @@ describe('barHeight', () => {
     // The bar says "this share of everyone who entered", which is what
     // `from_start` reports. Scaling against the previous step instead would
     // draw every surviving step at full height and hide the funnel entirely.
-    expect(barHeight(100, 100)).toBe(PLOT_HEIGHT)
-    expect(barHeight(50, 100)).toBe(PLOT_HEIGHT / 2)
-    expect(barHeight(25, 100)).toBe(PLOT_HEIGHT / 4)
+    // `BAR_SCALE` is 180 and is deliberately not exported -- the plot's own
+    // height is a computed maximum now, not a constant -- so these are
+    // pinned to the literal heights rather than to a shared symbol that
+    // could be changed on both sides at once.
+    expect(barHeight(100, 100)).toBe(280)
+    expect(barHeight(50, 100)).toBe(140)
+    expect(barHeight(25, 100)).toBe(70)
   })
 
   it('never returns NaN when nobody entered', () => {
@@ -78,76 +79,6 @@ describe('rampIndex', () => {
   })
 })
 
-describe('ribbonPath', () => {
-  it('anchors both ends to the baseline so the taper is the drop-off', () => {
-    // A constant-thickness ribbon would say the loss happens AT the bar. The
-    // top edge falling from one bar's top to the next's is what draws the
-    // loss where it occurs.
-    const d = ribbonPath(PLOT_HEIGHT, PLOT_HEIGHT / 2, 0)
-    expect(d).toBe(
-      `M ${BAR_WIDTH + 28} 0 C ${(BAR_WIDTH + 28 + 128) / 2} 0, ${(BAR_WIDTH + 28 + 128) / 2} 90, 128 90 L 128 180 L ${BAR_WIDTH + 28} 180 Z`,
-    )
-  })
-
-  it('starts where the source bar ends and lands where the next one starts', () => {
-    const d = ribbonPath(100, 40, 2)
-    expect(d.startsWith(`M ${barX(2) + BAR_WIDTH} ${PLOT_HEIGHT - 100} `)).toBe(true)
-    expect(d).toContain(`${barX(3)} ${PLOT_HEIGHT - 40}`)
-  })
-
-  it('emits no NaN for a zero-entrant funnel', () => {
-    expect(ribbonPath(barHeight(0, 0), barHeight(0, 0), 0)).not.toContain('NaN')
-  })
-})
-
-describe('ribbonLabelY', () => {
-  it('centres the label on the ribbon at its own midpoint', () => {
-    // Both bars full height: the ribbon is a full-height slab, so its middle
-    // is the plot's middle, less half a line box.
-    expect(ribbonLabelY(PLOT_HEIGHT, PLOT_HEIGHT)).toBe(PLOT_HEIGHT / 2 - LABEL_HEIGHT / 2)
-  })
-
-  it('uses the mean of the two ends, which is exactly where the curve is', () => {
-    // ribbonPath's cubic has both control points at the horizontal midpoint,
-    // making its y-component a 1D Bezier with P0=P1 and P2=P3 -- so the
-    // curve at the centre IS the mean. If this drifts, the label stops
-    // sitting on the ribbon it names.
-    const from = 180
-    const to = 60
-    const topAtCentre = PLOT_HEIGHT - (from + to) / 2 // 60
-    const thickness = PLOT_HEIGHT - topAtCentre // 120
-    expect(ribbonLabelY(from, to)).toBe(topAtCentre + thickness / 2 - LABEL_HEIGHT / 2)
-  })
-
-  it('lifts the label above a ribbon too thin to hold it', () => {
-    // Two near-empty steps leave a wedge thinner than a line of text. A
-    // centred label would spill over both edges and be legible against
-    // neither the ribbon nor the surface.
-    const y = ribbonLabelY(4, 4)
-    expect(y).toBeLessThan(PLOT_HEIGHT - 4 - LABEL_HEIGHT)
-    expect(y).toBeGreaterThanOrEqual(0)
-  })
-
-  it('never returns a negative offset', () => {
-    // A negative top would push the label out of the plot and, in a
-    // scrolling card, out of view entirely.
-    expect(ribbonLabelY(PLOT_HEIGHT, PLOT_HEIGHT - 1)).toBeGreaterThanOrEqual(0)
-    expect(ribbonLabelY(0, 0)).toBeGreaterThanOrEqual(0)
-  })
-})
-
-describe('plotWidth', () => {
-  it('is one slot per step', () => {
-    expect(plotWidth(2)).toBe(200)
-    expect(plotWidth(8)).toBe(800)
-  })
-
-  it('never collapses to zero for an empty step list', () => {
-    // A zero-width viewBox makes the whole SVG undrawable rather than empty.
-    expect(plotWidth(0)).toBeGreaterThan(0)
-  })
-})
-
 describe('biggestLeak', () => {
   it('names the step that loses the largest share of the one before it', () => {
     const steps = [
@@ -190,5 +121,68 @@ describe('biggestLeak', () => {
       step({ index: 3, event: 'b', people: 25, from_previous: 0.5 }),
     ]
     expect(biggestLeak(steps, 100)?.event).toBe('a')
+  })
+})
+
+describe('geometry with optional steps', () => {
+  const s = (event: string, people: number, optional?: true): StepResult => ({
+    index: 0,
+    event,
+    people,
+    from_previous: 1,
+    from_start: 1,
+    ...(optional ? { optional, skipped: 0 } : {}),
+  })
+
+  it('excludes optional steps from the spine', () => {
+    const steps = [s('a', 10), s('b', 8), s('c', 3, true), s('d', 5)]
+    expect(spineSteps(steps).map((x) => x.event)).toEqual(['a', 'b', 'd'])
+  })
+
+  it('never names an optional step as the biggest leak', () => {
+    // Its `from_previous` is measured against the step it branches off, so a
+    // rarely-taken side branch would otherwise win a comparison it is not in.
+    const steps = [
+      { ...s('a', 100), from_previous: 1 },
+      { ...s('b', 90), from_previous: 0.9 },
+      { ...s('c', 5, true), from_previous: 0.05 },
+      { ...s('d', 40), from_previous: 0.44 },
+    ]
+    // Asserted BOTH ways on purpose. `biggestLeak` filters to the spine
+    // itself rather than trusting the caller to have done it, so a future
+    // caller handing it the raw definition list cannot reintroduce this.
+    expect(biggestLeak(steps, 100)?.event).toBe('d')
+    expect(biggestLeak(spineSteps(steps), 100)?.event).toBe('d')
+  })
+
+  it('ramps colour over the spine, and hands an optional step its branch point colour', () => {
+    // The ordinal ramp says "these are in an order". An off-spine step is
+    // not in that order, so it borrows rather than consuming a step.
+    const steps = [s('a', 10), s('b', 8), s('c', 3, true), s('d', 5)]
+    const ramp = rampIndexes(steps)
+    expect(ramp).toEqual([1, 2, 2, 3])
+  })
+
+  it('leaves a funnel with no optional steps ramping exactly as before', () => {
+    const steps = [s('a', 10), s('b', 8), s('c', 5)]
+    expect(rampIndexes(steps)).toEqual([1, 2, 3])
+    expect(spineSteps(steps)).toHaveLength(3)
+  })
+
+  it('names the definition-order slot of every spine step, so the chain spans rather than routes', () => {
+    // The pairs the chain links run between are consecutive entries HERE,
+    // not consecutive definition positions. Two optional steps in a row must
+    // still yield one pair, spanning both slots.
+    expect(spineSlots([s('a', 10), s('b', 8), s('c', 3, true), s('d', 5)])).toEqual([0, 1, 3])
+    expect(spineSlots([s('a', 10), s('b', 3, true), s('c', 2, true), s('d', 5)])).toEqual([0, 3])
+    expect(spineSlots([s('a', 10), s('b', 8)])).toEqual([0, 1])
+  })
+
+  it('hangs each optional step off the last REQUIRED step before it, never off its neighbour', () => {
+    // Two optional steps in a row both branch off the same required step --
+    // the second does NOT branch off the first, which is the denominator
+    // `levels.ts` computed its `from_previous` against.
+    const steps = [s('a', 10), s('b', 8), s('c', 3, true), s('d', 2, true), s('e', 5)]
+    expect(branchSlots(steps)).toEqual([null, null, 1, 1, null])
   })
 })

@@ -1,8 +1,8 @@
 import { useEffect, useId, useRef, useState } from 'react'
-import { ApiError } from '../../api/client.js'
-import type { ApiClient } from '../../api/client.js'
-import { Combobox } from '../../components/Combobox.js'
-import { Label } from '../../components/ui/label.js'
+import { ApiError } from '../api/client.js'
+import type { ApiClient } from '../api/client.js'
+import { Combobox } from './Combobox.js'
+import { Label } from './ui/label.js'
 
 /** How long to wait after the last keystroke before asking the server. */
 const DEBOUNCE_MS = 250

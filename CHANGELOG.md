@@ -21,6 +21,109 @@ here as it happened rather than tagged retroactively, for the same reason 0.1.0
 is: a tag created after the fact names a moment nobody could have fetched. Its
 one fix is contained in 0.3.0.
 
+## Unreleased
+
+### Added
+
+- **A funnel step can be optional.** A step marked `"optional": true` may be
+  skipped without disqualifying anyone from the steps after it —
+  **conversion is now measured over the required steps alone**, so a funnel
+  with no optional steps reports exactly what it always reported. An
+  optional step branches off the last required step before it: its result
+  carries `optional: true`, a `skipped` count — the people who reached
+  that required step and did not do this one inside the window — and a
+  `continued` count, the people who did do it and went on to the next
+  required step through it; a required step's result carries none of the
+  three. The first and last steps of a funnel still cannot be optional,
+  since they define entry and conversion, and a funnel may carry at most
+  `MAX_OPTIONAL_STEPS` (2) of them inside the existing eight-step ceiling —
+  measured, not preferred: one measured shape at three optional steps
+  compiles past ClickHouse's 262,144-byte `max_query_size` and fails
+  outright. `POST /v1/funnels/:id/people` accepts a third `mode`,
+  `"skipped"`, for optional steps only; it and `/dropoff` refuse
+  `mode: "dropped"` on an optional step and `mode: "skipped"` on a required
+  one, each with a `400` (`code: "mode"`). `definition_version` moves to 3
+  for this — a build reading a definition a newer build wrote now refuses
+  it with a `400` naming the version, on both read and write, rather than
+  silently dropping the field it does not understand and reporting a
+  smaller `converted`. **A saved funnel with three optional steps is now
+  refused at save time** under this cap; nobody has one yet, but a caller
+  scripting against the old limit will see a `400` where it used to see a
+  `201`. One that was saved before this release cannot be RENAMED either:
+  `PATCH /v1/funnels/:id` cap-checks the definition the patch would produce,
+  so a name-only patch to such a funnel returns the same `400`. Listing and
+  reading it still work — one bad row does not break the list page.
+- **A compiled funnel that is too large to run is refused before it reaches
+  ClickHouse.** Past `MAX_COMPILED_QUERY_BYTES`, every route that compiles a
+  funnel returns a `400` naming what to remove — `where` predicates, step
+  audiences, or optional steps — instead of the request reaching ClickHouse
+  and failing there with a bare syntax error. `POST /v1/funnels` and
+  `PATCH /v1/funnels/:id` compile the definition and discard the SQL for
+  exactly this reason, so a funnel that could never run is refused at save
+  time rather than saved with a `201` and then failing on every `/run`,
+  `/dropoff` and `/people` it is ever asked for. The cap bounds the failure;
+  it does not fix it
+  ([#200](https://github.com/lyraflow/lyraflow/issues/200)).
+
+- **The feed reads over a window you choose.** A range control (last hour,
+  24 hours, 7, 30 or 90 days) and an event-name filter drive the chart, the
+  accepted table and the rejections together. Before this each of the three
+  picked its own window and none of them said which: the events table sent
+  no `since` and inherited the server's 24-hour default, the rejections
+  asked for 24 hours explicitly, and the chart above them was fixed at sixty
+  minutes — so the chart and the table under it disagreed by a factor of
+  twenty-four. The range and the filter live in the URL, so a refresh keeps
+  them and the screen can be sent to someone else as a link. The poll rate
+  follows the range: three seconds for the live windows, a minute for the
+  historical ones. The rejected tab takes the window but **not** the event
+  filter, deliberately — a rejection may have been refused *because* its
+  event name is missing or unparseable, so filtering by name would hide
+  exactly the rows that tab exists for.
+- **`GET /v1/events/stats` accepts `event`.** One event name, narrowing the
+  aggregate the same way `event` already narrowed `GET /v1/events` — same
+  128-character ceiling, same semantics, and independent of `group_by`.
+  Added because the two are read together: the feed draws this aggregate
+  directly above the table `/v1/events` fills, and a filter that reached
+  only one of them would leave a chart counting everything above a table
+  showing one event.
+
+### Changed
+
+- **The funnel chart is a flow diagram, not a stack of bars.** The required
+  steps form a spine, an optional step hangs off it as a branch, and the
+  people who continued through it rejoin the spine at the next required
+  step. **Every band and every node is drawn at its own count through one
+  scale for the whole plot**, so any two widths on the chart are comparable
+  and a band does not taper. The count and rate printed on a band are the
+  true values, never scaled.
+- **A funnel's drop-off is drawn.** The people who reached a step and went
+  no further leave it as a ribbon that fades out, labelled with their count,
+  rather than being left as empty space under the bands for the reader to
+  infer. A ribbon always leaves away from the flow — downward from a
+  required step, upward from a branch — so it never crosses the paths that
+  continue.
+- **The feed's chart names what it measured.** Its resolution follows the
+  chosen range, its caption and its hover readout say which unit they are
+  in, and three marks under the plot name the window's start, middle and
+  end. Bar heights are on a **square-root scale**, stated on the chart: on a
+  ninety-day window peaking near 1,900 events in a day against a baseline
+  near 5, a linear scale floors the baseline at one pixel and eighty-five
+  days of real traffic draw as a flat line. Zero is still zero and order is
+  preserved, but a bar is no longer proportional to its count.
+- **A funnel's partial-window warning says the window in words** — "the full
+  7-day window" rather than "the full 604800-second window".
+
+### Fixed
+
+- **The feed's empty state no longer claims the project has no events.** It
+  said "No events yet" from a query that had only ever looked at one day, so
+  a project whose last event was a week old was told it had none. It names
+  the window it looked at, and the filter when one is set.
+- **The feed's chart no longer crashes on a long window.** It assumed
+  minute resolution whatever the range, so a ninety-day window built 129,600
+  buckets and the screen failed outright rather than drawing anything. Only
+  reachable once the range became a choice, in this release.
+
 ## 0.9.0 — 2026-08-22
 
 ### Added

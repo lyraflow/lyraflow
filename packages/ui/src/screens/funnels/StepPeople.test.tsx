@@ -210,3 +210,146 @@ describe('StepPeople -- seeded counts', () => {
     expect(screen.getByRole('button', { name: 'Dropped here (47)' })).toBeInTheDocument()
   })
 })
+
+describe('StepPeople on an optional step', () => {
+  const OPTIONAL_PROPS = { ...BASE_PROPS, step: 3, optional: true, event: 'video_submitted' }
+
+  it('offers the two populations a branch HAS, in the event’s own words, and never the one the server refuses', async () => {
+    // `dropped` on an optional step is a 400 (Task 8's route), so a toggle
+    // that offers it is not a wording problem -- it is a button that cannot
+    // work. And "dropped" would be wrong even if the server allowed it:
+    // nobody drops out at a branch, they carried on down the funnel.
+    const funnelPeople = vi.fn(async () => page())
+    render(<StepPeople client={fakeClient(funnelPeople)} {...OPTIONAL_PROPS} />)
+    expect(screen.getByRole('button', { name: /^did video_submitted/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^did not/i })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /dropped/i })).not.toBeInTheDocument()
+    await waitFor(() => expect(funnelPeople).toHaveBeenCalledTimes(1))
+  })
+
+  it('asks for mode `skipped`, not `dropped`, when the second option is chosen', async () => {
+    const funnelPeople = vi.fn(async () => page({ person_count: 50 }))
+    render(<StepPeople client={fakeClient(funnelPeople)} {...OPTIONAL_PROPS} />)
+    await waitFor(() => expect(funnelPeople).toHaveBeenCalledTimes(1))
+    await userEvent.click(screen.getByRole('button', { name: /^did not/i }))
+    await waitFor(() => expect(funnelPeople).toHaveBeenCalledTimes(2))
+    expect(funnelPeople).toHaveBeenNthCalledWith(2, 1, 7, {
+      step: 3,
+      mode: 'skipped',
+      since: RANGE.since,
+      until: RANGE.until,
+      cursor: undefined,
+    })
+  })
+
+  it('seeds the skipped count the same way the others are seeded', () => {
+    const funnelPeople = vi.fn(async () => page())
+    render(
+      <StepPeople
+        client={fakeClient(funnelPeople)}
+        {...OPTIONAL_PROPS}
+        seedCounts={{ reached: 30, skipped: 50 }}
+      />,
+    )
+    expect(screen.getByRole('button', { name: 'Did video_submitted (30)' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Did not (50)' })).toBeInTheDocument()
+  })
+
+  // THE 400 THIS COMPONENT EXISTS TO AVOID. `skipped` is legal on step 3 and
+  // illegal on step 4, so a mode carried across the change is a request that
+  // cannot succeed -- and it arrives as "could not load these people", with
+  // nothing on screen saying the client asked something impossible.
+  //
+  // Proved WITHOUT a remount, deliberately: `FunnelDetail` keys this
+  // component on the step, so a test that unmounts it would pass against a
+  // component with no reset at all, which is exactly the mutation this is
+  // for.
+  it('resets the mode to `reached` when the step it is asked about changes, rather than carrying an illegal one over', async () => {
+    const funnelPeople = vi.fn(async () => page())
+    const { rerender } = render(
+      <StepPeople client={fakeClient(funnelPeople)} {...OPTIONAL_PROPS} />,
+    )
+    await userEvent.click(screen.getByRole('button', { name: /^did not/i }))
+    await waitFor(() => expect(funnelPeople).toHaveBeenCalledTimes(2))
+    expect(funnelPeople).toHaveBeenNthCalledWith(
+      2,
+      1,
+      7,
+      expect.objectContaining({ mode: 'skipped' }),
+    )
+
+    rerender(
+      <StepPeople client={fakeClient(funnelPeople)} {...BASE_PROPS} step={4} event="purchase" />,
+    )
+    // The required step's own pair is back, with `reached` selected.
+    expect(screen.getByRole('button', { name: /^reached/i })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+    expect(screen.getByRole('button', { name: /^dropped here/i })).toBeInTheDocument()
+    await waitFor(() => expect(funnelPeople).toHaveBeenCalledTimes(3))
+    expect(funnelPeople).toHaveBeenNthCalledWith(3, 1, 7, {
+      step: 4,
+      mode: 'reached',
+      since: RANGE.since,
+      until: RANGE.until,
+      cursor: undefined,
+    })
+    // Asserted over EVERY call, not just the third: nothing may ever have
+    // asked step 4 for `skipped`, not even for one render.
+    // `vi.fn(async () => page())` infers a zero-argument signature, so the
+    // recorded calls come back as `[]` and every index is out of range.
+    // Widened here rather than by loosening the mock: the mock's own return
+    // type is what makes the rest of this file's fixtures type-check.
+    const calls = funnelPeople.mock.calls as unknown as [
+      number,
+      number,
+      { step: number; mode: string },
+    ][]
+    for (const call of calls) {
+      if (call[2].step === 4) expect(call[2].mode).not.toBe('skipped')
+    }
+  })
+
+  it('resets the mode when the SAME step number changes shape, which is the other way an illegal mode survives', async () => {
+    // A re-run against an edited definition can make step 3 required while
+    // the step number on screen never changes. `skipped` is then illegal on
+    // a step the reader never navigated away from.
+    const funnelPeople = vi.fn(async () => page())
+    const { rerender } = render(
+      <StepPeople client={fakeClient(funnelPeople)} {...OPTIONAL_PROPS} />,
+    )
+    await userEvent.click(screen.getByRole('button', { name: /^did not/i }))
+    await waitFor(() => expect(funnelPeople).toHaveBeenCalledTimes(2))
+
+    rerender(
+      <StepPeople
+        client={fakeClient(funnelPeople)}
+        {...BASE_PROPS}
+        step={3}
+        event="video_submitted"
+      />,
+    )
+    expect(screen.getByRole('button', { name: /^reached/i })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+    await waitFor(() => expect(funnelPeople).toHaveBeenCalledTimes(3))
+    expect(funnelPeople).toHaveBeenNthCalledWith(
+      3,
+      1,
+      7,
+      expect.objectContaining({ mode: 'reached' }),
+    )
+  })
+
+  it('leaves a required step’s toggle exactly as it was', () => {
+    // The common case must not have moved. `optional` absent is a required
+    // step, and its two labels are the ones every existing test names.
+    const funnelPeople = vi.fn(async () => page())
+    render(<StepPeople client={fakeClient(funnelPeople)} {...BASE_PROPS} />)
+    expect(screen.getByRole('button', { name: 'Reached' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Dropped here' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^did /i })).not.toBeInTheDocument()
+  })
+})

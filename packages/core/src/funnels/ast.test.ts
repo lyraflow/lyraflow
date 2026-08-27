@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { FunnelDefinition } from './ast.js'
+import { FUNNEL_DEFINITION_VERSION, FunnelDefinition, FunnelStep } from './ast.js'
 
 describe('FunnelDefinition', () => {
   it('accepts a step with no predicates', () => {
@@ -87,5 +87,24 @@ describe('FunnelDefinition', () => {
     })
     expect(nulled.success).toBe(true)
     expect(zero.success).toBe(false)
+  })
+})
+
+describe('optional steps', () => {
+  it('defaults a step to required when the field is absent', () => {
+    const parsed = FunnelStep.parse({ event: 'signed_up' })
+    expect(parsed.optional).toBeUndefined()
+  })
+
+  it('parses an explicit optional step', () => {
+    expect(FunnelStep.parse({ event: 'video_submitted', optional: true }).optional).toBe(true)
+  })
+
+  it('carries definition version 3', () => {
+    // Not because a v2 definition stops parsing -- `optional` is optional and
+    // every saved row parses byte-identically. Because a v2 READER strips the
+    // unknown key and runs every step as required, which is a wrong number
+    // with no error. The version is what lets a reader refuse.
+    expect(FUNNEL_DEFINITION_VERSION).toBe(3)
   })
 })

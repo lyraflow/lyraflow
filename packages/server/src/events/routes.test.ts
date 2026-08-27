@@ -908,6 +908,112 @@ describe('GET /v1/events/stats', () => {
     ])
   })
 
+  it('narrows to one event name, and counts only that one', async () => {
+    // The chart on the feed screen sits directly above the table
+    // `/v1/events` fills, and both are read as one answer. An event filter
+    // that reached only the table would leave a chart counting everything
+    // above a table showing one event, with nothing on the screen saying
+    // they had been asked different questions.
+    const intervalMs = 60_000
+    const bucket1 = bucketStart(Date.now() - 34 * 60_000, intervalMs)
+
+    await ch.insert({
+      table: 'events',
+      format: 'JSONEachRow',
+      values: [
+        evRowAtMs({
+          projectId: projectA,
+          eventId: uuid(300),
+          userId: 'stats-filter-user',
+          eventName: 'stats_filter_wanted',
+          atMs: bucket1 + 5_000,
+        }),
+        evRowAtMs({
+          projectId: projectA,
+          eventId: uuid(301),
+          userId: 'stats-filter-user',
+          eventName: 'stats_filter_wanted',
+          atMs: bucket1 + 10_000,
+        }),
+        evRowAtMs({
+          projectId: projectA,
+          eventId: uuid(302),
+          userId: 'stats-filter-user',
+          eventName: 'stats_filter_other',
+          atMs: bucket1 + 15_000,
+        }),
+      ],
+    })
+
+    const since = new Date(bucket1 - 1_000).toISOString()
+    const until = new Date(bucket1 + intervalMs - 1_000).toISOString()
+    const window = `since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`
+
+    // Unfiltered sees all three; the same window filtered sees only two.
+    // Both halves matter: asserting the filtered count alone would pass
+    // against a route that dropped every row it could not explain.
+    const all = await statsGet(`?interval=1m&${window}`)
+    expect(all.json().buckets).toEqual([{ bucket: new Date(bucket1).toISOString(), events: 3 }])
+
+    const filtered = await statsGet(`?interval=1m&event=stats_filter_wanted&${window}`)
+    expect(filtered.statusCode).toBe(200)
+    expect(filtered.json().buckets).toEqual([
+      { bucket: new Date(bucket1).toISOString(), events: 2 },
+    ])
+
+    // An event name nobody sent is an empty aggregate, never an error --
+    // the feed asks for whatever name is in its filter box, including one
+    // that has stopped arriving.
+    const none = await statsGet(`?interval=1m&event=stats_filter_absent&${window}`)
+    expect(none.statusCode).toBe(200)
+    expect(none.json().buckets).toEqual([])
+  })
+
+  it('filters and groups by event name together', async () => {
+    // Rejecting the combination would be a rule the caller has to learn for
+    // no reason, and `group_by` is how the chart would later split a filter
+    // across names.
+    const intervalMs = 60_000
+    const bucket1 = bucketStart(Date.now() - 37 * 60_000, intervalMs)
+
+    await ch.insert({
+      table: 'events',
+      format: 'JSONEachRow',
+      values: [
+        evRowAtMs({
+          projectId: projectA,
+          eventId: uuid(305),
+          userId: 'stats-fg-user',
+          eventName: 'stats_fg_wanted',
+          atMs: bucket1 + 5_000,
+        }),
+        evRowAtMs({
+          projectId: projectA,
+          eventId: uuid(306),
+          userId: 'stats-fg-user',
+          eventName: 'stats_fg_other',
+          atMs: bucket1 + 10_000,
+        }),
+      ],
+    })
+
+    const since = new Date(bucket1 - 1_000).toISOString()
+    const until = new Date(bucket1 + intervalMs - 1_000).toISOString()
+    const res = await statsGet(
+      `?interval=1m&group_by=event_name&event=stats_fg_wanted&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`,
+    )
+    expect(res.statusCode).toBe(200)
+    expect(res.json().buckets).toEqual([
+      { bucket: new Date(bucket1).toISOString(), event_name: 'stats_fg_wanted', events: 1 },
+    ])
+  })
+
+  it('rejects an event name past the ceiling the feed uses', async () => {
+    const res = await statsGet(`?interval=1m&event=${'x'.repeat(129)}`)
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toBe('invalid_query')
+  })
+
   // events is a ReplacingMergeTree; see the identical dedup test on
   // GET /v1/events above for why merges are stopped and the two duplicate
   // rows are two SEPARATE ch.insert() calls rather than one — a single

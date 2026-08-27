@@ -1,11 +1,13 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { userEvent } from '@testing-library/user-event'
+import { MemoryRouter, useLocation, useNavigate } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import type { ApiClient } from '../api/client.js'
 import { ApiError } from '../api/client.js'
 import { ProjectProvider } from '../app/ProjectContext.js'
 import { DEFAULT_POLL_INTERVAL_MS, Feed } from './Feed.js'
+import { HISTORICAL_POLL_MS } from './feed/range.js'
 
 /** The fields `GET /v1/events` sends for an event that carried none of the
  * optional context -- spelled out once so a fixture below can override only
@@ -91,7 +93,17 @@ function fakeClient(over: { events?: typeof EVENTS } = {}) {
       next_offset: REJECTIONS.length,
     })),
     stats: vi.fn(async () => ({ buckets: BUCKETS })),
-  } as unknown as ApiClient & { events: Mock; rejections: Mock; stats: Mock }
+    /* The filter bar's event field reads the project's event catalogue on
+     * mount. Stubbed here rather than left off: without it every test on
+     * this screen dies inside `EventCombobox` with `client.schemaEvents is
+     * not a function`, which says nothing about the feed. */
+    schemaEvents: vi.fn(async () => ['signup', 'checkout']),
+  } as unknown as ApiClient & {
+    events: Mock
+    rejections: Mock
+    stats: Mock
+    schemaEvents: Mock
+  }
 }
 
 /** Succeeds once, then fails — for the "keeps its rows on error" test. */
@@ -180,58 +192,60 @@ function failingRejectionsAfterFirstCall() {
   return c
 }
 
+/** The two projects every test on this screen renders with. Module level so a
+ * test that builds its own tree -- to add a probe, or its own router entry --
+ * uses the same fixture rather than a copy that can drift from it. */
+const PROJECTS = [
+  {
+    id: 1,
+    name: 'Alpha',
+    slug: 'alpha',
+    created_at: '',
+    retention_months: 24,
+    monthly_event_quota: null,
+    disabled_at: null,
+    deleting_at: null,
+  },
+  {
+    id: 2,
+    name: 'Beta',
+    slug: 'beta',
+    created_at: '',
+    retention_months: 24,
+    monthly_event_quota: null,
+    disabled_at: null,
+    deleting_at: null,
+  },
+]
+
 function renderFeed(
   opts: {
     client?: ReturnType<typeof fakeClient>
     projectId?: number
     pollIntervalMs?: number
     onUnauthorized?: () => void
+    /** The URL the feed opens at. The range and the event filter live in the
+     * query string now, so a test that wants either has to arrive with it
+     * the way a refresh or a shared link does. */
+    url?: string
   } = {},
 ) {
   const client = opts.client ?? fakeClient()
-  const projects = [
-    {
-      id: 1,
-      name: 'Alpha',
-      slug: 'alpha',
-      created_at: '',
-      retention_months: 24,
-      monthly_event_quota: null,
-      disabled_at: null,
-      deleting_at: null,
-    },
-    {
-      id: 2,
-      name: 'Beta',
-      slug: 'beta',
-      created_at: '',
-      retention_months: 24,
-      monthly_event_quota: null,
-      disabled_at: null,
-      deleting_at: null,
-    },
-  ]
-  const view = render(
-    <ProjectProvider projects={projects} initialId={opts.projectId ?? 1}>
-      <Feed
-        client={client}
-        pollIntervalMs={opts.pollIntervalMs}
-        onUnauthorized={opts.onUnauthorized}
-      />
-    </ProjectProvider>,
+  const tree = (id: number) => (
+    <MemoryRouter initialEntries={[opts.url ?? '/feed']}>
+      <ProjectProvider projects={PROJECTS} initialId={id}>
+        <Feed
+          client={client}
+          pollIntervalMs={opts.pollIntervalMs}
+          onUnauthorized={opts.onUnauthorized}
+        />
+      </ProjectProvider>
+    </MemoryRouter>
   )
+  const view = render(tree(opts.projectId ?? 1))
   return {
     client,
-    rerenderWithProject: (id: number) =>
-      view.rerender(
-        <ProjectProvider projects={projects} initialId={id}>
-          <Feed
-            client={client}
-            pollIntervalMs={opts.pollIntervalMs}
-            onUnauthorized={opts.onUnauthorized}
-          />
-        </ProjectProvider>,
-      ),
+    rerenderWithProject: (id: number) => view.rerender(tree(id)),
   }
 }
 
@@ -310,12 +324,321 @@ describe('Feed', () => {
     expect(client.events.mock.calls[0]?.[1]).toHaveProperty('limit')
   })
 
-  // Matrix row 1 (no data, no error): the only case where "No events yet"
-  // is an honest thing to say.
+  describe('range and filter', () => {
+    const argsOf = (m: Mock, call = 0) => m.mock.calls[call]?.[1]
+
+    it('sends ONE window to all three polls', async () => {
+      // The defect this whole control set exists for. The events poll used
+      // to send no `since` at all and inherit the server's 24-hour default,
+      // the rejections poll asked for 24 hours explicitly, and the chart
+      // above them was hard-coded to sixty minutes -- so the chart and the
+      // table under it disagreed by a factor of twenty-four, permanently,
+      // with nothing on the screen saying so.
+      const client = fakeClient()
+      renderFeed({ client })
+      await waitFor(() => expect(client.stats).toHaveBeenCalled())
+      const e = argsOf(client.events)
+      const r = argsOf(client.rejections)
+      const st = argsOf(client.stats)
+      for (const q of [e, r, st]) {
+        expect(q.since).toEqual(expect.any(String))
+        expect(q.until).toEqual(expect.any(String))
+      }
+      // Within a second of each other: each poll resolves the window at its
+      // own call time, so they are not byte-identical and must not be
+      // asserted as such.
+      const spans = [e, r, st].map((q) => new Date(q.until).getTime() - new Date(q.since).getTime())
+      for (const span of spans) expect(Math.abs(span - 24 * 3_600_000)).toBeLessThan(2000)
+      // ...and it ENDS NOW. The span alone is satisfied by any 24 hours in
+      // history -- found by mutation, with a window frozen at the epoch --
+      // and a feed showing a correct-width window of last year is worse
+      // than one showing nothing.
+      for (const q of [e, r, st]) {
+        expect(Math.abs(Date.now() - new Date(q.until).getTime())).toBeLessThan(5000)
+      }
+    })
+
+    it('re-asks all three polls when the range changes, with the new span', async () => {
+      const client = fakeClient()
+      renderFeed({ client })
+      await waitFor(() => expect(client.stats).toHaveBeenCalled())
+
+      await userEvent.selectOptions(screen.getByTestId('feed-range'), '7d')
+
+      await waitFor(() => {
+        const q = client.events.mock.calls.at(-1)?.[1]
+        const span = new Date(q.until).getTime() - new Date(q.since).getTime()
+        expect(Math.abs(span - 7 * 24 * 3_600_000)).toBeLessThan(2000)
+      })
+      for (const m of [client.rejections, client.stats]) {
+        const q = m.mock.calls.at(-1)?.[1]
+        const span = new Date(q.until).getTime() - new Date(q.since).getTime()
+        expect(Math.abs(span - 7 * 24 * 3_600_000)).toBeLessThan(2000)
+      }
+    })
+
+    it('sends the resolution the chosen span requires, not a fixed one', async () => {
+      // `1m` at 24 hours is 1440 buckets against a server cap of 1000 -- an
+      // unconditional 400. The pairing is the reason range and interval are
+      // one choice rather than two.
+      const client = fakeClient()
+      renderFeed({ client })
+      await waitFor(() => expect(client.stats).toHaveBeenCalled())
+      expect(argsOf(client.stats).interval).toBe('1h')
+
+      await userEvent.selectOptions(screen.getByTestId('feed-range'), '1h')
+      await waitFor(() => expect(client.stats.mock.calls.at(-1)?.[1].interval).toBe('1m'))
+
+      await userEvent.selectOptions(screen.getByTestId('feed-range'), '90d')
+      await waitFor(() => expect(client.stats.mock.calls.at(-1)?.[1].interval).toBe('1d'))
+    })
+
+    it('sends the event filter to the chart AND the table, together', async () => {
+      // Half of this is why the server grew an `event` parameter on stats.
+      // A filter reaching only the table leaves a chart counting everything
+      // above a table showing one event, with nothing saying they were
+      // asked different questions.
+      const client = fakeClient()
+      renderFeed({ client })
+      await waitFor(() => expect(client.stats).toHaveBeenCalled())
+      expect(argsOf(client.events).event).toBeUndefined()
+      expect(argsOf(client.stats).event).toBeUndefined()
+
+      await userEvent.type(screen.getByLabelText(/filter by event/i), 'checkout')
+      await waitFor(() => expect(client.events.mock.calls.at(-1)?.[1].event).toBe('checkout'))
+      expect(client.stats.mock.calls.at(-1)?.[1].event).toBe('checkout')
+    })
+
+    it('never filters the REJECTED tab by event name', async () => {
+      // A rejection is a payload the server refused, and the reason may be
+      // that its event name is missing or unparseable. Filtering this tab by
+      // name would hide exactly the rows an operator opened it for.
+      const client = fakeClient()
+      renderFeed({ client })
+      await userEvent.type(screen.getByLabelText(/filter by event/i), 'checkout')
+      await waitFor(() => expect(client.events.mock.calls.at(-1)?.[1].event).toBe('checkout'))
+
+      // FORCING A FRESH REJECTIONS CALL, and without this the test proved
+      // nothing -- found by mutation. The rejections poll does not depend on
+      // the filter, so it does not re-fire when one is typed, and its last
+      // call was made before the filter existed. Changing the range is a
+      // dependency it DOES have, so this re-polls it with the filter set.
+      const callsBefore = client.rejections.mock.calls.length
+      await userEvent.selectOptions(screen.getByTestId('feed-range'), '7d')
+      await waitFor(() => expect(client.rejections.mock.calls.length).toBeGreaterThan(callsBefore))
+      for (const call of client.rejections.mock.calls) {
+        expect(call[1].event).toBeUndefined()
+      }
+    })
+
+    it('clears the filter back to no parameter, not to an empty name', async () => {
+      // `''` and "absent" are different requests: one asks for events named
+      // nothing, the other asks for all of them.
+      const client = fakeClient()
+      renderFeed({ client })
+      await userEvent.type(screen.getByLabelText(/filter by event/i), 'checkout')
+      await waitFor(() => expect(client.events.mock.calls.at(-1)?.[1].event).toBe('checkout'))
+      await userEvent.click(screen.getByTestId('feed-clear-event'))
+      await waitFor(() => expect(client.events.mock.calls.at(-1)?.[1].event).toBeUndefined())
+    })
+
+    it('slows the poll down on a range nobody can watch change', async () => {
+      // Re-scanning ninety days every three seconds asks an expensive
+      // question twenty times a minute and answers it with a number that
+      // cannot visibly move.
+      //
+      // `fireEvent.change` rather than `userEvent` OR a hand-assigned
+      // `select.value`, and both alternatives were tried. Assigning the
+      // value directly does not move the range at all: React tracks an
+      // input's value on the node and treats a direct assignment as no
+      // change, so the dispatched event is swallowed and a build ignoring
+      // `range.pollMs` passed -- found by mutation. `userEvent` goes through
+      // the tracker correctly but waits on real delays it cannot take from
+      // frozen timers, and hangs. `fireEvent` uses the native setter and
+      // needs no clock.
+      vi.useFakeTimers()
+      try {
+        const client = fakeClient()
+        renderFeed({ client })
+        await vi.advanceTimersByTimeAsync(0)
+        const live = client.events.mock.calls.length
+        await vi.advanceTimersByTimeAsync(DEFAULT_POLL_INTERVAL_MS * 2)
+        expect(client.events.mock.calls.length).toBeGreaterThan(live)
+
+        fireEvent.change(screen.getByTestId('feed-range'), { target: { value: '90d' } })
+        await vi.advanceTimersByTimeAsync(0)
+        // No `waitFor` inside a fake-timer block: it polls on the very
+        // timers that are frozen, so it can only ever time out. Advancing
+        // explicitly is both the fix and the more precise assertion.
+        expect(client.stats.mock.calls.at(-1)?.[1].interval).toBe('1d')
+
+        // The switch itself re-polls; the question is the cadence AFTER it.
+        const before = client.events.mock.calls.length
+        await vi.advanceTimersByTimeAsync(DEFAULT_POLL_INTERVAL_MS * 2)
+        expect(client.events.mock.calls.length).toBe(before)
+        // ...and it does still poll, just far less often -- a cadence of
+        // "never" would also satisfy the line above.
+        await vi.advanceTimersByTimeAsync(HISTORICAL_POLL_MS)
+        expect(client.events.mock.calls.length).toBeGreaterThan(before)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('opens on the range and filter the URL carries, not on the defaults', async () => {
+      // A REFRESH IS THIS TEST. The window and the filter live in the query
+      // string, so reloading the page arrives here exactly as a shared link
+      // does -- there is no separate restore path that could rot.
+      const client = fakeClient()
+      renderFeed({ client, url: '/feed?range=7d&event=checkout' })
+      await waitFor(() => expect(client.stats).toHaveBeenCalled())
+      const q = client.events.mock.calls[0]?.[1]
+      const span = new Date(q.until).getTime() - new Date(q.since).getTime()
+      expect(Math.abs(span - 7 * 24 * 3_600_000)).toBeLessThan(2000)
+      expect(q.event).toBe('checkout')
+      // ...and the controls show it, or the polls and the screen disagree.
+      expect((screen.getByTestId('feed-range') as HTMLSelectElement).value).toBe('7d')
+      expect((screen.getByLabelText(/filter by event/i) as HTMLInputElement).value).toBe('checkout')
+    })
+
+    it('writes the chosen range and filter into the URL, keeping anything else there', async () => {
+      // Reads the ACTUAL location through a probe rather than inferring it
+      // from the polls. Without this the Feed-level tests could not see the
+      // URL at all, and a build that rebuilt the query string from scratch --
+      // dropping every parameter this screen does not own -- passed all of
+      // them. Nothing else is in the feed's query string today, which is
+      // exactly why the regression would land silently.
+      let url = ''
+      function Probe() {
+        url = useLocation().search
+        return null
+      }
+      const client = fakeClient()
+      render(
+        <MemoryRouter initialEntries={['/feed?keep=me']}>
+          <ProjectProvider projects={PROJECTS} initialId={1}>
+            <Probe />
+            <Feed client={client} />
+          </ProjectProvider>
+        </MemoryRouter>,
+      )
+      await waitFor(() => expect(client.stats).toHaveBeenCalled())
+
+      await userEvent.selectOptions(screen.getByTestId('feed-range'), '30d')
+      await waitFor(() => expect(new URLSearchParams(url).get('range')).toBe('30d'))
+      await userEvent.type(screen.getByLabelText(/filter by event/i), 'signup')
+      await waitFor(() => expect(new URLSearchParams(url).get('event')).toBe('signup'))
+      expect(new URLSearchParams(url).get('keep')).toBe('me')
+
+      // Back to the default range: the parameter goes away entirely rather
+      // than being written out as the value it already defaults to.
+      await userEvent.selectOptions(screen.getByTestId('feed-range'), '24h')
+      await waitFor(() => expect(new URLSearchParams(url).has('range')).toBe(false))
+      expect(new URLSearchParams(url).get('keep')).toBe('me')
+    })
+
+    it('puts a chosen range and filter INTO the URL', async () => {
+      const client = fakeClient()
+      renderFeed({ client })
+      await waitFor(() => expect(client.stats).toHaveBeenCalled())
+      await userEvent.selectOptions(screen.getByTestId('feed-range'), '30d')
+      await userEvent.type(screen.getByLabelText(/filter by event/i), 'signup')
+      // `MemoryRouter` keeps its history in memory rather than in
+      // `window.location`, so the URL itself is not readable here -- the
+      // round trip through it is pinned directly in `params.test.ts`, and
+      // what this test owns is that the controls and the polls both follow.
+      await waitFor(() => expect(client.events.mock.calls.at(-1)?.[1].event).toBe('signup'))
+      expect((screen.getByTestId('feed-range') as HTMLSelectElement).value).toBe('30d')
+      expect(client.stats.mock.calls.at(-1)?.[1].interval).toBe('1d')
+    })
+
+    it('survives a remount at the same URL, which is what a refresh is', async () => {
+      const client = fakeClient()
+      const first = renderFeed({ client, url: '/feed?range=90d&event=purchase' })
+      await waitFor(() => expect(client.stats).toHaveBeenCalled())
+      expect(client.stats.mock.calls[0]?.[1].interval).toBe('1d')
+      first.client.stats.mockClear()
+
+      // A fresh mount at the same address -- no shared state, no context
+      // carried over. Anything held only in `useState` is gone by here.
+      renderFeed({ client, url: '/feed?range=90d&event=purchase' })
+      await waitFor(() => expect(client.stats).toHaveBeenCalled())
+      const q = client.stats.mock.calls.at(-1)?.[1]
+      expect(q.interval).toBe('1d')
+      expect(q.event).toBe('purchase')
+    })
+
+    it('does not bury the page behind one history entry per keystroke', async () => {
+      // The event field writes on every character. Pushing would put six
+      // entries between the operator and wherever they came from, so Back
+      // walks backwards through their own typing instead of leaving the
+      // screen. Found by mutation: nothing asserted this, and flipping
+      // `replace` to `false` passed the whole suite.
+      let go: ReturnType<typeof useNavigate> | null = null
+      function Probe() {
+        go = useNavigate()
+        return null
+      }
+      const client = fakeClient()
+      render(
+        <MemoryRouter initialEntries={['/feed']}>
+          <ProjectProvider projects={PROJECTS} initialId={1}>
+            <Probe />
+            <Feed client={client} />
+          </ProjectProvider>
+        </MemoryRouter>,
+      )
+      const field = screen.getByLabelText(/filter by event/i) as HTMLInputElement
+      await userEvent.type(field, 'signup')
+      await waitFor(() => expect(field.value).toBe('signup'))
+
+      await act(async () => {
+        ;(go as unknown as ReturnType<typeof useNavigate>)(-1)
+      })
+      // One step back must not land on a half-typed filter. With `replace`
+      // the entry was never added, so there is nowhere to go and the value
+      // stands; with `push` this reads "signu".
+      expect(field.value).not.toBe('signu')
+    })
+
+    it('ignores a range the option list has never heard of', async () => {
+      // A hand-edited or stale link must open the feed, not break it.
+      const client = fakeClient()
+      renderFeed({ client, url: '/feed?range=42y' })
+      await waitFor(() => expect(client.stats).toHaveBeenCalled())
+      expect((screen.getByTestId('feed-range') as HTMLSelectElement).value).toBe('24h')
+    })
+
+    it('names the window it looked at, and never claims the project is empty', async () => {
+      // THE REPORTED DEFECT. "No events yet" is a claim about the project,
+      // made by a query that only ever saw one window -- an operator with
+      // eight-day-old data was told he had none, with no hint that a range
+      // control was the remedy.
+      const client = fakeClient({ events: [] })
+      renderFeed({ client })
+      const empty = await screen.findByTestId('accepted-empty')
+      expect(empty.textContent).toMatch(/last 24 hours/i)
+      expect(empty.textContent).not.toMatch(/yet/i)
+      expect(screen.getByText(/wider range/i)).toBeInTheDocument()
+    })
+
+    it('names the FILTER too when one is set, and offers clearing it', async () => {
+      const client = fakeClient({ events: [] })
+      renderFeed({ client })
+      await userEvent.type(screen.getByLabelText(/filter by event/i), 'checkout')
+      await waitFor(() =>
+        expect(screen.getByTestId('accepted-empty').textContent).toMatch(/checkout/),
+      )
+      expect(screen.getByText(/clear the filter/i)).toBeInTheDocument()
+    })
+  })
+
+  // Matrix row 1 (no data, no error): the only case where an empty state is
+  // an honest thing to show at all. WHAT it says is pinned separately below.
   it('shows an empty state rather than a blank table', async () => {
     const client = fakeClient({ events: [] })
     renderFeed({ client })
-    expect(await screen.findByText(/no events yet/i)).toBeInTheDocument()
+    expect(await screen.findByTestId('accepted-empty')).toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     // Fix round 2 on #82: the asymmetric half of the badge fix. A confirmed
     // zero (the events poll succeeded and returned nothing) must show a

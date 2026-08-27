@@ -1,8 +1,8 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
-import { ApiError } from '../../api/client.js'
-import type { ApiClient } from '../../api/client.js'
+import { ApiError } from '../api/client.js'
+import type { ApiClient } from '../api/client.js'
 import { EventCombobox } from './EventCombobox.js'
 
 describe('EventCombobox', () => {

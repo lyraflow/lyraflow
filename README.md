@@ -319,8 +319,17 @@ Past the wizard (or immediately, if a project already exists), there are four
 screens, reachable from the sidebar:
 
 - **Feed** — a live event feed, split into an **Accepted** tab and a
-  **Rejected** tab. Rejected events carry the reason they were dropped next
-  to each row — `validation_failed`, `too_many_properties`,
+  **Rejected** tab, over a window you pick — the last hour through the last
+  90 days — with an optional event-name filter. The window and the filter are
+  held in the URL, so a refresh keeps them and the screen can be shared as a
+  link; the page polls every few seconds on the short windows and once a
+  minute on the long ones. The chart above the tables counts events per
+  bucket over the same window, at the finest resolution that window allows.
+  The event filter reaches the chart and the Accepted tab but **not** the
+  Rejected one: a payload may have been refused precisely because its event
+  name was missing or unparseable, so filtering the rejections by name would
+  hide the rows that tab exists for. Rejected events carry the reason they
+  were dropped next to each row — `validation_failed`, `too_many_properties`,
   `event_name_cardinality` or `property_key_cardinality` — which is
   otherwise only visible by reading server logs. An unauthenticated or
   over-quota request is refused *before* it reaches a project at all, so it
@@ -355,7 +364,7 @@ screens, reachable from the sidebar:
 
   Click a step and a Reached/Dropped panel opens beneath the chart — two
   different populations, each counted on its own rather than assumed from the
-  bar above (see *Who reached a step, or stopped there* under Funnels below).
+  chart above (see *Who reached a step, or stopped there* under Funnels below).
 
 - **Segments** — build a filter tree in the browser: `and`/`or` groups, traits,
   context, lifecycle bounds, and behaviours with their own `where` predicates.
@@ -1678,6 +1687,100 @@ above, not by `MAX_FUNNEL_BEHAVIOR_NODES`.
 
 Two steps minimum, eight maximum.
 
+### Optional steps
+
+A step can carry `"optional": true`. Absent means required — which is what
+every step was before this, so an existing funnel with no optional steps
+reports exactly what it always reported.
+
+```json
+"steps": [
+  { "event": "$page" },
+  { "event": "signed_up" },
+  { "event": "subscription_started" },
+  { "event": "video_submitted", "optional": true },
+  { "event": "subscription_canceled" }
+]
+```
+
+Someone who skips `video_submitted` still counts at `subscription_canceled` —
+an optional step does not disqualify anyone from the steps after it.
+**Conversion is measured over the required steps only.**
+
+An optional step branches off the last **required** step before it, not off
+whatever step precedes it in the definition — two optional steps back to
+back both branch from the same required step, not from each other. Its
+`from_previous` is a share of that branch point's population, not of the
+step written just above it. Its result carries `optional: true`, a
+`skipped` count — the people who reached the branch point and did not do
+this step inside the window — and a `continued` count: of the people who
+*did* reach this step, how many went on to the next required step through
+it. `people` is the leg into the step and `continued` is the leg out of it;
+the gap between them is this step's own drop-off. A required step's result
+carries none of the three.
+
+**The first and last steps cannot be optional.** Step 1 defines entry — it
+is what bounds who enters within the range — and the last step defines
+conversion; making either optional leaves both undefined.
+
+The funnel chart in the [Web UI](#web-ui) draws all of this as a flow
+diagram, not a stack of bars: the required steps form a spine, an optional
+step hangs off it as a branch, and the people counted in `continued` rejoin
+the spine at the next required step — a fork that rejoins, the same shape
+described above.
+
+**What the widths mean.** Every node and every band is drawn on **one
+scale**, set by the number of people who entered. A given thickness means the
+same number of people wherever it appears, so bands are comparable to each
+other and to the nodes they touch, anywhere on the chart.
+
+Two things follow, and both are the point rather than side effects.
+
+**The space under a node's bands is its drop-off.** A node holding 800 people
+whose outgoing bands carry 500 of them leaves 300 people's worth of its edge
+empty, and that gap is drawn where the loss happened.
+
+**Bands can run past a node, and that means something too.** Someone who does
+an optional step *after* a later step is counted on both legs leaving the step
+before it — genuinely on two paths, because the funnel cannot tell which came
+first. Where that happens the stack extends past the node's own edge, and the
+node's caption names the number: `3 counted twice`. It is the same
+`windowFunnel` limit documented above under ordering, seen from the chart.
+
+An earlier version scaled each node's bands to fill its edge exactly. The
+geometry always added up, at the cost of both readings above: a width meant
+something only against the one node it touched, and a node's edge was always
+fully covered — so a funnel that converts everyone drew as a solid rectangle
+with no space anywhere in it.
+
+A funnel may have up to `MAX_OPTIONAL_STEPS` (2) optional steps, inside the
+same eight-step ceiling as before. Each optional step costs two extra
+`windowFunnel` chains, and both copy the SQL text of every condition before
+them — one measured shape at three optional steps compiles past ClickHouse's
+262,144-byte `max_query_size` and fails outright, which is why the limit is 2
+and not 3.
+
+A funnel that compiles past that same limit some other way — enough `where`
+predicates or step audiences, even with two or fewer optional steps — is
+refused with a `400` before it ever reaches ClickHouse, naming what to
+remove: predicates, audiences, or optional steps. That cap bounds the
+failure; it does not fix it —
+[#200](https://github.com/lyraflow/lyraflow/issues/200) tracks compiling this
+down instead of capping it.
+
+**The limit worth knowing before you rely on this:** an optional step counts
+any time after the required step before it and inside the window —
+*including after a later step*. Someone who cancels and then submits a video
+afterward is still counted as having done the optional step.
+`windowFunnel` reports a chain length, not the instants it matched at, so
+"step 4 happened before step 5" is not a question this can answer without a
+different query shape. That is also why the two bands leaving a branch point
+on the chart do not have to sum to the branch point's own count: someone who
+does the optional step *after* the required step it feeds into is counted on
+both legs leaving that branch point — once heading into the optional step,
+once heading straight past it on the required chain — the same
+order-blindness, seen from the chart instead of from `/dropoff`.
+
 ### The three clocks
 
 This is the part worth reading twice, because getting it wrong makes a funnel
@@ -1818,6 +1921,11 @@ already scripts against it never sees a difference. It is not two ways of
 doing one thing: `/people` is the general endpoint, and `/dropoff` is the one
 call it happens to always make (`mode: "dropped"`).
 
+On an **optional** step, `/dropoff` is refused with a `400` — skipping a step
+means never stopping there, so "stopped exactly here" is not a population an
+optional step has. The error points the caller at `/people`, where `reached`
+or `skipped` are the two readings that mean something.
+
 ### Who reached a step, or stopped there
 
 ```sh
@@ -1832,6 +1940,15 @@ everyone who got at least that far) and `dropped` (`level = step`, everyone
 who stopped exactly there) differ by a factor of three on a real funnel, and
 whichever way a default fell, the other reading is what a caller would get by
 accident.
+
+A third mode, `skipped`, exists for **optional steps only** — the people who
+reached the required step this one branches off and did not do this step
+inside the window, the same count the run response's `skipped` field gives
+for that step. Asking for `mode: "dropped"` on an optional step is refused
+with a `400` (`code: "mode"`): skipping it means never stopping there, so
+that reading is not a population an optional step has. Asking for
+`mode: "skipped"` on a required step is refused the same way — nobody can
+skip a required step, so the mode means nothing there.
 
 `reached` is the population behind the number on the chart: step N's `people`
 in the run response above is exactly this count, at whatever instant the run
@@ -1998,7 +2115,12 @@ is present on a bucket **only** when grouping was requested:
 | `since` | ISO 8601 datetime |
 | `until` | ISO 8601 datetime, defaults to now |
 | `interval` | `1m`, `1h`, or `1d`; default `1h` |
+| `event` | one event name, at most 128 characters |
 | `group_by` | only `event_name` is accepted |
+
+`event` narrows the aggregate to a single event name, exactly as it does on
+`GET /v1/events`, and works with or without `group_by`. It is applied before
+the counts are grouped, so it narrows the scan rather than the result.
 
 **There is a hard cap of 1,000 buckets per request.** This route sums groups
 server-side rather than paging rows, so unlike the feed it has no `limit` to

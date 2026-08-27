@@ -126,10 +126,18 @@ export function formatRelative(iso: string, now: Date): string {
  * leaves a reader no marker for where step 1's predicates stop, and a
  * summary that can be misread is worse than none -- acting on the wrong
  * population looks exactly like acting on the right one.
+ *
+ * `(optional)` for the same reason the predicates are here at all: two
+ * funnels whose steps differ only in which one is optional measure
+ * different populations and would otherwise render as the same row. It
+ * follows the event and precedes the `where` clause, matching the order the
+ * flow chart's own `aria-label` reads a step in -- `page_view (optional)
+ * (where page is changelog)`.
  */
 export function stepLabel(step: FunnelStep): string {
-  if (step.where == null || step.where.length === 0) return step.event
-  return `${step.event} (where ${wherePhrase(step.where)})`
+  const name = step.optional === true ? `${step.event} (optional)` : step.event
+  if (step.where == null || step.where.length === 0) return name
+  return `${name} (where ${wherePhrase(step.where)})`
 }
 
 /** A funnel's steps as one line, in order. */

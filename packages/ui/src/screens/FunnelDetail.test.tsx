@@ -1372,3 +1372,163 @@ describe('FunnelDetail — step selection wires the people panel', () => {
     expect(screen.getByRole('button', { name: 'Reached (2,000)' })).toBeInTheDocument()
   })
 })
+
+// Task 9: an optional step's people panel is a different pair of questions,
+// and the drop count for the step AFTER one is measured against the previous
+// REQUIRED step rather than against the branch sitting between them.
+describe('FunnelDetail — an optional step seeds a different pair of counts', () => {
+  function branchedFunnel(): Funnel {
+    return {
+      ...FUNNEL,
+      steps: [
+        { event: 'signup' },
+        { event: 'onboarded' },
+        { event: 'video_submitted', optional: true },
+        { event: 'purchase' },
+      ],
+    }
+  }
+
+  function branchedRun(): FunnelRunResult {
+    return {
+      entered: 100,
+      converted: 40,
+      conversion_rate: 0.4,
+      partial_window_entrants: 0,
+      range: { since: '2026-08-08T00:00:00.000Z', until: '2026-08-15T00:00:00.000Z' },
+      as_of: '2026-08-15T11:58:00.000Z',
+      warnings: [],
+      steps: [
+        { index: 1, event: 'signup', people: 100, from_previous: 1, from_start: 1 },
+        { index: 2, event: 'onboarded', people: 80, from_previous: 0.8, from_start: 0.8 },
+        {
+          index: 3,
+          event: 'video_submitted',
+          people: 30,
+          from_previous: 0.375,
+          from_start: 0.3,
+          optional: true,
+          skipped: 50,
+        },
+        { index: 4, event: 'purchase', people: 40, from_previous: 0.5, from_start: 0.4 },
+      ],
+    }
+  }
+
+  const pending = () => vi.fn(() => new Promise<never>(() => {}))
+
+  function renderBranched() {
+    const client = fakeClient({
+      funnel: vi.fn(async () => branchedFunnel()),
+      runFunnel: vi.fn(async () => branchedRun()),
+      funnelPeople: pending(),
+    })
+    renderDetail(client)
+    return client
+  }
+
+  it("seeds a required step's dropped count against the next REQUIRED step, not against the branch between them", async () => {
+    // steps[2] is the branch (30 people). Reading it would seed 80 - 30 =
+    // 50, and the number is plausible -- it happens to equal `skipped`,
+    // which is exactly the sort of coincidence that makes a wrong formula
+    // survive review. The right count is 80 - 40 = 40.
+    renderBranched()
+    await screen.findByTestId('funnel-step-1')
+    await userEvent.click(screen.getByTestId('funnel-step-2'))
+    expect(screen.getByRole('button', { name: 'Reached (80)' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Dropped here (40)' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Dropped here (50)' })).toBeNull()
+  })
+
+  it('offers a branch its own two questions, seeded from the run, and never asks the server for a mode it refuses', async () => {
+    const client = renderBranched()
+    await screen.findByTestId('funnel-step-1')
+    await userEvent.click(screen.getByTestId('funnel-step-3'))
+    expect(screen.getByRole('button', { name: 'Did video_submitted (30)' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Did not (50)' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /dropped/i })).toBeNull()
+    await waitFor(() =>
+      expect(client.funnelPeople).toHaveBeenCalledWith(
+        1,
+        FUNNEL.id,
+        expect.objectContaining({ step: 3, mode: 'reached' }),
+      ),
+    )
+    for (const call of client.funnelPeople.mock.calls) {
+      expect((call[2] as { mode: string }).mode).not.toBe('dropped')
+    }
+  })
+
+  it('moving from the branch to a required step never asks for `skipped`, which that step would refuse', async () => {
+    const client = renderBranched()
+    await screen.findByTestId('funnel-step-1')
+    await userEvent.click(screen.getByTestId('funnel-step-3'))
+    await userEvent.click(screen.getByRole('button', { name: /^did not/i }))
+    await waitFor(() =>
+      expect(client.funnelPeople).toHaveBeenCalledWith(
+        1,
+        FUNNEL.id,
+        expect.objectContaining({ step: 3, mode: 'skipped' }),
+      ),
+    )
+
+    await userEvent.click(screen.getByTestId('funnel-step-4'))
+    expect(screen.getByRole('button', { name: /^reached/i })).toBeInTheDocument()
+    await waitFor(() =>
+      expect(client.funnelPeople).toHaveBeenCalledWith(
+        1,
+        FUNNEL.id,
+        expect.objectContaining({ step: 4, mode: 'reached' }),
+      ),
+    )
+    for (const call of client.funnelPeople.mock.calls) {
+      const body = call[2] as { step: number; mode: string }
+      if (body.step !== 3) expect(body.mode).not.toBe('skipped')
+    }
+  })
+
+  it('takes the shape from the RESULT when the definition disagrees, and never asks for `dropped` on a branch', async () => {
+    // Same rule as `FunnelFlow`'s and `StepBars`' own disagreement tests, and
+    // the consequence here is the worst of the three. `funnel` and `result`
+    // arrive from two INDEPENDENT requests, so the definition on screen can
+    // be newer than the numbers -- step 3 has since been made required, and
+    // nothing has re-run. Reading optionality from the definition builds the
+    // people toggle for a required step: it offers `Dropped here`, and the
+    // server 400s that mode on the step the run says is optional.
+    //
+    // The result wins because the result is what the numbers were computed
+    // from, and the server decides mode legality from the definition it ran.
+    const stale: Funnel = {
+      ...branchedFunnel(),
+      steps: [
+        { event: 'signup' },
+        { event: 'onboarded' },
+        { event: 'video_submitted' },
+        { event: 'purchase' },
+      ],
+    }
+    const client = fakeClient({
+      funnel: vi.fn(async () => stale),
+      runFunnel: vi.fn(async () => branchedRun()),
+      funnelPeople: pending(),
+    })
+    renderDetail(client)
+    await screen.findByTestId('funnel-step-1')
+    await userEvent.click(screen.getByTestId('funnel-step-3'))
+
+    expect(screen.getByRole('button', { name: 'Did video_submitted (30)' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Did not (50)' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /dropped/i })).toBeNull()
+
+    await waitFor(() =>
+      expect(client.funnelPeople).toHaveBeenCalledWith(
+        1,
+        FUNNEL.id,
+        expect.objectContaining({ step: 3, mode: 'reached' }),
+      ),
+    )
+    for (const call of client.funnelPeople.mock.calls) {
+      expect((call[2] as { mode: string }).mode).not.toBe('dropped')
+    }
+  })
+})

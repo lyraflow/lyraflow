@@ -39,6 +39,10 @@
       "types": "./dist/funnels/levels.d.ts",
       "default": "./dist/funnels/levels.js"
     },
+    "./funnels/validate.js": {
+      "types": "./dist/funnels/validate.d.ts",
+      "default": "./dist/funnels/validate.js"
+    },
     "./segments/instants.js": {
       "types": "./dist/segments/instants.d.ts",
       "default": "./dist/segments/instants.js"

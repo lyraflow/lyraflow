@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router'
 import type { ApiClient } from '../api/client.js'
 import { ApiError, DEFAULT_LIMIT } from '../api/client.js'
 import { useProject } from '../app/ProjectContext.js'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs.js'
 import { AcceptedTable } from './feed/AcceptedTable.js'
+import { FeedFilters } from './feed/FeedFilters.js'
 import { RejectionsTable } from './feed/RejectionsTable.js'
 import { Sparkline } from './feed/Sparkline.js'
+import { readFeedParams, writeFeedParams } from './feed/params.js'
+import { type FeedRange, LIVE_POLL_MS, rangeWindow } from './feed/range.js'
 import { usePolling } from './feed/usePolling.js'
 import { formatRelative } from './funnels/format.js'
 
@@ -17,31 +21,36 @@ import { formatRelative } from './funnels/format.js'
  * that need a faster cycle pass their own `pollIntervalMs` rather than
  * this changing; see `Feed.test.tsx`'s "defaults to polling every 3
  * seconds" for the pin.
+ *
+ * It is now the LIVE cadence from `range.ts` rather than its own literal --
+ * the poll rate follows the chosen range, and the default range is a live
+ * one, so this is what the screen still opens at. Kept exported because
+ * `App` and `Wizard` pace themselves against the feed's rhythm.
  */
-export const DEFAULT_POLL_INTERVAL_MS = 3000
+export const DEFAULT_POLL_INTERVAL_MS = LIVE_POLL_MS
 
-/**
- * `GET /v1/events` defaults `since` to the last 24 hours when the caller
- * omits it (routes.ts, `DEFAULT_SINCE_MS`); `GET /v1/events/rejections` has
- * no default of its own -- its only bound is the dead-letter table's 30-day
- * TTL. Left alone, the Accepted and Rejected tabs' counts describe two
- * different spans (Important 6): "last 24 hours" beside "last 30 days",
- * shown as if they were comparable. The events poll below keeps relying on
- * the server's own 24h default (so it stays in sync with that route even if
- * the default ever changes); the rejections poll has to state the matching
- * window explicitly, since it has no default of its own to inherit.
+/*
+ * THE WINDOW IS CHOSEN, ONCE, AND ALL THREE POLLS SEND IT.
+ *
+ * Every one of them used to pick its own and none of them said which. The
+ * events poll sent no `since` at all and inherited the server's 24-hour
+ * default; the rejections poll asked for 24 hours explicitly, to keep the
+ * two tab counts comparable; and the chart above them was hard-coded to
+ * sixty minutes at `1m` resolution. So the chart and the table under it
+ * disagreed by a factor of twenty-four, permanently and invisibly.
+ *
+ * Reported as a screen showing nothing on a project that has data -- which
+ * was true, and the copy made it worse by saying "No events yet", a claim
+ * about the project that a query bounded at 24 hours cannot support.
+ *
+ * `rangeWindow` is called INSIDE each poll rather than once per render, so a
+ * feed left open keeps asking for the last N minutes as of each poll rather
+ * than as of whenever the range was last changed. Both edges are still sent
+ * explicitly, which the sparkline needs for a reason that has not changed:
+ * `GET /v1/events/stats` does not zero-fill, so without a known window a
+ * 40-minute outage inside an hour is indistinguishable from 20 minutes of
+ * steady traffic.
  */
-const REJECTIONS_WINDOW_MS = 24 * 60 * 60 * 1000
-
-/**
- * Fixed lookback for the sparkline's own stats poll, sent explicitly so the
- * client always knows the window's true edges. Needed to zero-fill minutes
- * the API omitted (Important 7): `GET /v1/events/stats` groups by bucket
- * with NO zero-fill, returning only minutes that had at least one event --
- * without a known window to fill against, a 40-minute outage inside a
- * 60-minute window is indistinguishable from 20 minutes of steady traffic.
- */
-const STATS_WINDOW_MINUTES = 60
 
 /**
  * A fetched page at exactly `limit` means there is more behind it that
@@ -84,43 +93,90 @@ export function Feed(props: {
    */
   onUnauthorized?: () => void
 }) {
-  const { client, pollIntervalMs = DEFAULT_POLL_INTERVAL_MS, onUnauthorized } = props
+  const { client, pollIntervalMs, onUnauthorized } = props
   const { activeId } = useProject()
   const [tab, setTab] = useState('accepted')
+
+  /* THE URL IS THE STATE, not a copy of it.
+   *
+   * Held here rather than in `useState` so a refresh keeps the window and
+   * the filter an operator chose -- and so the screen they are looking at
+   * can be sent to someone else, which is the thing an operator actually
+   * wants the moment they find a spike. Reading straight from the search
+   * params rather than seeding state from them also removes the class of
+   * bug where the two drift: there is one value, and the address bar is it.
+   *
+   * `replace`, never push: the event field writes on every keystroke, and
+   * pushing would bury the page the operator arrived from under one history
+   * entry per character. The cost is that back does not step through filter
+   * changes, which is the right trade for a text field.
+   */
+  const [search, setSearch] = useSearchParams()
+  const { range, event } = readFeedParams(search)
+  const setParams = useCallback(
+    (next: { range?: FeedRange; event?: string }) => {
+      setSearch(
+        (prev) =>
+          writeFeedParams(prev, {
+            range: next.range ?? readFeedParams(prev).range,
+            event: next.event ?? readFeedParams(prev).event,
+          }),
+        { replace: true },
+      )
+    },
+    [setSearch],
+  )
+  const setRange = useCallback((r: FeedRange) => setParams({ range: r }), [setParams])
+  const setEvent = useCallback((e: string) => setParams({ event: e }), [setParams])
+
+  /** `''` is no filter, never `undefined`: `EventCombobox` is a text field
+   * and an empty string is what it reports when cleared. The polls convert
+   * it to an omitted parameter, which is the only place the distinction
+   * between "no filter" and "an empty event name" has to be made. */
+  const eventParam = event === '' ? undefined : event
+
+  /* The cadence follows the range, and `pollIntervalMs` still wins so a
+   * test can drive the cycle. Three seconds answers "is my instrumentation
+   * working right now", which is a question about the last few minutes;
+   * re-scanning ninety days at that rate asks an expensive question twenty
+   * times a minute and answers it with a number that cannot visibly move. */
+  const interval = pollIntervalMs ?? range.pollMs
 
   const pollEvents = useCallback(async () => {
     if (activeId == null) return { events: [], next_cursor: null }
     // No cursor, on purpose: this is a poll for the head of the stream, not
     // a page. Paging forward from an old `next_cursor` here would silently
     // skip anything that arrived past whatever page was fetched first.
-    return client.events(activeId, { limit: DEFAULT_LIMIT })
-  }, [client, activeId])
+    const { since, until } = rangeWindow(range)
+    return client.events(activeId, { limit: DEFAULT_LIMIT, since, until, event: eventParam })
+  }, [client, activeId, range, eventParam])
 
   const pollRejections = useCallback(async () => {
     if (activeId == null) return { rejections: [], has_more: false, next_offset: 0 }
-    return client.rejections(activeId, {
-      limit: DEFAULT_LIMIT,
-      since: new Date(Date.now() - REJECTIONS_WINDOW_MS).toISOString(),
-    })
-  }, [client, activeId])
+    const { since, until } = rangeWindow(range)
+    // NO event filter here, and that is not an omission. A rejection is a
+    // payload the server refused, so the reason it is on this tab may be
+    // that its event name is missing or unparseable -- filtering the
+    // rejected tab by event name would hide exactly the rows an operator
+    // came to it for. The window applies; the name cannot.
+    return client.rejections(activeId, { limit: DEFAULT_LIMIT, since, until })
+  }, [client, activeId, range])
 
   const pollStats = useCallback(async () => {
-    const until = new Date()
-    const since = new Date(until.getTime() - STATS_WINDOW_MINUTES * 60_000)
-    if (activeId == null) {
-      return { buckets: [], since: since.toISOString(), until: until.toISOString() }
-    }
+    const { since, until } = rangeWindow(range)
+    if (activeId == null) return { buckets: [], since, until }
     const page = await client.stats(activeId, {
-      interval: '1m',
-      since: since.toISOString(),
-      until: until.toISOString(),
+      interval: range.interval,
+      since,
+      until,
+      event: eventParam,
     })
-    return { ...page, since: since.toISOString(), until: until.toISOString() }
-  }, [client, activeId])
+    return { ...page, since, until }
+  }, [client, activeId, range, eventParam])
 
-  const eventsState = usePolling(pollEvents, pollIntervalMs)
-  const rejectionsState = usePolling(pollRejections, pollIntervalMs)
-  const statsState = usePolling(pollStats, pollIntervalMs)
+  const eventsState = usePolling(pollEvents, interval)
+  const rejectionsState = usePolling(pollRejections, interval)
+  const statsState = usePolling(pollStats, interval)
 
   const events = eventsState.data?.events ?? []
   const rejections = rejectionsState.data?.rejections ?? []
@@ -180,7 +236,22 @@ export function Feed(props: {
 
   return (
     <div className="flex min-w-0 flex-col gap-4">
-      <Sparkline buckets={buckets} since={statsState.data?.since} until={statsState.data?.until} />
+      <FeedFilters
+        client={client}
+        projectId={activeId}
+        range={range}
+        onRangeChange={setRange}
+        event={event}
+        onEventChange={setEvent}
+        onUnauthorized={onUnauthorized}
+      />
+
+      <Sparkline
+        buckets={buckets}
+        since={statsState.data?.since}
+        until={statsState.data?.until}
+        interval={range.interval}
+      />
 
       {/*
        * Issue #82: this used to be one message regardless of whether there
@@ -227,10 +298,19 @@ export function Feed(props: {
           </TabsTrigger>
         </TabsList>
         <TabsContent value="accepted" className="min-w-0">
-          <AcceptedTable events={events} loadFailed={eventsLoadFailed} />
+          <AcceptedTable
+            events={events}
+            loadFailed={eventsLoadFailed}
+            rangeLabel={range.label}
+            filteredEvent={eventParam}
+          />
         </TabsContent>
         <TabsContent value="rejected" className="min-w-0">
-          <RejectionsTable rejections={rejections} loadFailed={rejectionsLoadFailed} />
+          <RejectionsTable
+            rejections={rejections}
+            loadFailed={rejectionsLoadFailed}
+            rangeLabel={range.label}
+          />
         </TabsContent>
       </Tabs>
     </div>

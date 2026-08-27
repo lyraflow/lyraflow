@@ -227,6 +227,11 @@ export interface StatsQuery {
   interval?: '1m' | '1h' | '1d'
   since?: string
   until?: string
+  /** One event name. The same field `EventsQuery` carries, because the feed
+   * draws this aggregate directly above the table that query fills and a
+   * filter reaching only one of them would put two different questions on
+   * one screen. */
+  event?: string
 }
 export interface RejectionsQuery {
   limit?: number
@@ -316,10 +321,13 @@ export interface RangeBody {
  * matching the server -- `reached` (level >= step) and `dropped` (level =
  * step) differ by a large factor on a real funnel, and whichever default
  * was picked, the other reading is the one a caller would get by accident.
+ *
+ * `skipped` is optional steps only, and the two others are refused on one:
+ * the server 400s rather than answering a neighbouring question.
  */
 export interface FunnelPeopleQuery {
   step: number
-  mode: 'reached' | 'dropped'
+  mode: 'reached' | 'dropped' | 'skipped'
   since?: string
   until?: string
   cursor?: string

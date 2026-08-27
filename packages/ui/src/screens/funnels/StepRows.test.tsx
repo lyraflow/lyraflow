@@ -1,4 +1,5 @@
 import type { FunnelStep } from '@lyraflow/core/funnels/ast.js'
+import { MAX_OPTIONAL_STEPS } from '@lyraflow/core/funnels/validate.js'
 import type { CostWarning } from '@lyraflow/core/segments/validate.js'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -6,6 +7,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../../api/client.js'
 import type { ApiClient } from '../../api/client.js'
 import { MIN_STEPS, StepRows } from './StepRows.js'
+
+const user = userEvent.setup()
 
 function fakeClient(): ApiClient {
   return {
@@ -529,5 +532,166 @@ describe('audiences', () => {
     const step2 = screen.getByTestId('step-2-audience')
     expect(within(step1).getByText(/scans all history/)).toBeInTheDocument()
     expect(within(step2).queryByText(/scans all history/)).not.toBeInTheDocument()
+  })
+})
+
+describe('the optional toggle', () => {
+  // THERE IS NO SWITCH OR CHECKBOX PRIMITIVE in this codebase --
+  // `components/ui/` has button, input, label, select, tabs and no boolean
+  // control at all. `StepPeople` already states a two-state choice as a
+  // `Button` with `aria-pressed`, so that is the pattern here too rather
+  // than a new primitive or a new Radix dependency.
+  const optionalToggles = () => screen.getAllByRole('button', { name: /optional/i })
+
+  it('marks a middle step optional and drops the key when unmarked', async () => {
+    // The KEY is dropped, not set to false: `optional` is `.optional()`, so
+    // "absent" is the shape a step that never had one is stored with, and a
+    // step whose toggle was turned back off must round-trip to exactly that.
+    const onChange = vi.fn()
+    // Unmounted before the second `renderStepRows` below: RTL's automatic
+    // cleanup runs between `it` blocks, not between two `render` calls
+    // inside the SAME one, so leaving the first mounted would leave both
+    // sets of step cards in the document -- `optionalToggles()[1]` would
+    // then still resolve to the first render's button, silently re-testing
+    // the on->off direction against a copy that already answered on->off.
+    const first = renderStepRows({
+      steps: [{ event: 'a' }, { event: 'b' }, { event: 'c' }],
+      onChange,
+    })
+    await user.click(optionalToggles()[1] as HTMLElement)
+    expect(onChange).toHaveBeenCalledWith([
+      { event: 'a' },
+      { event: 'b', optional: true },
+      { event: 'c' },
+    ])
+
+    onChange.mockClear()
+    first.unmount()
+    renderStepRows({
+      steps: [{ event: 'a' }, { event: 'b', optional: true }, { event: 'c' }],
+      onChange,
+    })
+    await user.click(optionalToggles()[1] as HTMLElement)
+    expect(onChange).toHaveBeenCalledWith([{ event: 'a' }, { event: 'b' }, { event: 'c' }])
+    // `?? {}`, same defensive shape as the audience removal test below --
+    // `noUncheckedIndexedAccess` treats `mock.calls[0][0][1]` as possibly
+    // `undefined` at every step, and the assertion above already proved
+    // this call happened with the right value.
+    expect(Object.keys(onChange.mock.calls[0]?.[0]?.[1] ?? {})).toEqual(['event'])
+  })
+
+  it('disables the toggle on the first and last steps, with the reason visible', async () => {
+    // Kept unreachable rather than rejected at save. `describeError` renders
+    // `This funnel could not be read: steps` for a validation 400, which
+    // tells an operator nothing about which rule they broke.
+    renderStepRows({ steps: [{ event: 'a' }, { event: 'b' }, { event: 'c' }] })
+    const toggles = optionalToggles()
+    expect(toggles[0]).toBeDisabled()
+    expect(toggles[2]).toBeDisabled()
+    expect(toggles[1]).toBeEnabled()
+    expect(toggles[1]).toHaveAttribute('aria-pressed', 'false')
+    expect(screen.getAllByText(/defines when someone enters/i).length).toBeGreaterThan(0)
+  })
+
+  it(`disables the remaining toggles once ${MAX_OPTIONAL_STEPS} steps are optional`, () => {
+    const steps = [
+      { event: 'a' },
+      { event: 'b', optional: true },
+      { event: 'c', optional: true },
+      { event: 'd', optional: true },
+      { event: 'e' },
+      { event: 'f' },
+    ]
+    renderStepRows({ steps })
+    const toggles = optionalToggles()
+    // Already-optional steps stay switchable -- an operator must be able to
+    // undo their way back under the cap.
+    expect(toggles[1]).toBeEnabled()
+    expect(toggles[2]).toBeEnabled()
+    expect(toggles[3]).toBeEnabled()
+    expect(toggles[4]).toBeDisabled()
+  })
+
+  it('states the ordering limit beside the toggle', () => {
+    // The voice volunteers its own limits. An optional step is constrained
+    // to fall after the required step before it and inside the window, and
+    // NOT before the required step after it.
+    renderStepRows({ steps: [{ event: 'a' }, { event: 'b', optional: true }, { event: 'c' }] })
+    expect(screen.getByText(/any time after .* within the window/i)).toBeInTheDocument()
+  })
+})
+
+describe('reordering and removing an optional step', () => {
+  // The toggle refuses first and last BY POSITION, and move/remove change
+  // positions. Left alone they strand an optional step at an end where its
+  // own toggle is disabled -- so the operator cannot undo it from the
+  // control that caused it, Save stays enabled (`stepsValid` checks only
+  // length and event names), and the server's 400 carries no `detail[]`:
+  // `This funnel could not be read: steps`, naming neither rule. Fixed in
+  // the mutators, because the rule is meant to be unreachable rather than
+  // rejected after the fact.
+  //
+  // The KEY must be gone, not set to `false` -- `optional` is `.optional()`,
+  // so a step that never carried one round-trips as absent.
+
+  it('drops optionality from a step moved onto the END of the list', async () => {
+    const onChange = vi.fn()
+    renderStepRows({
+      steps: [{ event: 'a' }, { event: 'b', optional: true }, { event: 'c' }],
+      onChange,
+    })
+    await user.click(screen.getByRole('button', { name: 'Move step 2 down' }))
+    expect(onChange).toHaveBeenCalledWith([{ event: 'a' }, { event: 'c' }, { event: 'b' }])
+    expect(Object.keys(onChange.mock.calls[0]?.[0]?.[2] ?? {})).toEqual(['event'])
+  })
+
+  it('drops optionality from a step moved onto the FRONT of the list', async () => {
+    const onChange = vi.fn()
+    renderStepRows({
+      steps: [{ event: 'a' }, { event: 'b', optional: true }, { event: 'c' }],
+      onChange,
+    })
+    await user.click(screen.getByRole('button', { name: 'Move step 2 up' }))
+    expect(onChange).toHaveBeenCalledWith([{ event: 'b' }, { event: 'a' }, { event: 'c' }])
+    expect(Object.keys(onChange.mock.calls[0]?.[0]?.[0] ?? {})).toEqual(['event'])
+  })
+
+  it('leaves optionality alone on a move that keeps the step in the middle', async () => {
+    // Stripping unconditionally would silently undo an operator's toggle
+    // every time they nudged a step, which is the mirror defect.
+    const onChange = vi.fn()
+    renderStepRows({
+      steps: [{ event: 'a' }, { event: 'b', optional: true }, { event: 'c' }, { event: 'd' }],
+      onChange,
+    })
+    await user.click(screen.getByRole('button', { name: 'Move step 2 down' }))
+    expect(onChange).toHaveBeenCalledWith([
+      { event: 'a' },
+      { event: 'c' },
+      { event: 'b', optional: true },
+      { event: 'd' },
+    ])
+  })
+
+  it('drops optionality from the step a REMOVAL leaves at the end', async () => {
+    const onChange = vi.fn()
+    renderStepRows({
+      steps: [{ event: 'a' }, { event: 'b' }, { event: 'c', optional: true }, { event: 'd' }],
+      onChange,
+    })
+    await user.click(screen.getByRole('button', { name: 'Remove step 4' }))
+    expect(onChange).toHaveBeenCalledWith([{ event: 'a' }, { event: 'b' }, { event: 'c' }])
+    expect(Object.keys(onChange.mock.calls[0]?.[0]?.[2] ?? {})).toEqual(['event'])
+  })
+
+  it('drops optionality from the step a REMOVAL leaves at the front', async () => {
+    const onChange = vi.fn()
+    renderStepRows({
+      steps: [{ event: 'a' }, { event: 'b', optional: true }, { event: 'c' }, { event: 'd' }],
+      onChange,
+    })
+    await user.click(screen.getByRole('button', { name: 'Remove step 1' }))
+    expect(onChange).toHaveBeenCalledWith([{ event: 'b' }, { event: 'c' }, { event: 'd' }])
+    expect(Object.keys(onChange.mock.calls[0]?.[0]?.[0] ?? {})).toEqual(['event'])
   })
 })

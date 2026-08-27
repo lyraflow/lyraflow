@@ -96,6 +96,32 @@ const preview = async (body: object) => {
   return res.json()
 }
 
+/**
+ * A person's whole journey, one event per entry, spaced a minute apart
+ * inside `RANGE`.
+ *
+ * Offsets are given FROM THE FIRST EVENT rather than absolutely, because
+ * every optional-step question here is about order and distance, never about
+ * a wall-clock instant. `send` flushes, so the rows are queryable when this
+ * returns.
+ *
+ * `RANGE.since` is an ISO string (see `ago` above), not a `Date` -- wrapped
+ * here rather than changed at the call site, since every other use in this
+ * file passes it straight through as a string.
+ */
+async function journey(
+  name: string,
+  events: readonly (string | readonly [string, number])[],
+): Promise<void> {
+  const start = new Date(RANGE.since).getTime() + 60_000
+  await send(
+    events.map((e, i) => {
+      const [event, offsetMs] = typeof e === 'string' ? [e, i * 60_000] : e
+      return track(who(name), event, new Date(start + offsetMs).toISOString())
+    }),
+  )
+}
+
 /** Everyone in this file shares one project, so each case uses its own ids. */
 const who = (name: string) => `sem-${name}`
 
@@ -1746,4 +1772,325 @@ describe('funnel semantics', () => {
     expect(res.statusCode).toBe(200)
     return res.json().people.map((r: { person_id: string }) => r.person_id)
   }
+})
+
+describe('optional steps, against real rows', () => {
+  // $page -> signed_up -> subscription_started -> [video_submitted] -> subscription_canceled
+  //
+  // Event names are TAGGED per test ($page-<tag>, etc.) rather than shared
+  // across this whole describe block. Every `journey()` call anchors at the
+  // exact same instant (`RANGE.since + 60s` -- see `journey` above) and
+  // `preview` aggregates over the WHOLE project and range, not "this test's
+  // people": two tests sharing one event vocabulary are indistinguishable to
+  // it. Running the brief's tests verbatim with one shared `STEPS_OPT`
+  // proved this by accumulation -- `converted` read as the sum of every
+  // journey seeded so far in the block (1 became 2, then 2, then 6...),
+  // which is cross-test bleed, not a defect in compile.ts/levels.ts. The
+  // rest of this file already works around the same hazard on its shared
+  // `STEPS` (`excludes a deleted person...` diffs a before/after count
+  // rather than asserting one absolute; `ACTUALLY restricts the population
+  // to a segment...` uses `toBeGreaterThanOrEqual`/`toBeLessThan`). Tagging
+  // keeps the brief's exact counts and structure intact instead.
+  const optSteps = (tag: string) => [
+    { event: `$page-${tag}` },
+    { event: `signed_up-${tag}` },
+    { event: `subscription_started-${tag}` },
+    { event: `video_submitted-${tag}`, optional: true },
+    { event: `subscription_canceled-${tag}` },
+  ]
+  const runOpt = (steps: object[], extra: object = {}) =>
+    preview({ steps, window_seconds: WINDOW, ...extra })
+
+  it('counts someone who skipped the optional step as converted', async () => {
+    // THE fixture. Under the old semantics this person is pinned at level 3
+    // and never reaches step 5. Make the compiler treat an optional step as
+    // required and exactly this test fails.
+    const tag = 'skip'
+    await journey('skip', [
+      `$page-${tag}`,
+      `signed_up-${tag}`,
+      `subscription_started-${tag}`,
+      `subscription_canceled-${tag}`,
+    ])
+    const r = await runOpt(optSteps(tag))
+    expect(r.converted).toBe(1)
+    expect(r.steps[4].people).toBe(1)
+    expect(r.steps[3].people).toBe(0)
+    expect(r.steps[3].skipped).toBe(1)
+  })
+
+  it('counts someone who did the optional step at both the step and the end', async () => {
+    const tag = 'both'
+    await journey('both', [
+      `$page-${tag}`,
+      `signed_up-${tag}`,
+      `subscription_started-${tag}`,
+      `video_submitted-${tag}`,
+      `subscription_canceled-${tag}`,
+    ])
+    const r = await runOpt(optSteps(tag))
+    expect(r.converted).toBe(1)
+    expect(r.steps[3].people).toBe(1)
+    expect(r.steps[3].skipped).toBe(0)
+  })
+
+  it('counts someone who did the optional step and stopped there', async () => {
+    const tag = 'stall'
+    await journey('stall', [
+      `$page-${tag}`,
+      `signed_up-${tag}`,
+      `subscription_started-${tag}`,
+      `video_submitted-${tag}`,
+    ])
+    const r = await runOpt(optSteps(tag))
+    expect(r.converted).toBe(0)
+    expect(r.steps[3].people).toBe(1)
+    expect(r.steps[2].people).toBe(1)
+  })
+
+  it('reports skipped as the branch point minus the step, on a mixed population', async () => {
+    const tag = 'mix'
+    await journey('m1', [
+      `$page-${tag}`,
+      `signed_up-${tag}`,
+      `subscription_started-${tag}`,
+      `video_submitted-${tag}`,
+    ])
+    await journey('m2', [`$page-${tag}`, `signed_up-${tag}`, `subscription_started-${tag}`])
+    await journey('m3', [
+      `$page-${tag}`,
+      `signed_up-${tag}`,
+      `subscription_started-${tag}`,
+      `subscription_canceled-${tag}`,
+    ])
+    const r = await runOpt(optSteps(tag))
+    expect(r.steps[2].people).toBe(3)
+    expect(r.steps[3].people).toBe(1)
+    expect(r.steps[3].skipped).toBe(2)
+    // Exact by construction, never clamped. A negative here is a defect.
+    expect(r.steps[3].skipped).toBeGreaterThanOrEqual(0)
+  })
+
+  it('rates the step after the optional one against the required step before it', async () => {
+    const tag = 'rate'
+    await journey('r1', [
+      `$page-${tag}`,
+      `signed_up-${tag}`,
+      `subscription_started-${tag}`,
+      `subscription_canceled-${tag}`,
+    ])
+    await journey('r2', [`$page-${tag}`, `signed_up-${tag}`, `subscription_started-${tag}`])
+    const r = await runOpt(optSteps(tag))
+    // 1 of the 2 at subscription_started -- NOT 1 of the 0 at video_submitted.
+    expect(r.steps[4].from_previous).toBeCloseTo(0.5)
+  })
+
+  it('does not count an optional event that arrives before its branch point', async () => {
+    const tag = 'early'
+    await journey('early', [
+      `$page-${tag}`,
+      `video_submitted-${tag}`,
+      `signed_up-${tag}`,
+      `subscription_started-${tag}`,
+      `subscription_canceled-${tag}`,
+    ])
+    const r = await runOpt(optSteps(tag))
+    expect(r.steps[3].people).toBe(0)
+    expect(r.steps[3].skipped).toBe(1)
+    expect(r.converted).toBe(1)
+  })
+
+  it('counts an optional event exactly at the window edge and not one past it', async () => {
+    // The boundary instant in BOTH directions -- where a `>` / `>=`
+    // divergence lives, and the fixture a suite naturally avoids.
+    const tag = 'edge'
+    const w = 600
+    await journey('edge', [
+      [`$page-${tag}`, 0],
+      [`signed_up-${tag}`, 1_000],
+      [`subscription_started-${tag}`, 2_000],
+      [`video_submitted-${tag}`, w * 1000],
+    ])
+    await journey('past', [
+      [`$page-${tag}`, 0],
+      [`signed_up-${tag}`, 1_000],
+      [`subscription_started-${tag}`, 2_000],
+      [`video_submitted-${tag}`, w * 1000 + 1],
+    ])
+    const r = await runOpt(optSteps(tag), { window_seconds: w })
+    expect(r.steps[3].people).toBe(1)
+    expect(r.steps[3].skipped).toBe(1)
+  })
+
+  it('measures two adjacent optional steps independently off the same required step', async () => {
+    // ASYMMETRIC on purpose: two people do `video_submitted`, one does
+    // `avatar_set`, so `steps[2]` and `steps[3]` read DIFFERENT numbers.
+    // A symmetric 1-and-1 population can't tell branch_0 apart from branch_1
+    // -- swapping which branch feeds which optional step, or wiring both
+    // optional steps to the same branch, would still read 1, 1, 1, 1, 2.
+    const two = [
+      { event: '$page-adj' },
+      { event: 'signed_up-adj' },
+      { event: 'video_submitted-adj', optional: true },
+      { event: 'avatar_set-adj', optional: true },
+      { event: 'subscription_started-adj' },
+    ]
+    await journey('vid1', [
+      '$page-adj',
+      'signed_up-adj',
+      'video_submitted-adj',
+      'subscription_started-adj',
+    ])
+    await journey('vid2', [
+      '$page-adj',
+      'signed_up-adj',
+      'video_submitted-adj',
+      'subscription_started-adj',
+    ])
+    await journey('avt', [
+      '$page-adj',
+      'signed_up-adj',
+      'avatar_set-adj',
+      'subscription_started-adj',
+    ])
+    const r = await runOpt(two)
+    expect(r.steps[2].people).toBe(2)
+    expect(r.steps[3].people).toBe(1)
+    expect(r.steps[2].skipped).toBe(1)
+    expect(r.steps[3].skipped).toBe(2)
+    expect(r.converted).toBe(3)
+  })
+
+  it('serves the reached and skipped people lists as complements', async () => {
+    // `/people` is keyed on a STORED funnel, so this one cannot go through
+    // `preview` -- create it, then ask.
+    const tag = 'complement'
+    await journey('did', [
+      `$page-${tag}`,
+      `signed_up-${tag}`,
+      `subscription_started-${tag}`,
+      `video_submitted-${tag}`,
+    ])
+    await journey('didnt', [`$page-${tag}`, `signed_up-${tag}`, `subscription_started-${tag}`])
+    // Never reaches the branch point at all -- must appear in NEITHER list.
+    // This pins the `level >= spineRank` half of the `skipped` predicate:
+    // without it, "skipped" degrades to "didn't do the optional event",
+    // which this person also satisfies despite never having had the chance.
+    await journey('short', [`$page-${tag}`, `signed_up-${tag}`])
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v1/funnels',
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+      payload: {
+        name: 'optional complements',
+        steps: optSteps(tag),
+        window_seconds: WINDOW,
+      } as never,
+    })
+    expect(created.statusCode).toBe(201)
+    const id = created.json().id
+
+    const ask = async (mode: string) => {
+      const res = await app.inject({
+        method: 'POST',
+        url: `/v1/funnels/${id}/people`,
+        headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+        payload: { step: 4, mode, ...RANGE } as never,
+      })
+      expect(res.statusCode).toBe(200)
+      return res.json()
+    }
+    const reached = await ask('reached')
+    const skipped = await ask('skipped')
+    expect(reached.person_count).toBe(1)
+    expect(skipped.person_count).toBe(1)
+    const ids = new Set(
+      [...reached.members, ...skipped.members].map((m: { person_id: string }) => m.person_id),
+    )
+    expect(ids.size).toBe(2)
+  })
+
+  it('counts someone who carried on THROUGH the optional step', async () => {
+    const tag = 'through'
+    await journey('through', [
+      `$page-${tag}`,
+      `signed_up-${tag}`,
+      `subscription_started-${tag}`,
+      `video_submitted-${tag}`,
+      `subscription_canceled-${tag}`,
+    ])
+    const r = await runOpt(optSteps(tag))
+    expect(r.steps[3].people).toBe(1)
+    expect(r.steps[3].continued).toBe(1)
+  })
+
+  it('does not count someone who did the optional step and stopped', async () => {
+    const tag = 'stopped'
+    await journey('stopped', [
+      `$page-${tag}`,
+      `signed_up-${tag}`,
+      `subscription_started-${tag}`,
+      `video_submitted-${tag}`,
+    ])
+    const r = await runOpt(optSteps(tag))
+    expect(r.steps[3].people).toBe(1)
+    expect(r.steps[3].continued).toBe(0)
+  })
+
+  it('THE OVERLAP: someone who does the optional step AFTER the next required one', async () => {
+    // The fixture this suite has nothing like, and the one the whole
+    // conservation rule exists for. They reach the last step and they did the
+    // optional event -- but not on the way, so they are on the branch leg AND
+    // on the bypass leg, and the two outgoing legs from step 3 now overlap by
+    // exactly this person.
+    const tag = 'after'
+    await journey('after', [
+      `$page-${tag}`,
+      `signed_up-${tag}`,
+      `subscription_started-${tag}`,
+      `subscription_canceled-${tag}`,
+      `video_submitted-${tag}`,
+    ])
+    const r = await runOpt(optSteps(tag))
+    expect(r.steps[3].people).toBe(1)
+    expect(r.steps[3].continued).toBe(0)
+    expect(r.converted).toBe(1)
+  })
+
+  it('never reports continued above the people who reached the step', async () => {
+    const tag = 'subset'
+    await journey('s1', [
+      `$page-${tag}`,
+      `signed_up-${tag}`,
+      `subscription_started-${tag}`,
+      `video_submitted-${tag}`,
+      `subscription_canceled-${tag}`,
+    ])
+    await journey('s2', [
+      `$page-${tag}`,
+      `signed_up-${tag}`,
+      `subscription_started-${tag}`,
+      `video_submitted-${tag}`,
+    ])
+    const r = await runOpt(optSteps(tag))
+    expect(r.steps[3].people).toBe(2)
+    expect(r.steps[3].continued).toBe(1)
+  })
+
+  it('applies the window to the full chain, not only to the branch', async () => {
+    // Inside the window to the optional step, past it to the next required
+    // one: reached, but did not continue.
+    const w = 600
+    const tag = 'fullwin'
+    await journey('fullwin', [
+      [`$page-${tag}`, 0],
+      [`signed_up-${tag}`, 1_000],
+      [`subscription_started-${tag}`, 2_000],
+      [`video_submitted-${tag}`, 3_000],
+      [`subscription_canceled-${tag}`, w * 1000 + 1],
+    ])
+    const r = await runOpt(optSteps(tag), { window_seconds: w })
+    expect(r.steps[3].people).toBe(1)
+    expect(r.steps[3].continued).toBe(0)
+  })
 })
