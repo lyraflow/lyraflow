@@ -4,6 +4,7 @@ import {
   LayoutList,
   LogOut,
   Settings as SettingsIcon,
+  Star,
   UserRound,
   Users,
 } from 'lucide-react'
@@ -131,6 +132,40 @@ function ProjectSwitcher() {
         ))}
       </SelectContent>
     </Select>
+  )
+}
+
+/**
+ * A link, not a badge -- there is deliberately no star count here.
+ *
+ * The two obvious ways to show one both make an operator's dashboard talk
+ * to a third party without being asked: GitHub's own buttons.github.io
+ * widget, and a browser fetch of api.github.com. Either sends the IP of
+ * every person who opens Lyraflow to GitHub, and neither works in an
+ * install with no egress -- for a self-hosted analytics tool that is the
+ * behaviour the product exists to avoid, not a detail. If a count is ever
+ * wanted it has to come from the server, cached, with a way to turn it off.
+ *
+ * `noreferrer` is doing real work alongside `noopener`: without it the
+ * outbound request carries this page's URL, which on a self-hosted install
+ * is the operator's own hostname. That is private infrastructure, and it
+ * is not GitHub's to learn.
+ */
+function StarOnGitHub() {
+  return (
+    <a
+      href="https://github.com/lyraflow/lyraflow"
+      target="_blank"
+      rel="noreferrer noopener"
+      className="flex shrink-0 items-center gap-1.5 rounded-md border border-border p-1.5 text-sm text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 sm:px-2"
+    >
+      <Star className="size-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
+      {/* Visually hidden below `sm` for the same reason the nav labels are
+       * -- the header already scrolls at 390px -- but kept in the DOM at
+       * every width so the link's accessible name never depends on the
+       * viewport. */}
+      <span className="sr-only sm:not-sr-only">Star on GitHub</span>
+    </a>
   )
 }
 
@@ -309,6 +344,7 @@ export function Shell(props: { email: string | null; onLogout(): void; children?
         <header className="flex h-14 min-w-0 shrink-0 items-center justify-between gap-2 overflow-x-auto border-b border-border bg-card px-4">
           <ProjectSwitcher />
           <div className="flex min-w-0 shrink items-center gap-2">
+            <StarOnGitHub />
             <ThemeToggle />
             <AccountMenu email={props.email} onLogout={props.onLogout} />
           </div>

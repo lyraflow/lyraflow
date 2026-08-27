@@ -307,3 +307,62 @@ describe('Shell — deleting projects in the switcher', () => {
     expect(screen.queryByRole('option', { name: /Other/ })).not.toBeInTheDocument()
   })
 })
+
+describe('Shell — the GitHub link', () => {
+  /** The one URL this control exists to reach. Hard-coded rather than
+   * imported from the component so a typo in `Shell.tsx` fails here instead
+   * of being asserted against itself. */
+  const REPO = 'https://github.com/lyraflow/lyraflow'
+
+  it('links to the public repository', () => {
+    renderShell()
+    expect(screen.getByRole('link', { name: /star on github/i })).toHaveAttribute('href', REPO)
+  })
+
+  // A dashboard is a working surface -- an operator mid-investigation who
+  // clicks this must not lose the screen they were on.
+  it('opens in a new tab', () => {
+    renderShell()
+    expect(screen.getByRole('link', { name: /star on github/i })).toHaveAttribute(
+      'target',
+      '_blank',
+    )
+  })
+
+  // `noreferrer` is the privacy guard, and it is separate from `noopener`:
+  // without it the outbound request carries this page's URL, which on a
+  // self-hosted install is the operator's own hostname. Pinned on its own so
+  // dropping just this token fails just this test.
+  it('sends no referrer, so a self-hosted hostname does not reach GitHub', () => {
+    renderShell()
+    const rel = screen.getByRole('link', { name: /star on github/i }).getAttribute('rel') ?? ''
+    expect(rel.split(/\s+/)).toContain('noreferrer')
+    expect(rel.split(/\s+/)).toContain('noopener')
+  })
+
+  // The count was the deliberate omission (O1), not an unfinished piece: it
+  // cannot be fetched in the browser without sending every operator's IP to
+  // GitHub, and it cannot be fetched at all in an install with no egress.
+  // An exact-name match is what pins it -- any count rendered beside the
+  // label lands in the accessible name and breaks this.
+  it('shows no star count', () => {
+    renderShell()
+    const link = screen.getByRole('link', { name: 'Star on GitHub' })
+    expect(link.textContent).toBe('Star on GitHub')
+    expect(link.textContent).not.toMatch(/\d/)
+  })
+
+  // The other half of the same decision: no buttons.github.io widget, no
+  // embedded frame. Either would reintroduce the third-party request that
+  // dropping the count exists to avoid.
+  it('embeds no third-party widget', () => {
+    const { container } = renderShell()
+    // Asserted first on purpose: without it this test is a pure negative
+    // and passes when the control is absent entirely -- it would then be
+    // testing nothing, which is precisely the state the two assertions
+    // below exist to rule out.
+    expect(screen.getByRole('link', { name: /star on github/i })).toBeInTheDocument()
+    expect(container.querySelector('script')).toBeNull()
+    expect(container.querySelector('iframe')).toBeNull()
+  })
+})
