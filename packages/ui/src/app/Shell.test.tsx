@@ -437,6 +437,41 @@ describe('Shell — version', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
+  it('offers a changelog link beside the version', async () => {
+    renderWithClient(fakeClient())
+    await screen.findByText('v0.10.0')
+    const link = screen.getByRole('link', { name: /changelog/i })
+    expect(link).toHaveAttribute(
+      'href',
+      'https://github.com/lyraflow/lyraflow/blob/main/CHANGELOG.md',
+    )
+  })
+
+  // Absent until the version is, since it reads as a footnote to it -- a
+  // lone `[changelog]` under the nav with no version above it is chrome
+  // pointing at nothing.
+  it('does not offer the changelog link before the version arrives', () => {
+    const d = deferred<{ version: string }>()
+    renderWithClient(fakeClient({ meta: vi.fn(() => d.promise) }))
+    expect(screen.queryByRole('link', { name: /changelog/i })).not.toBeInTheDocument()
+  })
+
+  /**
+   * The third outbound GitHub link in this shell, and it needs the same
+   * guard as the other two for the same reason: without `noreferrer` the
+   * request carries this page's URL, which on a self-hosted install is the
+   * operator's own hostname. Pinned separately because nothing structural
+   * ties the three together -- each is a plain anchor someone can add
+   * without it.
+   */
+  it('does not leak the install hostname to GitHub through the changelog link', async () => {
+    renderWithClient(fakeClient())
+    await screen.findByText('v0.10.0')
+    const rel = screen.getByRole('link', { name: /changelog/i }).getAttribute('rel')
+    expect(rel).toContain('noreferrer')
+    expect(rel).toContain('noopener')
+  })
+
   /**
    * Pins the DECISION, not the rendering. Below `sm` this aside reflows from
    * a vertical sidebar into a compact top bar -- the row that already scrolls
@@ -453,7 +488,12 @@ describe('Shell — version', () => {
     renderWithClient(fakeClient())
     await screen.findByText('v0.10.0')
     const el = screen.getByTestId('sidebar-version')
+    // The decision is "not displayed below `sm`, displayed at `sm` and up".
+    // Which display value restores it (`block` when it was the version
+    // alone, `flex` now that it is a row) is not the decision, so the
+    // assertion does not pin one -- it pins that `hidden` is there and that
+    // some `sm:` display utility undoes it.
     expect(el.className).toContain('hidden')
-    expect(el.className).toContain('sm:block')
+    expect(el.className).toMatch(/\bsm:(block|flex|inline-flex)\b/)
   })
 })

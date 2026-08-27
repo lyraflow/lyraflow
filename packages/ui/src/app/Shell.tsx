@@ -356,9 +356,35 @@ export function Shell(props: {
         {version !== null && (
           <p
             data-testid="sidebar-version"
-            className="hidden text-xs text-muted-foreground sm:mt-auto sm:block sm:px-4 sm:pb-4"
+            className="hidden text-xs text-muted-foreground sm:mt-auto sm:flex sm:items-center sm:gap-1.5 sm:px-4 sm:pb-4"
           >
-            v{version}
+            <span>v{version}</span>
+            {/*
+             * `CHANGELOG.md` on `main`, NOT this version's tag -- the two
+             * answer different questions and the card already answers the
+             * other one. Its "Release notes" link goes to
+             * `/releases/tag/v<version>`: what shipped in the version you are
+             * running. From a running install the useful question is the
+             * opposite one, what has shipped SINCE, and the file is
+             * newest-first so it opens on exactly that. It also cannot 404,
+             * which the tag link can before a release object exists.
+             *
+             * The brackets are part of the link text rather than decoration
+             * around it, so the accessible name contains the visible label
+             * (WCAG 2.5.3) instead of differing from it by punctuation.
+             *
+             * Third outbound GitHub link in this file, and `noreferrer` earns
+             * its place for the third time: see `StarOnGitHub` above. A
+             * self-hosted install's hostname is not GitHub's to learn.
+             */}
+            <a
+              href="https://github.com/lyraflow/lyraflow/blob/main/CHANGELOG.md"
+              target="_blank"
+              rel="noreferrer noopener"
+              className="underline hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2"
+            >
+              [changelog]
+            </a>
           </p>
         )}
       </aside>
