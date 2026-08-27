@@ -79,18 +79,50 @@ const UNIQUE_VIOLATION = '23505'
 const StoredSteps = z.array(FunnelStep).min(2)
 
 /**
- * Structural equality for two `where` predicate values. A predicate's `value`
- * is either a scalar or a two-element tuple (`between`); comparing by field
- * rather than by JSON string keeps this independent of how each value was
+ * Structural equality for two predicate values. Comparing by field rather
+ * than by JSON string keeps this independent of how each value was
  * constructed.
+ *
+ * Four shapes reach here, one per operator family that carries a value: a
+ * scalar, a two-element tuple (`between`), a substring, and a relative
+ * window's `{n, unit}`. The presence and boolean families carry NO value, and
+ * arrive as `undefined` from both sides -- which the scalar branch already
+ * compares correctly.
+ *
+ * `unknown` rather than a union of those four, deliberately: this is also
+ * called from `audienceEqual`'s generic key walk below, where the value has
+ * been read off a `Record<string, unknown>` and no narrower type is available
+ * without asserting one.
  */
-function valueEqual(a: WherePredicate['value'], b: WherePredicate['value']): boolean {
+function valueEqual(a: unknown, b: unknown): boolean {
   if (Array.isArray(a) || Array.isArray(b)) {
     return (
       Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => v === b[i])
     )
   }
+  // A relative window. Compared field by field for the same reason the tuple
+  // above is -- two objects that mean the same window are never `===`, and
+  // treating them as different would make every save of an unchanged funnel
+  // write a new definition.
+  if (a !== null && b !== null && typeof a === 'object' && typeof b === 'object') {
+    const oa = a as Record<string, unknown>
+    const ob = b as Record<string, unknown>
+    const keys = new Set([...Object.keys(oa), ...Object.keys(ob)])
+    return [...keys].every((k) => oa[k] === ob[k])
+  }
   return a === b
+}
+
+/**
+ * A clause's value, or `undefined` for the families that carry none.
+ *
+ * `'value' in c` rather than a cast: the presence and boolean clauses have no
+ * `value` key at all in the AST, so this is the narrowing TypeScript already
+ * knows how to do, and it stays correct if a sixth family arrives with a
+ * different shape again.
+ */
+function clauseValue(c: WherePredicate): unknown {
+  return 'value' in c ? c.value : undefined
 }
 
 /**
@@ -111,7 +143,7 @@ function wherePredicatesEqual(p: WherePredicate, q: WherePredicate | undefined):
     fieldP.source === fieldQ.source &&
     fieldP.name === fieldQ.name &&
     p.operator === q.operator &&
-    valueEqual(p.value, q.value)
+    valueEqual(clauseValue(p), clauseValue(q))
   )
 }
 
@@ -158,8 +190,7 @@ function audienceEqual(a: FilterNode | undefined, b: FilterNode | undefined): bo
   return [...keys].every((k) => {
     const va = (a as Record<string, unknown>)[k]
     const vb = (b as Record<string, unknown>)[k]
-    if (k === 'value')
-      return valueEqual(va as WherePredicate['value'], vb as WherePredicate['value'])
+    if (k === 'value') return valueEqual(va, vb)
     if (k === 'where') {
       const wa = (va ?? []) as WherePredicate[]
       const wb = (vb ?? []) as WherePredicate[]

@@ -39,9 +39,10 @@ function stepCondition(
   params: Params,
   eventPlaceholder: (event: string) => string,
   audienceSql: (step: FunnelStep) => string | undefined,
+  now: Date,
 ): string {
   const parts = [`event_name = ${eventPlaceholder(step.event)}`]
-  for (const w of step.where ?? []) parts.push(wherePredicate(w, params))
+  for (const w of step.where ?? []) parts.push(wherePredicate(w, params, now))
   const gate = audienceSql(step)
   if (gate !== undefined) parts.push(gate)
   return parts.length === 1 ? (parts[0] as string) : `(${parts.join(' AND ')})`
@@ -217,7 +218,7 @@ export function compileFunnel(opts: {
   const attributeSelect = attributes.length > 0 ? `,\n           ${attributes.join(', ')}` : ''
 
   const conditions = definition.steps.map((s, i) => {
-    const cond = stepCondition(s, params, eventPlaceholder, audienceSql)
+    const cond = stepCondition(s, params, eventPlaceholder, audienceSql, now)
     // Step 1 additionally bounds ENTRY to the range. Without it the extended
     // scan above would let someone whose first step lands after `until` enter
     // a funnel the caller did not ask about.

@@ -1,5 +1,11 @@
 import { AST_VERSION, FilterNode as FilterNodeSchema } from '@lyraflow/core/segments/ast.js'
-import type { Context, FilterNode, Lifecycle, Trait } from '@lyraflow/core/segments/ast.js'
+import type {
+  Comparison,
+  Context,
+  FilterNode,
+  Lifecycle,
+  Trait,
+} from '@lyraflow/core/segments/ast.js'
 import { MAX_BEHAVIOR_NODES, costWarnings } from '@lyraflow/core/segments/validate.js'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -794,7 +800,7 @@ describe('ConditionRow', () => {
     await userEvent.selectOptions(kindSelect(), 'where they came from')
     await userEvent.selectOptions(kindSelect(), 'who they are')
 
-    const next = onNode.mock.calls.at(-1)?.[0] as Trait
+    const next = onNode.mock.calls.at(-1)?.[0] as Comparison<Trait>
     expect(next.kind).toBe('trait')
     // None of the original trait survived the round trip...
     expect(next.value).toBe('')

@@ -1,8 +1,10 @@
-import { LIFECYCLE_FIELDS, type Lifecycle } from '@lyraflow/core/segments/ast.js'
+import { LIFECYCLE_FIELDS, type Lifecycle, OPERATOR_FAMILY } from '@lyraflow/core/segments/ast.js'
 import { Label } from '../../components/ui/label.js'
+import { ClauseValueField } from './ClauseValueField.js'
 import { OperatorSelect } from './OperatorSelect.js'
 import type { ConditionValue } from './ValueInput.js'
 import { ValueInput } from './ValueInput.js'
+import { clauseValueOf, withOperator } from './clause.js'
 import { valueToPicker, valueToStored } from './datetime.js'
 
 /**
@@ -64,14 +66,31 @@ export function LifecycleForm(props: {
       <OperatorSelect
         id={operatorId}
         value={node.operator}
-        onChange={(operator) => onChange({ ...node, operator })}
+        // Comparison and relative date only. `first_seen`/`last_seen` are
+        // non-nullable DateTime64 columns, so `is set` is true for everyone
+        // and `contains` would be a substring match on a rendered timestamp
+        // -- neither is a question about a lifecycle bound.
+        families={['comparison', 'relative']}
+        onChange={(operator) => onChange(withOperator(node, operator))}
       />
-      <ValueInput
-        operator={node.operator}
-        value={valueToPicker(node.value as ConditionValue)}
-        onChange={(value) => onChange({ ...node, value: valueToStored(value) } as Lifecycle)}
-        type="datetime-local"
-      />
+      {OPERATOR_FAMILY[node.operator] === 'comparison' ? (
+        <ValueInput
+          operator={node.operator}
+          value={valueToPicker(clauseValueOf(node) as ConditionValue)}
+          onChange={(value) => onChange({ ...node, value: valueToStored(value) } as Lifecycle)}
+          type="datetime-local"
+        />
+      ) : (
+        // No `valueToPicker` round trip: a relative window is `{n, unit}`,
+        // not an instant, so the datetime translation that makes a stored
+        // `Z`-suffixed bound renderable has nothing to do here.
+        <ClauseValueField
+          id={`${id}-value`}
+          operator={node.operator}
+          value={clauseValueOf(node)}
+          onChange={(value) => onChange({ ...node, value } as Lifecycle)}
+        />
+      )}
     </div>
   )
 }

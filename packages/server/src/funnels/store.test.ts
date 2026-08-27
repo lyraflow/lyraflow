@@ -76,7 +76,10 @@ describe('FunnelStore', () => {
     const created = await store.create(projectId, 'signup', signup)
     const found = await store.get(projectId, created.id)
     expect(found?.steps).toHaveLength(2)
-    expect(found?.steps[0]?.where?.[0]?.value).toBe('/')
+    // `toMatchObject` rather than reading `.value` off the predicate: a
+    // read-back predicate is the whole clause union, and the presence and
+    // boolean families have no `value` key for the compiler to find.
+    expect(found?.steps[0]?.where?.[0]).toMatchObject({ value: '/' })
     expect(found?.windowSeconds).toBe(604800)
     expect(found?.definitionVersion).toBe(FUNNEL_DEFINITION_VERSION)
   })

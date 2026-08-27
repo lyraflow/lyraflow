@@ -1,12 +1,15 @@
 import { LIFECYCLE_FIELDS, Lifecycle as LifecycleSchema } from '@lyraflow/core/segments/ast.js'
-import type { Lifecycle } from '@lyraflow/core/segments/ast.js'
+import type { Comparison, Lifecycle } from '@lyraflow/core/segments/ast.js'
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { LifecycleForm } from './LifecycleForm.js'
 
-const lifecycleNode = (): Lifecycle => ({
+// The COMPARISON member: every fixture below spreads this and overrides
+// `value` with an instant string, which the relative member's `{n, unit}`
+// would refuse.
+const lifecycleNode = (): Comparison<Lifecycle> => ({
   kind: 'lifecycle',
   field: 'first_seen',
   operator: '>=',

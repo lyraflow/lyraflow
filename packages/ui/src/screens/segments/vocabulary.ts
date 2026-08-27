@@ -17,8 +17,21 @@
  * selects by value keeps working, and the CLI -- which prints ids, names and
  * counts, and deliberately renders no tree as prose at all -- is untouched.
  */
-import { COMPARISON_OPERATORS, wherePredicateField } from '@lyraflow/core/segments/ast.js'
-import type { ComparisonOperator, WherePredicate, Window } from '@lyraflow/core/segments/ast.js'
+import {
+  BOOLEAN_OPERATORS,
+  COMPARISON_OPERATORS,
+  OPERATOR_FAMILY,
+  RELATIVE_OPERATORS,
+  SET_OPERATORS,
+  TEXT_OPERATORS,
+  wherePredicateField,
+} from '@lyraflow/core/segments/ast.js'
+import type {
+  Operator,
+  RelativeWindow,
+  WherePredicate,
+  Window,
+} from '@lyraflow/core/segments/ast.js'
 import { lifecycleInstant } from '@lyraflow/core/segments/instants.js'
 
 /**
@@ -33,7 +46,7 @@ import { lifecycleInstant } from '@lyraflow/core/segments/instants.js'
  * module's tests pin the observable half instead (every operator in core has a
  * word, and no word is its own symbol).
  */
-export const OPERATOR_WORDS: Record<ComparisonOperator, string> = {
+export const OPERATOR_WORDS: Record<Operator, string> = {
   '=': 'is',
   '!=': 'is not',
   '>': 'more than',
@@ -41,6 +54,18 @@ export const OPERATOR_WORDS: Record<ComparisonOperator, string> = {
   '<': 'less than',
   '<=': 'at most',
   between: 'between',
+  contains: 'contains',
+  not_contains: 'does not contain',
+  starts_with: 'starts with',
+  not_starts_with: 'does not start with',
+  ends_with: 'ends with',
+  not_ends_with: 'does not end with',
+  is_set: 'is set',
+  is_not_set: 'is not set',
+  is_true: 'is true',
+  is_false: 'is false',
+  in_last: 'in the last',
+  not_in_last: 'not in the last',
 }
 
 /**
@@ -59,7 +84,7 @@ export const OPERATOR_WORDS: Record<ComparisonOperator, string> = {
  * `ComparisonOperator` at all.
  */
 export function operatorWord(operator: string): string {
-  return OPERATOR_WORDS[operator as ComparisonOperator] ?? operator
+  return OPERATOR_WORDS[operator as Operator] ?? operator
 }
 
 /**
@@ -68,8 +93,38 @@ export function operatorWord(operator: string): string {
  * record's own keys, so the ORDER is core's and the list can never be a
  * subset of it.
  */
-export const OPERATOR_OPTIONS: { value: ComparisonOperator; label: string }[] =
-  COMPARISON_OPERATORS.map((value) => ({ value, label: OPERATOR_WORDS[value] }))
+export const OPERATOR_OPTIONS: { value: Operator; label: string }[] = COMPARISON_OPERATORS.map(
+  (value) => ({ value, label: OPERATOR_WORDS[value] }),
+)
+
+/**
+ * Every operator, grouped by family, in the order core declares them.
+ *
+ * Grouped rather than flat because the list is now nineteen long, and a flat
+ * nineteen-item select is one an operator scrolls rather than reads. The
+ * group labels are the reader's words for the families, not the AST's
+ * (`SET_OPERATORS` is "presence"): nothing here reaches a node.
+ *
+ * Which groups a given control OFFERS is the caller's decision -- see
+ * `OperatorSelect`'s `families` prop -- because the AST admits a different
+ * set per target, and a select that offers `is true` on a country would be a
+ * control that compiles to a rejection.
+ */
+export const OPERATOR_GROUPS: {
+  family: 'comparison' | 'text' | 'set' | 'boolean' | 'relative'
+  label: string
+  options: { value: Operator; label: string }[]
+}[] = [
+  { family: 'comparison', label: 'Compare', options: [...COMPARISON_OPERATORS] },
+  { family: 'text', label: 'Text', options: [...TEXT_OPERATORS] },
+  { family: 'set', label: 'Presence', options: [...SET_OPERATORS] },
+  { family: 'boolean', label: 'True or false', options: [...BOOLEAN_OPERATORS] },
+  { family: 'relative', label: 'Relative date', options: [...RELATIVE_OPERATORS] },
+].map((g) => ({
+  family: g.family as 'comparison' | 'text' | 'set' | 'boolean' | 'relative',
+  label: g.label,
+  options: (g.options as Operator[]).map((value) => ({ value, label: OPERATOR_WORDS[value] })),
+}))
 
 /**
  * The three window variants, in the order `ast.ts` declares them, with the
@@ -202,6 +257,46 @@ export function formatValue(value: unknown, formatScalar: (v: unknown) => string
 }
 
 /**
+ * An operator and its value as ONE phrase -- `is trial`, `contains checkout`,
+ * `is set`, `in the last 7 days`.
+ *
+ * This exists because `${operatorWord(op)} ${formatValue(value)}` stopped
+ * being true for every operator. Three of the five families do not render
+ * that way:
+ *
+ * - **presence and boolean carry no value at all**, so the operator word is
+ *   already the whole phrase. Pasting a value on gives `plan is set
+ *   undefined`.
+ * - **a relative window carries `{n, unit}`**, which `formatValue` would
+ *   render as `[object Object]`.
+ *
+ * Callers pass a clause read off STORED data, so `operator` is `string`
+ * rather than `Operator` and an unrecognised one falls through to the old
+ * rendering -- the same tolerance `operatorWord` has, and for the same
+ * reason: a summary must degrade to something readable rather than print
+ * `undefined` into a sentence.
+ */
+export function clausePhrase(
+  clause: { operator: string; value?: unknown },
+  formatScalar: (v: unknown) => string = String,
+): string {
+  const word = operatorWord(clause.operator)
+  switch (OPERATOR_FAMILY[clause.operator as Operator]) {
+    case 'set':
+    case 'boolean':
+      return word
+    case 'relative': {
+      const w = clause.value as RelativeWindow | undefined
+      // An unfinished row has no window yet; the operator word alone still
+      // reads, and the row itself says separately that it is not finished.
+      return w ? `${word} ${w.n} ${w.unit}` : word
+    }
+    default:
+      return `${word} ${formatValue(clause.value, formatScalar)}`
+  }
+}
+
+/**
  * A `where` list as prose: `page is changelog, duration_ms at least 30`.
  *
  * WITHOUT the leading word "where" and without any terminator, deliberately.
@@ -227,7 +322,7 @@ export function wherePhrase(where: readonly WherePredicate[]): string {
       // which is which. Nothing here can tell them apart anyway: this
       // function sees one tree, never the project's property namespace.
       const { name } = wherePredicateField(w)
-      return `${name} ${operatorWord(w.operator)} ${formatValue(w.value)}`
+      return `${name} ${clausePhrase(w)}`
     })
     .join(', ')
 }

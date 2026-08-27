@@ -25,6 +25,42 @@ one fix is contained in 0.3.0.
 
 ### Added
 
+- **Predicates can ask more than "is it equal to".** Segment conditions and
+  funnel-step `where` clauses offered seven operators — equality and ordering
+  — on every one of the four condition kinds. Four families join them
+  (**#193**): **text** (`contains`, `starts_with`, `ends_with` and their
+  negations), **presence** (`is_set` / `is_not_set`), **boolean** (`is_true` /
+  `is_false`) and **relative dates** (`in_last` / `not_in_last`, taking
+  `{ n, unit }` in the same vocabulary a behaviour's window already uses).
+  `url starts_with https://` was the question that could not be written.
+
+  **Which families a condition may use depends on what it compares**, and the
+  schema enforces it rather than the editor merely hiding options: a context
+  field or an event column takes no `is_true` (never a flag) and no `in_last`
+  (never a date); a `lifecycle` bound takes no `is_set` (always set) and no
+  `contains`; a behavioural `count` takes comparisons only. The builder's
+  operator list narrows to match, so a control cannot offer an operator the
+  server would refuse.
+
+  **`is_set` was not merely unspelled — it was unaskable.** A ClickHouse
+  `Map` returns the value type's default for a missing key, so a property that
+  was never sent and one sent as `""` read back identically and no comparison
+  could separate them. It compiles through `mapContains` on a map and an
+  emptiness test on a column, which are genuinely different questions.
+
+  Text matching folds both sides with `lowerUTF8`, so `path contains checkout`
+  finds `/Checkout`; `=` stays case-sensitive, because changing it would
+  reinterpret every saved segment. Negations include people who have nothing
+  in that slot at all — the same reading `!=` has always had here — and
+  `is_set` is how you exclude them.
+
+  **`AST_VERSION` stays at 1 and no funnel definition is rewritten.** Every
+  previously valid tree parses to exactly the same object, which is pinned by
+  a test rather than asserted in a comment: the new families are additional
+  members of a clause union, and the operators already in use match the member
+  they always did.
+
+
 - **The installed version, on the Settings screen.** A new Install card
   reports what release the server is running, with a link to that version's
   release notes. The number comes from `GET /v1/meta` rather than being

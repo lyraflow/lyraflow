@@ -1,3 +1,4 @@
+import { ALL_OPERATORS } from '@lyraflow/core/segments/ast.js'
 import type { Trait } from '@lyraflow/core/segments/ast.js'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -5,6 +6,7 @@ import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '../../api/client.js'
 import { TraitForm } from './TraitForm.js'
+import { clauseValueOf } from './clause.js'
 
 const traitNode = (): Trait => ({ kind: 'trait', key: 'plan', operator: '>=', value: '3' })
 
@@ -101,7 +103,7 @@ describe('TraitForm', () => {
     expect(screen.getByRole('combobox', { name: /operator/i })).toHaveValue('>=')
   })
 
-  it('offers every comparison operator, from core -- not a hand-picked subset', () => {
+  it('offers every operator, from core -- not a hand-picked subset', () => {
     render(
       <TraitForm
         id="c"
@@ -112,7 +114,26 @@ describe('TraitForm', () => {
       />,
     )
     const select = screen.getByRole('combobox', { name: /operator/i })
-    expect(select.querySelectorAll('option')).toHaveLength(7)
+    // Driven off core's own list rather than a literal count, which is what
+    // the test's name has always claimed. It was `7`, and a hard-coded count
+    // is exactly the hand-picked subset it was written to prevent -- it went
+    // red on a change that ADDED operators correctly.
+    expect(select.querySelectorAll('option')).toHaveLength(ALL_OPERATORS.length)
+  })
+
+  it('offers all five families on a trait, because a trait can hold anything', () => {
+    render(
+      <TraitForm
+        id="c"
+        node={traitNode()}
+        onChange={vi.fn()}
+        client={fakeClient()}
+        projectId={7}
+      />,
+    )
+    const select = screen.getByRole('combobox', { name: /operator/i })
+    const groups = [...select.querySelectorAll('optgroup')].map((g) => g.getAttribute('label'))
+    expect(groups).toEqual(['Compare', 'Text', 'Presence', 'True or false', 'Relative date'])
   })
 
   it('switching to between round-trips through ValueInput self-heal to two populated inputs', async () => {
@@ -345,7 +366,7 @@ describe("TraitForm — the value carries the trait's kind", () => {
         node={{ kind: 'trait', key: 'seats', operator: '=', value: '12' }}
       />,
     )
-    await waitFor(() => expect(current.value).toBe(12))
+    await waitFor(() => expect(clauseValueOf(current)).toBe(12))
   })
 
   it('leaves a text trait alone', async () => {
@@ -360,7 +381,7 @@ describe("TraitForm — the value carries the trait's kind", () => {
       />,
     )
     await waitFor(() => expect(client.schemaProperties).toHaveBeenCalled())
-    expect(current.value).toBe('pro')
+    expect(clauseValueOf(current)).toBe('pro')
   })
 
   it('says so when the trait has never been recorded and the value looks numeric', async () => {

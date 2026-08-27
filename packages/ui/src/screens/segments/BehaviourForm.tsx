@@ -9,6 +9,7 @@ import type { ConditionValue } from './ValueInput.js'
 import { ValueInput } from './ValueInput.js'
 import { WherePredicates } from './WherePredicates.js'
 import { WindowPicker } from './WindowPicker.js'
+import { withOperator } from './clause.js'
 
 /**
  * The `behavior` leaf form -- the largest of the four, because a behaviour
@@ -119,7 +120,12 @@ export function BehaviourForm(props: {
         <OperatorSelect
           id={operatorId}
           value={node.operator}
-          onChange={(operator) => onChange({ ...node, operator })}
+          // Comparisons only, matching `Behavior`'s clause in the AST: what a
+          // behavioural leaf compares is a COUNT or a SUM, so `contains`,
+          // `is set` and `in the last 7 days` have no reading on it. The
+          // behaviour's own time bound is its `window`, edited below.
+          families={['comparison']}
+          onChange={(operator) => onChange(withOperator(node, operator))}
         />
         {/* The value and the word that qualifies it are ONE flex item, not two
          * siblings of the wrapping row -- because as two siblings they were

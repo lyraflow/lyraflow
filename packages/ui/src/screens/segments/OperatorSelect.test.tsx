@@ -12,7 +12,7 @@ import { OPERATOR_OPTIONS } from './vocabulary.js'
 
 describe('OperatorSelect', () => {
   it('renders the words, not the symbols', () => {
-    render(<OperatorSelect id="op" value=">=" onChange={vi.fn()} />)
+    render(<OperatorSelect families={['comparison']} id="op" value=">=" onChange={vi.fn()} />)
     const options = Array.from(
       screen.getByLabelText('Operator').querySelectorAll('option'),
     ) as HTMLOptionElement[]
@@ -31,13 +31,13 @@ describe('OperatorSelect', () => {
   })
 
   it('keeps the accessible name `Operator`, which several suites address it by', () => {
-    render(<OperatorSelect id="op" value="=" onChange={vi.fn()} />)
+    render(<OperatorSelect families={['comparison']} id="op" value="=" onChange={vi.fn()} />)
     expect(screen.getByRole('combobox', { name: /operator/i })).toHaveValue('=')
   })
 
   it('reports the AST’s own symbol when a word is chosen', async () => {
     const onChange = vi.fn()
-    render(<OperatorSelect id="op" value="=" onChange={onChange} />)
+    render(<OperatorSelect families={['comparison']} id="op" value="=" onChange={onChange} />)
     await userEvent.selectOptions(screen.getByLabelText('Operator'), '!=')
     expect(onChange).toHaveBeenLastCalledWith('!=')
   })
@@ -47,7 +47,7 @@ describe('OperatorSelect', () => {
     // the word on screen really is attached to the option carrying `>=`,
     // which selecting by value cannot tell apart from a mislabelled list.
     const onChange = vi.fn()
-    render(<OperatorSelect id="op" value="=" onChange={onChange} />)
+    render(<OperatorSelect families={['comparison']} id="op" value="=" onChange={onChange} />)
     await userEvent.selectOptions(screen.getByLabelText('Operator'), screen.getByText('at least'))
     expect(onChange).toHaveBeenLastCalledWith('>=')
   })
