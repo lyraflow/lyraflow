@@ -21,6 +21,22 @@ here as it happened rather than tagged retroactively, for the same reason 0.1.0
 is: a tag created after the fact names a moment nobody could have fetched. Its
 one fix is contained in 0.3.0.
 
+## Unreleased
+
+### Added
+
+- **A link to the repository in the dashboard header**, beside the theme
+  toggle — the label "Star on GitHub" at `sm` and wider, the star icon
+  alone below it. **It carries no star count, and that is the decision
+  rather than an omission:** the two ways to show one both make the
+  dashboard reach a third party without being asked — GitHub's
+  `buttons.github.io` widget, and a browser fetch of `api.github.com`.
+  Either sends the IP of everyone who opens Lyraflow to GitHub, and
+  neither works in an install with no egress. The link is marked
+  `rel="noreferrer noopener"` for the same reason: without `noreferrer`
+  the outbound request carries this page's URL, which on a self-hosted
+  install is the operator's own hostname.
+
 ## 0.10.0 — 2026-08-27
 
 ### Added
