@@ -21,7 +21,7 @@ here as it happened rather than tagged retroactively, for the same reason 0.1.0
 is: a tag created after the fact names a moment nobody could have fetched. Its
 one fix is contained in 0.3.0.
 
-## Unreleased
+## 0.10.0 — 2026-08-27
 
 ### Added
 

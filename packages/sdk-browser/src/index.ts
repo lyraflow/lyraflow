@@ -7,7 +7,7 @@ import { EventQueue } from './queue.js'
 import { Transport } from './transport.js'
 import { clampContext, validateEvent } from './validate.js'
 
-export const VERSION = '0.9.0'
+export const VERSION = '0.10.0'
 
 // Its own module now (IMPORTANT 4 from the whole-branch review) -- see
 // that module's own docstring for why a caller who wants only this
