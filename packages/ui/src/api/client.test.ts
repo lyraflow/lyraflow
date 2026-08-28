@@ -538,6 +538,187 @@ describe('createClient', () => {
     })
   })
 
+  describe('trend reports', () => {
+    const base = {
+      name: 'Signups',
+      event: 'signed_up',
+      interval: '1d' as const,
+      group_by: null,
+    }
+
+    it('unwraps the trend-report list envelope', async () => {
+      const f = fakeFetch(200, { trends: [{ id: 1, name: 'A' }] })
+      const out = await createClient(f as unknown as typeof fetch).trendReports(7)
+      expect(out).toEqual([{ id: 1, name: 'A' }])
+      const [path, init] = f.mock.calls[0] ?? []
+      expect(path).toBe('/v1/trends')
+      expect(init?.method ?? 'GET').toBe('GET')
+    })
+
+    it('sends the project header on every saved-report call', async () => {
+      const f = fakeFetch(200, { trends: [] })
+      await createClient(f as unknown as typeof fetch).trendReports(7)
+      const init = f.mock.calls[0]?.[1] as RequestInit
+      expect(new Headers(init.headers).get('x-lyraflow-project')).toBe('7')
+    })
+
+    // Pinned the same way `funnel` is: verb, path (the id in the path, not
+    // the query string), project header.
+    it('trendReport GETs a single trend report by id under the project header', async () => {
+      const f = fakeFetch(200, { id: 7, name: 'Signups' })
+      const out = await createClient(f as unknown as typeof fetch).trendReport(3, 7)
+      expect(out).toEqual({ id: 7, name: 'Signups' })
+      const [path, init] = f.mock.calls[0] ?? []
+      expect(path).toBe('/v1/trends/7')
+      expect(init?.method ?? 'GET').toBe('GET')
+      expect(new Headers(init?.headers).get('x-lyraflow-project')).toBe('3')
+    })
+
+    // Pins the exact request body -- a client that dropped a field, renamed
+    // one, or nested the input under a `body`/`input` key would still
+    // typecheck against a loosely-shaped stub and pass a test that only
+    // checked the response.
+    it('createTrendReport POSTs the input verbatim', async () => {
+      const f = fakeFetch(201, { id: 9, ...base })
+      await createClient(f as unknown as typeof fetch).createTrendReport(3, base)
+      const [path, init] = f.mock.calls[0] ?? []
+      expect(path).toBe('/v1/trends')
+      expect(init?.method).toBe('POST')
+      expect(new Headers(init?.headers).get('x-lyraflow-project')).toBe('3')
+      expect(JSON.parse(init?.body as string)).toEqual(base)
+    })
+
+    // Same "omit means unchanged" contract `patchFunnel` pins: a field
+    // ABSENT from the call must stay absent on the wire, not fill in with
+    // `undefined` keys or the rest of `base`.
+    it('patchTrendReport sends PATCH with exactly the given partial patch', async () => {
+      const f = fakeFetch(200, { id: 7, ...base, name: 'Renamed' })
+      await createClient(f as unknown as typeof fetch).patchTrendReport(3, 7, {
+        name: 'Renamed',
+      })
+      const [path, init] = f.mock.calls[0] ?? []
+      expect(path).toBe('/v1/trends/7')
+      expect(init?.method).toBe('PATCH')
+      expect(new Headers(init?.headers).get('x-lyraflow-project')).toBe('3')
+      expect(JSON.parse(init?.body as string)).toEqual({ name: 'Renamed' })
+    })
+
+    it('deleteTrendReport sends DELETE to the trend-report path under the project header', async () => {
+      // NOT `fakeFetch(204, null)` -- it stringifies the body to `"null"`,
+      // and a 204 `Response` is not allowed a body at all (the constructor
+      // throws). Mirrors `deleteFunnel`'s own test just above.
+      const f = vi.fn(
+        async (_input: RequestInfo | URL, _init?: RequestInit) =>
+          new Response(null, { status: 204 }),
+      )
+      await expect(
+        createClient(f as unknown as typeof fetch).deleteTrendReport(3, 7),
+      ).resolves.toBeUndefined()
+      expect(f).toHaveBeenCalledTimes(1)
+      const [path, init] = f.mock.calls[0] ?? []
+      expect(path).toBe('/v1/trends/7')
+      expect(init?.method).toBe('DELETE')
+      expect(new Headers(init?.headers).get('x-lyraflow-project')).toBe('3')
+    })
+
+    it('surfaces a 409 as an ApiError carrying the server code', async () => {
+      const f = fakeFetch(409, { error: 'a trend with that name already exists in this project' })
+      await expect(
+        createClient(f as unknown as typeof fetch).createTrendReport(7, base),
+      ).rejects.toMatchObject({
+        status: 409,
+        code: 'a trend with that name already exists in this project',
+      })
+    })
+  })
+
+  describe('retention reports', () => {
+    const base = {
+      name: 'Week 1 return',
+      start_event: 'signed_up',
+      return_event: 'opened_app',
+      start_where: [],
+      return_where: [],
+      granularity: 'week' as const,
+      periods: 8,
+      segment_id: null,
+    }
+
+    // The retention-report list route answers `{ reports: [...] }`, NOT
+    // `{ retention_reports: [...] }` or `{ trends: [...] }` -- a copy-paste
+    // of the trend-report envelope key would typecheck and fail only here.
+    it('unwraps the retention-report list envelope', async () => {
+      const f = fakeFetch(200, { reports: [{ id: 1, name: 'Week 1 return' }] })
+      const out = await createClient(f as unknown as typeof fetch).retentionReports(7)
+      expect(out).toEqual([{ id: 1, name: 'Week 1 return' }])
+      const [path, init] = f.mock.calls[0] ?? []
+      expect(path).toBe('/v1/retention-reports')
+      expect(init?.method ?? 'GET').toBe('GET')
+      expect(new Headers(init?.headers).get('x-lyraflow-project')).toBe('7')
+    })
+
+    it('retentionReport GETs a single retention report by id under the project header', async () => {
+      const f = fakeFetch(200, { id: 7, name: 'Week 1 return' })
+      const out = await createClient(f as unknown as typeof fetch).retentionReport(3, 7)
+      expect(out).toEqual({ id: 7, name: 'Week 1 return' })
+      const [path, init] = f.mock.calls[0] ?? []
+      expect(path).toBe('/v1/retention-reports/7')
+      expect(init?.method ?? 'GET').toBe('GET')
+      expect(new Headers(init?.headers).get('x-lyraflow-project')).toBe('3')
+    })
+
+    it('createRetentionReport POSTs the input verbatim', async () => {
+      const f = fakeFetch(201, { id: 9, ...base })
+      await createClient(f as unknown as typeof fetch).createRetentionReport(3, base)
+      const [path, init] = f.mock.calls[0] ?? []
+      expect(path).toBe('/v1/retention-reports')
+      expect(init?.method).toBe('POST')
+      expect(new Headers(init?.headers).get('x-lyraflow-project')).toBe('3')
+      expect(JSON.parse(init?.body as string)).toEqual(base)
+    })
+
+    it('patchRetentionReport sends PATCH with exactly the given partial patch', async () => {
+      const f = fakeFetch(200, { id: 7, ...base, periods: 12 })
+      await createClient(f as unknown as typeof fetch).patchRetentionReport(3, 7, {
+        periods: 12,
+      })
+      const [path, init] = f.mock.calls[0] ?? []
+      expect(path).toBe('/v1/retention-reports/7')
+      expect(init?.method).toBe('PATCH')
+      expect(new Headers(init?.headers).get('x-lyraflow-project')).toBe('3')
+      expect(JSON.parse(init?.body as string)).toEqual({ periods: 12 })
+    })
+
+    it('deleteRetentionReport sends DELETE to the retention-report path under the project header', async () => {
+      // Same reason as `deleteTrendReport`'s test just above -- a 204
+      // `Response` cannot carry a body, so `fakeFetch(204, null)` throws.
+      const f = vi.fn(
+        async (_input: RequestInfo | URL, _init?: RequestInit) =>
+          new Response(null, { status: 204 }),
+      )
+      await expect(
+        createClient(f as unknown as typeof fetch).deleteRetentionReport(3, 7),
+      ).resolves.toBeUndefined()
+      expect(f).toHaveBeenCalledTimes(1)
+      const [path, init] = f.mock.calls[0] ?? []
+      expect(path).toBe('/v1/retention-reports/7')
+      expect(init?.method).toBe('DELETE')
+      expect(new Headers(init?.headers).get('x-lyraflow-project')).toBe('3')
+    })
+
+    it('surfaces a 409 as an ApiError carrying the server code', async () => {
+      const f = fakeFetch(409, {
+        error: 'a retention report with that name already exists in this project',
+      })
+      await expect(
+        createClient(f as unknown as typeof fetch).createRetentionReport(7, base),
+      ).rejects.toMatchObject({
+        status: 409,
+        code: 'a retention report with that name already exists in this project',
+      })
+    })
+  })
+
   describe('segments', () => {
     // Invented: `segment` (singular) had zero coverage the way `funnel`
     // (singular) once did -- mutating it to send

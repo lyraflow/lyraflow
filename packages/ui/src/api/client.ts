@@ -24,6 +24,8 @@ import type {
   RangeBody,
   RejectionsPage,
   RejectionsQuery,
+  RetentionReport,
+  RetentionReportInput,
   RetentionRequest,
   RetentionResult,
   SchemaProperty,
@@ -31,6 +33,8 @@ import type {
   SegmentPreview,
   StatsPage,
   StatsQuery,
+  TrendReport,
+  TrendReportInput,
   Usage,
 } from './types.js'
 
@@ -183,6 +187,31 @@ export interface ApiClient {
    * other.
    */
   funnelPeople(projectId: number, id: number, body: FunnelPeopleQuery): Promise<FunnelPeoplePage>
+  /**
+   * The saved-report CRUD surfaces. Same five-method shape as
+   * `funnels`/`funnel`/`createFunnel`/`patchFunnel`/`deleteFunnel` above,
+   * for both report kinds -- including that each list unwraps its own
+   * envelope key (`{ trends: [...] }`, `{ reports: [...] }` -- NOT the same
+   * key, see the client's own list implementations below).
+   */
+  trendReports(projectId: number): Promise<TrendReport[]>
+  trendReport(projectId: number, id: number): Promise<TrendReport>
+  createTrendReport(projectId: number, body: TrendReportInput): Promise<TrendReport>
+  patchTrendReport(
+    projectId: number,
+    id: number,
+    patch: Partial<TrendReportInput>,
+  ): Promise<TrendReport>
+  deleteTrendReport(projectId: number, id: number): Promise<void>
+  retentionReports(projectId: number): Promise<RetentionReport[]>
+  retentionReport(projectId: number, id: number): Promise<RetentionReport>
+  createRetentionReport(projectId: number, body: RetentionReportInput): Promise<RetentionReport>
+  patchRetentionReport(
+    projectId: number,
+    id: number,
+    patch: Partial<RetentionReportInput>,
+  ): Promise<RetentionReport>
+  deleteRetentionReport(projectId: number, id: number): Promise<void>
   segments(projectId: number): Promise<Segment[]>
   segment(projectId: number, id: number): Promise<Segment>
   createSegment(
@@ -446,6 +475,29 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
       call(`/v1/funnels/${id}/run`, { method: 'POST', body: JSON.stringify(range) }, projectId),
     funnelPeople: (projectId, id, body) =>
       call(`/v1/funnels/${id}/people`, { method: 'POST', body: JSON.stringify(body) }, projectId),
+    trendReports: async (projectId) =>
+      (await call<{ trends: TrendReport[] }>('/v1/trends', {}, projectId)).trends,
+    trendReport: (projectId, id) => call(`/v1/trends/${id}`, {}, projectId),
+    createTrendReport: (projectId, body) =>
+      call('/v1/trends', { method: 'POST', body: JSON.stringify(body) }, projectId),
+    patchTrendReport: (projectId, id, patch) =>
+      call(`/v1/trends/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }, projectId),
+    deleteTrendReport: (projectId, id) => call(`/v1/trends/${id}`, { method: 'DELETE' }, projectId),
+    // The list envelope's key is `reports`, NOT `trends` -- see
+    // `retention-routes.ts`'s `GET /v1/retention-reports` handler.
+    retentionReports: async (projectId) =>
+      (await call<{ reports: RetentionReport[] }>('/v1/retention-reports', {}, projectId)).reports,
+    retentionReport: (projectId, id) => call(`/v1/retention-reports/${id}`, {}, projectId),
+    createRetentionReport: (projectId, body) =>
+      call('/v1/retention-reports', { method: 'POST', body: JSON.stringify(body) }, projectId),
+    patchRetentionReport: (projectId, id, patch) =>
+      call(
+        `/v1/retention-reports/${id}`,
+        { method: 'PATCH', body: JSON.stringify(patch) },
+        projectId,
+      ),
+    deleteRetentionReport: (projectId, id) =>
+      call(`/v1/retention-reports/${id}`, { method: 'DELETE' }, projectId),
     segments: async (projectId) =>
       (await call<{ segments: Segment[] }>('/v1/segments', {}, projectId)).segments,
     segment: (projectId, id) => call(`/v1/segments/${id}`, {}, projectId),

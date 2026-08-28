@@ -1,3 +1,11 @@
+/**
+ * `Interval` and `Granularity` come off core's TOP-LEVEL export, not a deep
+ * `.../ast.js` path the way `FunnelDefinition` and `FunnelStep` below do --
+ * `trends/ast.js` and `retention/ast.js` are not in `@lyraflow/core`'s
+ * `exports` map, only `index.ts`'s barrel re-export of them is, so a deep
+ * import here would resolve at typecheck time and fail at build.
+ */
+import type { Granularity, Interval } from '@lyraflow/core'
 import type { FunnelDefinition, FunnelStep } from '@lyraflow/core/funnels/ast.js'
 import type { FunnelResult, StepResult } from '@lyraflow/core/funnels/levels.js'
 
@@ -544,6 +552,94 @@ export interface RetentionRequest {
  */
 export type TrendPoint = StatsBucket
 export type TrendResult = StatsPage
+
+/**
+ * `GET /v1/trends` and `GET /v1/trends/:id` -- a SAVED trend definition, not
+ * a run result (`TrendResult` above is that). This is `StoredTrend` from
+ * `@lyraflow/server`'s `reports/trend-store.ts`, restated field-for-field
+ * rather than imported: the UI package does not depend on the server, the
+ * same reason `Funnel` and `Segment` above are declared locally instead of
+ * imported. Same field names, same snake_case -- this type describes the
+ * WIRE, not a view model, and a second spelling here is exactly how the
+ * client and the store it mirrors would drift.
+ *
+ * Deliberately has no `definition_version` and no `stale`, unlike
+ * `RetentionReport` below: a trend's definition is three scalar columns, so
+ * there is nothing that can fail to parse and nothing to version. Adding
+ * either field here "for symmetry" with `RetentionReport` would be copying
+ * a shape the wire does not have.
+ */
+export interface TrendReport {
+  id: number
+  name: string
+  event: string
+  interval: Interval
+  group_by: string | null
+  created_at: string
+  updated_at: string
+}
+
+/**
+ * `POST /v1/trends` and `PATCH /v1/trends/:id`'s body. Snake_case, same as
+ * `TrendReport` -- there is no domain/wire translation at this boundary, so
+ * a create call and a patch call both send this shape verbatim
+ * (`Partial<TrendReportInput>` for the patch).
+ */
+export interface TrendReportInput {
+  name: string
+  event: string
+  interval: Interval
+  group_by: string | null
+}
+
+/**
+ * `GET /v1/retention-reports` and `GET /v1/retention-reports/:id` -- a SAVED
+ * retention definition, not a run result (`RetentionResult` above is that).
+ * This is `StoredRetentionReport` from `@lyraflow/server`'s
+ * `reports/retention-store.ts`, restated field-for-field rather than
+ * imported, same reason as `TrendReport` above.
+ *
+ * `stale` is true when the stored `start_where`/`return_where` no longer
+ * parse under the server's grammar -- ALWAYS present, `false` for an
+ * ordinary row, same discipline as `Funnel.stale` and `Segment.stale`: one
+ * field is checked regardless of whether the row it names happens to be
+ * broken. `definition_version` exists here and NOT on `TrendReport` because
+ * this report's `where` clauses are parsed JSON rather than three scalar
+ * columns -- see `TrendReport`'s docstring for the asymmetry.
+ */
+export interface RetentionReport {
+  id: number
+  name: string
+  definition_version: number
+  start_event: string
+  return_event: string
+  start_where: unknown[]
+  return_where: unknown[]
+  granularity: Granularity
+  periods: number
+  segment_id: number | null
+  stale: boolean
+  created_at: string
+  updated_at: string
+}
+
+/**
+ * `POST /v1/retention-reports` and `PATCH /v1/retention-reports/:id`'s body.
+ * Snake_case, same as `RetentionReport` and for the same reason `TrendReportInput`
+ * is. `start_where`/`return_where` are `unknown[]` rather than
+ * `WherePredicate[]`, same choice `RetentionRequest` above makes: this
+ * module describes the wire and does not import core's segment schema.
+ */
+export interface RetentionReportInput {
+  name: string
+  start_event: string
+  return_event: string
+  start_where: unknown[]
+  return_where: unknown[]
+  granularity: Granularity
+  periods: number
+  segment_id: number | null
+}
 
 /**
  * `GET /v1/persons/:id`.
