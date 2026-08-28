@@ -65,6 +65,39 @@ describe('TraitValueField', () => {
     expect(label).toHaveAttribute('for', input.id)
   })
 
+  // The operator the test above cannot see. `between` is in
+  // `COMPARISON_OPERATORS`, and `TraitForm` routes the whole comparison
+  // family here, so it is reachable from the segment builder and from the
+  // people screen's trait search -- but `ValueInput` renders TWO boxes for
+  // it, and it used to suffix BOTH (`-1`/`-2`). The `Label htmlFor={id}`
+  // above therefore named an element that did not exist for exactly this
+  // one operator: a visible label that focuses nothing, and invisible in
+  // `TraitValueField`'s own markup because the suffix is applied inside
+  // `ValueInput`. The fix gives the first box the caller's id unchanged.
+  //
+  // Asserted by CLICKING the label rather than by comparing `for` to
+  // `first.id`. Clicking a `<label>` focuses the control its `for` names
+  // and does nothing at all when that id names nothing, so this cannot
+  // pass against a dangling reference -- whereas an attribute comparison
+  // passes vacuously the day both sides are changed to the same wrong
+  // value. It is also the behaviour an operator actually gets.
+  it('wires the visible label to the first box under `between`, not to a dangling id', async () => {
+    render(<Harness client={client()} operator="between" />)
+    const first = screen.getByRole('combobox', { name: /^value 1$/i })
+    const label = screen.getByText('Value', { selector: 'label' })
+
+    await userEvent.click(label)
+
+    expect(first).toHaveFocus()
+    // The second box keeps its own suffixed id and its own accessible
+    // name; only the FIRST inherits the caller's. Pinned so a later
+    // "simplification" that gives both the same id -- which would make the
+    // focus assertion above pass just as well -- fails here instead.
+    const second = screen.getByRole('combobox', { name: /^value 2$/i })
+    expect(second.id).not.toBe(first.id)
+    expect(second).not.toHaveFocus()
+  })
+
   // THE eagerness pin, and the reason this component exists separately from
   // `PropertyCombobox`. The endpoint behind it scans the project's whole
   // trait partition; a segment builder renders one of these per condition
