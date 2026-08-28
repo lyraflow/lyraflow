@@ -52,12 +52,20 @@ export function personPath(id: string): string {
  * hand-edited URL simply fails to parse and this returns `null`, the same
  * "nothing to show yet" state `readPersonId` reports for no id.
  *
- * **`id` wins when a URL carries both.** `People` checks `readPersonId`
- * first and renders the profile, discarding the trait parameters silently.
- * Neither `personPath` nor `traitSearchPath` can produce such a URL -- each
- * writes its own parameters and nothing else -- so it is reachable only by
- * hand-assembling one, and naming a specific person is the more specific
- * request of the two. Written down so it stays a decision rather than a
+ * **`id` decides the top of the screen when a URL carries both.** `People`
+ * checks `readPersonId` first, so naming a person is the more specific
+ * request of the two and the profile is what the screen leads with. It does
+ * NOT discard the trait parameters: on the not-found branch `People` renders
+ * `TraitSearch` below the message, and that component reads the trait query
+ * out of `location.search` for itself -- so `?id=ghost&trait_key=plan&...`
+ * shows the 404 for `ghost` AND runs the trait search underneath it, which
+ * is the recovery an operator holding a dead id actually wants. Every other
+ * outcome of the lookup -- a profile that loads, a fragmented history, a
+ * failed request -- renders no search, so there the trait parameters do
+ * ride along unread until the id leaves the URL. Neither `personPath` nor
+ * `traitSearchPath` can produce such a URL -- each writes its own
+ * parameters and nothing else -- so it is reachable only by
+ * hand-assembling one. Written down so it stays a decision rather than a
  * consequence of which `if` happens to come first.
  */
 const TRAIT_KEY_PARAM = 'trait_key'
