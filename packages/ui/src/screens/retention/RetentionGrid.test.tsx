@@ -2,6 +2,7 @@ import { render, screen, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import type { RetentionResult } from '../../api/types.js'
 import { RetentionGrid } from './RetentionGrid.js'
+import { MAX_TINT, MIN_TINT } from './grid.js'
 
 const result = (over: Partial<RetentionResult> = {}): RetentionResult => ({
   granularity: 'week',
@@ -20,6 +21,13 @@ const result = (over: Partial<RetentionResult> = {}): RetentionResult => ({
 })
 
 const rows = () => within(screen.getByTestId('retention-grid')).getAllByRole('row').slice(1)
+
+/** The opacity of the tint layer behind one cell, or 0 when there is none. */
+const tintOf = (row: number, cell: number): number => {
+  const td = within(rows()[row] as HTMLElement).getAllByRole('cell')[cell]
+  const layer = td?.querySelector('div')
+  return layer ? Number(layer.style.opacity || 0) : 0
+}
 
 describe('RetentionGrid', () => {
   it('renders an unmeasured cell as a dash, never as 0%', () => {
@@ -61,5 +69,63 @@ describe('RetentionGrid', () => {
   it('gives one column per period plus the cohort and size columns', () => {
     render(<RetentionGrid result={result()} />)
     expect(screen.getAllByRole('columnheader')).toHaveLength(2 + 4)
+  })
+
+  it('shades the strongest cell fully, even when it is nowhere near 100%', () => {
+    // The bug: shading was linear against an absolute 100%, so a grid
+    // narrowed by `where` predicates -- peaking around 51%, with most cells
+    // under 15% -- rendered with no visible colour at all. Reported as "you
+    // removed the gradient".
+    render(
+      <RetentionGrid
+        result={result({
+          cohorts: [
+            { cohort: '2026-06-01', size: 100, retained: [51, 7, 0, null] },
+            { cohort: '2026-06-08', size: 100, retained: [14, 0, null, null] },
+          ],
+        })}
+      />,
+    )
+    expect(tintOf(0, 1)).toBeCloseTo(MAX_TINT, 5)
+  })
+
+  it('keeps a small cell visible rather than letting it fade to nothing', () => {
+    render(
+      <RetentionGrid
+        result={result({
+          cohorts: [{ cohort: '2026-06-01', size: 100, retained: [51, 7, 0, null] }],
+        })}
+      />,
+    )
+    const small = tintOf(0, 2)
+    expect(small).toBeGreaterThanOrEqual(MIN_TINT)
+    // ...and still clearly weaker than the strongest, or the shading says
+    // nothing.
+    expect(small).toBeLessThan(MAX_TINT * 0.8)
+  })
+
+  it('leaves a measured zero unshaded, so it cannot read as a small hit', () => {
+    render(
+      <RetentionGrid
+        result={result({
+          cohorts: [{ cohort: '2026-06-01', size: 100, retained: [51, 7, 0, null] }],
+        })}
+      />,
+    )
+    expect(tintOf(0, 3)).toBe(0)
+  })
+
+  it('says the shading is relative, and to what', () => {
+    // Colour no longer means an absolute rate, so a reader comparing shades
+    // across two grids would be wrong. The percentages are what compare.
+    render(
+      <RetentionGrid
+        result={result({
+          cohorts: [{ cohort: '2026-06-01', size: 100, retained: [51, 7, 0, null] }],
+        })}
+      />,
+    )
+    expect(screen.getByTestId('retention-scale')).toHaveTextContent('51%')
+    expect(screen.getByTestId('retention-scale')).toHaveTextContent(/not comparable/i)
   })
 })

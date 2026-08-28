@@ -385,7 +385,10 @@ screens, reachable from the sidebar:
   re-run when you change the controls: a grid is a real scan, and numbers from
   one definition sitting under the controls of another is a wrong answer
   stated confidently, so the grid clears and waits for you. Cells shade by
-  retention, and a period that had not finished when the grid ran shows a dash
+  retention **relative to the strongest cell in that grid**, which the screen
+  states — a narrowed grid peaking at 15% would otherwise render with no
+  visible colour at all, so shades compare within one grid and never between
+  two. A period that had not finished when the grid ran shows a dash
   rather than 0% — with a line underneath saying how many did, because a dash
   read as a zero is the one way this chart misleads. The whole definition
   lives in the URL, so a grid is shareable as a link and there is nothing to

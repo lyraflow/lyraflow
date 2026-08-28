@@ -125,6 +125,14 @@ one fix is contained in 0.3.0.
   event name and two different conditions, so a grid without predicates
   answered a different question with total confidence.
 
+  **Cell shading is relative to the strongest cell in that grid**, on a
+  square-root curve, and the screen says so. Shading against an absolute 100%
+  was linear and worked only for grids whose numbers were already large: a
+  report narrowed with `where` predicates peaks around 51% with most cells
+  under 15%, which rendered as a table with no colour at all. Colours therefore
+  compare within one grid and never between two — the percentages, printed in
+  every cell, are what compare.
+
   **No stored retention reports, deliberately.** A grid is two event names, a
   granularity and a range — small enough to live in the URL, which is how the
   screen is shareable as a link without a store, a migration or a second set
