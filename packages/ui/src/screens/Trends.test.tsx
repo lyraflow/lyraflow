@@ -331,6 +331,29 @@ describe('Trends -- saving and reopening a saved report', () => {
     expect(client.patchTrendReport).not.toHaveBeenCalled()
   })
 
+  it('updates the saved report on PATCH, with the same range-free body create sends', async () => {
+    // The Important finding from review: `patchTrendReport` previously
+    // appeared in this suite only inside a `.not.toHaveBeenCalled()`
+    // assertion, so its own call site -- as opposed to the `reportBody()`
+    // it shares with create -- was never actually observed. A mutation at
+    // the PATCH call site alone (a leaked `range`, or the
+    // `reportId != null` branch dropped or inverted) would have survived
+    // the suite. This asserts the full key set the way the create test
+    // does, so a leaked `range` (or a renamed `since`/`until` evasion of
+    // it) fails rather than passing unnoticed.
+    const client = renderAt('/trends/3')
+    await waitFor(() => expect(client.stats).toHaveBeenCalled())
+    await type(/name/i, 'Renamed')
+    await click(/save/i)
+    await waitFor(() => expect(client.patchTrendReport).toHaveBeenCalled())
+    expect(client.patchTrendReport).toHaveBeenCalledWith(1, 3, {
+      name: 'Renamed',
+      event: 'signup',
+      interval: '1d',
+      group_by: null,
+    })
+  })
+
   it('saves a new report from an unsaved screen', async () => {
     const client = renderAt('/trends/new?event=signup&interval=1d')
     await type(/name/i, 'Signups by day')
