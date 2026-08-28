@@ -50,7 +50,21 @@ function LookupForm(props: {
       }}
     >
       <div className="flex flex-col gap-2">
-        <Label htmlFor="people-lookup">User id, anonymous id, or a device id</Label>
+        {/* NOT "anonymous id". `resolvePersonScope`'s device fallback
+          * reaches an anonymous id only through `identity_bindings`, and
+          * only `identify()` ever writes a row there -- so an anonymous id
+          * belonging to a visitor who has never been identified resolves to
+          * nobody and this screen 404s on it, even though the feed is
+          * showing their events. Measured: two `track` calls under
+          * `visitor-anon-1` with no `identify()`, and `GET
+          * /v1/persons/visitor-anon-1` answers `404 person_not_found`. A
+          * label promising it works is a promise the server does not keep,
+          * and on a young install where almost nothing has been identified
+          * it is wrong more often than it is right. `#18` is the open
+          * limitation; this label stops advertising past it. */}
+        <Label htmlFor="people-lookup">
+          User id, or the anonymous or device id of someone already identified
+        </Label>
         <div className="flex flex-wrap items-center gap-3">
           <Input
             id="people-lookup"
@@ -233,18 +247,42 @@ export function People(props: { client: ApiClient; onUnauthorized?: () => void }
           onSubmit={submit}
           error={
             <span data-testid="person-not-found">
-              {/* The 404 copy, verbatim -- the sentence this task exists to
-               * get right. A 404 here means one of three things and the API
-               * cannot tell them apart (`person.ts`'s own docstring), so
-               * this says all three rather than picking one and being wrong
-               * for the other two. */}
+              {/* The 404 copy, verbatim -- the sentence this screen exists
+               * to get right. A 404 here means one of FOUR things and the
+               * API cannot tell them apart, so this says all four rather
+               * than picking one and being wrong for the other three.
+               *
+               * Three of them come from `person.ts`'s own docstring (never
+               * sent, erased, aged out). The fourth is not in that
+               * docstring and was found by probing: a visitor who has never
+               * been identified. `resolvedPersonExpr` falls back to
+               * `anonymous_id` for an unbound event, so their events carry
+               * that id and the feed both shows them and LINKS HERE with
+               * it -- but `resolvePersonScope` reaches a device only
+               * through `identity_bindings`, which only `identify()` ever
+               * writes, so the read resolves to nobody. Measured: two
+               * `track` calls under `visitor-anon-1`, both visible in the
+               * feed, and `GET /v1/persons/visitor-anon-1` answering `404
+               * person_not_found`.
+               *
+               * It goes FIRST, not last, because on a fresh install almost
+               * nothing has been identified and this is what most feed rows
+               * lead to. An operator who has just clicked a person out of
+               * the feed and been told "no event was ever recorded under
+               * this id" has been contradicted by the screen they came
+               * from, which is how a correct message still destroys trust
+               * in the tool. Tracked as `#18`; naming it here is the honest
+               * half of not fixing it in this change. */}
               <strong>
                 Nothing to show for <code className="font-mono">{id}</code>.
               </strong>{' '}
-              That means one of three things and the API cannot tell them apart: no event was ever
-              recorded under this id in this project; everything recorded was erased by a deletion
-              request; or every event aged out under this project&apos;s retention window. If you
-              expected someone here, check the id and the project.
+              That means one of four things and the API cannot tell them apart. Most often, on a
+              project where little has been identified yet: this id belongs to a visitor who has
+              never been identified, so their events exist and are visible in the feed, but nothing
+              has ever tied that id to a person and there is no profile to assemble. Otherwise: no
+              event was ever recorded under this id in this project; everything recorded was erased
+              by a deletion request; or every event aged out under this project&apos;s retention
+              window. If you expected someone here, check the id and the project.
             </span>
           }
         />

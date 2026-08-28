@@ -128,17 +128,30 @@ describe('People', () => {
   it('shows a lookup input when there is no id', () => {
     const client = { person: vi.fn() } as unknown as ApiClient
     renderPeople('/people', client)
-    expect(screen.getByLabelText(/user id, anonymous id, or a device id/i)).toBeInTheDocument()
+    expect(screen.getByLabelText(/user id, or the anonymous or device id/i)).toBeInTheDocument()
     expect(client.person).not.toHaveBeenCalled()
   })
 
-  it('names all three reasons a person cannot be shown', async () => {
-    // person.ts's own docstring: a 404 means nobody ever sent this id, OR
+  it('names all four reasons a person cannot be shown', async () => {
+    // person.ts's own docstring names three: nobody ever sent this id, OR
     // everything they did sits at or before their deletion boundary, OR
     // every event aged out under retention -- "there is no way to tell the
     // three apart from this response alone". Saying "no such person" would
     // tell an operator checking an erasure that it worked when it may have
     // been a retention expiry.
+    //
+    // The FOURTH is not in that docstring and was found by probing the live
+    // server: a visitor who has never been identified. Their events carry
+    // their `anonymous_id`, the feed shows them and links here with it, and
+    // this read 404s -- because `resolvePersonScope` reaches a device only
+    // through `identity_bindings`, which only `identify()` writes. On a
+    // fresh install that is most feed rows, so it is the likeliest cause of
+    // this message and the copy leads with it.
+    //
+    // The three original assertions stay exactly as they were. This is an
+    // addition: the failure mode being pinned is a message that names some
+    // causes and not others, and dropping one to make room for another is
+    // the same defect in a new place.
     const client = {
       person: vi.fn(async () => {
         throw new ApiError(404, 'person_not_found')
@@ -151,13 +164,29 @@ describe('People', () => {
     // recorded" rather than containing the literal substring "never" --
     // same shape of correction `PersonFields.test.tsx` already made for
     // `AttributesSection`'s copy. Pinning the real phrasing for each of
-    // the three causes instead, which is the assertion this test exists to
-    // make: an operator must be told all three, not shown a message loose
-    // enough to also describe "no such person".
+    // the causes instead, which is the assertion this test exists to
+    // make: an operator must be told all of them, not shown a message
+    // loose enough to also describe "no such person".
     expect(msg).toHaveTextContent(/no event was ever recorded/i)
     expect(msg).toHaveTextContent(/erased by a deletion request/i)
     expect(msg).toHaveTextContent(/retention window/i)
+    expect(msg).toHaveTextContent(/never been identified/i)
+    expect(msg).toHaveTextContent(/visible in the feed/i)
+    expect(msg).toHaveTextContent(/one of four things/i)
     expect(msg).not.toHaveTextContent(/no such person/i)
+  })
+
+  it('does not promise the lookup resolves an unidentified visitor', async () => {
+    // The label used to read "User id, anonymous id, or a device id". The
+    // second and third are only true once `identify()` has bound them --
+    // the same fact the 404 copy above now names. A label stating a
+    // capability the server does not have sends an operator to a dead end
+    // and then blames their id.
+    const client = { person: vi.fn() } as unknown as ApiClient
+    renderPeople('/people', client)
+    const label = screen.getByText(/^user id, or the anonymous or device id/i)
+    expect(label).toHaveTextContent(/already identified/i)
+    expect(client.person).not.toHaveBeenCalled()
   })
 
   it('explains a fragmented history rather than showing a broken screen', async () => {
