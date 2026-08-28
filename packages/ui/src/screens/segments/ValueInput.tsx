@@ -60,6 +60,14 @@ export function ValueInput(props: {
   onChange: (value: ConditionValue) => void
   type?: 'text' | 'datetime-local'
   label?: string
+  /** The DOM id for the box (or, under `between`, the first of the two --
+   * suffixed `-1`/`-2` internally so both stay unique), so a caller that
+   * renders its own visible `<Label htmlFor>` -- `TraitValueField` does --
+   * can point it at the actual input. Optional and unused by every other
+   * caller of this component, which either renders no visible label at all
+   * or (`ClauseValueField`'s relative branch) labels each box itself rather
+   * than through here. */
+  id?: string
   suggest?: {
     /** Rendered as the popup's options. May be empty -- the field stays a
      * combobox regardless, so that offering suggestions does not change the
@@ -79,7 +87,7 @@ export function ValueInput(props: {
     errorMessage?: string
   }
 }) {
-  const { operator, value, onChange, type = 'text', label = 'Value', suggest } = props
+  const { operator, value, onChange, type = 'text', label = 'Value', id, suggest } = props
   const isBetween = operator === 'between'
   const isTuple = Array.isArray(value)
 
@@ -125,6 +133,7 @@ export function ValueInput(props: {
          * value (`between "a" and "m"`) is typed straight in, as before. */}
         {suggest ? (
           <Combobox
+            id={id ? `${id}-1` : undefined}
             type={type}
             className="grow basis-24"
             label={`${label} 1`}
@@ -138,6 +147,7 @@ export function ValueInput(props: {
           />
         ) : (
           <Input
+            id={id ? `${id}-1` : undefined}
             type={type}
             className="min-w-0 grow basis-24"
             aria-label={`${label} 1`}
@@ -148,6 +158,7 @@ export function ValueInput(props: {
         <span className="shrink-0 text-sm text-muted-foreground">and</span>
         {suggest ? (
           <Combobox
+            id={id ? `${id}-2` : undefined}
             type={type}
             className="grow basis-24"
             label={`${label} 2`}
@@ -161,6 +172,7 @@ export function ValueInput(props: {
           />
         ) : (
           <Input
+            id={id ? `${id}-2` : undefined}
             type={type}
             className="min-w-0 grow basis-24"
             aria-label={`${label} 2`}
@@ -175,6 +187,7 @@ export function ValueInput(props: {
   if (suggest) {
     return (
       <Combobox
+        id={id}
         type={type}
         className="w-full"
         label={label}
@@ -191,6 +204,7 @@ export function ValueInput(props: {
 
   return (
     <Input
+      id={id}
       type={type}
       aria-label={label}
       value={isTuple ? '' : toText(value as Scalar)}

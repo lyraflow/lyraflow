@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { ApiError } from '../../api/client.js'
 import type { ApiClient } from '../../api/client.js'
+import { Label } from '../../components/ui/label.js'
 import type { ConditionValue } from './ValueInput.js'
 import { ValueInput } from './ValueInput.js'
 
@@ -52,6 +53,22 @@ type Answer = { trait: string; options: string[] } | { trait: string; failed: tr
  * segment may be written ahead of the data that fills it. Everything here
  * only populates a list; typing anything at all still works, and a failed or
  * empty lookup leaves the field fully usable.
+ *
+ * ## The `Value` label
+ *
+ * `ClauseValueField`, the sibling this replaces for the comparison family,
+ * renders a visible `Label`; this component used to render none at all --
+ * `ValueInput`'s `aria-label="Value"` gave the field an accessible name, but
+ * nothing a sighted operator could see, and nothing occupying this column's
+ * label row in `TraitForm`'s condition row. Both defects share one fix: a
+ * `Label` here, wired to a `useId()` value the same way `PropertyCombobox`
+ * wires its own (`id` on the input, `htmlFor` the same value on the
+ * `Label`) -- self-generated rather than taken from the caller, because
+ * `TraitForm` renders exactly one of these per row and `PropertyCombobox`,
+ * this field's sibling in that row, already establishes that a self-scoped
+ * id needs no caller involvement at all. Wording matches `ClauseValueField`
+ * exactly, so the two read as one control choosing between two renderings,
+ * not two different fields.
  */
 export function TraitValueField(props: {
   client: ApiClient
@@ -66,6 +83,7 @@ export function TraitValueField(props: {
   onUnauthorized?: () => void
 }) {
   const { client, projectId, trait, operator, value, onChange, onUnauthorized } = props
+  const id = useId()
   // What the operator has asked for, and never anything else: `null` until
   // they touch a box. Every fetch this component makes is downstream of this
   // being non-null, which is what makes "no request on render" a property of
@@ -133,9 +151,11 @@ export function TraitValueField(props: {
   }, [ask, key, client, projectId])
 
   return (
-    <div className="flex flex-col gap-1">
+    <div className="flex min-w-0 flex-col gap-1">
+      <Label htmlFor={id}>Value</Label>
       <div className="flex items-end gap-2">
         <ValueInput
+          id={id}
           operator={operator}
           value={value}
           onChange={onChange}

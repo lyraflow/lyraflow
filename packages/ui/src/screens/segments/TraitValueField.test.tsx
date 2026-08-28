@@ -49,6 +49,22 @@ function Harness(props: { client: ApiClient; trait?: string; operator?: string; 
 }
 
 describe('TraitValueField', () => {
+  // The field used to render only `aria-label="Value"` on the input --
+  // an accessible name, but no visible `<label>` a sighted operator could
+  // read, and nothing occupying this column's label row next to `Trait`
+  // and `Operator` in `TraitForm`'s condition row. `getByLabelText` alone
+  // cannot pin this: it matches `aria-label` just as well as a real
+  // `<label>`, so it would pass against the very defect this guards. The
+  // assertion has to walk to an actual `<label>` element and confirm its
+  // `for` names the input's own id, which is what a sighted operator and a
+  // screen reader both need.
+  it('renders a visible Value label wired to the value input', () => {
+    render(<Harness client={client()} />)
+    const input = screen.getByRole('combobox', { name: /^value$/i })
+    const label = screen.getByText('Value', { selector: 'label' })
+    expect(label).toHaveAttribute('for', input.id)
+  })
+
   // THE eagerness pin, and the reason this component exists separately from
   // `PropertyCombobox`. The endpoint behind it scans the project's whole
   // trait partition; a segment builder renders one of these per condition
