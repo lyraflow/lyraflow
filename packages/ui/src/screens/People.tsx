@@ -263,6 +263,7 @@ export function People(props: { client: ApiClient; onUnauthorized?: () => void }
           projectId={activeId}
           personId={person.person_id}
           eventCount={person.events}
+          onUnauthorized={onUnauthorized}
         />
       )}
       {/*
