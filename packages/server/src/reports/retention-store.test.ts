@@ -131,6 +131,48 @@ describe('RetentionReportStore', () => {
     )
   })
 
+  // I3 from the whole-branch review: a PATCH that rewrites the predicates
+  // must re-stamp `definition_version`, the same way `FunnelStore.update`
+  // re-stamps its own on a `steps` write (`funnels/store.ts`'s own
+  // docstring). Both rows below are inserted directly at version 0 --
+  // `create()` always stamps the current version, so there is no way to
+  // observe a version CHANGE by going through it alone.
+  describe("definition_version's re-stamp on update", () => {
+    it('a patch that writes predicates advances the stamp', async () => {
+      const inserted = await pg.query<{ id: string }>(
+        `INSERT INTO retention_reports
+           (project_id,name,definition_version,start_event,return_event,start_where,
+            return_where,granularity,periods)
+         VALUES ($1,'Old shape',0,'a','b','[]'::jsonb,'[]'::jsonb,'week',8)
+         RETURNING id`,
+        [projectA],
+      )
+      const id = Number(inserted.rows[0]?.id)
+      const updated = await store.update(projectA, id, {
+        start_where: [{ property: 'plan', operator: '=', value: 'pro' }],
+      })
+      expect(updated?.definition_version).toBe(1)
+    })
+
+    it('a patch that does not touch predicates leaves the stamp alone', async () => {
+      const inserted = await pg.query<{ id: string }>(
+        `INSERT INTO retention_reports
+           (project_id,name,definition_version,start_event,return_event,start_where,
+            return_where,granularity,periods)
+         VALUES ($1,'Old shape, renamed',0,'a','b','[]'::jsonb,'[]'::jsonb,'week',8)
+         RETURNING id`,
+        [projectA],
+      )
+      const id = Number(inserted.rows[0]?.id)
+      // Touches granularity and the name -- neither is the predicate tree.
+      const updated = await store.update(projectA, id, {
+        name: 'Renamed, not re-parsed',
+        granularity: 'day',
+      })
+      expect(updated?.definition_version).toBe(0)
+    })
+  })
+
   it('keeps segment_id when the segment it names is deleted', async () => {
     // THE test for decision 3. ON DELETE CASCADE would remove the report;
     // ON DELETE SET NULL would erase the evidence that a restriction ever

@@ -212,6 +212,19 @@ export class RetentionReportStore {
    * a caller reading a plain property off an object it did not build sees
    * `undefined` whether the key is absent or was never set, which is the
    * same distinction JSON itself draws.
+   *
+   * A patch that writes `start_where` or `return_where` also stamps
+   * `definition_version` to the current `RETENTION_DEFINITION_VERSION` —
+   * `FunnelStore.update`'s own docstring gives the reason, and it applies
+   * here unchanged: the stored predicates are now whatever THIS build
+   * parsed and wrote, whether or not the row's old value already matched.
+   * A patch that only renames, or only touches granularity/periods/segment,
+   * leaves the version alone — the predicate tree did not change. Without
+   * this, `020_saved_reports.sql`'s whole reason for the column (finding
+   * every row written under an earlier shape without parsing each one)
+   * would be defeated for exactly the rows a future migration most needs to
+   * find: ones PATCHed under a newer shape while still carrying an older
+   * stamp.
    */
   async update(
     projectId: number,
@@ -226,6 +239,10 @@ export class RetentionReportStore {
            return_event = COALESCE($5, return_event),
            start_where  = COALESCE($6::jsonb, start_where),
            return_where = COALESCE($7::jsonb, return_where),
+           definition_version = CASE
+             WHEN $6::jsonb IS NULL AND $7::jsonb IS NULL THEN definition_version
+             ELSE $12
+           END,
            granularity  = COALESCE($8, granularity),
            periods      = COALESCE($9, periods),
            segment_id   = CASE WHEN $10 THEN $11 ELSE segment_id END,
@@ -244,6 +261,7 @@ export class RetentionReportStore {
           patch.periods ?? null,
           patch.segment_id !== undefined,
           patch.segment_id ?? null,
+          RETENTION_DEFINITION_VERSION,
         ],
       )
       const row = r.rows[0]
