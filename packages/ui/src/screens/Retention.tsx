@@ -95,6 +95,14 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
   const [reportError, setReportError] = useState<string | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  // True once a fetched report comes back `stale: true` -- its stored
+  // `start_where`/`return_where` no longer parse under core's grammar
+  // (`RetentionReport`'s own docstring in `api/types.ts`). Kept as its own
+  // piece of state rather than read live off a `report` object this screen
+  // does not otherwise keep, because it must survive past the seed effect
+  // that discovers it -- the warning stays on screen for as long as this
+  // report is open, not just for the render that loaded it.
+  const [stale, setStale] = useState(false)
 
   // The (project, report) pair this screen is currently open on. Same
   // mechanism `Trends.tsx` uses and for the same reason -- see that
@@ -111,6 +119,7 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
     setName('')
     setReportError(null)
     setSaveError(null)
+    setStale(false)
   }, [identity])
 
   const update = useCallback(
@@ -210,6 +219,7 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
       .then((r) => {
         if (cancelled) return
         setName(r.name)
+        setStale(r.stale)
         const alreadyDefined = hasRetentionDefinitionParams(search)
         const finalParams: RetentionParams = alreadyDefined
           ? params
@@ -232,12 +242,23 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
         const seededUnfinished = incompletePredicates(finalParams)
         const seededOverCap = tooManyCohorts(finalParams, new Date())
         const seededIncompleteRange = rangeIncomplete(finalParams.range)
+        // A stale report's stored predicates do not parse under the
+        // server's grammar (`RetentionReport.stale`) -- the SAME "we cannot
+        // faithfully reproduce this, so we are not going to pretend"
+        // response the ceiling checks above already give, reached through
+        // a different cause. Not gated on `alreadyDefined`: staleness is a
+        // fact about the report that was opened, not about which fields
+        // happened to seed, and `overCap`/`incompleteRange` above apply
+        // unconditionally for the same reason. The operator still gets the
+        // Run button -- this only stops the AUTOMATIC run decision 5 exists
+        // to guard, exactly as it stops one for an over-cap report.
         if (
           finalParams.start !== '' &&
           finalParams.return !== '' &&
           seededUnfinished === 0 &&
           !seededOverCap &&
-          !seededIncompleteRange
+          !seededIncompleteRange &&
+          !r.stale
         ) {
           run(finalParams)
         }
@@ -454,6 +475,13 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
           when the same event name means several things: <code>$page</code> where <code>path</code>{' '}
           is <code>/</code>, then <code>$page</code> where <code>path</code> is{' '}
           <code>/register</code>.
+        </p>
+      )}
+
+      {stale && (
+        <p data-testid="retention-stale" className="text-muted-foreground text-sm">
+          The filters saved with this report no longer parse, so it cannot be reproduced as saved.
+          Run below to see what these controls ask for now, or fix the conditions and save over it.
         </p>
       )}
 

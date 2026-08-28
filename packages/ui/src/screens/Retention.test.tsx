@@ -449,4 +449,21 @@ describe('Retention -- saving and reopening a saved report', () => {
     expect(await screen.findByText(/no longer exists/i)).toBeInTheDocument()
     expect(client.runRetention).toHaveBeenCalledWith(1, expect.objectContaining({ segment_id: 42 }))
   })
+
+  it('warns on a stale report instead of auto-running its unparseable predicates', async () => {
+    // Fix round 1's finding: `stale` arrives on every load (`RetentionReport`
+    // in `api/types.ts`) and `RetentionReports.tsx` already surfaces it on
+    // the list -- this screen was the only place still ignoring it. A stale
+    // report's `start_where`/`return_where` no longer parse under the
+    // server's grammar, so seeding and auto-running anyway either silently
+    // drops the predicates (widening the population) or sends one the
+    // server itself flagged as unparseable. Same two-part assertion as the
+    // cohort-ceiling warn-on-load test, for the same reason: a warning that
+    // renders while the request goes out anyway fixes nothing.
+    const client = renderAt('/retention/3', {
+      retentionReport: vi.fn(async () => reportFixture({ stale: true })),
+    })
+    expect(await screen.findByTestId('retention-stale')).toBeInTheDocument()
+    expect(client.runRetention).not.toHaveBeenCalled()
+  })
 })
