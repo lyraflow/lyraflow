@@ -1,13 +1,22 @@
 /**
- * `Interval` and `Granularity` come off core's TOP-LEVEL export, not a deep
- * `.../ast.js` path the way `FunnelDefinition` and `FunnelStep` below do --
- * `trends/ast.js` and `retention/ast.js` are not in `@lyraflow/core`'s
- * `exports` map, only `index.ts`'s barrel re-export of them is, so a deep
- * import here would resolve at typecheck time and fail at build.
+ * `Interval` and `Granularity` come off `trends/ast.js` and
+ * `retention/ast.js` DEEP paths, the same way `FunnelDefinition` and
+ * `FunnelStep` below do -- not the top-level barrel (`@lyraflow/core`).
+ * Here both uses are type-only, so it makes no difference to the bundle
+ * either way: a `type`-only import is erased at build time regardless of
+ * which path it names. The deep path is still the one to use, for
+ * consistency with every other import in this package and so a later edit
+ * that turns this into a value import (adding a runtime constant to the
+ * same line) does not silently start pulling the barrel in. The barrel
+ * re-exports `auth/password.ts`, which does `import { promisify } from
+ * 'node:util'` and uses `scrypt` -- Node-only code with no place in a
+ * browser bundle. `trends/params.ts` carries the fuller version of this
+ * note, for the value import that actually hit it.
  */
-import type { Granularity, Interval } from '@lyraflow/core'
 import type { FunnelDefinition, FunnelStep } from '@lyraflow/core/funnels/ast.js'
 import type { FunnelResult, StepResult } from '@lyraflow/core/funnels/levels.js'
+import type { Granularity } from '@lyraflow/core/retention/ast.js'
+import type { Interval } from '@lyraflow/core/trends/ast.js'
 
 /**
  * `WherePredicate`, `FunnelStep`, `FunnelDefinition` and `StepResult` are

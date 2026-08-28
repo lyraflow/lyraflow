@@ -1,4 +1,4 @@
-import type { Interval } from '@lyraflow/core'
+import type { Interval } from '@lyraflow/core/trends/ast.js'
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
 import type { ApiClient } from '../api/client.js'

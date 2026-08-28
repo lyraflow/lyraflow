@@ -1,15 +1,21 @@
-// `INTERVALS`/`Interval` come off core's TOP-LEVEL export, not a deep
-// `trends/ast.js` path -- that path is not in `@lyraflow/core`'s `exports`
-// map, only `index.ts`'s barrel re-export of it is, so a deep import here
-// would resolve at typecheck time and fail at build (`packages/ui/src/api/
-// types.ts` carries the same note for `Interval`/`Granularity`). This used
-// to be a third, hand-written copy of the same four strings -- Task 2's
-// review found it restated a second time in a server route and moved it
-// into core; this was the copy left over, and core is now the single
-// TypeScript source of truth. `020_saved_reports.sql`'s CHECK constraint is
-// the one copy that cannot be removed, because SQL cannot import a
-// TypeScript module.
-import { INTERVALS, type Interval } from '@lyraflow/core'
+// `INTERVALS`/`Interval` come off core's `trends/ast.js` DEEP path, not the
+// top-level barrel (`@lyraflow/core`). This is a VALUE import -- `INTERVALS`
+// is used at runtime, not just as a type -- and core's barrel re-exports
+// `auth/password.ts`, which does `import { promisify } from 'node:util'` and
+// uses `scrypt`. A value import from the barrel pulls that Node-only module
+// into this package's browser bundle, where `util.promisify` does not
+// exist; the bundle throws while evaluating and the admin app never renders
+// (`build-output.test.ts` catches exactly this). The deep path avoids the
+// barrel entirely, so it carries only `trends/ast.js` and nothing else core
+// exports. `packages/core/package.json`'s `exports` map lists this path
+// explicitly (`packages/ui/src/api/types.ts` carries the same note for
+// `Interval`/`Granularity`). This used to be a third, hand-written copy of
+// the same four strings -- Task 2's review found it restated a second time
+// in a server route and moved it into core; this was the copy left over,
+// and core is now the single TypeScript source of truth.
+// `020_saved_reports.sql`'s CHECK constraint is the one copy that cannot be
+// removed, because SQL cannot import a TypeScript module.
+import { INTERVALS, type Interval } from '@lyraflow/core/trends/ast.js'
 import {
   DEFAULT_RANGE,
   type RangeChoice,

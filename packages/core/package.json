@@ -46,6 +46,14 @@
     "./segments/instants.js": {
       "types": "./dist/segments/instants.d.ts",
       "default": "./dist/segments/instants.js"
+    },
+    "./trends/ast.js": {
+      "types": "./dist/trends/ast.d.ts",
+      "default": "./dist/trends/ast.js"
+    },
+    "./retention/ast.js": {
+      "types": "./dist/retention/ast.d.ts",
+      "default": "./dist/retention/ast.js"
     }
   },
   "engines": {

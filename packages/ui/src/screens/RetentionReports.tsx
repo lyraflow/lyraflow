@@ -1,4 +1,4 @@
-import type { Granularity } from '@lyraflow/core'
+import type { Granularity } from '@lyraflow/core/retention/ast.js'
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
 import type { ApiClient } from '../api/client.js'
