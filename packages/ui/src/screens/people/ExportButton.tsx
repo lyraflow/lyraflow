@@ -24,10 +24,10 @@ import { Button } from '../../components/ui/button.js'
  */
 
 /**
- * **This constant bounds an event COUNT. The thing that hurts a browser is
- * BYTES, and nothing bounds those.** Read the rest of this comment before
- * treating the number as a size guarantee, because an earlier version of it
- * did exactly that and was wrong by two orders of magnitude.
+ * **This constant bounds an event COUNT, not BYTES.** Read the rest of this
+ * comment before treating the number as a size guarantee, because an
+ * earlier version of it did exactly that and was wrong by two orders of
+ * magnitude.
  *
  * What was actually measured, twice:
  *
@@ -39,17 +39,30 @@ import { Button } from '../../components/ui/button.js'
  * - **The worst line seen.** One `track` event carrying 20 properties of
  *   8 KB each, sent through the ordinary public write key and accepted,
  *   exported at 164,744 bytes -- 327x the figure above. `propertyBag`
- *   (`packages/core/src/ingest/payloads.ts`) is `z.record(z.union([...]))`
- *   with `.max()` on the KEY COUNT only; a property VALUE has no length
- *   cap at any layer of ingest, so that event is not an abuse of the API,
- *   it is inside every documented limit. 50,000 events of that shape
- *   buffer to roughly **7.7 GB**, which no browser tab survives.
+ *   (`packages/core/src/ingest/payloads.ts:6`) is a bare
+ *   `z.record(propertyValue)`, with no `.max()` anywhere on it -- not on
+ *   keys, not on values. The 250-property-per-event cap comes from
+ *   `checkLimits` (`packages/server/src/ingest/limits.ts:73`), checked
+ *   against the parsed payload's key count after Zod has already accepted
+ *   it, not from the schema itself. A property VALUE has no length cap at
+ *   any layer of ingest, so that event is not an abuse of the API, it is
+ *   inside every documented limit.
+ *
+ * A single event's bytes ARE bounded, just not by anything property-shaped:
+ * Fastify's `bodyLimit` (`packages/server/src/app.ts`) caps the whole
+ * ingest request -- one event per request -- at 1,048,576 bytes, past which
+ * the server answers 413 before any route handler runs. So the true worst
+ * case at 50,000 events is 50,000 events each up to that ceiling, roughly
+ * **50 GB**, not the 7.7 GB an earlier version of this comment quoted --
+ * that figure came from extrapolating the 164,744-byte sample above, which
+ * is what the worst OBSERVED event looked like, not what ingest actually
+ * permits.
  *
  * So the estimate above is not conservative. It is a claim about the
- * TYPICAL event, and the distribution it sits in has no right-hand edge --
- * which is the property that makes a count-based ceiling the wrong
- * instrument for this and a defensible one only because it is cheap,
- * honest about what it is, and available from a number
+ * TYPICAL event, and the gap between that 504-byte typical line and the
+ * ~1 MiB per-event ceiling is wide enough to make a count-based ceiling the
+ * wrong instrument for bounding bytes -- and a defensible one only because
+ * it is cheap, honest about what it is, and available from a number
  * (`Person.events`) the profile read already returned.
  *
  * What this ceiling therefore does and does not do:
