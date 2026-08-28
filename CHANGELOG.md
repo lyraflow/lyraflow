@@ -32,8 +32,9 @@ one fix is contained in 0.3.0.
   event timeline, newest first, paged backwards a page at a time and
   anchored to their own last-seen rather than the last 24 hours. Reached
   from a segment member row, a funnel step's people panel, the feed's
-  person cell, a sidebar entry, and a lookup box on the screen itself —
-  there is still no People *list* to browse without an id in hand.
+  person cell, a sidebar entry, and the two controls on the screen itself:
+  a lookup box for an id you already have, and the trait search below for
+  when you have none.
 
   Two privacy actions sit on the profile. Export buffers the subject-access
   response in the browser and triggers a save; past 50,000 events it shows
@@ -55,6 +56,37 @@ one fix is contained in 0.3.0.
   `prev_cursor` alongside `next_cursor` — the page's own oldest and newest
   rows, in every response, regardless of which direction produced the page,
   which stays ordered oldest-first either way.
+
+- **Finding someone without an id in hand**, on the same `/people` screen
+  (**#208**): one exact trait condition — a trait, an operator, a value,
+  the same triple a segment condition is built from — run through the
+  segment engine that already answers one, listing everyone who matches
+  with their traits and a link to each profile, paged the way a segment's
+  member list is. It suggests trait names from the event schema and only
+  scans for a trait's *values* once a value box is focused, so opening the
+  screen costs nothing. The condition lives in the URL, so a search that
+  matched nobody is still a link that says so after a reload. It is one
+  exact condition and nothing more: no partial or prefix matching, no
+  asking about several traits at once, and still no list of everyone to
+  browse without naming a condition.
+
+- **Member rows say whether the person was ever identified.** `POST
+  /v1/segments/preview`, `POST /v1/segments/:id/preview` and `POST
+  /v1/funnels/:id/people` each carry `identified` on every row: `true` when
+  at least one of that person's events carried a real `user_id`, `false`
+  when their `person_id` is an `anonymous_id` the device fallback produced.
+  The two are indistinguishable as strings, and the difference is what
+  decides whether there is a profile behind the row — `GET /v1/persons/:id`
+  answers `404 person_not_found` for the unidentified one
+  ([#18](https://github.com/lyraflow/lyraflow/issues/18)). `POST
+  /v1/funnels/:id/dropoff` does not carry it: that route keeps its own row
+  shape, retained unchanged for compatibility.
+
+- **A person icon marks the rows that open a profile**, in the feed's
+  accepted table and in every member list. Every row still links, because
+  hiding the link would contradict the feed the operator just came from;
+  the icon says which of those links lands on a profile rather than on the
+  page explaining that a "nothing to show" means one of four things.
 
 ## 0.11.0 — 2026-08-28
 

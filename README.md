@@ -29,9 +29,13 @@ under Docker, and nothing leaves it.
 >
 > There is now a **person profile**: their stitched identity, traits, latest
 > context and full event history, opened from a segment member row, a funnel
-> step's people panel, the feed, or the sidebar. There is still **no People
-> list**: nothing lists persons to browse, so someone whose id you do not
-> already have stays unreachable — a lookup box is not a list. Journeys,
+> step's people panel, the feed, the sidebar, or either of the two ways in on
+> the screen itself — a lookup box for an id you already have, and a **trait
+> search** for when you have none, which pages through everyone matching and
+> links each of them to their profile. That search is one exact condition,
+> the same kind a segment is built from: not a partial match, not a search
+> across every trait at once, and still **no list of everyone** to browse
+> without naming a condition at all. Journeys,
 > dashboards and path analysis are still ahead, and neither report can be
 > saved — each lives in its URL. See [Web UI](#web-ui) for exactly what exists
 > and what does not.
@@ -433,8 +437,19 @@ screens, reachable from the sidebar:
   time and bounded by their own first-seen and last-seen rather than by the
   last 24 hours — so a customer last active in June opens on June, not on an
   empty screen. Reached from a segment member row, a funnel step's people
-  panel, the feed's person cell, the sidebar, or the lookup box on the screen
-  itself.
+  panel, the feed's person cell, the sidebar, or either of the two searches
+  on the screen itself.
+
+  Those two sit side by side whenever no id is in the URL. The **lookup box**
+  takes an id you already have. **Find by trait** is for when you have none:
+  one exact condition — a trait, an operator, a value — run through the same
+  engine a segment preview uses, listing everyone who matches with their
+  traits and a link to each profile, paged the way a segment's member list
+  is. It is one exact condition and nothing more: no partial or prefix
+  matching, no asking about several traits at once, and still no list of
+  everyone to browse without naming a condition. The condition lives in the
+  URL, so a search that matched nobody is still a link that says so after a
+  reload.
 
   **The entry points reach further than the profile does.** A person only
   enters the identity graph through `identify()`, so a visitor who has only
@@ -444,7 +459,9 @@ screens, reachable from the sidebar:
   "nothing to show" can mean, rather than by hiding the link or by claiming
   the id was never seen. On a fresh install, where little has been identified
   yet, that is the common case. It is the same limit *Privacy: deletion and export* below
-  documents for the API, met from the UI side.
+  documents for the API, met from the UI side. The rows that *do* open a
+  profile carry a person icon — in the feed's accepted table and in every
+  member list — so which link pays off is visible before the click.
 
   Two privacy actions sit on the profile. **Export** buffers the subject-access
   response in the browser and triggers a save — past 50,000 events it shows
@@ -1386,8 +1403,9 @@ curl -s http://localhost:3000/v1/segments/preview \
   "as_of": "2026-08-07T09:30:00.000Z",
   "members": [
     { "person_id": "user-42", "first_seen": "2026-07-01T00:00:00.000Z",
-      "last_seen": "2026-08-06T09:30:00.000Z", "country": "US", "region": "CA",
-      "city": "San Francisco", "device_type": "desktop", "os": "macOS",
+      "last_seen": "2026-08-06T09:30:00.000Z", "identified": true,
+      "country": "US", "region": "CA", "city": "San Francisco",
+      "device_type": "desktop", "os": "macOS",
       "browser": "Chrome", "referrer": "https://google.com",
       "utm_source": "google", "utm_medium": "cpc", "utm_campaign": "launch",
       "traits": { "plan": "trial", "company": "Acme" },
@@ -1399,11 +1417,19 @@ curl -s http://localhost:3000/v1/segments/preview \
 }
 ```
 
-Each member row carries `person_id`, `first_seen`, `last_seen`, and the ten
-`context` fields (see *Node types* below) at their **current** value — not the
-`first_touch` one, even for the four fields that are only ever recorded as
-first-touch (see the caveat below `context` for why `latest` reads the same
-value there).
+Each member row carries `person_id`, `first_seen`, `last_seen`, `identified`,
+and the ten `context` fields (see *Node types* below) at their **current**
+value — not the `first_touch` one, even for the four fields that are only ever
+recorded as first-touch (see the caveat below `context` for why `latest` reads
+the same value there).
+
+`identified` says whether that person has ever been `identify()`d, as opposed
+to reached only through the device fallback: `true` when at least one of their
+events carried a real `user_id`, `false` when their `person_id` is an
+`anonymous_id` that nothing has ever tied to a person. The two are
+indistinguishable as strings, and the difference is what decides whether there
+is a profile behind the row: `GET /v1/persons/:id` answers `404` for the
+unidentified one, for the reason *Privacy: deletion and export* gives below.
 
 It also carries that person's **traits**, split by type the way they are
 stored: strings in `traits`, numbers in `traits_num`. At most 50 of each are
@@ -2115,6 +2141,7 @@ The response:
   "members": [
     { "person_id": "user-42", "first_seen": "2026-07-01T00:00:00.000Z",
       "last_seen": "2026-08-08T09:20:00.000Z", "entered_at": "2026-08-08T09:12:00.000Z",
+      "identified": true,
       "country": "US", "region": "CA", "city": "San Francisco", "device_type": "desktop",
       "os": "macOS", "browser": "Chrome", "referrer": "https://google.com",
       "utm_source": "google", "utm_medium": "cpc", "utm_campaign": "launch",
@@ -2127,6 +2154,10 @@ The response:
   "window_exhausted": false
 }
 ```
+
+Each row is a segment member row plus `entered_at`, `identified` included —
+see *Retrieving members, not just the count* above for what that field means
+and why a caller wants it.
 
 `person_count` is its own query, taken at the same `as_of` the page is —
 never the run's cached step number, because a run and a `/people` call can
