@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { MAX_WHERE_PREDICATES, WherePredicate } from '../segments/ast.js'
 
 /**
  * How wide a period is. No `hour`: retention asks whether somebody came
@@ -46,6 +47,24 @@ export const RetentionQuery = z.object({
   start_event: z.string().min(1).max(128),
   /** The event that counts as coming back. May be the same as `start_event`. */
   return_event: z.string().min(1).max(128),
+  /**
+   * Narrows WHICH occurrence of `start_event` puts somebody in a cohort.
+   *
+   * The segment `WherePredicate` verbatim, exactly as a funnel step's `where`
+   * is -- a claim about one event is one idea, and a parallel grammar for it
+   * here would drift from the other two at the first operator added to
+   * either.
+   *
+   * Without this the report cannot ask its most ordinary question: a site
+   * whose every navigation is a `$page` can only cohort by "viewed any page",
+   * so `$page where path = /register` and `$page where path = /` are the same
+   * report. That is the shape Cem hit on 2026-08-28.
+   */
+  start_where: z.array(WherePredicate).max(MAX_WHERE_PREDICATES).optional(),
+  /** The same, for what counts as coming back. Independent of `start_where`:
+   * "viewed the pricing page, then came back and viewed the docs" needs two
+   * different predicates on the same event name. */
+  return_where: z.array(WherePredicate).max(MAX_WHERE_PREDICATES).optional(),
   granularity: z.enum(GRANULARITIES),
   periods: z.number().int().positive().max(MAX_PERIODS),
   /**

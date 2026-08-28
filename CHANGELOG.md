@@ -85,6 +85,13 @@ one fix is contained in 0.3.0.
   deduplication, the deletion boundary and an optional `segment_id` are all
   the ones the funnel engine already uses.
 
+  **Each side takes a `where` list**, the same grammar a funnel step and a
+  segment behaviour use, and the two are independent. Without it the report
+  could not ask its most ordinary question: on a site where every navigation
+  is a `$page`, "viewed the home page, then came back and registered" is one
+  event name and two different conditions, so a grid without predicates
+  answered a different question with total confidence.
+
   **No stored retention reports, deliberately.** A grid is two event names, a
   granularity and a range — small enough to live in the URL, which is how the
   screen is shareable as a link without a store, a migration or a second set

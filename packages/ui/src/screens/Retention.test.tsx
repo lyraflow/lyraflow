@@ -116,4 +116,33 @@ describe('Retention', () => {
     await userEvent.click(runButton())
     await waitFor(() => expect(screen.getByText(/segment 4 no longer exists/)).toBeInTheDocument())
   })
+
+  it('sends a where predicate held in the URL, on the side it belongs to', async () => {
+    // The gap this closes: `$page where path = /` and `$page where path =
+    // /register` were the same report, so the grid answered a different
+    // question with total confidence.
+    const where = encodeURIComponent(
+      JSON.stringify([{ source: 'attribute', attribute: 'path', operator: '=', value: '/' }]),
+    )
+    const client = harness({}, `${READY}&start_where=${where}`)
+    await userEvent.click(runButton())
+    await waitFor(() => expect(client.runRetention).toHaveBeenCalled())
+    const body = (client.runRetention as unknown as { mock: { calls: unknown[][] } }).mock
+      .calls[0]?.[1] as {
+      start_where?: unknown[]
+      return_where?: unknown[]
+    }
+    expect(body.start_where).toHaveLength(1)
+    // The two sides are independent -- an empty list is omitted entirely
+    // rather than sent as `[]`.
+    expect('return_where' in body).toBe(false)
+  })
+
+  it('offers a condition editor for each event, not one shared between them', async () => {
+    harness({}, READY)
+    // Addressed by their own ids: one shared editor would silently apply a
+    // start-side condition to the return side.
+    expect(document.querySelector('[data-testid^="retention-start-where"]')).not.toBeNull()
+    expect(document.querySelector('[data-testid^="retention-return-where"]')).not.toBeNull()
+  })
 })

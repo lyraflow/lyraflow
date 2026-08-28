@@ -492,6 +492,11 @@ export interface RetentionResult {
 export interface RetentionRequest {
   start_event: string
   return_event: string
+  /** Which occurrence of each event counts. The segment/funnel `where`
+   * grammar verbatim -- typed as `unknown[]` here only because this module
+   * describes the wire and does not import core's schema. */
+  start_where?: unknown[]
+  return_where?: unknown[]
   granularity: 'day' | 'week' | 'month'
   periods: number
   since?: string
