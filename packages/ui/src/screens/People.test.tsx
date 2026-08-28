@@ -375,8 +375,9 @@ describe('People', () => {
       events: vi.fn(async () => eventsPage()),
     } as unknown as ApiClient
     renderPeople('/people?id=u1', client)
-    expect(await screen.findByText(/nothing to read a device, browser or location from/i))
-      .toBeInTheDocument()
+    expect(
+      await screen.findByText(/nothing to read a device, browser or location from/i),
+    ).toBeInTheDocument()
     expect(screen.queryByText(/this person.s timeline has not loaded/i)).toBeNull()
     expect(screen.queryByText(/have no value recorded/i)).toBeNull()
   })

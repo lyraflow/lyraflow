@@ -78,17 +78,17 @@ function LookupForm(props: {
     >
       <div className="flex flex-col gap-2">
         {/* NOT "anonymous id". `resolvePersonScope`'s device fallback
-          * reaches an anonymous id only through `identity_bindings`, and
-          * only `identify()` ever writes a row there -- so an anonymous id
-          * belonging to a visitor who has never been identified resolves to
-          * nobody and this screen 404s on it, even though the feed is
-          * showing their events. Measured: two `track` calls under
-          * `visitor-anon-1` with no `identify()`, and `GET
-          * /v1/persons/visitor-anon-1` answers `404 person_not_found`. A
-          * label promising it works is a promise the server does not keep,
-          * and on a young install where almost nothing has been identified
-          * it is wrong more often than it is right. `#18` is the open
-          * limitation; this label stops advertising past it. */}
+         * reaches an anonymous id only through `identity_bindings`, and
+         * only `identify()` ever writes a row there -- so an anonymous id
+         * belonging to a visitor who has never been identified resolves to
+         * nobody and this screen 404s on it, even though the feed is
+         * showing their events. Measured: two `track` calls under
+         * `visitor-anon-1` with no `identify()`, and `GET
+         * /v1/persons/visitor-anon-1` answers `404 person_not_found`. A
+         * label promising it works is a promise the server does not keep,
+         * and on a young install where almost nothing has been identified
+         * it is wrong more often than it is right. `#18` is the open
+         * limitation; this label stops advertising past it. */}
         <Label htmlFor="people-lookup">
           User id, or the anonymous or device id of someone already identified
         </Label>
@@ -439,11 +439,11 @@ export function People(props: { client: ApiClient; onUnauthorized?: () => void }
       ) : (
         <DetailSection title="Attributes">
           {/* Two sentences, not one, and which one renders is the whole
-            * point of `Context` having three members. "has not loaded" is a
-            * claim about this screen's own progress; "nothing to read it
-            * from" is a claim about the person's data. Saying the first
-            * when the second is true tells an operator to wait for
-            * something that already happened. */}
+           * point of `Context` having three members. "has not loaded" is a
+           * claim about this screen's own progress; "nothing to read it
+           * from" is a claim about the person's data. Saying the first
+           * when the second is true tells an operator to wait for
+           * something that already happened. */}
           <p className="text-muted-foreground text-sm">
             {context.kind === 'empty'
               ? 'No context to show — this person’s timeline came back with no events, so there is nothing to read a device, browser or location from.'
