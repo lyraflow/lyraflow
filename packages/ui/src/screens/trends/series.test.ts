@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import type { TrendPoint } from '../../api/types.js'
-import { OTHER, compactCount, linePath, sharedPeak, toSeries } from './series.js'
+import {
+  INSET,
+  OTHER,
+  compactCount,
+  dotPath,
+  linePath,
+  nearestIndex,
+  pointCoords,
+  sharedPeak,
+  toSeries,
+} from './series.js'
 
 const p = (bucket: string, series: string, events: number): TrendPoint => ({
   bucket,
@@ -68,12 +78,22 @@ describe('sharedPeak', () => {
 describe('linePath', () => {
   it('puts the peak at the top and a zero on the floor', () => {
     const path = linePath([{ events: 0 }, { events: 10 }], 10, 100, 50)
-    expect(path).toBe('0.00,50.00 100.00,0.00')
+    expect(path).toBe('6.00,50.00 94.00,0.00')
   })
 
-  it('spreads points evenly across the width', () => {
-    const path = linePath([{ events: 1 }, { events: 1 }, { events: 1 }], 1, 100, 50)
-    expect(path.split(' ').map((s) => s.split(',')[0])).toEqual(['0.00', '50.00', '100.00'])
+  it('insets the end points, so their dots are not drawn half outside the box', () => {
+    // Found by rendering the panel at 820px and looking at it: flush against
+    // 0 and `width`, the first and last dots came out as half-dots.
+    const coords = pointCoords([{ events: 1 }, { events: 1 }], 1, 100, 50)
+    expect(coords[0]?.x).toBe(INSET)
+    expect(coords[1]?.x).toBe(100 - INSET)
+  })
+
+  it('spreads points evenly between the insets', () => {
+    const xs = pointCoords([{ events: 1 }, { events: 1 }, { events: 1 }], 1, 100, 50).map(
+      (c) => c.x,
+    )
+    expect(xs).toEqual([INSET, 50, 100 - INSET])
   })
 
   it('draws a single bucket as a flat line, not a dot in an empty box', () => {
@@ -84,11 +104,45 @@ describe('linePath', () => {
   it('draws a flat floor when every value is zero, rather than dividing by it', () => {
     const path = linePath([{ events: 0 }, { events: 0 }], 0, 100, 50)
     expect(path).not.toContain('NaN')
-    expect(path).toBe('0.00,50.00 100.00,50.00')
+    expect(path).toBe('6.00,50.00 94.00,50.00')
   })
 
   it('is empty for no points at all', () => {
     expect(linePath([], 10, 100, 50)).toBe('')
+  })
+})
+
+describe('dotPath', () => {
+  it('is a ZERO-LENGTH path, which is what makes a round cap render as a dot', () => {
+    // Not a `<circle>`: the panel uses `preserveAspectRatio="none"`, so a
+    // circle is stretched into a wide ellipse. Rendered side by side at
+    // 820px, the circles came out roughly three times wider than tall.
+    const d = dotPath({ x: 12, y: 34 })
+    expect(d).toBe('M12.00,34.00 L12.00,34.00')
+    const [, from, to] = d.match(/^M(.+) L(.+)$/) ?? []
+    expect(from).toBe(to)
+  })
+})
+
+describe('nearestIndex', () => {
+  it('picks the first point at the left edge and the last at the right', () => {
+    expect(nearestIndex(0, 5, 260)).toBe(0)
+    expect(nearestIndex(1, 5, 260)).toBe(4)
+  })
+
+  it('picks the middle point in the middle', () => {
+    expect(nearestIndex(0.5, 5, 260)).toBe(2)
+  })
+
+  it('clamps rather than returning an index off the end', () => {
+    // Reachable: the pointer can sit inside the inset at either edge.
+    expect(nearestIndex(-0.2, 5, 260)).toBe(0)
+    expect(nearestIndex(1.4, 5, 260)).toBe(4)
+  })
+
+  it('is the only point when there is one, and nothing when there are none', () => {
+    expect(nearestIndex(0.7, 1, 260)).toBe(0)
+    expect(nearestIndex(0.7, 0, 260)).toBeNull()
   })
 })
 

@@ -123,4 +123,23 @@ describe('Trends', () => {
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/too many series/))
     expect(screen.queryByTestId('trend-panels')).toBeNull()
   })
+
+  it('puts no description inside the controls row, so nothing lifts out of alignment', () => {
+    // The row is `items-end` so the Run button lines up with the inputs, and
+    // that holds only while every column is the same height. A hint paragraph
+    // under the Property field made its column taller and pushed the field
+    // itself visibly UP -- reported as a glitch on 2026-08-28. Explanations
+    // go below the row.
+    harness({}, '/trends?event=checkout&source=property&field=plan')
+    const row = screen.getByTestId('trend-controls')
+    expect(row.querySelectorAll('p')).toHaveLength(0)
+  })
+
+  it('still explains what a property is, below the row rather than inside it', () => {
+    harness({}, '/trends?event=checkout&source=property&field=plan')
+    expect(screen.getByText(/whatever your app put in/i)).toBeInTheDocument()
+    expect(screen.getByTestId('trend-controls')).not.toContainElement(
+      screen.getByText(/whatever your app put in/i),
+    )
+  })
 })

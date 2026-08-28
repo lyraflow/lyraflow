@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { TrendPanels } from './TrendPanels.js'
 import { OTHER, toSeries } from './series.js'
@@ -77,5 +77,105 @@ describe('TrendPanels', () => {
       .getAllByRole('listitem')
       .map((li) => li.getAttribute('data-testid'))
     expect(names).toEqual(['trend-panel-chosen', `trend-panel-${OTHER}`])
+  })
+
+  it('marks every point with a dot, so a reader knows where to hover', () => {
+    render(
+      <TrendPanels
+        series={series([
+          { bucket: '2026-06-01T00:00:00.000Z', series: 'a', events: 3 },
+          { bucket: '2026-06-02T00:00:00.000Z', series: 'a', events: 5 },
+          { bucket: '2026-06-03T00:00:00.000Z', series: 'a', events: 1 },
+        ])}
+      />,
+    )
+    const svg = screen.getByRole('img')
+    expect(svg.querySelectorAll('path')).toHaveLength(3)
+  })
+
+  it('draws the dots as round-cap zero-length paths, never as circles', () => {
+    // A `<circle>` under `preserveAspectRatio="none"` renders as a wide
+    // ellipse -- confirmed by rendering both at 820px.
+    render(<TrendPanels series={series([{ bucket: 'b1', series: 'a', events: 1 }])} />)
+    const svg = screen.getByRole('img')
+    expect(svg.querySelectorAll('circle')).toHaveLength(0)
+    const dot = svg.querySelector('path')
+    expect(dot?.getAttribute('stroke-linecap')).toBe('round')
+    expect(dot?.getAttribute('vector-effect')).toBe('non-scaling-stroke')
+  })
+
+  it('reads out the bucket AND the value on hover, not just the value', () => {
+    render(
+      <TrendPanels
+        interval="1d"
+        series={series([
+          { bucket: '2026-06-01T00:00:00.000Z', series: 'a', events: 3 },
+          { bucket: '2026-06-02T00:00:00.000Z', series: 'a', events: 7 },
+        ])}
+      />,
+    )
+    const svg = screen.getByRole('img')
+    svg.getBoundingClientRect = () => ({ left: 0, width: 260 }) as DOMRect
+    fireEvent.mouseMove(svg, { clientX: 260 })
+    const readout = screen.getByTestId('trend-readout-a')
+    expect(readout).toHaveTextContent('7')
+    // The X value too -- a number with no time on it does not say which point
+    // the pointer is over, which is the whole reason to hover.
+    expect(readout.textContent).toMatch(/\d/)
+    expect(readout.textContent).toContain('·')
+  })
+
+  it('shares the hovered bucket across every panel, which is the point of the layout', () => {
+    render(
+      <TrendPanels
+        interval="1d"
+        series={series([
+          { bucket: '2026-06-01T00:00:00.000Z', series: 'a', events: 3 },
+          { bucket: '2026-06-02T00:00:00.000Z', series: 'a', events: 7 },
+          { bucket: '2026-06-01T00:00:00.000Z', series: 'b', events: 100 },
+          { bucket: '2026-06-02T00:00:00.000Z', series: 'b', events: 200 },
+        ])}
+      />,
+    )
+    const first = screen.getAllByRole('img')[0] as unknown as SVGElement
+    first.getBoundingClientRect = () => ({ left: 0, width: 260 }) as DOMRect
+    fireEvent.mouseMove(first, { clientX: 260 })
+    // Hovering ONE panel reads out the same bucket in BOTH.
+    expect(screen.getByTestId('trend-readout-a')).toHaveTextContent('7')
+    expect(screen.getByTestId('trend-readout-b')).toHaveTextContent('200')
+  })
+
+  it('goes back to the total when the pointer leaves', () => {
+    render(
+      <TrendPanels
+        series={series([
+          { bucket: 'b1', series: 'a', events: 3 },
+          { bucket: 'b2', series: 'a', events: 7 },
+        ])}
+      />,
+    )
+    const svg = screen.getByRole('img')
+    svg.getBoundingClientRect = () => ({ left: 0, width: 260 }) as DOMRect
+    fireEvent.mouseMove(svg, { clientX: 260 })
+    expect(screen.queryByTestId('trend-readout-a')).not.toBeNull()
+    fireEvent.mouseLeave(svg)
+    expect(screen.queryByTestId('trend-readout-a')).toBeNull()
+  })
+
+  it('stops drawing every dot once they would merge, but still marks the hovered one', () => {
+    // Sixty DISTINCT buckets. The first version of this used `i % 28`, which
+    // collapses to 28 once `toSeries` groups them -- under the limit, so the
+    // test passed against the branch it was written for.
+    const many = Array.from({ length: 60 }, (_, i) => ({
+      bucket: new Date(Date.UTC(2026, 5, 1 + i)).toISOString(),
+      series: 'a',
+      events: i,
+    }))
+    render(<TrendPanels series={series(many)} />)
+    const svg = screen.getByRole('img')
+    expect(svg.querySelectorAll('path')).toHaveLength(0)
+    svg.getBoundingClientRect = () => ({ left: 0, width: 260 }) as DOMRect
+    fireEvent.mouseMove(svg, { clientX: 130 })
+    expect(svg.querySelectorAll('path')).toHaveLength(1)
   })
 })

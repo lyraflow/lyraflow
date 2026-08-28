@@ -85,7 +85,12 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
         </p>
       </header>
 
-      <div className="flex flex-wrap items-end gap-3">
+      {/* `items-end` so the Run button's baseline matches the inputs'. That
+       * alignment holds only while every column is the same height, so no
+       * control in this row may render a description under itself -- the one
+       * that did pushed its own field visibly out of line. Explanations go
+       * below the row. */}
+      <div data-testid="trend-controls" className="flex flex-wrap items-end gap-3">
         <EventCombobox
           client={client}
           projectId={activeId ?? 0}
@@ -126,6 +131,13 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
         </Button>
       </div>
 
+      {params.source === 'property' && (
+        <p className="text-muted-foreground text-sm">
+          A key from the event's own properties — whatever your app put in <code>properties</code>{' '}
+          when it sent the event.
+        </p>
+      )}
+
       {breakdownIncomplete(params) && (
         <p data-testid="trend-incomplete-split" className="text-muted-foreground text-sm">
           Pick a {params.source === 'attribute' ? 'column' : 'property'} to split by, or this will
@@ -141,7 +153,7 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
 
       {result && (
         <div className="flex flex-col gap-3">
-          <TrendPanels series={series} />
+          <TrendPanels series={series} interval={params.interval} />
           {/* The counterpart of the retention grid's "these cells are not
            * zeroes" line: a chart that quietly dropped its long tail is one
            * whose parts do not add up, so the screen says what was folded

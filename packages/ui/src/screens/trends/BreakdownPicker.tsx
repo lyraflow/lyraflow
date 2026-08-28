@@ -91,7 +91,12 @@ export function BreakdownPicker(props: {
           onChange={(next) => onChange({ source, field: next })}
           label="Property"
           placeholder="e.g. plan"
-          hint="A key from the event's own properties."
+          // NO `hint`. The controls sit in an `items-end` row so the Run
+          // button lines up with the inputs, and a hint paragraph makes this
+          // column taller -- which pushes its label and box UP out of line
+          // with every other field. Reported as a visual glitch on
+          // 2026-08-28. The sentence moved below the whole row, where it also
+          // has room to be a sentence.
           emptyMessage="No properties recorded for this event yet."
           onUnauthorized={onUnauthorized}
         />

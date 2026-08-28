@@ -52,6 +52,13 @@ one fix is contained in 0.3.0.
   measured against ClickHouse rather than assumed, so a weekly trend and a
   weekly cohort row cannot disagree about where a week begins.
 
+  **Every point carries a dot, and hovering one reads out its bucket and its
+  value in every panel at once** — shared rather than per-panel, which is the
+  payoff of small multiples: the pointer picks a moment and each series says
+  what it was doing then. Dots are drawn as zero-length round-capped strokes
+  rather than as `<circle>`s, because the panel scales its width freely and a
+  circle under that transform renders as a wide ellipse.
+
   The screen draws a split as **small multiples on one shared scale** rather
   than overlaid coloured lines. Lyraflow's palette is a single copper ramp,
   built and documented for *ordinal* data like funnel stages; a breakdown's

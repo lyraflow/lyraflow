@@ -374,7 +374,10 @@ screens, reachable from the sidebar:
   palette is a single copper ramp built for *ordinal* data like funnel stages,
   and a breakdown's values have no order, so there is no honest colour to give
   them. Ten panels at most; everything smaller is summed into `(other)`, and
-  the screen says how many values that was so the panels still add up.
+  the screen says how many values that was so the panels still add up. Every
+  point is marked, and hovering one reads out its bucket and its value in
+  **every** panel at once — the pointer picks a moment and each series says
+  what it was doing then.
 
 - **Retention** — pick a start event, a return event, a condition on either of
   them, a period and how many of them, and run a cohort grid. It does **not**

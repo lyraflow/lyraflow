@@ -64,6 +64,43 @@ export function sharedPeak(series: Series[]): number {
 }
 
 /**
+ * How far in from each edge the first and last points sit, in viewBox units.
+ *
+ * Not decoration: with the points flush against `0` and `width` the end dots
+ * are drawn half outside the box and render as half-dots. Seen by rendering
+ * the panel at 820px and looking at it, which is the only way this kind of
+ * defect ever shows up.
+ */
+export const INSET = 6
+
+/** Where point `i` of `n` sits horizontally. */
+export function pointX(i: number, n: number, width: number, inset = INSET): number {
+  if (n <= 1) return width / 2
+  return inset + (i * (width - inset * 2)) / (n - 1)
+}
+
+/** Where a value sits vertically. A peak of zero puts everything on the floor. */
+export function pointY(events: number, peak: number, height: number): number {
+  return peak <= 0 ? height : height - (events / peak) * height
+}
+
+/**
+ * Every point's position, which the line, the dots and the hover readout all
+ * read. One derivation, so a dot cannot sit off its own line.
+ */
+export function pointCoords(
+  points: { events: number }[],
+  peak: number,
+  width: number,
+  height: number,
+): { x: number; y: number }[] {
+  return points.map((p, i) => ({
+    x: pointX(i, points.length, width),
+    y: pointY(p.events, peak, height),
+  }))
+}
+
+/**
  * An SVG polyline for one series, in a `width` by `height` box.
  *
  * LINEAR, deliberately, and unlike the Feed's sparkline -- which is
@@ -85,13 +122,45 @@ export function linePath(
   height: number,
 ): string {
   if (points.length === 0) return ''
-  const y = (events: number) => (peak <= 0 ? height : height - (events / peak) * height)
   if (points.length === 1) {
-    const only = y(points[0]?.events ?? 0)
-    return `0,${only} ${width},${only}`
+    const only = pointY(points[0]?.events ?? 0, peak, height)
+    return `${INSET},${only} ${width - INSET},${only}`
   }
-  const step = width / (points.length - 1)
-  return points.map((p, i) => `${(i * step).toFixed(2)},${y(p.events).toFixed(2)}`).join(' ')
+  return pointCoords(points, peak, width, height)
+    .map((c) => `${c.x.toFixed(2)},${c.y.toFixed(2)}`)
+    .join(' ')
+}
+
+/**
+ * A DOT, as a zero-length path with a round cap rather than a `<circle>`.
+ *
+ * The panel is drawn with `preserveAspectRatio="none"` so the line fills
+ * whatever width the grid gives it, which means the horizontal scale is not
+ * the vertical one -- and a `<circle>` under that transform renders as a wide
+ * ELLIPSE. Rendered side by side at 820px: the circles came out roughly three
+ * times wider than tall. A zero-length path with `stroke-linecap="round"` and
+ * `vector-effect="non-scaling-stroke"` is a perfectly round dot of a fixed
+ * device size at any panel width, because both the cap and the stroke width
+ * are resolved after the transform.
+ */
+export function dotPath(c: { x: number; y: number }): string {
+  return `M${c.x.toFixed(2)},${c.y.toFixed(2)} L${c.x.toFixed(2)},${c.y.toFixed(2)}`
+}
+
+/**
+ * Which point a pointer at `fraction` across the panel is nearest.
+ *
+ * A fraction rather than a pixel offset, so the caller does the one thing it
+ * can do (measure its own box) and this does the arithmetic -- which is then
+ * testable without a layout engine.
+ */
+export function nearestIndex(fraction: number, count: number, width = 260): number | null {
+  if (count === 0) return null
+  if (count === 1) return 0
+  const x = fraction * width
+  const step = (width - INSET * 2) / (count - 1)
+  const i = Math.round((x - INSET) / step)
+  return Math.max(0, Math.min(count - 1, i))
 }
 
 /**
