@@ -139,8 +139,23 @@ export function whereFromStored(raw: unknown[]): WherePredicate[] {
   return raw.filter(looksLikePredicate)
 }
 
+/**
+ * M4 from the whole-branch review: a bare `Number()` coerces shapes a
+ * numeric id must not accept -- `'0x10'` reads as 16, `'1e3'` as 1000.
+ * `packages/server/src/numeric-id.ts`'s own docstring is the reason this
+ * matches its strictness rather than the loose parse this used to be: two
+ * routes there once skipped exactly this check by copying each other, and
+ * the second one's own comment said so. `/^\d+$/` first, so `Number()`
+ * never sees anything it could coerce, then `Number.isSafeInteger` for the
+ * same reason that file's own parser applies it. No security stake here --
+ * the server's segment lookup is project-scoped and this is the operator's
+ * own URL -- but the UI package cannot import a server module (this would
+ * pull the whole server package into the browser bundle), so the check is
+ * restated rather than shared, the same way `MAX_BUCKETS` and `MAX_COHORTS`
+ * already are in this file and `trends/params.ts`.
+ */
 function readSegmentId(raw: string | null): number | null {
-  if (raw == null) return null
+  if (raw == null || !/^\d+$/.test(raw)) return null
   const n = Number(raw)
   return Number.isSafeInteger(n) && n > 0 ? n : null
 }
