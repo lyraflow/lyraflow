@@ -430,9 +430,21 @@ screens, reachable from the sidebar:
   seen and the event count; their traits; their latest context — device,
   browser, OS, country, referrer and campaign — read from their newest event;
   and their full event timeline, newest first, paged backwards a page at a
-  time and anchored to their own last-seen rather than the last 24 hours.
-  Reached from a segment member row, a funnel step's people panel, the feed's
-  person cell, the sidebar, or the lookup box on the screen itself.
+  time and bounded by their own first-seen and last-seen rather than by the
+  last 24 hours — so a customer last active in June opens on June, not on an
+  empty screen. Reached from a segment member row, a funnel step's people
+  panel, the feed's person cell, the sidebar, or the lookup box on the screen
+  itself.
+
+  **The entry points reach further than the profile does.** A person only
+  enters the identity graph through `identify()`, so a visitor who has only
+  ever been tracked anonymously has events — visible in the feed, under their
+  `anonymous_id` — and no profile to open. The feed still links their rows,
+  and the profile answers by naming that as the first of the four things a
+  "nothing to show" can mean, rather than by hiding the link or by claiming
+  the id was never seen. On a fresh install, where little has been identified
+  yet, that is the common case. It is the same limit *Erasing a person* below
+  documents for the API, met from the UI side.
 
   Two privacy actions sit on the profile. **Export** buffers the subject-access
   response in the browser and triggers a save — past 50,000 events it shows
@@ -476,8 +488,9 @@ the progress; `lyraflow projects deletion get <id>` reports the same thing, and
 
 **Volunteering the limit:** that is the whole UI. A person profile exists, but
 there is no **People list** — nothing browses or searches persons, so the
-lookup box above only helps when you already hold an id; reach anyone else the
-way the rest of this document shows, over the HTTP API or the CLI.
+lookup box above only helps when you already hold an id, and only when that id
+belongs to someone `identify()` has bound. Reach anyone else the way the rest
+of this document shows, over the HTTP API or the CLI.
 
 The funnel screen's per-step people panel is backed by
 `POST /v1/funnels/:id/people` (see *Funnels* below) — the same bounded member
