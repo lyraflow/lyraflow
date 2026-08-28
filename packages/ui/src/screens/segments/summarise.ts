@@ -22,7 +22,14 @@
  * place and each variant carries its own preposition instead.
  */
 import type { FilterNode } from '@lyraflow/core/segments/ast.js'
-import { formatBound, formatValue, operatorWord, wherePhrase, windowPhrase } from './vocabulary.js'
+import {
+  clausePhrase,
+  formatBound,
+  formatValue,
+  operatorWord,
+  wherePhrase,
+  windowPhrase,
+} from './vocabulary.js'
 
 /** A `lifecycle` value: always a datetime by the AST's own refine, so it is
  * rendered as one. A non-string scalar cannot be a reading and is left
@@ -79,11 +86,11 @@ export function summarise(node: FilterNode): string {
     case 'not':
       return `not (${summarise(node.child)})`
     case 'trait':
-      return `${node.key} ${operatorWord(node.operator)} ${formatValue(node.value)}`
+      return `${node.key} ${clausePhrase(node)}`
     case 'context':
-      return `${node.field} (${node.scope}) ${operatorWord(node.operator)} ${formatValue(node.value)}`
+      return `${node.field} (${node.scope}) ${clausePhrase(node)}`
     case 'lifecycle':
-      return `${node.field} ${operatorWord(node.operator)} ${formatValue(node.value, asBound)}`
+      return `${node.field} ${clausePhrase(node, asBound)}`
     case 'behavior': {
       const clause = node.aggregate === 'count' ? 'count' : `${node.aggregate} of ${node.property}`
       const base = `${clause} of ${node.event} ${windowPhrase(node.window)} ${operatorWord(node.operator)} ${formatValue(node.value)}`

@@ -1,14 +1,20 @@
-import { MAX_WHERE_PREDICATES, wherePredicateField } from '@lyraflow/core/segments/ast.js'
+import {
+  MAX_WHERE_PREDICATES,
+  OPERATOR_FAMILY,
+  wherePredicateField,
+} from '@lyraflow/core/segments/ast.js'
 import type { EventColumnField, WherePredicate } from '@lyraflow/core/segments/ast.js'
 import { useCallback, useEffect, useState } from 'react'
 import type { ApiClient } from '../../api/client.js'
 import type { PropertyKind, SchemaProperty } from '../../api/types.js'
 import { Button } from '../../components/ui/button.js'
+import { ClauseValueField } from './ClauseValueField.js'
 import type { FieldChoice } from './FieldCombobox.js'
 import { FieldCombobox } from './FieldCombobox.js'
 import { OperatorSelect } from './OperatorSelect.js'
 import type { ConditionValue, Scalar } from './ValueInput.js'
 import { ValueInput } from './ValueInput.js'
+import { clauseValueOf, withOperator } from './clause.js'
 import { columnFieldNote } from './columnFields.js'
 import { coerceForKind, kindNote, learnKinds } from './propertyKinds.js'
 
@@ -40,20 +46,45 @@ function asText(value: ConditionValue): string | [string, string] {
  * of it would be the form punishing them for its own ambiguity.
  */
 function withField(p: WherePredicate, choice: FieldChoice): WherePredicate {
-  if (choice.source === 'attribute') {
+  const carried = clauseValueOf(p)
+
+  if (choice.source !== 'attribute') {
+    // No `source` written for a property predicate: absent is what every tree
+    // saved before attribute predicates existed carries, and writing
+    // `source: 'property'` on every save would make an untouched segment
+    // serialise differently from the one on disk -- which the funnel store's
+    // own equality check reads as a change.
+    //
+    // The value key is omitted rather than set to `undefined` when the
+    // operator carries none, for the reason `withOperator` gives.
     return {
-      source: 'attribute',
-      attribute: choice.name as EventColumnField,
+      property: choice.name,
       operator: p.operator,
-      value: asText(p.value as ConditionValue),
-    }
+      ...(carried === undefined ? {} : { value: carried }),
+    } as WherePredicate
   }
-  // No `source` written for a property predicate: absent is what every tree
-  // saved before attribute predicates existed carries, and writing
-  // `source: 'property'` on every save would make an untouched segment
-  // serialise differently from the one on disk -- which the funnel store's
-  // own equality check reads as a change.
-  return { property: choice.name, operator: p.operator, value: p.value }
+
+  const attribute = choice.name as EventColumnField
+  const family = OPERATOR_FAMILY[p.operator]
+
+  // A column is never a flag and never a date -- `columnClause` in the AST
+  // admits neither family on an attribute -- so those two operators cannot
+  // travel with the field. Reset to `is` with an empty value rather than
+  // carry one the server would refuse: the row then reads as unfinished,
+  // which it now is, instead of looking complete and failing on save.
+  if (family === 'boolean' || family === 'relative') {
+    return { source: 'attribute', attribute, operator: '=', value: '' }
+  }
+  if (family === 'set')
+    return { source: 'attribute', attribute, operator: p.operator } as WherePredicate
+  // Text values are already strings; a comparison value may be a number a
+  // tree written through the API carried, so it goes through `asText`.
+  return {
+    source: 'attribute',
+    attribute,
+    operator: p.operator,
+    value: family === 'text' ? String(carried ?? '') : asText(carried as ConditionValue),
+  } as WherePredicate
 }
 
 /**
@@ -124,8 +155,15 @@ export function WherePredicates(props: {
     let changed = false
     const healed = value.map((p) => {
       if (p.source === 'attribute') return p
-      const next = coerceForKind(p.value as ConditionValue, kinds[p.property])
-      if (next === p.value) return p
+      // Comparison operators only, for the reason `TraitForm`'s copy of this
+      // guard gives: coercion exists to route a numeric property to
+      // `properties_num`, and that routing happens in `wherePredicate`'s
+      // comparison branch alone. Left ungated it rewrites a substring to a
+      // number and a relative window to a string, every render.
+      if (OPERATOR_FAMILY[p.operator] !== 'comparison') return p
+      const current = clauseValueOf(p) as ConditionValue
+      const next = coerceForKind(current, kinds[p.property])
+      if (next === current) return p
       changed = true
       return { ...p, value: next } as WherePredicate
     })
@@ -173,7 +211,7 @@ export function WherePredicates(props: {
         const note =
           field.source === 'property'
             ? (columnFieldNote(field.name) ??
-              kindNote(field.name, kinds[field.name], p.value as ConditionValue))
+              kindNote(field.name, kinds[field.name], clauseValueOf(p) as ConditionValue))
             : null
         return (
           <div key={rowId} data-testid={rowId} className="flex min-w-0 flex-col gap-1">
@@ -190,13 +228,32 @@ export function WherePredicates(props: {
               <OperatorSelect
                 id={operatorId}
                 value={p.operator}
-                onChange={(operator) => updateAt(i, { ...p, operator })}
+                // Per ROW, not per screen: a predicate on a property may be a
+                // flag or a date, while one on an event COLUMN is neither --
+                // the same split `PropertyPredicate` and `AttributePredicate`
+                // make in the AST. A single list here would offer `is true`
+                // on `utm_campaign`.
+                families={
+                  p.source === 'attribute'
+                    ? ['comparison', 'text', 'set']
+                    : ['comparison', 'text', 'set', 'boolean', 'relative']
+                }
+                onChange={(operator) => updateAt(i, withOperator(p, operator))}
               />
-              <ValueInput
-                operator={p.operator}
-                value={p.value as ConditionValue}
-                onChange={(val) => updateAt(i, { ...p, value: val } as WherePredicate)}
-              />
+              {OPERATOR_FAMILY[p.operator] === 'comparison' ? (
+                <ValueInput
+                  operator={p.operator}
+                  value={clauseValueOf(p) as ConditionValue}
+                  onChange={(val) => updateAt(i, { ...p, value: val } as WherePredicate)}
+                />
+              ) : (
+                <ClauseValueField
+                  id={rowId}
+                  operator={p.operator}
+                  value={clauseValueOf(p)}
+                  onChange={(val) => updateAt(i, { ...p, value: val } as WherePredicate)}
+                />
+              )}
               <Button type="button" variant="outline" size="sm" onClick={() => removeAt(i)}>
                 Remove
               </Button>

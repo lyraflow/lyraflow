@@ -210,7 +210,7 @@ export function compileSegment(opts: {
   collectBehaviors(query.filter, behaviors)
   const pass = behaviourCte({ database, projectId, behaviors, params, now })
 
-  const where = treeExpr(query.filter, { params, aliasFor: pass.aliasFor })
+  const where = treeExpr(query.filter, { params, aliasFor: pass.aliasFor, now })
 
   // Traits are unpivoted one row per key, so they are folded back into maps
   // here — the predicates read them as t_str[key] / t_num[key].

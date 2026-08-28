@@ -1355,8 +1355,44 @@ key.
 | `lifecycle` | `first_seen` / `last_seen` |
 | `behavior` | an event name (or `*` for any), aggregated as `count`, `sum`, `min`, `max`, or `distinct`, over a `last` / `absolute` / `ever` window, optionally narrowed by `where` (see below) |
 
-Operators are `=`, `!=`, `>`, `>=`, `<`, `<=`, and `between`. `between` takes
-exactly two values; every other operator takes exactly one.
+##### Operators
+
+There are five families, and **which ones a condition may use depends on what
+it is comparing** — a country is never a flag, a `first_seen` is always set.
+
+| family | operators | value | admitted on |
+| --- | --- | --- | --- |
+| compare | `=` `!=` `>` `>=` `<` `<=` `between` | one, or two for `between` | everything |
+| text | `contains` `not_contains` `starts_with` `not_starts_with` `ends_with` `not_ends_with` | one string | traits, properties, context, event columns |
+| presence | `is_set` `is_not_set` | **none** | traits, properties, context, event columns |
+| boolean | `is_true` `is_false` | **none** | traits and properties |
+| relative date | `in_last` `not_in_last` | `{ "n": 7, "unit": "days" }` (`hours` or `days`) | traits, properties, `lifecycle` |
+
+`between` takes exactly two values; the presence and boolean families take
+**no `value` key at all**, and sending one is ignored rather than refused.
+
+Four things about these that are easy to get wrong, and that Lyraflow has
+picked a side on:
+
+- **Text matching is case-insensitive; `=` is not.** `path contains checkout`
+  finds `/Checkout`. Equality was case-sensitive before these operators
+  existed and stays that way, because changing it would silently reinterpret
+  every segment already saved. The folding is ClickHouse's `lowerUTF8`, which
+  handles accented Latin and Greek but **not** Turkish dotted `İ` — so
+  `contains istanbul` does not match `İSTANBUL`.
+- **`is_set` is not `!= ""`, and that is why it exists.** A property or trait
+  that was never sent reads back as the empty string, exactly like one that
+  was sent empty. No comparison can separate them; `is_set` can.
+- **Negations include people who have nothing there.** `plan not_contains pro`
+  matches someone with no `plan` at all, as does `not_in_last`. If you mean
+  "has a plan, and it is not pro", combine it with `is_set`.
+- **`is_true` / `is_false` match the stored text `"true"` / `"false"`**, which
+  is what ingest writes for a JSON boolean. They do not treat `"1"`, `"yes"`
+  or a non-empty string as true.
+
+A relative date is resolved when the segment **runs**, not when it is saved,
+and a trait or property is read through a best-effort date parse — a value
+that is not a date is simply not in the window.
 
 #### `where`: narrowing a behaviour to particular events
 
@@ -1675,8 +1711,9 @@ curl -X POST https://analytics.example.com/v1/funnels \
 A **step** is one event, plus two independent things you can constrain about
 it. `where` narrows **which occurrence** of the event counts — a property of
 the event itself, exactly the shape a segment behaviour uses —
-`{ property, operator, value }`, with `operator` one of `=`, `!=`, `>`, `>=`,
-`<`, `<=`, `between` — so you write a predicate the same way in both places.
+`{ property, operator, value }`, with the same operators a segment condition
+takes (see [Operators](#operators)) — so you write a predicate the same way in
+both places.
 Predicates matter more than they look: a page-view funnel is several `$page`
 steps that differ only by `path`.
 

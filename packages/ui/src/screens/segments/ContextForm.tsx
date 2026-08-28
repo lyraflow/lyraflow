@@ -1,9 +1,11 @@
-import { CONTEXT_FIELDS } from '@lyraflow/core/segments/ast.js'
+import { CONTEXT_FIELDS, OPERATOR_FAMILY } from '@lyraflow/core/segments/ast.js'
 import type { Context, ContextField } from '@lyraflow/core/segments/ast.js'
 import { Label } from '../../components/ui/label.js'
+import { ClauseValueField } from './ClauseValueField.js'
 import { OperatorSelect } from './OperatorSelect.js'
 import type { ConditionValue } from './ValueInput.js'
 import { ValueInput } from './ValueInput.js'
+import { clauseValueOf, withOperator } from './clause.js'
 
 /**
  * The `context` leaf form. `field` is a CLOSED select built from
@@ -62,13 +64,27 @@ export function ContextForm(props: {
       <OperatorSelect
         id={operatorId}
         value={node.operator}
-        onChange={(operator) => onChange({ ...node, operator })}
+        // No boolean and no relative-date family, matching `columnClause` in
+        // the AST: every context field is a country, a device, a referrer or
+        // a campaign. `is true` on one would match nothing and say nothing
+        // about why.
+        families={['comparison', 'text', 'set']}
+        onChange={(operator) => onChange(withOperator(node, operator))}
       />
-      <ValueInput
-        operator={node.operator}
-        value={node.value as ConditionValue}
-        onChange={(value) => onChange({ ...node, value } as Context)}
-      />
+      {OPERATOR_FAMILY[node.operator] === 'comparison' ? (
+        <ValueInput
+          operator={node.operator}
+          value={clauseValueOf(node) as ConditionValue}
+          onChange={(value) => onChange({ ...node, value } as Context)}
+        />
+      ) : (
+        <ClauseValueField
+          id={`${id}-value`}
+          operator={node.operator}
+          value={clauseValueOf(node)}
+          onChange={(value) => onChange({ ...node, value } as Context)}
+        />
+      )}
     </div>
   )
 }

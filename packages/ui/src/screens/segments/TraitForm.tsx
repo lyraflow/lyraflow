@@ -1,11 +1,14 @@
+import { OPERATOR_FAMILY } from '@lyraflow/core/segments/ast.js'
 import type { Trait } from '@lyraflow/core/segments/ast.js'
 import { useCallback, useEffect, useState } from 'react'
 import type { ApiClient } from '../../api/client.js'
 import type { PropertyKind, SchemaProperty } from '../../api/types.js'
+import { ClauseValueField } from './ClauseValueField.js'
 import { OperatorSelect } from './OperatorSelect.js'
 import { PropertyCombobox } from './PropertyCombobox.js'
 import { TraitValueField } from './TraitValueField.js'
 import type { ConditionValue } from './ValueInput.js'
+import { clauseValueOf, withOperator } from './clause.js'
 import { coerceForKind, kindNote, learnKinds } from './propertyKinds.js'
 
 /** The event name the ingest path assigns to an identify payload, whose
@@ -69,12 +72,24 @@ export function TraitForm(props: {
     setKinds((known) => learnKinds(known, reported))
   }, [])
 
-  useEffect(() => {
-    const next = coerceForKind(node.value as ConditionValue, kinds[node.key])
-    if (next !== node.value) onChange({ ...node, value: next } as Trait)
-  }, [kinds, node, onChange])
+  // Comparison operators ONLY. `coerceForKind` exists to route a numeric
+  // trait to `t_num` by making the value a JavaScript number, and that
+  // routing happens in `traitExpr`'s comparison branch alone: `contains` is
+  // a string match whatever the trait's kind is, `is set` has no value to
+  // coerce, and `in the last` carries a window that `coerceForKind` would
+  // read as a non-numeric scalar and rewrite to a string. Without this guard
+  // the effect fires on every render of those rows and fights the operator's
+  // own edits.
+  const comparison = OPERATOR_FAMILY[node.operator] === 'comparison'
+  const value = clauseValueOf(node) as ConditionValue
 
-  const note = kindNote(node.key, kinds[node.key], node.value as ConditionValue)
+  useEffect(() => {
+    if (!comparison) return
+    const next = coerceForKind(value, kinds[node.key])
+    if (next !== value) onChange({ ...node, value: next } as Trait)
+  }, [comparison, value, kinds, node, onChange])
+
+  const note = comparison ? kindNote(node.key, kinds[node.key], value) : null
 
   return (
     <div className="flex min-w-0 flex-col gap-1">
@@ -95,17 +110,35 @@ export function TraitForm(props: {
         <OperatorSelect
           id={operatorId}
           value={node.operator}
-          onChange={(operator) => onChange({ ...node, operator })}
+          // Every family: a trait holds arbitrary caller data, so it may be a
+          // URL, a flag or an ISO date and the tree cannot know which.
+          families={['comparison', 'text', 'set', 'boolean', 'relative']}
+          onChange={(operator) => onChange(withOperator(node, operator))}
         />
-        <TraitValueField
-          client={client}
-          projectId={projectId}
-          trait={node.key}
-          operator={node.operator}
-          value={node.value as ConditionValue}
-          onChange={(value) => onChange({ ...node, value } as Trait)}
-          onUnauthorized={onUnauthorized}
-        />
+        {comparison ? (
+          <TraitValueField
+            client={client}
+            projectId={projectId}
+            trait={node.key}
+            operator={node.operator}
+            value={value}
+            onChange={(next) => onChange({ ...node, value: next } as Trait)}
+            onUnauthorized={onUnauthorized}
+          />
+        ) : (
+          // Suggestions are deliberately dropped outside the comparison
+          // family. `TraitValueField`'s list is a prefix scan of recorded
+          // values, which answers "which exact value do I mean" -- the
+          // question `=` asks. `contains` is asking a different one, and a
+          // list of whole values would invite picking one, producing a
+          // substring match that is really an equality test.
+          <ClauseValueField
+            id={`${id}-value`}
+            operator={node.operator}
+            value={value}
+            onChange={(next) => onChange({ ...node, value: next } as Trait)}
+          />
+        )}
       </div>
       {/* Muted, not `destructive`: nothing here is refused and the operator
        * did nothing wrong -- the kind of this trait simply is not established,

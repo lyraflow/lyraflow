@@ -398,3 +398,215 @@ describe('runSegment (live ClickHouse)', () => {
     }
   })
 })
+
+/**
+ * The operator families added in #193, asserted as POPULATIONS.
+ *
+ * Every one of these compiles to SQL a unit test already pins. What a unit
+ * test cannot tell is whether the SQL MEANS what the operator's name says --
+ * whether `lowerUTF8` actually folds the URL ClickHouse stored, whether
+ * `mapContains` really separates an absent trait from an empty one, whether
+ * `ifNull` leaves the two relative operators complementary over real rows.
+ *
+ * **Its OWN project, not the one above.** The population there is 3 on a
+ * fresh database and 5 once the tie-break test has run, because that test's
+ * `finally` can only delete `events` and the base population is built from
+ * `device_index` -- see the long note in this file's `beforeAll`. Half of
+ * these assertions are "everyone except…", so they would read 2 or 4
+ * depending on nothing but test order. A separate project is cheaper than
+ * making every count relative to a moving total.
+ */
+describe('the operator families, as populations (live ClickHouse)', () => {
+  const OPS = 7701
+  const opsUuid = (n: number) => `77010000-0000-4000-8000-${String(n).padStart(12, '0')}`
+
+  const opsEvent = (
+    id: string,
+    anon: string,
+    user: string,
+    name: string,
+    ts: string,
+    properties: Record<string, string> = {},
+  ) => ({
+    project_id: OPS,
+    event_id: id,
+    anonymous_id: anon,
+    user_id: user,
+    event_name: name,
+    timestamp: ts,
+    received_at: ts,
+    trusted: 1,
+    properties,
+    properties_num: {},
+  })
+
+  const countOps = (filter: FilterNode) =>
+    runSegment({
+      client: ch,
+      compiled: compileSegment({
+        query: { ast_version: 1, filter } as never,
+        projectId: OPS,
+        database: CH_DB,
+        now: NOW,
+      }),
+    })
+
+  const trait = (key: string, clause: Record<string, unknown>): FilterNode =>
+    ({ kind: 'trait', key, ...clause }) as unknown as FilterNode
+
+  beforeAll(async () => {
+    await pg.query('DELETE FROM projects WHERE id = $1', [OPS])
+    await pg.query(
+      `INSERT INTO projects (id, name, slug, write_key, server_key_hash)
+       VALUES ($1, 'Operators', 'segments-operators-test', 'wk_segments_ops', 'h')`,
+      [OPS],
+    )
+    for (const table of ['events', 'device_index', 'person_traits']) {
+      await ch.command({
+        query: `ALTER TABLE ${table} DELETE WHERE project_id = ${OPS}`,
+        clickhouse_settings: { mutations_sync: '1' },
+      })
+    }
+
+    // Three people, and every trait value below separates a pair of readings
+    // that an assertion about SQL TEXT cannot tell apart:
+    //   onboarded  'true' / 'false' / '' -- carol's is EMPTY, which is the
+    //              case `is set` exists to distinguish from absent, since a
+    //              ClickHouse Map returns '' for both.
+    //   signup_url mixed case on alice, lower on carol, so a `starts with
+    //              https://app.` matching both is case-insensitivity proved
+    //              against stored bytes rather than against a regex.
+    //   trial_ends on alice only, so `not in the last` has to include the two
+    //              people who have no such trait at all.
+    await ch.insert({
+      table: 'events',
+      format: 'JSONEachRow',
+      values: [
+        opsEvent(opsUuid(1), 'ops-a', 'ops-alice', '$identify', '2026-08-01 00:00:00.000', {
+          plan: 'trial',
+          onboarded: 'true',
+          signup_url: 'https://App.Example.com/signup',
+          trial_ends: '2026-08-05T00:00:00Z',
+        }),
+        opsEvent(opsUuid(2), 'ops-b', 'ops-bob', '$identify', '2026-08-01 00:00:00.000', {
+          plan: 'trial',
+          onboarded: 'false',
+          signup_url: 'https://other.test/x',
+        }),
+        opsEvent(opsUuid(3), 'ops-c', 'ops-carol', '$identify', '2026-08-01 00:00:00.000', {
+          plan: 'pro',
+          onboarded: '',
+          signup_url: 'https://app.example.com/pricing',
+        }),
+      ],
+    })
+  })
+
+  afterAll(async () => {
+    await pg.query('DELETE FROM projects WHERE id = $1', [OPS])
+  })
+
+  it('seeds exactly three people, which every count below is read against', async () => {
+    await expect(countOps(trait('plan', { operator: 'is_set' }))).resolves.toBe(3)
+  })
+
+  describe('text', () => {
+    it('matches case-insensitively, which is the whole decision', async () => {
+      // alice's URL is stored `https://App.Example.com/…`; carol's is lower.
+      // A case-SENSITIVE `starts with` finds only carol, so the difference
+      // between 1 and 2 here is exactly the `lowerUTF8` pair.
+      await expect(
+        countOps(trait('signup_url', { operator: 'starts_with', value: 'https://app.' })),
+      ).resolves.toBe(2)
+    })
+
+    it('finds a substring anywhere in the value, and folds the needle too', async () => {
+      await expect(countOps(trait('plan', { operator: 'contains', value: 'RIA' }))).resolves.toBe(2)
+      await expect(
+        countOps(trait('signup_url', { operator: 'ends_with', value: '/PRICING' })),
+      ).resolves.toBe(1)
+    })
+
+    it('counts a person with no such trait as NOT containing it', async () => {
+      // The documented reading: an absent trait reads as '', which contains
+      // nothing, so every negation includes the people who never had it.
+      // Stated as a number so the next reader need not trust the comment.
+      await expect(
+        countOps(trait('trial_ends', { operator: 'not_contains', value: '2026' })),
+      ).resolves.toBe(2)
+    })
+  })
+
+  describe('presence', () => {
+    it('separates an EMPTY trait from an ABSENT one, which no comparison can', async () => {
+      // carol's `onboarded` is the empty string, so all three HAVE the trait.
+      // This is the assertion that fails the moment `is set` is implemented
+      // as `!= ''` on a map -- which is the shape it correctly takes on a
+      // column, and the reason the two compile differently.
+      await expect(countOps(trait('onboarded', { operator: 'is_set' }))).resolves.toBe(3)
+      await expect(countOps(trait('onboarded', { operator: '!=', value: '' }))).resolves.toBe(2)
+    })
+
+    it('finds nobody for a trait no one has, rather than everybody', async () => {
+      await expect(countOps(trait('never_written', { operator: 'is_set' }))).resolves.toBe(0)
+      await expect(countOps(trait('never_written', { operator: 'is_not_set' }))).resolves.toBe(3)
+    })
+
+    it('is complementary over the whole population', async () => {
+      const set = await countOps(trait('trial_ends', { operator: 'is_set' }))
+      const notSet = await countOps(trait('trial_ends', { operator: 'is_not_set' }))
+      expect(set).toBe(1)
+      expect(set + notSet).toBe(3)
+    })
+  })
+
+  describe('boolean', () => {
+    it('reads the text ingest stored, and does not treat empty as false', async () => {
+      await expect(countOps(trait('onboarded', { operator: 'is_true' }))).resolves.toBe(1)
+      // bob only. Were `is false` compiled as `NOT is_true` it would return 2
+      // here -- carol's empty string is not `false` -- and would also sweep in
+      // every person with no such trait at all.
+      await expect(countOps(trait('onboarded', { operator: 'is_false' }))).resolves.toBe(1)
+    })
+  })
+
+  describe('relative dates', () => {
+    // NOW is 2026-08-07; alice's trial_ends is 2026-08-05.
+    it('finds a trait whose date falls inside the window, and not outside it', async () => {
+      await expect(
+        countOps(trait('trial_ends', { operator: 'in_last', value: { n: 7, unit: 'days' } })),
+      ).resolves.toBe(1)
+      await expect(
+        countOps(trait('trial_ends', { operator: 'in_last', value: { n: 1, unit: 'days' } })),
+      ).resolves.toBe(0)
+    })
+
+    it('leaves the two operators complementary even over unparseable dates', async () => {
+      // bob and carol have NO trial_ends, which parses to NULL. Without the
+      // `ifNull` guard, three-valued logic drops them from BOTH sides and
+      // this sums to 1 rather than 3 -- people vanishing from every result is
+      // a failure that ships looking like a correct filter.
+      const inLast = await countOps(
+        trait('trial_ends', { operator: 'in_last', value: { n: 7, unit: 'days' } }),
+      )
+      const notInLast = await countOps(
+        trait('trial_ends', { operator: 'not_in_last', value: { n: 7, unit: 'days' } }),
+      )
+      expect(notInLast).toBe(2)
+      expect(inLast + notInLast).toBe(3)
+    })
+
+    it('bounds a lifecycle column with no null guard, since it cannot be null', async () => {
+      const bound = (n: number, unit: string): FilterNode =>
+        ({
+          kind: 'lifecycle',
+          field: 'last_seen',
+          operator: 'in_last',
+          value: { n, unit },
+        }) as unknown as FilterNode
+      // Everyone was last seen on 2026-08-01; NOW is 2026-08-07.
+      await expect(countOps(bound(30, 'days'))).resolves.toBe(3)
+      await expect(countOps(bound(1, 'hours'))).resolves.toBe(0)
+    })
+  })
+})

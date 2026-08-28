@@ -1,10 +1,12 @@
-import { COMPARISON_OPERATORS, Window } from '@lyraflow/core/segments/ast.js'
+import { ALL_OPERATORS, COMPARISON_OPERATORS, Window } from '@lyraflow/core/segments/ast.js'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { toPickerValue } from './datetime.js'
 import {
+  OPERATOR_GROUPS,
   OPERATOR_OPTIONS,
   OPERATOR_WORDS,
   WINDOW_KIND_OPTIONS,
+  clausePhrase,
   formatBound,
   formatValue,
   operatorWord,
@@ -332,5 +334,55 @@ describe('wherePhrase — attribute predicates', () => {
     expect(wherePhrase([{ property: 'path', operator: '=', value: '/a' }])).toBe(
       wherePhrase([{ source: 'attribute', attribute: 'path', operator: '=', value: '/a' }]),
     )
+  })
+})
+
+describe('clausePhrase', () => {
+  it('renders a value-less operator as a complete phrase', () => {
+    // `${operatorWord} ${formatValue(undefined)}` reads "is set undefined",
+    // which is what this function exists to prevent.
+    expect(clausePhrase({ operator: 'is_set' })).toBe('is set')
+    expect(clausePhrase({ operator: 'is_true' })).toBe('is true')
+  })
+
+  it('renders a relative window in words rather than as an object', () => {
+    expect(clausePhrase({ operator: 'in_last', value: { n: 7, unit: 'days' } })).toBe(
+      'in the last 7 days',
+    )
+    expect(clausePhrase({ operator: 'not_in_last', value: { n: 6, unit: 'hours' } })).toBe(
+      'not in the last 6 hours',
+    )
+    expect(clausePhrase({ operator: 'in_last', value: { n: 7, unit: 'days' } })).not.toContain(
+      'object Object',
+    )
+  })
+
+  it('still renders a comparison the way it always did', () => {
+    expect(clausePhrase({ operator: '=', value: 'trial' })).toBe('is trial')
+    expect(clausePhrase({ operator: 'between', value: [2, 10] })).toBe('between 2 and 10')
+  })
+
+  it('renders a text operator with its value', () => {
+    expect(clausePhrase({ operator: 'contains', value: '/docs' })).toBe('contains /docs')
+    expect(clausePhrase({ operator: 'not_starts_with', value: 'x' })).toBe('does not start with x')
+  })
+
+  it('degrades to the raw operator for one it does not know', () => {
+    // Reachable: `summarise` renders a tree that arrived from the wire as
+    // `unknown`. Printing `undefined` into a sentence is the failure mode.
+    expect(clausePhrase({ operator: 'wat', value: 'x' })).toBe('wat x')
+  })
+
+  it('gives every operator core declares a word', () => {
+    // Not "a word unlike its symbol", which is the older assertion above and
+    // is right only for the comparison family: `contains` and `between` read
+    // as themselves, and the symbolic operators are the ones that must not.
+    for (const op of ALL_OPERATORS) expect(OPERATOR_WORDS[op]).toBeTruthy()
+  })
+
+  it('offers every operator through exactly one group', () => {
+    const offered = OPERATOR_GROUPS.flatMap((g) => g.options.map((o) => o.value))
+    expect(new Set(offered).size).toBe(offered.length)
+    expect(new Set(offered)).toEqual(new Set(ALL_OPERATORS))
   })
 })

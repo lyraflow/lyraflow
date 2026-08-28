@@ -40,7 +40,7 @@ function condition(b: Behavior, params: Params, now: Date): string {
     parts.push(`timestamp <= ${params.add(chDateTime(new Date(b.window.to)), 'DateTime64(3)')}`)
   }
 
-  for (const w of b.where ?? []) parts.push(wherePredicate(w, params))
+  for (const w of b.where ?? []) parts.push(wherePredicate(w, params, now))
 
   // A behaviour with no conditions at all (event '*', window 'ever', no
   // predicates) is legal and means "any event ever".

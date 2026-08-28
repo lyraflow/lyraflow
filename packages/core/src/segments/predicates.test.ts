@@ -3,9 +3,16 @@ import type { Behavior, FilterNode, WherePredicate } from './ast.js'
 import { Params } from './params.js'
 import { attributeColumns, treeExpr, wherePredicate } from './predicates.js'
 
+/**
+ * A fixed `now`, so a relative-date operator compiles to a bound this file
+ * can name. Every assertion about `in_last` reads against it rather than
+ * against the wall clock.
+ */
+const NOW = new Date('2026-08-27T12:00:00.000Z')
+
 const build = (node: FilterNode, aliasFor = new Map<Behavior, string>()) => {
   const params = new Params()
-  return { sql: treeExpr(node, { params, aliasFor }), params }
+  return { sql: treeExpr(node, { params, aliasFor, now: NOW }), params }
 }
 
 const trait: FilterNode = { kind: 'trait', key: 'plan', operator: '=', value: 'trial' }
@@ -141,7 +148,7 @@ describe('a lifecycle bound means the same instant on every server (#124)', () =
 describe('attribute predicates', () => {
   const compile = (w: WherePredicate) => {
     const params = new Params()
-    return { sql: wherePredicate(w, params), params }
+    return { sql: wherePredicate(w, params, NOW), params }
   }
 
   // The whole point of the feature: a name that used to read an empty map
