@@ -9,6 +9,7 @@ import { DetailSection } from '../components/DetailList.js'
 import { Button } from '../components/ui/button.js'
 import { Input } from '../components/ui/input.js'
 import { Label } from '../components/ui/label.js'
+import { ExportButton } from './people/ExportButton.js'
 import { IdentityHeader } from './people/IdentityHeader.js'
 import { Timeline } from './people/Timeline.js'
 import { personPath, readPersonId } from './people/params.js'
@@ -252,6 +253,18 @@ export function People(props: { client: ApiClient; onUnauthorized?: () => void }
   return (
     <div className="flex flex-col gap-6">
       <IdentityHeader person={person} />
+      {/* Guarded the same way the timeline below is -- `ExportButton` needs
+       * a project to call `personExport` against, and `activeId` is `null`
+       * only in the sliver of a render between mount and the project
+       * context settling. */}
+      {activeId != null && (
+        <ExportButton
+          client={client}
+          projectId={activeId}
+          personId={person.person_id}
+          eventCount={person.events}
+        />
+      )}
       {/*
        * Context comes off the timeline's newest event, not the person read
        * -- `AttributesSection` renders it once that second fetch lands.
