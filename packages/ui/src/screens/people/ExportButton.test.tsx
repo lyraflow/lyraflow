@@ -149,3 +149,65 @@ describe('ExportButton', () => {
     expect(screen.queryByText(/could not be exported/i)).toBeNull()
   })
 })
+
+/**
+ * The cancellation guard. This was the one async call on the whole branch
+ * without one -- `People` and `Timeline` both carry a `cancelled` flag --
+ * and unlike theirs, a late landing here is not a stale `setState`: it
+ * appends an anchor to the document and clicks it, so the browser saves a
+ * file.
+ *
+ * `unmount()` is the right trigger and not a contrivance. `ExportButton` is
+ * keyed on `person.person_id` in `People.tsx`, and the profile drops to its
+ * loading branch (a different root element) on any id change, so navigating
+ * A -> B and completing an erasure BOTH unmount this component while a
+ * request may still be in flight.
+ */
+describe('ExportButton -- cancellation', () => {
+  it('does not download after the component has gone', async () => {
+    const client = makeClient()
+    let resolveExport: (blob: Blob) => void = () => {}
+    ;(client.personExport as Mock).mockReturnValue(
+      new Promise<Blob>((resolve) => {
+        resolveExport = resolve
+      }),
+    )
+    const { unmount } = render(<ExportButton eventCount={10} {...base(client)} />)
+    await click(/export/i)
+    // Navigated away (or the person was erased) with the bytes still in
+    // flight.
+    unmount()
+    resolveExport(new Blob(['x']))
+    await Promise.resolve()
+    await Promise.resolve()
+    // No object URL, therefore no anchor, therefore no file on the
+    // operator's disk for a person they are no longer looking at -- and
+    // nothing to revoke either, which is why the leak this guard could have
+    // introduced is not one.
+    expect(createObjectURL).not.toHaveBeenCalled()
+    expect(lastAnchor).toBeNull()
+    expect(revokeObjectURL).not.toHaveBeenCalled()
+  })
+
+  it('does not bounce the session out on a 401 that lands after the component has gone', async () => {
+    const client = makeClient()
+    let rejectExport: (err: unknown) => void = () => {}
+    ;(client.personExport as Mock).mockReturnValue(
+      new Promise<Blob>((_resolve, reject) => {
+        rejectExport = reject
+      }),
+    )
+    const onUnauthorized = vi.fn()
+    const { unmount } = render(
+      <ExportButton eventCount={10} {...base(client)} onUnauthorized={onUnauthorized} />,
+    )
+    await click(/export/i)
+    unmount()
+    rejectExport(new ApiError(401, 'unauthorized'))
+    await Promise.resolve()
+    await Promise.resolve()
+    // Whoever is on screen now must not be thrown to the login form by an
+    // export nobody is waiting for.
+    expect(onUnauthorized).not.toHaveBeenCalled()
+  })
+})
