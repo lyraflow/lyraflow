@@ -1,6 +1,7 @@
 import { dedupeInFlight } from './dedupe.js'
 import type {
   CreatedProject,
+  DeletionStatus,
   EventsPage,
   EventsQuery,
   Funnel,
@@ -10,6 +11,8 @@ import type {
   FunnelRunResult,
   FunnelStep,
   Meta,
+  Person,
+  PersonDeletion,
   PreviewOptions,
   Project,
   ProjectDeletion,
@@ -189,6 +192,23 @@ export interface ApiClient {
   // 400. Expensive on the server — see the route's own comment — so callers
   // must reach it on an explicit interaction, never on render.
   schemaTraitValues(projectId: number, trait: string, q: string): Promise<string[]>
+  /** `GET /v1/persons/:id`. `id` is caller-supplied -- `identify('someone@example.com')`
+   * is the ordinary case -- so the route always encodes it with
+   * `encodeURIComponent`, never `encodeURI`: an id containing `/`, `?` or
+   * `#` would otherwise reach a different route, or a different query,
+   * entirely. */
+  person(projectId: number, id: string): Promise<Person>
+  /**
+   * Downloads the subject-access export as a `Blob`, NOT through `call` --
+   * the export is NDJSON and `call` always ends in `res.json()`. See
+   * `callBlob`'s own docstring for why this buffers despite the server
+   * streaming deliberately, and for who owns the size ceiling.
+   */
+  personExport(projectId: number, id: string): Promise<Blob>
+  /** `DELETE /v1/persons/:id`. Same id-encoding requirement as `person()`. */
+  deletePerson(projectId: number, id: string): Promise<PersonDeletion>
+  /** Polls one deletion request by the id `deletePerson` returned as `request_id`. */
+  deletion(projectId: number, requestId: number): Promise<DeletionStatus>
 }
 
 /**
@@ -303,6 +323,44 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
 
     if (res.status === 204) return undefined as T
     return (await res.json()) as T
+  }
+
+  /**
+   * The one request whose body is not JSON. `call` ends in `res.json()`,
+   * and the subject-access export is NDJSON.
+   *
+   * It buffers. The endpoint streams deliberately -- `export.ts`'s
+   * docstring explains that a second copy of one person's complete
+   * personal data is the liability that route refuses to create -- and a
+   * buffered `Blob` puts exactly that copy in browser memory. It is here
+   * anyway because `auth/bridge.ts` requires both `x-lyraflow-ui` and
+   * `x-lyraflow-project` on the session path, and no `<a download>`, form,
+   * or opened window can set a header. The size ceiling this trade-off
+   * needs is enforced by the CALLER, which knows the person's event count
+   * -- not here.
+   *
+   * Shares `call`'s error path and nothing else: it is not built by
+   * refactoring `call` to accommodate a non-JSON success body, because
+   * every other caller of `call` still wants that.
+   */
+  async function callBlob(path: string, projectId: number): Promise<Blob> {
+    const headers = new Headers()
+    headers.set('x-lyraflow-ui', '1')
+    headers.set('x-lyraflow-project', String(projectId))
+    const res = await fetchImpl(path, { headers, credentials: 'include' })
+
+    if (!res.ok) {
+      let code = 'unknown'
+      try {
+        const body = (await res.json()) as { error?: string }
+        if (typeof body.error === 'string') code = body.error
+      } catch {
+        /* keep 'unknown' */
+      }
+      throw new ApiError(res.status, code)
+    }
+
+    return res.blob()
   }
 
   return {
@@ -451,5 +509,11 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
           projectId,
         )
       ).values.map((v) => v.value),
+    person: (projectId, id) => call(`/v1/persons/${encodeURIComponent(id)}`, {}, projectId),
+    deletePerson: (projectId, id) =>
+      call(`/v1/persons/${encodeURIComponent(id)}`, { method: 'DELETE' }, projectId),
+    deletion: (projectId, requestId) => call(`/v1/deletions/${requestId}`, {}, projectId),
+    personExport: (projectId, id) =>
+      callBlob(`/v1/persons/${encodeURIComponent(id)}/export`, projectId),
   }
 }
