@@ -191,8 +191,9 @@ export interface ApiClient {
    * The saved-report CRUD surfaces. Same five-method shape as
    * `funnels`/`funnel`/`createFunnel`/`patchFunnel`/`deleteFunnel` above,
    * for both report kinds -- including that each list unwraps its own
-   * envelope key (`{ trends: [...] }`, `{ reports: [...] }` -- NOT the same
-   * key, see the client's own list implementations below).
+   * envelope key, named for the resource (`{ trends: [...] }`,
+   * `{ retention_reports: [...] }`), like every other list endpoint in
+   * this API.
    */
   trendReports(projectId: number): Promise<TrendReport[]>
   trendReport(projectId: number, id: number): Promise<TrendReport>
@@ -483,10 +484,9 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
     patchTrendReport: (projectId, id, patch) =>
       call(`/v1/trends/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }, projectId),
     deleteTrendReport: (projectId, id) => call(`/v1/trends/${id}`, { method: 'DELETE' }, projectId),
-    // The list envelope's key is `reports`, NOT `trends` -- see
-    // `retention-routes.ts`'s `GET /v1/retention-reports` handler.
     retentionReports: async (projectId) =>
-      (await call<{ reports: RetentionReport[] }>('/v1/retention-reports', {}, projectId)).reports,
+      (await call<{ retention_reports: RetentionReport[] }>('/v1/retention-reports', {}, projectId))
+        .retention_reports,
     retentionReport: (projectId, id) => call(`/v1/retention-reports/${id}`, {}, projectId),
     createRetentionReport: (projectId, body) =>
       call('/v1/retention-reports', { method: 'POST', body: JSON.stringify(body) }, projectId),

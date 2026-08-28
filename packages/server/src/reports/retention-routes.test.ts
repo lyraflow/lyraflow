@@ -141,7 +141,7 @@ describe('retention report routes', () => {
     })
     const id = created.json().id
 
-    expect((await call('GET', '/v1/retention-reports')).json().reports).toHaveLength(1)
+    expect((await call('GET', '/v1/retention-reports')).json().retention_reports).toHaveLength(1)
     expect((await call('GET', `/v1/retention-reports/${id}`)).json().name).toBe('Signup to login')
 
     const patched = await call('PATCH', `/v1/retention-reports/${id}`, { name: 'v2' })

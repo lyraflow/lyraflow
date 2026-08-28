@@ -126,7 +126,7 @@ export function registerRetentionReportRoutes(
     const project = await authenticate(req, reply)
     if (!project) return
     const reports = await store.list(project.id)
-    return reply.code(200).send({ reports: reports.map(toWire) })
+    return reply.code(200).send({ retention_reports: reports.map(toWire) })
   })
 
   app.get<{ Params: { id: string } }>('/v1/retention-reports/:id', async (req, reply) => {

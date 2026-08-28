@@ -644,11 +644,11 @@ describe('createClient', () => {
       segment_id: null,
     }
 
-    // The retention-report list route answers `{ reports: [...] }`, NOT
-    // `{ retention_reports: [...] }` or `{ trends: [...] }` -- a copy-paste
-    // of the trend-report envelope key would typecheck and fail only here.
+    // The retention-report list route answers `{ retention_reports: [...] }`,
+    // matching the resource name like every other list endpoint -- NOT
+    // `{ reports: [...] }` or `{ trends: [...] }`.
     it('unwraps the retention-report list envelope', async () => {
-      const f = fakeFetch(200, { reports: [{ id: 1, name: 'Week 1 return' }] })
+      const f = fakeFetch(200, { retention_reports: [{ id: 1, name: 'Week 1 return' }] })
       const out = await createClient(f as unknown as typeof fetch).retentionReports(7)
       expect(out).toEqual([{ id: 1, name: 'Week 1 return' }])
       const [path, init] = f.mock.calls[0] ?? []
