@@ -443,7 +443,7 @@ screens, reachable from the sidebar:
   and the profile answers by naming that as the first of the four things a
   "nothing to show" can mean, rather than by hiding the link or by claiming
   the id was never seen. On a fresh install, where little has been identified
-  yet, that is the common case. It is the same limit *Erasing a person* below
+  yet, that is the common case. It is the same limit *Privacy: deletion and export* below
   documents for the API, met from the UI side.
 
   Two privacy actions sit on the profile. **Export** buffers the subject-access
@@ -2679,7 +2679,7 @@ has been deleted exports only the events recorded after the deletion
 boundary, and a person with nothing left after that boundary is `404`, the
 same `{ "error": "person_not_found" }` an unresolvable id gets. As with
 `DELETE`, that `404` also covers a visitor who has never been through
-`/v1/identify` — see *Deleting a person* above, where the same limit is
+`/v1/identify` — see *Privacy: deletion and export* above, where the same limit is
 described in full. An `anonymous_id` alone is not enough to export a subject.
 Traits are omitted entirely once a boundary exists — a trait carries no
 event time (it is the *latest* value known for that key, not a timestamped
