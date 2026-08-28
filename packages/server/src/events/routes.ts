@@ -196,14 +196,24 @@ export interface EventsDeps {
   database: string
 }
 
-const Query = z.object({
-  since: z.string().datetime().optional(),
-  until: z.string().datetime().optional(),
-  event: z.string().max(128).optional(),
-  person: z.string().max(128).optional(),
-  limit: countParam({ min: 1, max: EVENTS_MAX_LIMIT, fallback: 50 }),
-  after: z.string().max(512).optional(),
-})
+const Query = z
+  .object({
+    since: z.string().datetime().optional(),
+    until: z.string().datetime().optional(),
+    event: z.string().max(128).optional(),
+    person: z.string().max(128).optional(),
+    limit: countParam({ min: 1, max: EVENTS_MAX_LIMIT, fallback: 50 }),
+    after: z.string().max(512).optional(),
+    /** The backwards half of the keyset walk. Same codec as `after`; opposite
+     * direction. Mutually exclusive with it -- see the refinement below. */
+    before: z.string().max(512).optional(),
+  })
+  .refine((q) => !(q.after !== undefined && q.before !== undefined), {
+    // Silently preferring one hands a caller a page they did not ask for,
+    // walking away from the position they gave.
+    message: 'before and after name opposite directions and cannot be combined',
+    path: ['before'],
+  })
 
 const StatsQuery = z.object({
   since: z.string().datetime().optional(),
@@ -349,24 +359,36 @@ interface FeedRow {
  * that omitted `timestamp` specifically — normal delivery, and everything
  * `packages/sdk-browser` ever sends, always carries one.
  *
- * TWO PAGING DIRECTIONS, ONE OUTPUT ORDERING. With no cursor, the only way
- * to get the *most recent* N events is to sort `DESC` and take the top N —
- * then this handler reverses that page in JS before responding, because the
- * response is meant to read like a log (oldest of the page first, newest
- * last), and `--follow`'s next call should be able to pick up from the very
- * last event this call showed. Seeing `DESC` in the SQL and an ascending
- * response is not a bug: the reversal IS what makes that true. With a
- * cursor, the direction flips to `ASC` and a keyset predicate —
- * `(timestamp, event_id) > (at, aid)` — takes over; ClickHouse compares
- * tuples lexicographically, which is exactly keyset semantics: it moves past
- * `at` only when `event_id` is also past `aid` AT that same instant, so two
- * events sharing a timestamp are never skipped the way a bare
- * `timestamp > at` would skip them.
+ * THREE PAGING SHAPES, ONE OUTPUT ORDERING. With no cursor, the only way to
+ * get the *most recent* N events is to sort `DESC` and take the top N. A
+ * backwards walk (`before`) wants the same thing relative to a position —
+ * the N newest events *below* the cursor — so it reads `DESC` too. Only a
+ * forward walk (`after`) wants the N events immediately following a
+ * position, in the order they occurred, so it is the one shape that reads
+ * `ASC` directly. Either `DESC` case is reversed in JS before responding,
+ * because the response is always meant to read like a log — oldest of the
+ * page first, newest last — and `--follow`'s next call should be able to
+ * pick up from the very last event this call showed. Seeing `DESC` in the
+ * SQL and an ascending response is not a bug: the reversal IS what makes
+ * that true, and skipping it for a backwards page (it already arrives in
+ * the order a profile would display it) is the shortcut that makes page 1
+ * ascending and page 2 descending — a seam invisible to any test that
+ * fetches a single page. One ordering, always; a screen that wants
+ * newest-first reverses once, itself.
+ *
+ * The keyset predicate — `(timestamp, event_id) > (at, aid)` forward,
+ * `<` backward — is the same tuple comparison either way; ClickHouse
+ * compares tuples lexicographically, which is exactly keyset semantics: it
+ * moves past `at` only when `event_id` is also past `aid` AT that same
+ * instant, so two events sharing a timestamp are never skipped the way a
+ * bare `timestamp > at` (or `<`) would skip them.
  *
  * `next_cursor` is always built from the LAST row of the page in the
  * returned (ascending) order — the newest event this call actually showed —
- * so a follow poll's next call continues from there. `null` on an empty
- * page: there is nothing to continue from.
+ * and `prev_cursor` from the FIRST (oldest), whichever direction produced
+ * the page: the uniformity is the contract, the direction is an
+ * implementation detail of one query. Either is `null` on an empty page:
+ * there is nothing to continue from in that direction.
  *
  * Ceilings mirror `segments/execute.ts`'s: this route is reachable by an
  * authenticated caller on repeat, and `timeout_overflow_mode: 'throw'`
@@ -389,10 +411,20 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
     if (!q.success) return reply.code(400).send({ error: 'invalid_query' })
     const { since, until, event, person, limit } = q.data
 
+    // One cursor, plus which way it points. The codec is shared: the
+    // position is the same fact in both directions, and this cursor is
+    // deliberately unsigned (cursor.ts's module docstring) because it
+    // enforces nothing -- an `after` value replayed as `before` is a
+    // legitimate walk the other way from a real position, not a forgery.
+    // That is why these need no distinct labels, unlike the funnel
+    // reached/dropped cursors, which index different POPULATIONS.
     let cursor: { timestamp: string; eventId: string } | null = null
-    if (q.data.after !== undefined) {
+    let backwards = false
+    const rawCursor = q.data.before ?? q.data.after
+    if (rawCursor !== undefined) {
+      backwards = q.data.before !== undefined
       try {
-        cursor = decodeFeedCursor(q.data.after)
+        cursor = decodeFeedCursor(rawCursor)
       } catch (err) {
         if (err instanceof FeedCursorError) {
           return reply.code(400).send({ error: 'invalid_cursor' })
@@ -441,6 +473,14 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
     // An explicit `since` alongside a cursor still applies below (a
     // caller deliberately narrowing is not the default firing); only the
     // DEFAULT must stay off whenever a cursor is doing the job instead.
+    //
+    // Same argument, flipped: a `before` walk into 2024 with the default
+    // still applied would end at whatever `now - 24h` happens to be, with
+    // no error and no marker, exactly as arbitrarily as the `after` case
+    // above. `cursor` below is set from EITHER `before` or `after` (see the
+    // cursor-decode block above), so `!cursor` already closes both — this
+    // is not two defaults to disable, it is one, gated on whether a keyset
+    // predicate is already bounding the scan.
     const DEFAULT_SINCE_MS = 24 * 60 * 60 * 1000
     let sinceClause = ''
     if (since) {
@@ -486,18 +526,26 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
     // Bound directly, under a name that cannot collide with `Params`' own
     // `p0`, `p1`, … generated names, rather than widening `ChType` for one
     // caller.
+    // The keyset predicate. `<` walks into the past, `>` walks toward now;
+    // ClickHouse compares tuples lexicographically, which is exactly what
+    // stops two events sharing a timestamp from being skipped in EITHER
+    // direction -- it moves past `at` only when `event_id` is also past
+    // `aid` at that same instant.
     let afterClause = ''
     let cursorParams: Record<string, unknown> = {}
     if (cursor) {
       const at = params.add(cursor.timestamp, 'DateTime64(3)')
       cursorParams = { cursorEventId: cursor.eventId }
-      afterClause = ` AND (timestamp, event_id) > (${at}, {cursorEventId:UUID})`
+      const op = backwards ? '<' : '>'
+      afterClause = ` AND (timestamp, event_id) ${op} (${at}, {cursorEventId:UUID})`
     }
 
-    // No cursor: DESC is the only way to get the most recent N, and the
-    // handler reverses the page below. A cursor means a keyset continuation,
-    // which only makes sense walking forward.
-    const direction = cursor ? 'ASC' : 'DESC'
+    // DESC for "the N nearest the ceiling" -- true of the no-cursor call
+    // (the newest N overall) and of a backwards walk (the newest N below the
+    // cursor). Only a forward walk reads ASC, because a forward keyset
+    // continuation wants the N immediately AFTER the cursor, in the order
+    // they occurred.
+    const direction = cursor && !backwards ? 'ASC' : 'DESC'
 
     const resolved = resolvedPersonExpr({ database, alias: 'e' })
     const notSuppressed = notSuppressedExpr({
@@ -543,13 +591,29 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
     })
     const fetched = await rs.json<FeedRow>()
 
-    // See this function's own docstring: DESC fetched the most recent N in
-    // newest-first order; reversing here is what turns that into a log read
-    // oldest-of-the-page-first. The cursor path fetched ASC already and
-    // needs no reversal.
-    const rows = cursor ? fetched : fetched.reverse()
+    // See this function's own docstring: DESC fetched the page newest-first
+    // -- true of both the no-cursor call and a backwards walk -- and
+    // reversing here is what turns that into a log read
+    // oldest-of-the-page-first, so EVERY response this route produces is
+    // ascending. The tempting shortcut is to return a backwards page
+    // unreversed -- it already arrives in the order a profile displays --
+    // but that makes page 1 (no cursor, DESC-then-reverse) ascending and
+    // page 2 (backwards, unreversed) descending, and the seam is invisible
+    // to any test that fetches a single page. One ordering, always; a
+    // screen that wants newest-first reverses once, itself. Only a forward
+    // walk fetched ASC already and needs no reversal.
+    const rows = direction === 'DESC' ? fetched.reverse() : fetched
 
+    // Always the page's own ends: `prev_cursor` from the first (oldest) row,
+    // `next_cursor` from the last (newest), in every response whichever
+    // direction produced it. The uniformity is the contract; the direction
+    // is an implementation detail of one query. Null on an empty page --
+    // there is nothing to continue from in either direction.
+    const first = rows[0]
     const last = rows[rows.length - 1]
+    const prev_cursor = first
+      ? encodeFeedCursor({ timestamp: first.timestamp, eventId: first.event_id })
+      : null
     const next_cursor = last
       ? encodeFeedCursor({ timestamp: last.timestamp, eventId: last.event_id })
       : null
@@ -579,6 +643,7 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
         city: r.city,
       })),
       next_cursor,
+      prev_cursor,
     })
   })
 

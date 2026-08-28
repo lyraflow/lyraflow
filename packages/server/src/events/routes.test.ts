@@ -9,7 +9,7 @@ import { loadConfig } from '../config.js'
 import { Readiness } from '../health.js'
 import { type PgDictionarySource, ensureIdentityDictionaries } from '../identity/dictionaries.js'
 import { MAX_PERSON_RANGE_CLAUSES } from '../identity/scope.js'
-import { encodeFeedCursor } from './cursor.js'
+import { decodeFeedCursor, encodeFeedCursor } from './cursor.js'
 import { EVENTS_MAX_LIMIT, STATS_MAX_BUCKETS, rejectionsHasMore } from './routes.js'
 
 const CH_DB = 'lyraflow_test'
@@ -184,6 +184,31 @@ async function cleanup(): Promise<void> {
 
 const get = (url: string, key = SERVER_KEY_A) =>
   app.inject({ method: 'GET', url, headers: { 'x-lyraflow-server-key': key } })
+
+/**
+ * Repeatedly follows `prev_cursor` until a page comes back empty, collecting
+ * every event seen along the way (including the first, cursor-less page).
+ * Exists for the tied-timestamp backward-walk test below: whether a tie at
+ * a page boundary is skipped or duplicated only shows up across a full
+ * walk, not a single page.
+ */
+async function walkBackwards(eventName: string, limit: number) {
+  const collected: { event_id: string }[] = []
+  const first = await get(`/v1/events?event=${eventName}&limit=${limit}`)
+  let body = first.json() as { events: { event_id: string }[]; prev_cursor: string | null }
+  collected.push(...body.events)
+  let prev = body.prev_cursor
+  while (prev) {
+    const page = await get(
+      `/v1/events?event=${eventName}&limit=${limit}&before=${encodeURIComponent(prev)}`,
+    )
+    body = page.json()
+    if (body.events.length === 0) break
+    collected.push(...body.events)
+    prev = body.prev_cursor
+  }
+  return collected
+}
 
 async function identify(writeKey: string, body: Record<string, unknown>) {
   const res = await app.inject({
@@ -721,6 +746,335 @@ describe('GET /v1/events', () => {
     // Both the gap event and the recent one — not just the recent one, and
     // not the cursor's own (already-seen) event.
     expect(ids).toEqual([gapEventId, recentEventId])
+  })
+
+  // Twelve events, ascending, one event name unique to this test. Walking
+  // `before` from the first (cursor-less) page's `prev_cursor` all the way
+  // back must reassemble the exact original set, in order, with no gap and
+  // no duplicate — the backward mirror of "pages forward from a cursor
+  // without missing or repeating" above, but exercised across the WHOLE
+  // walk rather than one page, since a gap or a repeat between page 2 and
+  // page 3 is invisible to a two-page test.
+  it('walks backwards through a fixture with no gap and no duplicate', async () => {
+    const atSecondsValues = Array.from({ length: 12 }, (_, i) => 2000 + i * 10)
+    await insertEvents(
+      atSecondsValues.map((atSeconds, i) =>
+        evRow({
+          projectId: projectA,
+          eventId: uuid(100 + i),
+          userId: 'back-walk-user',
+          eventName: 'feed_back_walk_event',
+          atSeconds,
+        }),
+      ),
+    )
+    const stamps = atSecondsValues.map((atSeconds) => isoAt(atSeconds))
+
+    const first = await get('/v1/events?event=feed_back_walk_event&limit=5')
+    expect(first.statusCode).toBe(200)
+    const firstBody = first.json()
+    const seen: { timestamp: string }[] = [...firstBody.events]
+    let prev = firstBody.prev_cursor
+    while (prev) {
+      const page = await get(
+        `/v1/events?event=feed_back_walk_event&limit=5&before=${encodeURIComponent(prev)}`,
+      )
+      expect(page.statusCode).toBe(200)
+      const body = page.json()
+      seen.unshift(...body.events)
+      prev = body.events.length === 0 ? null : body.prev_cursor
+    }
+    expect(seen.map((e) => e.timestamp)).toEqual(stamps)
+  })
+
+  // The case keyset paging exists for, walking backwards: two events at the
+  // exact same instant, positioned so a page boundary lands between them.
+  // Mirrors "pages forward from a cursor without missing or repeating"
+  // above — same tied-timestamp shape, `before` instead of `after`, the tie
+  // approached from the newer side. `uuid(121)` and `uuid(122)` share
+  // `atSeconds: 3310`; `limit: 2` on a 4-event fixture forces the tie to
+  // straddle the boundary between the first page (no cursor) and the
+  // second (backward from its `prev_cursor`). A bare `timestamp < at`
+  // would drop `uuid(121)` (same timestamp as the cursor's own
+  // `uuid(122)`, so not strictly less); the tuple comparison must not.
+  it('does not skip or repeat two events sharing a millisecond at a page boundary', async () => {
+    await insertEvents([
+      evRow({
+        projectId: projectA,
+        eventId: uuid(120),
+        userId: 'back-tie-user',
+        eventName: 'feed_back_tie_event',
+        atSeconds: 3300,
+      }),
+      evRow({
+        projectId: projectA,
+        eventId: uuid(121),
+        userId: 'back-tie-user',
+        eventName: 'feed_back_tie_event',
+        atSeconds: 3310,
+      }),
+      evRow({
+        projectId: projectA,
+        eventId: uuid(122),
+        userId: 'back-tie-user',
+        eventName: 'feed_back_tie_event',
+        atSeconds: 3310,
+      }),
+      evRow({
+        projectId: projectA,
+        eventId: uuid(123),
+        userId: 'back-tie-user',
+        eventName: 'feed_back_tie_event',
+        atSeconds: 3320,
+      }),
+    ])
+    const collected = await walkBackwards('feed_back_tie_event', 2)
+    expect(collected.map((e) => e.event_id).sort()).toEqual(
+      [uuid(120), uuid(121), uuid(122), uuid(123)].sort(),
+    )
+  })
+
+  it('refuses before and after together', async () => {
+    const res = await get('/v1/events?before=x&after=y')
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toBe('invalid_query')
+  })
+
+  // The mirror of "does not apply the default since window when a cursor is
+  // present", walking the other direction: an event at -30h and one at -1h,
+  // both real-clock-anchored (`chAtRealMsAgo`) since the 24h default can
+  // only be tripped by a row genuinely that old — `BASE_MS`-anchored `evRow`
+  // can never reach it. The initial cursor-less call only ever sees the -1h
+  // row (it is itself bound by the same 24h default); walking `before` from
+  // its `prev_cursor` must still reach the -30h row, proving the default
+  // stayed off for `before` the same way it already does for `after`.
+  it('does not apply the 24h since default when before is present', async () => {
+    const oldId = uuid(130)
+    const recentId = uuid(131)
+    await ch.insert({
+      table: 'events',
+      format: 'JSONEachRow',
+      values: [
+        {
+          project_id: projectA,
+          event_id: oldId,
+          anonymous_id: '',
+          user_id: 'back-default-since-user',
+          event_name: 'feed_back_default_since_event',
+          timestamp: chAtRealMsAgo(30 * 60 * 60 * 1000),
+          received_at: chAtRealMsAgo(30 * 60 * 60 * 1000),
+          trusted: 1,
+          properties: {},
+          properties_num: {},
+        },
+        {
+          project_id: projectA,
+          event_id: recentId,
+          anonymous_id: '',
+          user_id: 'back-default-since-user',
+          event_name: 'feed_back_default_since_event',
+          timestamp: chAtRealMsAgo(1 * 60 * 60 * 1000),
+          received_at: chAtRealMsAgo(1 * 60 * 60 * 1000),
+          trusted: 1,
+          properties: {},
+          properties_num: {},
+        },
+      ],
+    })
+
+    const head = await get('/v1/events?event=feed_back_default_since_event&limit=1')
+    expect(head.statusCode).toBe(200)
+    expect(head.json().prev_cursor).toBeTruthy()
+
+    const older = await get(
+      `/v1/events?event=feed_back_default_since_event&limit=10&before=${encodeURIComponent(head.json().prev_cursor)}`,
+    )
+    expect(older.statusCode).toBe(200)
+    const ids = older.json().events.map((e: { event_id: string }) => e.event_id)
+    expect(ids).toContain(oldId)
+  })
+
+  // A caller deliberately narrowing with an explicit `since` is not the
+  // default firing — that must still apply alongside `before`, the same way
+  // it already does alongside `after`. Own fixture and event name, same
+  // -30h/-1h shape as the test above, so this test's explicit `since` can
+  // never be checked against the previous test's rows by accident.
+  it('still applies an explicit since alongside before', async () => {
+    const oldId = uuid(140)
+    const recentId = uuid(141)
+    await ch.insert({
+      table: 'events',
+      format: 'JSONEachRow',
+      values: [
+        {
+          project_id: projectA,
+          event_id: oldId,
+          anonymous_id: '',
+          user_id: 'back-since-explicit-user',
+          event_name: 'feed_back_since_explicit_event',
+          timestamp: chAtRealMsAgo(30 * 60 * 60 * 1000),
+          received_at: chAtRealMsAgo(30 * 60 * 60 * 1000),
+          trusted: 1,
+          properties: {},
+          properties_num: {},
+        },
+        {
+          project_id: projectA,
+          event_id: recentId,
+          anonymous_id: '',
+          user_id: 'back-since-explicit-user',
+          event_name: 'feed_back_since_explicit_event',
+          timestamp: chAtRealMsAgo(1 * 60 * 60 * 1000),
+          received_at: chAtRealMsAgo(1 * 60 * 60 * 1000),
+          trusted: 1,
+          properties: {},
+          properties_num: {},
+        },
+      ],
+    })
+
+    const head = await get('/v1/events?event=feed_back_since_explicit_event&limit=1')
+    expect(head.statusCode).toBe(200)
+    const since = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString()
+
+    const older = await get(
+      `/v1/events?event=feed_back_since_explicit_event&limit=10&before=${encodeURIComponent(head.json().prev_cursor)}&since=${encodeURIComponent(since)}`,
+    )
+    expect(older.statusCode).toBe(200)
+    const ids = older.json().events.map((e: { event_id: string }) => e.event_id)
+    expect(ids).not.toContain(oldId)
+    // The cursor's own row must not reappear -- `before` is a strict, EXCLUSIVE
+    // bound, the same way `after` is. A `before` silently ignored (rather than
+    // applied) would fall back to a plain `since`-filtered, no-cursor query,
+    // which would return this row again; this line is what tells the two apart.
+    expect(ids).not.toContain(recentId)
+  })
+
+  // The seam decision this task's brief names: a backwards walk arrives
+  // newest-first, and returning it unreversed makes page 1 (no cursor,
+  // DESC-then-reverse) ascending and page 2 (backward) descending. A
+  // single-page test cannot see that seam — this one walks all three
+  // shapes (no cursor, backward, then forward again) and checks every page
+  // is ascending.
+  it('returns ascending events in all three shapes', async () => {
+    const atSecondsValues = Array.from({ length: 6 }, (_, i) => 3000 + i * 10)
+    await insertEvents(
+      atSecondsValues.map((atSeconds, i) =>
+        evRow({
+          projectId: projectA,
+          eventId: uuid(150 + i),
+          userId: 'back-ascending-user',
+          eventName: 'feed_back_ascending_event',
+          atSeconds,
+        }),
+      ),
+    )
+
+    const none = await get('/v1/events?event=feed_back_ascending_event&limit=3')
+    expect(none.statusCode).toBe(200)
+    const noneBody = none.json()
+    const back = await get(
+      `/v1/events?event=feed_back_ascending_event&limit=3&before=${encodeURIComponent(noneBody.prev_cursor)}`,
+    )
+    expect(back.statusCode).toBe(200)
+    const backBody = back.json()
+    const fwd = await get(
+      `/v1/events?event=feed_back_ascending_event&limit=3&after=${encodeURIComponent(backBody.next_cursor)}`,
+    )
+    expect(fwd.statusCode).toBe(200)
+
+    for (const page of [noneBody, backBody, fwd.json()]) {
+      const ts = page.events.map((e: { timestamp: string }) => e.timestamp)
+      expect(ts).toEqual([...ts].sort())
+    }
+
+    // `back` must be the OTHER three events, not a repeat of `none` -- a
+    // `before` silently ignored (rather than applied) would fall back to
+    // a plain no-cursor query and return the identical page again, which
+    // would still read as ascending and pass the loop above for the wrong
+    // reason.
+    const noneIds = noneBody.events.map((e: { event_id: string }) => e.event_id)
+    const backIds = backBody.events.map((e: { event_id: string }) => e.event_id)
+    expect(backIds.some((id: string) => noneIds.includes(id))).toBe(false)
+  })
+
+  it('builds prev_cursor from the oldest row and next_cursor from the newest', async () => {
+    const atSecondsValues = Array.from({ length: 5 }, (_, i) => 3100 + i * 10)
+    await insertEvents(
+      atSecondsValues.map((atSeconds, i) =>
+        evRow({
+          projectId: projectA,
+          eventId: uuid(160 + i),
+          userId: 'back-cursor-ends-user',
+          eventName: 'feed_back_cursor_ends_event',
+          atSeconds,
+        }),
+      ),
+    )
+
+    const page = await get('/v1/events?event=feed_back_cursor_ends_event&limit=3')
+    expect(page.statusCode).toBe(200)
+    const body = page.json()
+    expect(decodeFeedCursor(body.prev_cursor).eventId).toBe(body.events[0].event_id)
+    expect(decodeFeedCursor(body.next_cursor).eventId).toBe(body.events.at(-1).event_id)
+  })
+
+  // `--follow` is documented public behaviour, and a shared query path
+  // (this task added `before`) is exactly what breaks it by accident.
+  // Assert the KEY SET, not just a 200 — a stray or missing field on the
+  // forward shape would pass a status-only check.
+  it('leaves the forward walk byte-for-byte unchanged', async () => {
+    await insertEvents([
+      evRow({
+        projectId: projectA,
+        eventId: uuid(170),
+        userId: 'back-keyset-user',
+        eventName: 'feed_back_keyset_event',
+        atSeconds: 3200,
+      }),
+      evRow({
+        projectId: projectA,
+        eventId: uuid(171),
+        userId: 'back-keyset-user',
+        eventName: 'feed_back_keyset_event',
+        atSeconds: 3210,
+      }),
+      evRow({
+        projectId: projectA,
+        eventId: uuid(172),
+        userId: 'back-keyset-user',
+        eventName: 'feed_back_keyset_event',
+        atSeconds: 3220,
+      }),
+    ])
+
+    const page = await get('/v1/events?event=feed_back_keyset_event&limit=2')
+    expect(page.statusCode).toBe(200)
+    const body = page.json()
+    expect(Object.keys(body).sort()).toEqual(['events', 'next_cursor', 'prev_cursor'])
+
+    const after = await get(
+      `/v1/events?event=feed_back_keyset_event&limit=2&after=${encodeURIComponent(body.next_cursor)}`,
+    )
+    expect(after.statusCode).toBe(200)
+    const afterBody = after.json()
+    expect(
+      afterBody.events.every(
+        (e: { timestamp: string }) => e.timestamp >= body.events.at(-1).timestamp,
+      ),
+    ).toBe(true)
+  })
+
+  it('returns null cursors on an empty page', async () => {
+    const farFuture = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString()
+    const page = await get(
+      `/v1/events?event=feed_back_empty_event&limit=5&since=${encodeURIComponent(farFuture)}`,
+    )
+    expect(page.statusCode).toBe(200)
+    const body = page.json()
+    expect(body.events).toEqual([])
+    expect(body.prev_cursor).toBeNull()
+    expect(body.next_cursor).toBeNull()
   })
 
   // The cap exists because a person's windows are devices multiplied by
