@@ -11,6 +11,7 @@ import { SegmentBuilder } from '../screens/SegmentBuilder.js'
 import { SegmentDetail } from '../screens/SegmentDetail.js'
 import { Segments } from '../screens/Segments.js'
 import { Settings } from '../screens/Settings.js'
+import { TrendReports } from '../screens/TrendReports.js'
 import { Trends } from '../screens/Trends.js'
 import { Shell } from './Shell.js'
 
@@ -33,6 +34,7 @@ export const ROUTES = {
   segmentNew: '/segments/new',
   retention: '/retention',
   trends: '/trends',
+  trendNew: '/trends/new',
   people: '/people',
 } as const
 
@@ -42,6 +44,7 @@ export const funnelPath = (id: number) => `/funnels/${id}`
 export const funnelEditPath = (id: number) => `/funnels/${id}/edit`
 export const segmentPath = (id: number) => `/segments/${id}`
 export const segmentEditPath = (id: number) => `/segments/${id}/edit`
+export const trendReportPath = (id: number) => `/trends/${id}`
 
 /**
  * Wraps `Shell` in a `BrowserRouter` so the nav's links are real
@@ -90,7 +93,22 @@ export function AppRouter(props: {
   )
   const funnels = <Funnels client={props.client} onUnauthorized={props.onUnauthorized} />
   const retention = <Retention client={props.client} onUnauthorized={props.onUnauthorized} />
-  const trends = <Trends client={props.client} onUnauthorized={props.onUnauthorized} />
+  const trendReports = <TrendReports client={props.client} onUnauthorized={props.onUnauthorized} />
+  // Distinct `key`s for the same reason `funnelNew`/`funnelEdit` and
+  // `segmentNew`/`segmentEdit` carry them below: `<Routes>` reconciles its
+  // single child by TYPE AND POSITION, so navigating /trends/7 -> /trends/new
+  // would otherwise hand the same `Trends` instance a new route without
+  // remounting it, and the builder would open still carrying the report just
+  // being viewed. `Trends` itself is unchanged by this task -- it is still
+  // entirely URL-search-param-driven -- so this is the only guard against
+  // that carry-over until a later task teaches it to load a saved
+  // definition by id.
+  const trendNew = (
+    <Trends key="trend-new" client={props.client} onUnauthorized={props.onUnauthorized} />
+  )
+  const trendDetail = (
+    <Trends key="trend-detail" client={props.client} onUnauthorized={props.onUnauthorized} />
+  )
   // Distinct `key`s for the same reason the segment builders carry them:
   // <Routes> reconciles its single child by TYPE AND POSITION, so navigating
   // /funnels/7/edit -> /funnels/new hands the same component instance a new
@@ -162,7 +180,9 @@ export function AppRouter(props: {
           <Route path={ROUTES.funnelNew} element={funnelNew} />
           <Route path="/funnels/:id" element={funnelDetail} />
           <Route path="/funnels/:id/edit" element={funnelEdit} />
-          <Route path={ROUTES.trends} element={trends} />
+          <Route path={ROUTES.trends} element={trendReports} />
+          <Route path={ROUTES.trendNew} element={trendNew} />
+          <Route path="/trends/:id" element={trendDetail} />
           <Route path={ROUTES.retention} element={retention} />
           <Route path={ROUTES.segments} element={segments} />
           <Route path={ROUTES.segmentNew} element={segmentNew} />

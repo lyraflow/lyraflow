@@ -41,6 +41,12 @@ function renderAt(path: string) {
     meta: vi.fn(async () => ({ version: '0.10.0' })),
     funnels: vi.fn(async () => []),
     segments: vi.fn(async () => []),
+    trendReports: vi.fn(async () => []),
+    /* `Trends` (now reachable at /trends/new) renders `EventCombobox`
+     * unconditionally, which fetches event-name suggestions on mount --
+     * without this, the /trends/new test would hit an unstubbed method
+     * inside a timer callback and fail for a reason unrelated to routing. */
+    schemaEvents: vi.fn(async () => []),
   } as never
   return render(
     <ProjectProvider projects={PROJECTS} initialId={1}>
@@ -137,6 +143,39 @@ describe('AppRouter', () => {
     renderAt('/segments')
     const link = await screen.findByRole('link', { name: /segments/i })
     expect(link).toHaveAttribute('aria-current', 'page')
+  })
+
+  // Task 5: `/trends` used to render the URL-driven builder/viewer directly
+  // (`Trends`) -- it now renders the saved-trends list (`TrendReports`)
+  // instead, with `Trends` itself moved to `/trends/new` and `/trends/:id`.
+  // Both screens share the "Trends" heading, so the heading alone cannot
+  // tell them apart -- the list's own "New trend" link and the builder's
+  // "Run" control are what distinguish them, checked as a pair in each
+  // direction below (same shape as funnels' and segments' own resolution
+  // guards: a positive alongside a negative, so a component that renders
+  // *something* at both destinations can't pass by accident).
+  it('resolves /trends to the saved-trends list, not the builder', async () => {
+    renderAt('/trends')
+    expect(await screen.findByRole('heading', { name: /^trends$/i })).toBeInTheDocument()
+    expect(await screen.findByRole('link', { name: /new trend/i })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^run$/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: /accepted/i })).not.toBeInTheDocument()
+  })
+
+  it('marks Trends as current at /trends', async () => {
+    renderAt('/trends')
+    const link = await screen.findByRole('link', { name: /trends/i })
+    expect(link).toHaveAttribute('aria-current', 'page')
+  })
+
+  // `/trends/new` still resolves to the URL-driven screen -- proves the
+  // route was added and points at `Trends`, not left to fall through to the
+  // list or the catch-all.
+  it('resolves /trends/new to the trend builder, not the list', async () => {
+    renderAt('/trends/new')
+    expect(await screen.findByRole('heading', { name: /^trends$/i })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /^run$/i })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /new trend/i })).not.toBeInTheDocument()
   })
 
   // Same resolution guard as Funnels' and Segments' own pair above, for the
