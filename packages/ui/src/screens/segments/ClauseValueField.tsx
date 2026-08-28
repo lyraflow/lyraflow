@@ -32,9 +32,33 @@ export function ClauseValueField(props: {
 
   if (family === 'set' || family === 'boolean') {
     return (
-      <p data-testid={`${id}-no-value`} className="self-end pb-2 text-xs text-muted-foreground">
-        No value needed.
-      </p>
+      // The same column shape every other branch here renders -- a label
+      // line, then a control-height row -- rather than a bare `<p>` with a
+      // `self-end` on it. The bare version asserted an alignment, and was
+      // therefore right in exactly the rows whose alignment it had been
+      // guessed against: `ContextForm`, `LifecycleForm` and
+      // `WherePredicates` are `items-end`, `TraitForm` is `items-start`
+      // (see its own comment on why), and one `self-*` cannot serve both.
+      // Matching the siblings' height instead means the row's own
+      // `items-*` places this the way it places the value box it replaces,
+      // whichever that is -- and a fifth caller with a third alignment
+      // needs nothing here.
+      //
+      // The spacer stands in for the `Label` the other branches carry, so
+      // the sentence sits on the control line rather than on the label
+      // line. `aria-hidden` because it names nothing: the sentence below
+      // is the whole accessible content of this field.
+      <div className="flex min-w-0 flex-col gap-1">
+        <span aria-hidden="true" className="text-sm leading-none">
+          &nbsp;
+        </span>
+        <p
+          data-testid={`${id}-no-value`}
+          className="flex h-9 items-center text-xs text-muted-foreground"
+        >
+          No value needed.
+        </p>
+      </div>
     )
   }
 
