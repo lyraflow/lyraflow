@@ -51,6 +51,14 @@ export function personPath(id: string): string {
  * source of truth the moment a family changes. A missing, malformed or
  * hand-edited URL simply fails to parse and this returns `null`, the same
  * "nothing to show yet" state `readPersonId` reports for no id.
+ *
+ * **`id` wins when a URL carries both.** `People` checks `readPersonId`
+ * first and renders the profile, discarding the trait parameters silently.
+ * Neither `personPath` nor `traitSearchPath` can produce such a URL -- each
+ * writes its own parameters and nothing else -- so it is reachable only by
+ * hand-assembling one, and naming a specific person is the more specific
+ * request of the two. Written down so it stays a decision rather than a
+ * consequence of which `if` happens to come first.
  */
 const TRAIT_KEY_PARAM = 'trait_key'
 const TRAIT_OP_PARAM = 'trait_op'
