@@ -178,6 +178,8 @@ describe('TrendStore', () => {
     })
   })
 
+  // Last in the file: it deletes projectA outright, which every other test
+  // in this suite depends on still existing.
   it('a deleted project takes its trends with it', async () => {
     const made = await store.create(projectA, {
       name: 'Doomed',
