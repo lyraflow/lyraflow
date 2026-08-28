@@ -7,6 +7,7 @@ import { Funnels } from '../screens/Funnels.js'
 import { People } from '../screens/People.js'
 import { Profile } from '../screens/Profile.js'
 import { Retention } from '../screens/Retention.js'
+import { RetentionReports } from '../screens/RetentionReports.js'
 import { SegmentBuilder } from '../screens/SegmentBuilder.js'
 import { SegmentDetail } from '../screens/SegmentDetail.js'
 import { Segments } from '../screens/Segments.js'
@@ -33,6 +34,7 @@ export const ROUTES = {
   segments: '/segments',
   segmentNew: '/segments/new',
   retention: '/retention',
+  retentionNew: '/retention/new',
   trends: '/trends',
   trendNew: '/trends/new',
   people: '/people',
@@ -45,6 +47,7 @@ export const funnelEditPath = (id: number) => `/funnels/${id}/edit`
 export const segmentPath = (id: number) => `/segments/${id}`
 export const segmentEditPath = (id: number) => `/segments/${id}/edit`
 export const trendReportPath = (id: number) => `/trends/${id}`
+export const retentionReportPath = (id: number) => `/retention/${id}`
 
 /**
  * Wraps `Shell` in a `BrowserRouter` so the nav's links are real
@@ -92,7 +95,24 @@ export function AppRouter(props: {
     />
   )
   const funnels = <Funnels client={props.client} onUnauthorized={props.onUnauthorized} />
-  const retention = <Retention client={props.client} onUnauthorized={props.onUnauthorized} />
+  const retentionReports = (
+    <RetentionReports client={props.client} onUnauthorized={props.onUnauthorized} />
+  )
+  // Distinct `key`s for the same reason `trendNew`/`trendDetail` carry them
+  // below: `<Routes>` reconciles its single child by TYPE AND POSITION, so
+  // navigating /retention/7 -> /retention/new would otherwise hand the same
+  // `Retention` instance a new route without remounting it, and the builder
+  // would open still carrying the report just being viewed. `Retention`
+  // itself is unchanged by this task -- it is still entirely
+  // URL-search-param-driven -- so this is the only guard against that
+  // carry-over until a later task teaches it to load a saved definition by
+  // id.
+  const retentionNew = (
+    <Retention key="retention-new" client={props.client} onUnauthorized={props.onUnauthorized} />
+  )
+  const retentionDetail = (
+    <Retention key="retention-detail" client={props.client} onUnauthorized={props.onUnauthorized} />
+  )
   const trendReports = <TrendReports client={props.client} onUnauthorized={props.onUnauthorized} />
   // Distinct `key`s for the same reason `funnelNew`/`funnelEdit` and
   // `segmentNew`/`segmentEdit` carry them below: `<Routes>` reconciles its
@@ -183,7 +203,9 @@ export function AppRouter(props: {
           <Route path={ROUTES.trends} element={trendReports} />
           <Route path={ROUTES.trendNew} element={trendNew} />
           <Route path="/trends/:id" element={trendDetail} />
-          <Route path={ROUTES.retention} element={retention} />
+          <Route path={ROUTES.retention} element={retentionReports} />
+          <Route path={ROUTES.retentionNew} element={retentionNew} />
+          <Route path="/retention/:id" element={retentionDetail} />
           <Route path={ROUTES.segments} element={segments} />
           <Route path={ROUTES.segmentNew} element={segmentNew} />
           <Route path="/segments/:id" element={segmentDetail} />

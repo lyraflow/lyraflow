@@ -73,7 +73,11 @@ function SavedReportRowItem(props: {
         <span className="font-medium text-foreground">{row.name}</span>
         <span className="min-w-0 break-words text-sm text-muted-foreground">{row.summary}</span>
         <span className="flex items-center gap-2 text-sm text-muted-foreground">
-          {row.stale && <Badge variant="secondary">Cannot be read</Badge>}
+          {row.stale && (
+            <Badge variant="secondary" data-testid={`report-stale-${row.id}`}>
+              Cannot be read
+            </Badge>
+          )}
           <span>Updated {formatRelative(row.updatedAt, new Date())}</span>
         </span>
       </Link>
