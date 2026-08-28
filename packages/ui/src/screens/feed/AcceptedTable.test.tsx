@@ -215,4 +215,27 @@ describe('AcceptedTable linkPeople', () => {
     await userEvent.click(screen.getByRole('link', { name: 'u1' }))
     expect(screen.queryByText('Attributes')).not.toBeInTheDocument()
   })
+
+  // The icon marks "this link resolves", not "this cell is a link" -- both
+  // rows link, so the pair below is what actually pins the rule. Asserting
+  // presence on the identified row alone would also pass a version that
+  // put the icon on every linked row, which is exactly the thing C2 ruled
+  // out.
+  it('marks an identified row with a person icon inside the link', () => {
+    render(<AcceptedTable events={[event({ user_id: 'u1' })]} linkPeople />, { wrapper: Router })
+    const link = screen.getByRole('link', { name: 'u1' })
+    expect(link.querySelector('svg')).not.toBeNull()
+  })
+
+  it('does not mark an anonymous-only row with the person icon', () => {
+    // Same event shape as "links an anonymous row by its anonymous id" --
+    // the link still resolves to a device owner via resolvePersonScope's
+    // step 4, but nothing here confirms it, so the icon must not claim it
+    // does.
+    render(<AcceptedTable events={[event({ user_id: '', anonymous_id: 'dev-9' })]} linkPeople />, {
+      wrapper: Router,
+    })
+    const link = screen.getByRole('link', { name: 'dev-9' })
+    expect(link.querySelector('svg')).toBeNull()
+  })
 })

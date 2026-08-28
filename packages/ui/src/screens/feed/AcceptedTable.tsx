@@ -1,3 +1,4 @@
+import { User } from 'lucide-react'
 import { Fragment, useState } from 'react'
 import { Link } from 'react-router'
 import type { LyraEvent } from '../../api/types.js'
@@ -255,9 +256,20 @@ export function AcceptedTable(props: {
                   {linkPeople ? (
                     <Link
                       to={personPath(event.user_id || event.anonymous_id)}
-                      className="hover:underline"
+                      className="inline-flex items-center gap-1 hover:underline"
                       onClick={(e) => e.stopPropagation()}
                     >
+                      {/* The icon marks "identified", not "linked" -- every
+                       * row here links, but only a non-empty user_id names
+                       * a real person. An anonymous_id-only row still
+                       * resolves through resolvePersonScope's device
+                       * fallback, so its link is real too, yet marking it
+                       * the same way would promise a profile on exactly
+                       * the rows that open a 404 (#18). Keep this on
+                       * `event.user_id` alone -- widening it to "any
+                       * linked row" quietly turns the icon back into
+                       * decoration. */}
+                      {event.user_id && <User className="size-4" aria-hidden="true" />}
                       {event.user_id || event.anonymous_id}
                     </Link>
                   ) : (
