@@ -1,3 +1,4 @@
+import { TRAITS_PER_MEMBER_MAX } from '@lyraflow/core'
 import type { ClickHouseClient } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
 import type { Authenticate } from '../auth/bridge.js'
@@ -6,10 +7,20 @@ import type { SuppressionStore } from '../privacy/suppression-store.js'
 import type { PersonAliases } from './aliases.js'
 import type { IdentityBindings } from './bindings.js'
 import { MAX_PERSON_RANGE_CLAUSES, personEventSummary, resolvePersonScope } from './scope.js'
+import { readPersonTraitRows, splitTraits } from './traits.js'
 
 // Re-exported so nothing importing it from person.ts (its home before the
 // scope.ts extraction) breaks.
 export { MAX_PERSON_RANGE_CLAUSES } from './scope.js'
+
+/**
+ * This route is interactive -- a profile screen waiting on it -- so it keeps
+ * the 30s interactive ceiling rather than the export's 300s. The trait query
+ * scans the project's whole `person_traits` partition (its OR defeats that
+ * table's sort key), which is bounded but not free, and failing loudly at
+ * 30s is the right answer for a screen.
+ */
+export const PERSON_READ_MAX_EXECUTION_SECONDS = 30
 
 export interface PersonDeps {
   authenticate: Authenticate
@@ -138,12 +149,36 @@ export function registerPersonRoutes(app: FastifyInstance, deps: PersonDeps): vo
       return reply.code(404).send({ error: 'person_not_found' })
     }
 
+    // Traits cannot be split at a deletion boundary: 004_person_traits.sql
+    // stores value_str/value_num/has_num as argMax states with the timestamp
+    // DISCARDED, so a trait carries no instant to compare against one. The
+    // export route refuses them for exactly this reason and this read agrees
+    // with it rather than inventing a second answer.
+    //
+    // `traits_withheld` is the field that keeps this honest. Empty maps alone
+    // are indistinguishable from a person who never had a trait, and a screen
+    // reading them would tell an operator that an erased person never did.
+    const withheld = boundary != null
+    const shaped = withheld
+      ? { traits: {}, traits_num: {}, trait_total: 0 }
+      : splitTraits(
+          await readPersonTraitRows(ch, project.id, scope, PERSON_READ_MAX_EXECUTION_SECONDS),
+          TRAITS_PER_MEMBER_MAX,
+        )
+
     return reply.code(200).send({
       person_id: scope.canonical,
       ids: scope.ids,
+      // `ids` is `group ∪ devices` flattened and sorted, so it cannot say which
+      // of its entries is a device. The profile's identity header shows user ids
+      // and device ids as two different things -- that these are one person is
+      // the product's central claim, and a flat list does not make it.
+      devices: scope.devices,
       first_seen: parseChDateTime(summary.firstSeen).toISOString(),
       last_seen: parseChDateTime(summary.lastSeen).toISOString(),
       events: summary.events,
+      ...shaped,
+      traits_withheld: withheld,
     })
   })
 }

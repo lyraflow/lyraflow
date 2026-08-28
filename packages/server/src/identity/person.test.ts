@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
+import { TRAITS_PER_MEMBER_MAX } from '@lyraflow/core'
 import {
   type ClickHouseClient,
   createChClient,
@@ -998,6 +999,159 @@ describe('GET /v1/persons/:id', () => {
       [projectA, 'fully-erased'],
     )
     expect((await read('fully-erased')).statusCode).toBe(404)
+  })
+
+  // `ids` is `group ∪ devices` flattened -- it says nothing about kind.
+  // Without `devices` the identity header the profile screen builds has no
+  // way to render the distinction it exists for: a caller cannot tell a
+  // device id from a user id that happens to look the same.
+  it('names which of the ids are devices', async () => {
+    const device = 'id-shapes-device'
+    await identify(WRITE_KEY_A, {
+      message_id: randomUUID(),
+      anonymous_id: device,
+      user_id: 'id-shapes',
+      traits: {},
+    })
+    const body = (await read('id-shapes')).json()
+    expect(body.ids).toEqual(expect.arrayContaining(['id-shapes', device]))
+    expect(body.devices).toEqual([device])
+  })
+
+  it('returns traits split by kind, with a total', async () => {
+    await identify(WRITE_KEY_A, {
+      message_id: randomUUID(),
+      user_id: 'trait-person',
+      traits: { plan: 'pro', seats: 12, credits: 0 },
+    })
+    const res = await read('trait-person')
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.traits).toEqual({ plan: 'pro' })
+    expect(body.traits_num).toEqual({ seats: 12, credits: 0 })
+    expect(body.trait_total).toBe(3)
+    expect(body.traits_withheld).toBe(false)
+  })
+
+  it('returns empty maps rather than missing keys for a person with no traits', async () => {
+    await insertEvent({
+      projectId: projectA,
+      userId: 'no-traits-person',
+      timestamp: chAt(0),
+      eventName: 'page_view',
+    })
+    const body = (await read('no-traits-person')).json()
+    expect(body.traits).toEqual({})
+    expect(body.traits_num).toEqual({})
+    expect(body.trait_total).toBe(0)
+    expect(body.traits_withheld).toBe(false)
+  })
+
+  // The leak readPersonTraitRows' docstring describes. One device, two
+  // owners in sequence: an anonymous $identify while the device belongs to
+  // no one yet, then owner-a binds it, then it rebinds to owner-b.
+  //
+  // The anonymous $identify is inserted straight into ClickHouse rather than
+  // sent through POST /v1/identify: IdentifyPayload requires a non-empty
+  // user_id (payloads.ts), so the public ingest path can never itself
+  // produce a `user_id = ''` identify event today -- export.test.ts's
+  // identical fixture ("gives an anonymous trait to a device's current owner
+  // only, not a past one") documents the same gap and uses the same direct
+  // insert for it. This is the shape only a future "identify anonymously
+  // with traits" feature, or a direct write, could create.
+  it('gives an anonymous trait to the device CURRENT owner and to no past owner', async () => {
+    const device = 'shared-anon-device'
+    await ch.insert({
+      table: 'events',
+      format: 'JSONEachRow',
+      values: [
+        {
+          project_id: projectA,
+          event_id: randomUUID(),
+          anonymous_id: device,
+          user_id: '',
+          event_name: '$identify',
+          timestamp: chAt(0),
+          received_at: chAt(0),
+          trusted: 0,
+          properties: { referred_by: 'ad-42' },
+          properties_num: {},
+        },
+      ],
+    })
+    // Binds DEVICE to owner-a.
+    await identify(WRITE_KEY_A, {
+      message_id: randomUUID(),
+      anonymous_id: device,
+      user_id: 'owner-a',
+      traits: {},
+    })
+    // Rebinds DEVICE to owner-b.
+    await identify(WRITE_KEY_A, {
+      message_id: randomUUID(),
+      anonymous_id: device,
+      user_id: 'owner-b',
+      traits: {},
+    })
+    // Both must still exist as people.
+    await insertEvent({
+      projectId: projectA,
+      userId: 'owner-a',
+      timestamp: chAt(30),
+      eventName: 'page_view',
+    })
+
+    const a = (await read('owner-a')).json()
+    const b = (await read('owner-b')).json()
+    expect(b.traits.referred_by).toBe('ad-42')
+    expect(a.traits.referred_by).toBeUndefined()
+  })
+
+  it('withholds traits behind a deletion boundary and says that it did', async () => {
+    await identify(WRITE_KEY_A, {
+      message_id: randomUUID(),
+      user_id: 'erased-person',
+      traits: { plan: 'pro' },
+    })
+    await insertEvent({
+      projectId: projectA,
+      userId: 'erased-person',
+      timestamp: chAt(0),
+      eventName: 'page_view',
+    })
+    await pg.query(
+      'INSERT INTO suppressed_persons (project_id, person_id, suppressed_at) VALUES ($1,$2,now())',
+      [projectA, 'erased-person'],
+    )
+    // Activity AFTER the boundary, so the read still 200s. chAt is anchored
+    // to BASE_MS (hours in the past), so this uses a wall-clock instant a
+    // few minutes ahead of "now" instead, to land strictly after the
+    // boundary's `now()` regardless of how long the test above took.
+    await insertEvent({
+      projectId: projectA,
+      userId: 'erased-person',
+      timestamp: new Date(Date.now() + 5 * 60_000).toISOString().replace('T', ' ').replace('Z', ''),
+      eventName: 'page_view',
+    })
+
+    const body = (await read('erased-person')).json()
+    expect(body.traits_withheld).toBe(true)
+    expect(body.traits).toEqual({})
+    expect(body.trait_total).toBe(0)
+  })
+
+  it('caps returned traits at TRAITS_PER_MEMBER_MAX and reports the real total', async () => {
+    const many = Object.fromEntries(
+      Array.from({ length: 60 }, (_, i) => [`k${String(i).padStart(2, '0')}`, 'v']),
+    )
+    await identify(WRITE_KEY_A, {
+      message_id: randomUUID(),
+      user_id: 'many-traits',
+      traits: many,
+    })
+    const body = (await read('many-traits')).json()
+    expect(Object.keys(body.traits)).toHaveLength(TRAITS_PER_MEMBER_MAX)
+    expect(body.trait_total).toBe(60)
   })
 })
 
