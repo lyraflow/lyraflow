@@ -1,11 +1,16 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter } from 'react-router'
+import { MemoryRouter, Route, Routes } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
+import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
-import type { RetentionResult } from '../api/types.js'
+import type { RetentionReport, RetentionReportInput, RetentionResult } from '../api/types.js'
 import { ProjectProvider } from '../app/ProjectContext.js'
 import { Retention } from './Retention.js'
+
+/** An arbitrary fixed timestamp -- the exact value never matters to any
+ * assertion below, only that every stored report carries one. */
+const T = '2026-06-01T00:00:00.000Z'
 
 const PROJECTS = [
   {
@@ -50,6 +55,83 @@ function harness(over: Partial<ApiClient> = {}, url = '/retention') {
 
 const READY = '/retention?start=signed_up&return=project_created'
 const runButton = () => screen.getByRole('button', { name: /^run$/i })
+
+function reportFixture(over: Partial<RetentionReport> = {}): RetentionReport {
+  return {
+    id: 3,
+    name: 'Report',
+    definition_version: 1,
+    start_event: 'signed_up',
+    return_event: 'project_created',
+    start_where: [],
+    return_where: [],
+    granularity: 'week',
+    periods: 8,
+    segment_id: null,
+    stale: false,
+    created_at: T,
+    updated_at: T,
+    ...over,
+  }
+}
+
+/**
+ * Renders `Retention` behind the SAME two routes `Router.tsx` actually
+ * declares (`/retention/new`, `/retention/:id`) rather than the component
+ * directly -- unlike `harness`, this screen now reads `useParams().id`, so a
+ * test that wants that id populated needs a real `<Routes>` match, not just
+ * a URL string sitting under a router with nothing to parse it.
+ *
+ * Defaults every saved-report method to something that resolves rather than
+ * throws, matching whatever the URL/body implies where it reasonably can --
+ * a test that does not care about the load or the save should not have to
+ * mock either just to keep the screen from showing an error banner it isn't
+ * testing for.
+ */
+function renderAt(url: string, over: Partial<ApiClient> = {}) {
+  const client = {
+    runRetention: vi.fn(async () => RESULT),
+    schemaEvents: vi.fn(async () => ['signed_up', 'project_created']),
+    retentionReport: vi.fn(async (_projectId: number, id: number) => reportFixture({ id })),
+    createRetentionReport: vi.fn(async (_projectId: number, body: RetentionReportInput) =>
+      reportFixture({ id: 99, ...body }),
+    ),
+    patchRetentionReport: vi.fn(
+      async (_projectId: number, id: number, body: Partial<RetentionReportInput>) =>
+        reportFixture({ id, ...body }),
+    ),
+    ...over,
+  } as unknown as ApiClient
+  render(
+    <MemoryRouter initialEntries={[url]}>
+      <ProjectProvider projects={PROJECTS} initialId={1}>
+        <Routes>
+          <Route path="/retention/new" element={<Retention client={client} />} />
+          <Route path="/retention/:id" element={<Retention client={client} />} />
+        </Routes>
+      </ProjectProvider>
+    </MemoryRouter>,
+  )
+  return client
+}
+
+async function type(labelRe: RegExp, value: string) {
+  const input = screen.getByLabelText(labelRe)
+  await userEvent.clear(input)
+  await userEvent.type(input, value)
+}
+
+async function click(nameRe: RegExp) {
+  await userEvent.click(screen.getByRole('button', { name: nameRe }))
+}
+
+async function changeRange(id: string) {
+  await userEvent.selectOptions(screen.getByRole('combobox', { name: /range/i }), id)
+}
+
+function lastCallArg<T = Record<string, unknown>>(fn: unknown, index: number): T {
+  return (fn as { mock: { calls: unknown[][] } }).mock.calls[0]?.[index] as T
+}
 
 describe('Retention', () => {
   it('does not run on render -- a grid is a real scan, so it runs when asked', async () => {
@@ -207,5 +289,164 @@ describe('Retention', () => {
     harness({}, `${READY}&range=custom&from=2026-06-01`)
     expect(screen.getByTestId('retention-range-unfinished')).toBeInTheDocument()
     expect(runButton()).toBeDisabled()
+  })
+})
+
+describe('Retention -- saving and reopening a saved report', () => {
+  it('warns on LOAD when the stored granularity exceeds the cohort ceiling for the opened range', async () => {
+    // THE POINT OF THIS TASK. The range is never stored (decision 1), so a
+    // retention report saved at `granularity: 'day'` can reopen over a range
+    // that asks for far more cohorts than the ceiling allows -- 365 days of
+    // DAILY cohorts is 365 against a limit of 60. `range=365d` here stands
+    // in for a range already sitting in the URL (a bookmark, a shared link
+    // with only the range pinned).
+    const client = renderAt('/retention/3?range=365d', {
+      retentionReport: vi.fn(async () => reportFixture({ granularity: 'day' })),
+    })
+    expect(await screen.findByTestId('retention-too-many-cohorts')).toBeInTheDocument()
+    expect(client.runRetention).not.toHaveBeenCalled()
+  })
+
+  it('does not silently widen the stored granularity to make the request fit', async () => {
+    // Substituting `week` would show a report the operator did not save.
+    // Same setup as the warn-on-load test above -- a `day` report reopened
+    // over a range that overflows at that granularity -- so this is a real
+    // over-cap situation, not a vacuous check against a value nothing could
+    // have changed.
+    renderAt('/retention/3?range=365d', {
+      retentionReport: vi.fn(async () => reportFixture({ granularity: 'day' })),
+    })
+    await screen.findByTestId('retention-too-many-cohorts')
+    expect(screen.getByRole('combobox', { name: /period/i })).toHaveValue('day')
+  })
+
+  it('seeds the URL from the stored definition', async () => {
+    const client = renderAt('/retention/3', {
+      retentionReport: vi.fn(async () =>
+        reportFixture({ start_event: 'signed_up', return_event: 'project_created', periods: 4 }),
+      ),
+    })
+    await waitFor(() => expect(client.runRetention).toHaveBeenCalled())
+    expect(lastCallArg(client.runRetention, 1)).toMatchObject({
+      start_event: 'signed_up',
+      return_event: 'project_created',
+      periods: 4,
+    })
+  })
+
+  it('does not overwrite parameters already in the URL', async () => {
+    // A shared link to a saved report at a particular granularity must win
+    // over the stored definition, or the link does not mean what it says.
+    // Both events are also on the URL so the run is complete enough to fire
+    // and prove the value was not overwritten -- a bare URL with only a
+    // range on it would prove nothing.
+    const client = renderAt(
+      '/retention/3?start=signed_up&return=project_created&granularity=day&range=7d',
+      { retentionReport: vi.fn(async () => reportFixture({ granularity: 'week' })) },
+    )
+    await waitFor(() => expect(client.runRetention).toHaveBeenCalled())
+    expect(lastCallArg(client.runRetention, 1)).toMatchObject({ granularity: 'day' })
+  })
+
+  it('changing the range does not modify the saved report', async () => {
+    const client = renderAt('/retention/3')
+    await waitFor(() => expect(client.runRetention).toHaveBeenCalled())
+    await changeRange('30d')
+    expect(client.patchRetentionReport).not.toHaveBeenCalled()
+  })
+
+  it('updates the saved report on PATCH, with the same range-free body create sends', async () => {
+    // Task 6's review found its PATCH path was correct by inspection --
+    // shared with create's body builder -- but no test ever reached it, so a
+    // mutation local to that call site would have survived. This asserts the
+    // full key set the way the create test does, so a leaked range (or a
+    // renamed since/until evasion of it) fails rather than passing
+    // unnoticed.
+    const client = renderAt('/retention/3')
+    await waitFor(() => expect(client.runRetention).toHaveBeenCalled())
+    await type(/name/i, 'Renamed')
+    await click(/save/i)
+    await waitFor(() => expect(client.patchRetentionReport).toHaveBeenCalled())
+    expect(client.patchRetentionReport).toHaveBeenCalledWith(1, 3, {
+      name: 'Renamed',
+      start_event: 'signed_up',
+      return_event: 'project_created',
+      start_where: [],
+      return_where: [],
+      granularity: 'week',
+      periods: 8,
+      segment_id: null,
+    })
+  })
+
+  it('saves a new report from an unsaved screen', async () => {
+    const client = renderAt('/retention/new?start=signed_up&return=project_created')
+    await type(/name/i, 'Signup to purchase')
+    await click(/save/i)
+    await waitFor(() => expect(client.createRetentionReport).toHaveBeenCalled())
+    expect(client.createRetentionReport).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({
+        name: 'Signup to purchase',
+        start_event: 'signed_up',
+        return_event: 'project_created',
+      }),
+    )
+  })
+
+  it('never includes the range in a saved report’s body', async () => {
+    // Mutation table: sending the range would be the first step toward
+    // storing it despite decision 1 -- so this asserts the body's whole key
+    // set, not just that a `range` key is absent (a mutation could add it
+    // under `since`/`until` instead and slip past a narrower check).
+    const client = renderAt('/retention/new?start=signed_up&return=project_created&range=30d')
+    await type(/name/i, 'Signup to purchase')
+    await click(/save/i)
+    await waitFor(() => expect(client.createRetentionReport).toHaveBeenCalled())
+    const body = lastCallArg(client.createRetentionReport, 1)
+    expect(Object.keys(body).sort()).toEqual([
+      'granularity',
+      'name',
+      'periods',
+      'return_event',
+      'return_where',
+      'segment_id',
+      'start_event',
+      'start_where',
+    ])
+  })
+
+  it('reports a duplicate name without losing what was typed', async () => {
+    renderAt('/retention/new?start=signed_up&return=project_created', {
+      createRetentionReport: vi.fn(async () => {
+        throw new ApiError(409, 'name_taken')
+      }),
+    })
+    await type(/name/i, 'Taken')
+    await click(/save/i)
+    expect(await screen.findByText(/already/i)).toBeInTheDocument()
+    expect(screen.getByDisplayValue('Taken')).toBeInTheDocument()
+  })
+
+  it('sends the stored segment restriction, and says so when the segment is gone', async () => {
+    // Decision 3: the id survives the segment's deletion precisely so the
+    // run path can say the restriction vanished rather than silently
+    // widening. The warning shape is the run endpoint's real one
+    // (`reports/routes.ts`), not invented for this test.
+    const client = renderAt('/retention/3', {
+      retentionReport: vi.fn(async () => reportFixture({ segment_id: 42 })),
+      runRetention: vi.fn(async () => ({
+        ...RESULT,
+        warnings: [
+          {
+            path: 'segment_id',
+            reason:
+              'segment 42 no longer exists or cannot be read, so this grid was measured over everyone rather than the population it names',
+          },
+        ],
+      })),
+    })
+    expect(await screen.findByText(/no longer exists/i)).toBeInTheDocument()
+    expect(client.runRetention).toHaveBeenCalledWith(1, expect.objectContaining({ segment_id: 42 }))
   })
 })
