@@ -549,4 +549,95 @@ describe('Retention -- saving and reopening a saved report', () => {
     expect(screen.queryByTestId('retention-unfinished')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^save$/i })).toBeEnabled()
   })
+
+  // Fix round 2's finding: the flag above used to be ONE boolean for the
+  // whole report, cleared by editing EITHER side. Editing `startWhere` when
+  // it was `returnWhere` that lost a predicate cleared it anyway, and Save
+  // would then PATCH `return_where` with the still-narrowed list -- the
+  // exact data loss this check exists to prevent, reached from the side
+  // that was never touched. This is the broken direction: must fail before
+  // the per-side fix.
+  it('stays disabled when the OTHER side is edited -- return_where lost a predicate, start_where is touched', async () => {
+    renderAt('/retention/3', {
+      retentionReport: vi.fn(async () =>
+        reportFixture({ stale: true, return_where: [{ nonsense: true }] }),
+      ),
+    })
+    await screen.findByTestId('retention-stale')
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+    const start = screen.getByTestId('retention-start-where-where')
+    await userEvent.click(within(start).getByRole('button', { name: /add predicate/i }))
+    await userEvent.click(within(start).getByRole('button', { name: /remove/i }))
+    // start_where round-tripped back to empty and is not itself unfinished
+    // -- the ONLY reason Save could still be enabled here is the shared-flag
+    // bug, since nothing about start_where looks incomplete.
+    expect(screen.queryByTestId('retention-unfinished')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+  })
+
+  // The mirror of the test above, so the fix cannot be one-directional: a
+  // fix that only special-cases "start_where lost, start_where edited"
+  // (or its inverse) would pass one of this pair and fail the other.
+  it('stays disabled when the OTHER side is edited -- start_where lost a predicate, return_where is touched', async () => {
+    renderAt('/retention/3', {
+      retentionReport: vi.fn(async () =>
+        reportFixture({ stale: true, start_where: [{ nonsense: true }] }),
+      ),
+    })
+    await screen.findByTestId('retention-stale')
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+    const ret = screen.getByTestId('retention-return-where-where')
+    await userEvent.click(within(ret).getByRole('button', { name: /add predicate/i }))
+    await userEvent.click(within(ret).getByRole('button', { name: /remove/i }))
+    expect(screen.queryByTestId('retention-unfinished')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+  })
+
+  // The other direction of "a side that lost a predicate is itself
+  // edited" -- the existing test above this block covers start_where;
+  // this is return_where, so both directions of the RE-enabling half are
+  // pinned too, not only the disabling half.
+  it('re-enables Save once the operator edits return_where, when return_where is the side that lost a predicate', async () => {
+    renderAt('/retention/3', {
+      retentionReport: vi.fn(async () =>
+        reportFixture({ stale: true, return_where: [{ nonsense: true }] }),
+      ),
+    })
+    await screen.findByTestId('retention-stale')
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+    const ret = screen.getByTestId('retention-return-where-where')
+    await userEvent.click(within(ret).getByRole('button', { name: /add predicate/i }))
+    await userEvent.click(within(ret).getByRole('button', { name: /remove/i }))
+    expect(screen.queryByTestId('retention-unfinished')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeEnabled()
+  })
+
+  // Both sides lost a predicate: rebuilding only one must not be enough,
+  // and rebuilding both must be. A fix that tracked a single count rather
+  // than which SIDES still hold a drop could pass "edit one, still
+  // disabled" by coincidence (count 2 -> 1, still nonzero) while failing to
+  // generalise -- this pins the actual invariant by checking both steps.
+  it('with both sides dropped, only rebuilding both sides re-enables Save', async () => {
+    renderAt('/retention/3', {
+      retentionReport: vi.fn(async () =>
+        reportFixture({
+          stale: true,
+          start_where: [{ nonsense: true }],
+          return_where: [{ nonsense: true }],
+        }),
+      ),
+    })
+    await screen.findByTestId('retention-stale')
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+
+    const start = screen.getByTestId('retention-start-where-where')
+    await userEvent.click(within(start).getByRole('button', { name: /add predicate/i }))
+    await userEvent.click(within(start).getByRole('button', { name: /remove/i }))
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+
+    const ret = screen.getByTestId('retention-return-where-where')
+    await userEvent.click(within(ret).getByRole('button', { name: /add predicate/i }))
+    await userEvent.click(within(ret).getByRole('button', { name: /remove/i }))
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeEnabled()
+  })
 })

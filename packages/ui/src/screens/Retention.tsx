@@ -138,20 +138,32 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
   // until the operator fixes or removes it. An element that fails
   // `looksLikePredicate` itself (no `operator` field at all, say) is
   // DROPPED by `whereFromStored` before it ever reaches a row -- nothing
-  // visible, nothing for `unfinished` to count, so without this flag Save
-  // would be enabled with `startWhere`/`returnWhere` silently narrower than
-  // what was actually stored, and would overwrite the stored predicates
-  // with that narrower list. This flag is what makes the second shape
-  // block Save the same way the first one already does. Set at seed time
-  // (below) whenever seeding drops anything; cleared the moment `update`
-  // touches either side's predicates (`predicatesLostOnLoad` at that call
-  // site) -- editing IS rebuilding, whether or not the edit happens to
-  // repair the exact element that failed to parse. Run is deliberately NOT
-  // gated on this: the retention list's own seed-effect comment (and the
-  // 0.11.0 changelog entry it backs) already makes leaving Run available on
-  // a stale report a deliberate choice, so the operator can still see what
-  // the current controls ask for rather than being locked out of Run too.
-  const [predicatesLostOnLoad, setPredicatesLostOnLoad] = useState(false)
+  // visible, nothing for `unfinished` to count, so without a guard here
+  // Save would be enabled with `startWhere`/`returnWhere` silently
+  // narrower than what was actually stored, and would overwrite the
+  // stored predicates with that narrower list. This is what makes the
+  // second shape block Save the same way the first one already does. Run
+  // is deliberately NOT gated on this: the retention list's own
+  // seed-effect comment (and the 0.11.0 changelog entry it backs) already
+  // makes leaving Run available on a stale report a deliberate choice, so
+  // the operator can still see what the current controls ask for rather
+  // than being locked out of Run too.
+  //
+  // PER SIDE, not one flag for the report. Fix round 2's finding: a single
+  // shared boolean cleared by editing EITHER side let an edit to
+  // `startWhere` silently wave through a `returnWhere` that was never
+  // touched and still held a narrower list than what was stored -- the
+  // exact data loss this exists to prevent, reached from the side that
+  // was not the one edited. The set below names which sides still hold an
+  // unrebuilt drop; `canSave` requires it empty. Set at seed time (below)
+  // with whichever sides actually lost something; a side is removed from
+  // it only when `update` touches THAT side's predicates -- editing IS
+  // rebuilding, whether or not the edit happens to repair the exact
+  // element that failed to parse, but it only rebuilds the side it
+  // touches.
+  const [sidesWithLostPredicates, setSidesWithLostPredicates] = useState<
+    ReadonlySet<'start' | 'return'>
+  >(() => new Set())
 
   // The (project, report) pair this screen is currently open on. Same
   // mechanism `Trends.tsx` uses and for the same reason -- see that
@@ -169,7 +181,7 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
     setReportError(null)
     setSaveError(null)
     setStale(false)
-    setPredicatesLostOnLoad(false)
+    setSidesWithLostPredicates(new Set())
   }, [identity])
 
   const update = useCallback(
@@ -182,14 +194,20 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
       // clearing it is what makes "Run" mean something.
       setResult(null)
       setError(null)
-      // M5: editing either side's predicates is "rebuilding the
-      // conditions" -- see `predicatesLostOnLoad`'s own comment. Cleared on
-      // ANY touch to either side, not only one that happens to repair the
-      // exact element that failed to parse: the operator has taken
-      // ownership of what this side now says, which is what makes a
-      // subsequent Save an intentional write rather than an accidental one.
+      // M5: editing a side's predicates is "rebuilding" THAT side -- see
+      // `sidesWithLostPredicates`'s own comment. Only the side the patch
+      // actually touches is cleared: the operator has taken ownership of
+      // what that side now says, which is what makes a subsequent Save an
+      // intentional write for it -- it says nothing about a side the
+      // patch never mentioned.
       if ('startWhere' in patch || 'returnWhere' in patch) {
-        setPredicatesLostOnLoad(false)
+        setSidesWithLostPredicates((prev) => {
+          if (prev.size === 0) return prev
+          const next = new Set(prev)
+          if ('startWhere' in patch) next.delete('start')
+          if ('returnWhere' in patch) next.delete('return')
+          return next
+        })
       }
     },
     [setSearch],
@@ -302,16 +320,17 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
           const startWhere = whereFromStored(r.start_where)
           const returnWhere = whereFromStored(r.return_where)
           // M5: `whereFromStored` silently drops any stored element that
-          // does not even look like a predicate (see `predicatesLostOnLoad`'s
-          // own comment) -- comparing the raw stored count against what
-          // survived is how this notices, without `whereFromStored` itself
-          // needing to change (it is also used to read a hand-edited URL,
-          // where silently degrading garbage is the correct behaviour).
-          if (
-            startWhere.length < r.start_where.length ||
-            returnWhere.length < r.return_where.length
-          ) {
-            setPredicatesLostOnLoad(true)
+          // does not even look like a predicate (see
+          // `sidesWithLostPredicates`'s own comment) -- comparing the raw
+          // stored count against what survived is how this notices, per
+          // side, without `whereFromStored` itself needing to change (it is
+          // also used to read a hand-edited URL, where silently degrading
+          // garbage is the correct behaviour).
+          const lostSides = new Set<'start' | 'return'>()
+          if (startWhere.length < r.start_where.length) lostSides.add('start')
+          if (returnWhere.length < r.return_where.length) lostSides.add('return')
+          if (lostSides.size > 0) {
+            setSidesWithLostPredicates(lostSides)
           }
           finalParams = {
             start: r.start_event,
@@ -380,9 +399,10 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
     unfinished === 0 &&
     // M5: a saved report whose stored predicates were silently narrowed on
     // load must not be saved as-is -- that would overwrite the stored
-    // `start_where`/`return_where` with the narrower list. See
-    // `predicatesLostOnLoad`'s own comment.
-    !predicatesLostOnLoad
+    // `start_where`/`return_where` with the narrower list. Any side still
+    // in this set blocks Save, not only the side the operator happens to
+    // be looking at. See `sidesWithLostPredicates`'s own comment.
+    sidesWithLostPredicates.size === 0
 
   const handleSave = useCallback(() => {
     // Repeats the `canSave` gate the button's `disabled` prop already
