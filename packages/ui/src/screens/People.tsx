@@ -9,6 +9,7 @@ import { DetailSection } from '../components/DetailList.js'
 import { Button } from '../components/ui/button.js'
 import { Input } from '../components/ui/input.js'
 import { Label } from '../components/ui/label.js'
+import { DeleteButton } from './people/DeleteButton.js'
 import { ExportButton } from './people/ExportButton.js'
 import { IdentityHeader } from './people/IdentityHeader.js'
 import { Timeline } from './people/Timeline.js'
@@ -123,6 +124,14 @@ export function People(props: { client: ApiClient; onUnauthorized?: () => void }
   // context panel say "no context to show" instead of silently asserting an
   // empty one.
   const [newestEvent, setNewestEvent] = useState<LyraEvent | null>(null)
+  // Bumped by `DeleteButton.onDeleted` to force the person-read effect
+  // below to run again against the SAME id -- the erasure itself does not
+  // change the URL, so `id` alone never changes and the effect would
+  // otherwise never re-fire. Re-running it is what turns a completed
+  // deletion into the 404 branch Task 6 built: the correct, self-verifying
+  // end, because it proves the erasure by failing to find the person
+  // rather than by trusting the poll's own "completed" status.
+  const [reloadToken, setReloadToken] = useState(0)
 
   // Keeps the lookup box in step with the URL -- both for a fresh navigation
   // (submitting the form below) and for a direct load of `/people?id=…`
@@ -132,6 +141,14 @@ export function People(props: { client: ApiClient; onUnauthorized?: () => void }
     setDraft(id ?? '')
   }, [id])
 
+  // `reloadToken` is deliberately unused inside the effect body below -- it
+  // exists only to force this effect to re-run against the SAME id after a
+  // deletion completes, since neither `client` nor `id` themselves change
+  // (see the doc comment on `reloadToken` above). Removing it from the
+  // dependency array is exactly the bug it exists to prevent: a completed
+  // deletion would stop re-reading, and the profile would keep showing the
+  // erased person's data.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: see comment above
   useEffect(() => {
     if (id === null || activeId == null) return
     let cancelled = false
@@ -168,7 +185,7 @@ export function People(props: { client: ApiClient; onUnauthorized?: () => void }
     return () => {
       cancelled = true
     }
-  }, [client, activeId, id, onUnauthorized])
+  }, [client, activeId, id, onUnauthorized, reloadToken])
 
   function submit() {
     const trimmed = draft.trim()
@@ -253,18 +270,33 @@ export function People(props: { client: ApiClient; onUnauthorized?: () => void }
   return (
     <div className="flex flex-col gap-6">
       <IdentityHeader person={person} />
-      {/* Guarded the same way the timeline below is -- `ExportButton` needs
-       * a project to call `personExport` against, and `activeId` is `null`
-       * only in the sliver of a render between mount and the project
-       * context settling. */}
+      {/* Guarded the same way the timeline below is -- both actions need a
+       * project to call against, and `activeId` is `null` only in the
+       * sliver of a render between mount and the project context settling.
+       * The two privacy actions sit side by side: export reads, delete
+       * erases, and an operator reaching for one is often about to reach
+       * for the other. */}
       {activeId != null && (
-        <ExportButton
-          client={client}
-          projectId={activeId}
-          personId={person.person_id}
-          eventCount={person.events}
-          onUnauthorized={onUnauthorized}
-        />
+        <div className="flex flex-wrap items-start gap-2">
+          <ExportButton
+            client={client}
+            projectId={activeId}
+            personId={person.person_id}
+            eventCount={person.events}
+            onUnauthorized={onUnauthorized}
+          />
+          <DeleteButton
+            client={client}
+            projectId={activeId}
+            personId={person.person_id}
+            // Bumping `reloadToken` re-runs the person-read effect against
+            // the same id -- see that state's own doc comment for why a
+            // re-fetch, rather than trusting `onDeleted` to mean "gone", is
+            // the correct end here.
+            onDeleted={() => setReloadToken((t) => t + 1)}
+            onUnauthorized={onUnauthorized}
+          />
+        </div>
       )}
       {/*
        * Context comes off the timeline's newest event, not the person read
