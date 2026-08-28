@@ -327,6 +327,27 @@ describe('shared member projection', () => {
     }
   })
 
+  it('carries identified, sourced from base rather than re-derived here', () => {
+    // `identified` is `base`'s own column (see that CTE's doc comment in
+    // base.ts) -- this projection just names it unqualified. A bare
+    // `toContain('identified')` on the projection string alone would still
+    // pass if `base` stopped selecting it (ClickHouse would only notice at
+    // EXECUTION time, past what a shape test can see), so this also pins
+    // the compiled `members` query still contains the expression that
+    // produces it.
+    const p = memberProjection()
+    expect(p).toContain('identified')
+
+    const compiled = compileSegment({
+      query: { ast_version: 1, filter: trait } as SegmentQuery,
+      projectId: 7,
+      database: 'lyraflow',
+      now: new Date('2026-08-28T00:00:00.000Z'),
+      select: 'members',
+    })
+    expect(compiled.sql).toContain("CAST(max(user_id != ''), 'Bool') AS identified")
+  })
+
   it('builds a traits CTE that reads person_traits and nothing else', () => {
     const cte = traitsCte({ database: 'lyraflow', projectId: 7, params: new Params() })
     expect(cte).toContain('traits AS (')

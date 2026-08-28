@@ -437,10 +437,18 @@ export interface MemberRow {
   person_id: string
   first_seen: string
   last_seen: string
+  /** True the instant any of this person's device-index rows carried a real
+   * `user_id` -- i.e. they were ever `identify()`d, rather than resolved
+   * purely through the device fallback (core's `base.ts`, the `base` CTE).
+   * `person_id` alone cannot tell the two apart, which is the whole reason
+   * this field exists: `MemberList` uses it the same way the feed's
+   * `AcceptedTable` uses `event.user_id` -- to mark which rows lead to a
+   * real profile, per #18. */
+  identified: boolean
   traits: Record<string, string>
   traits_num: Record<string, number>
   trait_total: number
-  [field: string]: string | number | Record<string, string> | Record<string, number>
+  [field: string]: string | number | boolean | Record<string, string> | Record<string, number>
 }
 
 /** Both preview routes. `members`, `next_cursor` and `window_exhausted` are

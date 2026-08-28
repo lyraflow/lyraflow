@@ -1,4 +1,5 @@
 import { MEMBER_PAGE_SIZE } from '@lyraflow/core/segments/limits.js'
+import { User } from 'lucide-react'
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import type { MemberRow } from '../../api/types.js'
@@ -306,9 +307,20 @@ export function MemberList(props: {
                        * same pattern for the same reason. */}
                       <Link
                         to={personPath(m.person_id)}
-                        className="hover:underline"
+                        className="inline-flex items-center gap-1 hover:underline"
                         onClick={(e) => e.stopPropagation()}
                       >
+                        {/* The icon marks "identified", not "linked" -- every
+                         * row here links (unlike AcceptedTable's optional
+                         * `linkPeople`), but only `m.identified` names a
+                         * real person. A member matched purely through the
+                         * device fallback still resolves to a real profile
+                         * page, yet marking it the same way would promise a
+                         * profile on exactly the rows that open a 404
+                         * (#18). Same rule, same icon, same sizing as the
+                         * feed's AcceptedTable -- two different marks for
+                         * one concept would be worse than none. */}
+                        {m.identified && <User className="size-4" aria-hidden="true" />}
                         {m.person_id}
                       </Link>
                     </TableCell>

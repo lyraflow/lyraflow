@@ -28,11 +28,18 @@ function Router(props: { children: ReactNode }) {
   return <MemoryRouter>{props.children}</MemoryRouter>
 }
 
-function page(n: number, offset = 0): MemberRow[] {
+/**
+ * `identified` defaults to `false` -- most rows in this file test paging,
+ * ordering and ending logic, none of which the icon is part of, so the
+ * default keeps every one of those unedited rather than making each thread
+ * a value through that has nothing to do with what it asserts.
+ */
+function page(n: number, offset = 0, identified = false): MemberRow[] {
   return Array.from({ length: n }, (_, i) => ({
     person_id: `person-${offset + i}`,
     first_seen: '2026-08-01T00:00:00.000Z',
     last_seen: '2026-08-10T00:00:00.000Z',
+    identified,
     traits: {},
     traits_num: {},
     trait_total: 0,
@@ -347,6 +354,7 @@ describe('MemberList — person detail', () => {
       person_id: 'demo-live-0025',
       first_seen: '2026-08-01T00:00:00.000Z',
       last_seen: '2026-08-10T00:00:00.000Z',
+      identified: false,
       country: '',
       region: '',
       city: '',
@@ -521,6 +529,7 @@ describe('MemberList — person link', () => {
       person_id: 'u1',
       first_seen: '2026-08-01T00:00:00.000Z',
       last_seen: '2026-08-10T00:00:00.000Z',
+      identified: false,
       traits: {},
       traits_num: {},
       trait_total: 0,
@@ -589,5 +598,33 @@ describe('MemberList — person link', () => {
     await userEvent.click(screen.getByRole('button', { name: /show people/i }))
     await userEvent.click(screen.getByRole('row', { name: /u1/ }))
     expect(screen.getByText('Attributes')).toBeInTheDocument()
+  })
+
+  // The same rule AcceptedTable.test.tsx pins for the feed's icon, applied
+  // here at person-level: `identified` is what the row means, not "this row
+  // links" -- every row here links, but only `identified` names a real
+  // person rather than one resolved purely through the device fallback.
+  it('marks an identified member with a person icon inside the link', async () => {
+    renderMembers({
+      members: [member({ person_id: 'u1', identified: true })],
+      next_cursor: null,
+      window_exhausted: false,
+      person_count: 1,
+    })
+    await userEvent.click(screen.getByRole('button', { name: /show people/i }))
+    const link = await screen.findByRole('link', { name: 'u1' })
+    expect(link.querySelector('svg')).not.toBeNull()
+  })
+
+  it('does not mark a non-identified member with the person icon', async () => {
+    renderMembers({
+      members: [member({ person_id: 'dev-9', identified: false })],
+      next_cursor: null,
+      window_exhausted: false,
+      person_count: 1,
+    })
+    await userEvent.click(screen.getByRole('button', { name: /show people/i }))
+    const link = await screen.findByRole('link', { name: 'dev-9' })
+    expect(link.querySelector('svg')).toBeNull()
   })
 })

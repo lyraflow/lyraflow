@@ -25,6 +25,7 @@ function member(id: string): MemberRow {
     person_id: id,
     first_seen: '2026-08-01T00:00:00.000Z',
     last_seen: '2026-08-10T00:00:00.000Z',
+    identified: false,
     traits: {},
     traits_num: {},
     trait_total: 0,

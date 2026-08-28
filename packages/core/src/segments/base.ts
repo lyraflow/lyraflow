@@ -106,6 +106,27 @@ export function baseCte(opts: { database: string; projectId: number; params: Par
   // "Illegal type DateTime64(3, 'UTC') of argument for aggregate function
   // with Merge suffix". The same text works outside a GROUP BY, which is why
   // schema-clickhouse.test.ts gets away with it and this does not.
+  //
+  // `identified` (below, on `base`): whether this canonical person was EVER
+  // reached through resolvedPersonExpr's user_id branch (its
+  // "if user_id != '' then user_id" short-circuit, identity/resolve.ts)
+  // rather than solely through the device fallback -- the same distinction
+  // AcceptedTable.tsx's feed icon marks per event, taken to its
+  // person-level meaning: has this person ever identified. user_id here is
+  // dev's own bare column (part of its GROUP BY key, not an aggregate), so
+  // max(user_id != '') reads true the instant ANY of a person's
+  // device-index rows carries a real user_id, even when the rest of their
+  // history is anonymous.
+  //
+  // This exists because a canonical id built purely from
+  // dictGetOrDefault's anonymous_id fallback is a string a client cannot
+  // tell apart from a real user_id -- both are just a string once they
+  // leave the compiler. CAST(..., 'Bool'), not a bare comparison: a
+  // ClickHouse Bool serialises as JSON true/false in JSONEachRow, while the
+  // UInt8 it is an alias of would serialise as 0/1 and silently fail
+  // MemberRow.identified's boolean contract on the wire. See #18: a
+  // never-identified visitor's profile link 404s, so this is what a member
+  // list uses to decide whether to promise one.
   return `dev AS (
     SELECT
       project_id,
@@ -124,6 +145,7 @@ export function baseCte(opts: { database: string; projectId: number; params: Par
       ${resolved} AS ${RESOLVED_PERSON_ALIAS},
       min(m_first_seen) AS first_seen,
       max(m_last_seen)  AS last_seen,
+      CAST(max(user_id != ''), 'Bool') AS identified,
       ${latest},
       ${first}
     FROM dev
