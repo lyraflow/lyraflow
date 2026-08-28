@@ -60,6 +60,31 @@ export function ValueInput(props: {
   onChange: (value: ConditionValue) => void
   type?: 'text' | 'datetime-local'
   label?: string
+  /** The DOM id for the box, so a caller that renders its own visible
+   * `<Label htmlFor>` -- `TraitValueField` does -- can point it at the
+   * actual input.
+   *
+   * Under `between` there are two boxes, and the FIRST takes this id
+   * unchanged; only the second is suffixed (`-2`). The asymmetry is the
+   * whole point. Suffixing both (`-1`/`-2`, which this did) meant a
+   * caller's `htmlFor={id}` named an element that does not exist the
+   * moment the operator became `between` -- a visible label that focuses
+   * nothing, invisible in the caller's markup because the suffix is
+   * applied in here. Fixing it in the caller instead (`operator ===
+   * 'between' ? `${id}-1` : id`) would work and would couple every such
+   * caller to this component's suffixing convention, so the next operator
+   * family that needs two boxes reintroduces the bug in a new spelling.
+   * Letting the first box own the caller's id closes the class: there is
+   * no operator for which `id` names nothing.
+   *
+   * This is about the LABEL's target only. Both boxes carry their own
+   * accessible names regardless (`label` 1/2 below), so neither was ever
+   * unnamed to a screen reader.
+   *
+   * Optional, and unused by every other caller of this component, which
+   * either renders no visible label at all or (`ClauseValueField`'s
+   * relative branch) labels each box itself rather than through here. */
+  id?: string
   suggest?: {
     /** Rendered as the popup's options. May be empty -- the field stays a
      * combobox regardless, so that offering suggestions does not change the
@@ -79,7 +104,7 @@ export function ValueInput(props: {
     errorMessage?: string
   }
 }) {
-  const { operator, value, onChange, type = 'text', label = 'Value', suggest } = props
+  const { operator, value, onChange, type = 'text', label = 'Value', id, suggest } = props
   const isBetween = operator === 'between'
   const isTuple = Array.isArray(value)
 
@@ -125,6 +150,7 @@ export function ValueInput(props: {
          * value (`between "a" and "m"`) is typed straight in, as before. */}
         {suggest ? (
           <Combobox
+            id={id}
             type={type}
             className="grow basis-24"
             label={`${label} 1`}
@@ -138,6 +164,7 @@ export function ValueInput(props: {
           />
         ) : (
           <Input
+            id={id}
             type={type}
             className="min-w-0 grow basis-24"
             aria-label={`${label} 1`}
@@ -148,6 +175,7 @@ export function ValueInput(props: {
         <span className="shrink-0 text-sm text-muted-foreground">and</span>
         {suggest ? (
           <Combobox
+            id={id ? `${id}-2` : undefined}
             type={type}
             className="grow basis-24"
             label={`${label} 2`}
@@ -161,6 +189,7 @@ export function ValueInput(props: {
           />
         ) : (
           <Input
+            id={id ? `${id}-2` : undefined}
             type={type}
             className="min-w-0 grow basis-24"
             aria-label={`${label} 2`}
@@ -175,6 +204,7 @@ export function ValueInput(props: {
   if (suggest) {
     return (
       <Combobox
+        id={id}
         type={type}
         className="w-full"
         label={label}
@@ -191,6 +221,7 @@ export function ValueInput(props: {
 
   return (
     <Input
+      id={id}
       type={type}
       aria-label={label}
       value={isTuple ? '' : toText(value as Scalar)}

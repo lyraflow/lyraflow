@@ -3,6 +3,12 @@ export interface MemberRow {
   person_id: string
   first_seen: string
   last_seen: string
+  /** True the instant any of this person's device-index rows carried a real
+   * `user_id` -- i.e. they were ever `identify()`d, rather than resolved
+   * purely through the device fallback. See `base.ts`'s `base` CTE for the
+   * SQL and the full reasoning; a `person_id` alone cannot tell the two
+   * apart, which is the whole reason this column exists. */
+  identified: boolean
   /** The person's traits, split by type exactly as `person_traits` stores
    * them, and capped at `TRAITS_PER_MEMBER_MAX` keys each. */
   traits: Record<string, string>
@@ -13,7 +19,7 @@ export interface MemberRow {
   /** The context columns `memberProjection` selects -- one per
    * `CONTEXT_FIELDS` entry. The record types are here only because an index
    * signature must cover every named member above it. */
-  [field: string]: string | number | Record<string, string> | Record<string, number>
+  [field: string]: string | number | boolean | Record<string, string> | Record<string, number>
 }
 
 export interface CachedResult {

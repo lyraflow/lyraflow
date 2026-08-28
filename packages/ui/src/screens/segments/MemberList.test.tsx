@@ -1,16 +1,45 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import type { ReactNode } from 'react'
+import { MemoryRouter } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import type { MemberRow } from '../../api/types.js'
 import type { MemberPage } from './MemberList.js'
 import { MemberList } from './MemberList.js'
 
-function page(n: number, offset = 0): MemberRow[] {
+/**
+ * Unlike `AcceptedTable`'s optional `linkPeople`, the person link this
+ * component renders is unconditional -- both `SegmentDetail` and the funnel
+ * step-people panel want it, and there is no caller that renders a member row
+ * that cannot open a profile. So every render in this file needs a router in
+ * scope now, not just the ones that touch the link: a `<Link>` mounted
+ * outside one throws.
+ *
+ * NO `<Routes>`/`<Route>` here, deliberately -- unlike a real app shell, this
+ * wrapper never lets a click on the link replace `MemberList` with a
+ * destination screen. A route swap would unmount the row along with
+ * everything in it, and the "does not toggle" test below would then pass for
+ * the wrong reason: not because the click stayed inside the link, but
+ * because there would be nothing left to toggle. Keeping `MemberList` always
+ * mounted is what lets that test tell the two apart.
+ */
+function Router(props: { children: ReactNode }) {
+  return <MemoryRouter>{props.children}</MemoryRouter>
+}
+
+/**
+ * `identified` defaults to `false` -- most rows in this file test paging,
+ * ordering and ending logic, none of which the icon is part of, so the
+ * default keeps every one of those unedited rather than making each thread
+ * a value through that has nothing to do with what it asserts.
+ */
+function page(n: number, offset = 0, identified = false): MemberRow[] {
   return Array.from({ length: n }, (_, i) => ({
     person_id: `person-${offset + i}`,
     first_seen: '2026-08-01T00:00:00.000Z',
     last_seen: '2026-08-10T00:00:00.000Z',
+    identified,
     traits: {},
     traits_num: {},
     trait_total: 0,
@@ -21,7 +50,7 @@ function page(n: number, offset = 0): MemberRow[] {
  * cursor it is called with -- fine for a test that only ever fetches once. */
 function renderMembers(response: MemberPage) {
   const fetchPage = vi.fn(async () => response)
-  render(<MemberList fetchPage={fetchPage} />)
+  render(<MemberList fetchPage={fetchPage} />, { wrapper: Router })
   return fetchPage
 }
 
@@ -33,7 +62,7 @@ describe('MemberList', () => {
       window_exhausted: false,
       person_count: 10_000,
     }))
-    render(<MemberList fetchPage={fetchPage} />)
+    render(<MemberList fetchPage={fetchPage} />, { wrapper: Router })
     expect(screen.getByRole('button', { name: /show people/i })).toBeInTheDocument()
     expect(fetchPage).not.toHaveBeenCalled()
   })
@@ -97,7 +126,7 @@ describe('MemberList', () => {
         window_exhausted: true,
         person_count: 10_000,
       })
-    render(<MemberList fetchPage={fetchPage} />)
+    render(<MemberList fetchPage={fetchPage} />, { wrapper: Router })
 
     await userEvent.click(screen.getByRole('button', { name: /show people/i }))
     await userEvent.click(await screen.findByRole('button', { name: /load more/i }))
@@ -125,7 +154,7 @@ describe('MemberList', () => {
         window_exhausted: true,
         person_count: 10_000,
       })
-    render(<MemberList fetchPage={fetchPage} />)
+    render(<MemberList fetchPage={fetchPage} />, { wrapper: Router })
 
     await userEvent.click(screen.getByRole('button', { name: /show people/i }))
     await userEvent.click(await screen.findByRole('button', { name: /load more/i }))
@@ -163,7 +192,7 @@ describe('MemberList', () => {
         window_exhausted: true,
         person_count: 200,
       })
-    render(<MemberList fetchPage={fetchPage} />)
+    render(<MemberList fetchPage={fetchPage} />, { wrapper: Router })
 
     await userEvent.click(screen.getByRole('button', { name: /show people/i }))
     await userEvent.click(await screen.findByRole('button', { name: /load more/i }))
@@ -242,7 +271,7 @@ describe('MemberList', () => {
         window_exhausted: false,
         person_count: 10_000,
       })
-    render(<MemberList fetchPage={fetchPage} />)
+    render(<MemberList fetchPage={fetchPage} />, { wrapper: Router })
 
     await userEvent.click(screen.getByRole('button', { name: /show people/i }))
     const loadMore = await screen.findByRole('button', { name: /load more/i })
@@ -271,7 +300,7 @@ describe('MemberList', () => {
         window_exhausted: false,
         person_count: 10_000,
       })
-    render(<MemberList fetchPage={fetchPage} />)
+    render(<MemberList fetchPage={fetchPage} />, { wrapper: Router })
 
     await userEvent.click(screen.getByRole('button', { name: /show people/i }))
     expect(await screen.findByRole('alert')).toHaveTextContent(/could not load/i)
@@ -300,7 +329,7 @@ describe('MemberList', () => {
             resolveSecond = res
           }),
       )
-    render(<MemberList fetchPage={fetchPage} />)
+    render(<MemberList fetchPage={fetchPage} />, { wrapper: Router })
 
     await userEvent.click(screen.getByRole('button', { name: /show people/i }))
     const loadMore = await screen.findByRole('button', { name: /load more/i })
@@ -325,6 +354,7 @@ describe('MemberList — person detail', () => {
       person_id: 'demo-live-0025',
       first_seen: '2026-08-01T00:00:00.000Z',
       last_seen: '2026-08-10T00:00:00.000Z',
+      identified: false,
       country: '',
       region: '',
       city: '',
@@ -448,7 +478,7 @@ describe('MemberList — person detail', () => {
       // cheap, a member walk is not, and a segment must not fetch people
       // "just because the count was".
       const fetchPage = vi.fn()
-      render(<MemberList fetchPage={fetchPage} />)
+      render(<MemberList fetchPage={fetchPage} />, { wrapper: Router })
       expect(screen.getByRole('button', { name: /show people/i })).toBeInTheDocument()
       expect(fetchPage).not.toHaveBeenCalled()
     })
@@ -460,7 +490,7 @@ describe('MemberList — person detail', () => {
         window_exhausted: false,
         person_count: 1,
       }))
-      render(<MemberList fetchPage={fetchPage} autoLoad />)
+      render(<MemberList fetchPage={fetchPage} autoLoad />, { wrapper: Router })
       expect(await screen.findByText('person-0')).toBeInTheDocument()
       expect(screen.queryByRole('button', { name: /show people/i })).not.toBeInTheDocument()
     })
@@ -478,12 +508,123 @@ describe('MemberList — person detail', () => {
         window_exhausted: false,
         person_count: 1,
       }))
-      const { rerender } = render(<MemberList fetchPage={() => fetchPage()} autoLoad />)
+      const { rerender } = render(<MemberList fetchPage={() => fetchPage()} autoLoad />, {
+        wrapper: Router,
+      })
       expect(await screen.findByText('person-0')).toBeInTheDocument()
       for (let i = 0; i < 5; i++) {
         rerender(<MemberList fetchPage={() => fetchPage()} autoLoad />)
       }
       await waitFor(() => expect(fetchPage).toHaveBeenCalledTimes(1))
     })
+  })
+})
+
+describe('MemberList — person link', () => {
+  /** One member, overridable -- the walk fixtures above only need distinct
+   * ids, never a real one; these tests are the ones that care what the id
+   * IS, since it ends up in an href. */
+  function member(over: Partial<MemberRow> = {}): MemberRow {
+    return {
+      person_id: 'u1',
+      first_seen: '2026-08-01T00:00:00.000Z',
+      last_seen: '2026-08-10T00:00:00.000Z',
+      identified: false,
+      traits: {},
+      traits_num: {},
+      trait_total: 0,
+      ...over,
+    }
+  }
+
+  it('links each member to their profile', async () => {
+    renderMembers({
+      members: [member({ person_id: 'cem@example.com' })],
+      next_cursor: null,
+      window_exhausted: false,
+      person_count: 1,
+    })
+    await userEvent.click(screen.getByRole('button', { name: /show people/i }))
+    expect(await screen.findByRole('link', { name: 'cem@example.com' })).toHaveAttribute(
+      'href',
+      '/people?id=cem%40example.com',
+    )
+  })
+
+  /**
+   * The propagation guard, proven the way `AcceptedTable.test.tsx` proves
+   * the identical one for `linkPeople`: click the LINK itself and check the
+   * row did not also toggle underneath it.
+   *
+   * A test that instead clicks the `<tr>` (as the task brief's own sample
+   * for this case does) cannot exercise `stopPropagation` at all --
+   * `userEvent.click` dispatches the click event AT the element it is
+   * given, and a click never travels into descendants, only up through
+   * ancestors. So a click aimed at the row never reaches the anchor's own
+   * handler whether or not that handler stops propagation, and asserting
+   * "no navigation happened" after such a click is true regardless of this
+   * component's implementation. Clicking the link is the only click that
+   * can tell the two apart.
+   */
+  it('does not toggle the row when the link itself is clicked', async () => {
+    renderMembers({
+      members: [member()],
+      next_cursor: null,
+      window_exhausted: false,
+      person_count: 1,
+    })
+    await userEvent.click(screen.getByRole('button', { name: /show people/i }))
+    await userEvent.click(await screen.findByRole('link', { name: 'u1' }))
+    expect(screen.queryByText('Attributes')).not.toBeInTheDocument()
+  })
+
+  /**
+   * The other half of the brief's own pair: a click elsewhere on the row
+   * still expands it. This is a real regression check -- the row's existing
+   * click-to-expand behaviour must survive the new link -- but it is NOT a
+   * test of `stopPropagation`, and asserting "did not navigate" here would
+   * be vacuous: `userEvent.click` dispatches the click AT the row element
+   * itself, and a click never travels into descendants, so it cannot reach
+   * the anchor's handler regardless of whether that handler stops
+   * propagation. The test above this one is the one that can fail.
+   */
+  it('expands the row without navigating when the row itself is clicked', async () => {
+    renderMembers({
+      members: [member()],
+      next_cursor: null,
+      window_exhausted: false,
+      person_count: 1,
+    })
+    await userEvent.click(screen.getByRole('button', { name: /show people/i }))
+    await userEvent.click(screen.getByRole('row', { name: /u1/ }))
+    expect(screen.getByText('Attributes')).toBeInTheDocument()
+  })
+
+  // The same rule AcceptedTable.test.tsx pins for the feed's icon, applied
+  // here at person-level: `identified` is what the row means, not "this row
+  // links" -- every row here links, but only `identified` names a real
+  // person rather than one resolved purely through the device fallback.
+  it('marks an identified member with a person icon inside the link', async () => {
+    renderMembers({
+      members: [member({ person_id: 'u1', identified: true })],
+      next_cursor: null,
+      window_exhausted: false,
+      person_count: 1,
+    })
+    await userEvent.click(screen.getByRole('button', { name: /show people/i }))
+    const link = await screen.findByRole('link', { name: 'u1' })
+    expect(link.querySelector('svg')).not.toBeNull()
+  })
+
+  it('does not mark a non-identified member with the person icon', async () => {
+    renderMembers({
+      members: [member({ person_id: 'dev-9', identified: false })],
+      next_cursor: null,
+      window_exhausted: false,
+      person_count: 1,
+    })
+    await userEvent.click(screen.getByRole('button', { name: /show people/i }))
+    const link = await screen.findByRole('link', { name: 'dev-9' })
+    expect(link.querySelector('svg')).toBeNull()
   })
 })

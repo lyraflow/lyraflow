@@ -11,6 +11,17 @@ function fakeFetch(status: number, body: unknown) {
   )
 }
 
+// The export is NDJSON, not JSON -- `fakeFetch` would stringify it and
+// mislabel the content type. `personExport`'s success path never parses the
+// body at all (it hands back the raw `Blob`), so the only thing that
+// matters here is that the bytes and the status arrive unmodified.
+function fakeNdjsonFetch(status: number, text: string) {
+  return vi.fn(
+    async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(text, { status, headers: { 'content-type': 'application/x-ndjson' } }),
+  )
+}
+
 describe('createClient', () => {
   it('sends the UI header on every request', async () => {
     const f = fakeFetch(200, { configured: true })
@@ -87,6 +98,25 @@ describe('createClient', () => {
     await createClient(f as unknown as typeof fetch).events(1, {})
     const url = String(f.mock.calls[0]?.[0])
     expect(url).toMatch(/[?&]limit=\d+/)
+  })
+
+  // NOT a pin on `EventsQuery.before` existing -- it CANNOT fail on that
+  // absence. `events()` builds its URL by spreading the caller's whole query
+  // object through `qs()`, which forwards any key at runtime regardless of
+  // what `EventsQuery` declares; TypeScript erases at the vitest/esbuild
+  // boundary, so an object literal typed `{ before: 'CUR', limit: 10 }`
+  // reaches `qs()` unchanged whether or not `before` is a real field. The
+  // guard that actually catches a caller writing `before` without the type
+  // existing is `pnpm typecheck` (TS2353, excess property on an object
+  // literal), not this file. What this DOES pin: that `qs()` stays a generic
+  // passthrough rather than growing an allowlist that would silently drop
+  // `before` (or any other key) at runtime -- a regression this test can and
+  // would catch.
+  it('forwards an arbitrary events query key -- before included -- through qs()', async () => {
+    const f = fakeFetch(200, { events: [], next_cursor: null, prev_cursor: null })
+    await createClient(f as unknown as typeof fetch).events(7, { before: 'CUR', limit: 10 })
+    const url = String(f.mock.calls[0]?.[0])
+    expect(url).toMatch(/[?&]before=CUR(&|$)/)
   })
 
   it('raises ApiError carrying the status and the code', async () => {
@@ -244,6 +274,61 @@ describe('createClient', () => {
       await createClient(f as unknown as typeof fetch).rejections(1, { reason: 'bad_schema' })
       const url = String(f.mock.calls[0]?.[0])
       expect(url).toMatch(/[?&]reason=bad_schema(&|$)/)
+    })
+  })
+
+  describe('persons', () => {
+    it('reads a person by an id that needs encoding', async () => {
+      const f = fakeFetch(200, { person_id: 'cem@example.com', ids: [], events: 1 })
+      await createClient(f as unknown as typeof fetch).person(7, 'cem@example.com')
+      const [url, init] = f.mock.calls[0] as unknown as [string, RequestInit]
+      expect(url).toBe('/v1/persons/cem%40example.com')
+      expect(new Headers(init.headers).get('x-lyraflow-project')).toBe('7')
+    })
+
+    // encodeURIComponent, not encodeURI: a raw '/' would make
+    // /v1/persons/a/b, which is a different route.
+    it('encodes a slash in a person id rather than adding a path segment', async () => {
+      const f = fakeFetch(200, {})
+      await createClient(f as unknown as typeof fetch).person(7, 'a/b')
+      const url = String(f.mock.calls[0]?.[0])
+      expect(url).toBe('/v1/persons/a%2Fb')
+    })
+
+    // It cannot be an <a download>: the session path in auth/bridge.ts
+    // requires x-lyraflow-ui AND x-lyraflow-project, and no anchor can set
+    // a header.
+    it('returns the export as a blob, with the ui and project headers set', async () => {
+      const f = fakeNdjsonFetch(200, '{"type":"person"}\n')
+      const blob = await createClient(f as unknown as typeof fetch).personExport(7, 'p1')
+      await expect(blob.text()).resolves.toContain('"type":"person"')
+      const init = f.mock.calls[0]?.[1] as RequestInit
+      expect(new Headers(init.headers).get('x-lyraflow-ui')).toBe('1')
+      expect(new Headers(init.headers).get('x-lyraflow-project')).toBe('7')
+    })
+
+    it('throws an ApiError with the server code when an export fails', async () => {
+      const f = fakeFetch(404, { error: 'person_not_found' })
+      await expect(
+        createClient(f as unknown as typeof fetch).personExport(7, 'ghost'),
+      ).rejects.toMatchObject({ status: 404, code: 'person_not_found' })
+    })
+
+    it('deletePerson sends DELETE to the encoded person path under the project header', async () => {
+      const f = fakeFetch(202, { request_id: 5, person_id: 'a/b', suppressed_at: 'now' })
+      await createClient(f as unknown as typeof fetch).deletePerson(7, 'a/b')
+      const [url, init] = f.mock.calls[0] as unknown as [string, RequestInit]
+      expect(url).toBe('/v1/persons/a%2Fb')
+      expect(init.method).toBe('DELETE')
+      expect(new Headers(init.headers).get('x-lyraflow-project')).toBe('7')
+    })
+
+    it('deletion GETs a deletion request by its numeric id under the project header', async () => {
+      const f = fakeFetch(200, { status: 'pending', requested_at: 'now', completed_at: null })
+      await createClient(f as unknown as typeof fetch).deletion(7, 42)
+      const [url, init] = f.mock.calls[0] as unknown as [string, RequestInit]
+      expect(url).toBe('/v1/deletions/42')
+      expect(new Headers(init.headers).get('x-lyraflow-project')).toBe('7')
     })
   })
 

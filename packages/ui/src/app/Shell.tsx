@@ -8,6 +8,7 @@ import {
   Settings as SettingsIcon,
   Star,
   UserRound,
+  UserSearch,
   Users,
 } from 'lucide-react'
 import type { ReactNode } from 'react'
@@ -358,6 +359,19 @@ export function Shell(props: {
           >
             <Users className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
             <span className="sr-only sm:not-sr-only">Segments</span>
+          </NavLink>
+          <NavLink
+            to={ROUTES.people}
+            className={({ isActive }) =>
+              `flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium ${
+                isActive
+                  ? 'text-foreground'
+                  : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+              }`
+            }
+          >
+            <UserSearch className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
+            <span className="sr-only sm:not-sr-only">People</span>
           </NavLink>
           <NavLink
             to={ROUTES.settings}

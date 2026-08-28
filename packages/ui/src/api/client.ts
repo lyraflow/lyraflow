@@ -1,6 +1,7 @@
 import { dedupeInFlight } from './dedupe.js'
 import type {
   CreatedProject,
+  DeletionStatus,
   EventsPage,
   EventsQuery,
   Funnel,
@@ -10,6 +11,8 @@ import type {
   FunnelRunResult,
   FunnelStep,
   Meta,
+  Person,
+  PersonDeletion,
   PreviewOptions,
   Project,
   ProjectDeletion,
@@ -56,6 +59,40 @@ export class ApiError extends Error {
     super(`${status} ${code}`)
     this.name = 'ApiError'
   }
+}
+
+/**
+ * Parses an error response body -- shared by `call` and `callBlob`, the
+ * two `fetchImpl` call sites, because both need the same tolerance: a 5xx
+ * from a proxy is frequently HTML, so parsing must not throw a SyntaxError
+ * that replaces the real status with a parse failure. Both fall back to
+ * `'unknown'` rather than propagate one.
+ *
+ * `callBlob`'s SUCCESS body is NDJSON, not JSON -- that is the entire
+ * reason it exists instead of using `call`. Its ERROR body is JSON like
+ * every other route's, which is what makes one helper correct for both
+ * call sites rather than merely convenient.
+ */
+async function parseErrorCode(res: Response): Promise<{ code: string; detail?: ApiErrorDetail[] }> {
+  let code = 'unknown'
+  let detail: ApiErrorDetail[] | undefined
+  try {
+    const body = (await res.json()) as { error?: string; detail?: unknown }
+    if (typeof body.error === 'string') code = body.error
+    if (Array.isArray(body.detail)) {
+      const parsed = body.detail.filter(
+        (d): d is ApiErrorDetail =>
+          typeof d === 'object' &&
+          d !== null &&
+          typeof (d as Record<string, unknown>).path === 'string' &&
+          typeof (d as Record<string, unknown>).message === 'string',
+      )
+      if (parsed.length > 0) detail = parsed
+    }
+  } catch {
+    /* keep 'unknown', detail stays absent */
+  }
+  return { code, detail }
 }
 
 export interface ApiClient {
@@ -189,6 +226,23 @@ export interface ApiClient {
   // 400. Expensive on the server — see the route's own comment — so callers
   // must reach it on an explicit interaction, never on render.
   schemaTraitValues(projectId: number, trait: string, q: string): Promise<string[]>
+  /** `GET /v1/persons/:id`. `id` is caller-supplied -- `identify('someone@example.com')`
+   * is the ordinary case -- so the route always encodes it with
+   * `encodeURIComponent`, never `encodeURI`: an id containing `/`, `?` or
+   * `#` would otherwise reach a different route, or a different query,
+   * entirely. */
+  person(projectId: number, id: string): Promise<Person>
+  /**
+   * Downloads the subject-access export as a `Blob`, NOT through `call` --
+   * the export is NDJSON and `call` always ends in `res.json()`. See
+   * `callBlob`'s own docstring for why this buffers despite the server
+   * streaming deliberately, and for who owns the size ceiling.
+   */
+  personExport(projectId: number, id: string): Promise<Blob>
+  /** `DELETE /v1/persons/:id`. Same id-encoding requirement as `person()`. */
+  deletePerson(projectId: number, id: string): Promise<PersonDeletion>
+  /** Polls one deletion request by the id `deletePerson` returned as `request_id`. */
+  deletion(projectId: number, requestId: number): Promise<DeletionStatus>
 }
 
 /**
@@ -278,31 +332,45 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
     const res = await fetchImpl(path, { ...init, headers, credentials: 'include' })
 
     if (!res.ok) {
-      // A 5xx from a proxy is frequently HTML. Parsing must not throw a
-      // SyntaxError that replaces the real status with a parse failure.
-      let code = 'unknown'
-      let detail: ApiErrorDetail[] | undefined
-      try {
-        const body = (await res.json()) as { error?: string; detail?: unknown }
-        if (typeof body.error === 'string') code = body.error
-        if (Array.isArray(body.detail)) {
-          const parsed = body.detail.filter(
-            (d): d is ApiErrorDetail =>
-              typeof d === 'object' &&
-              d !== null &&
-              typeof (d as Record<string, unknown>).path === 'string' &&
-              typeof (d as Record<string, unknown>).message === 'string',
-          )
-          if (parsed.length > 0) detail = parsed
-        }
-      } catch {
-        /* keep 'unknown', detail stays absent */
-      }
+      const { code, detail } = await parseErrorCode(res)
       throw new ApiError(res.status, code, detail)
     }
 
     if (res.status === 204) return undefined as T
     return (await res.json()) as T
+  }
+
+  /**
+   * The one request whose body is not JSON. `call` ends in `res.json()`,
+   * and the subject-access export is NDJSON.
+   *
+   * It buffers. The endpoint streams deliberately -- `export.ts`'s
+   * docstring explains that a second copy of one person's complete
+   * personal data is the liability that route refuses to create -- and a
+   * buffered `Blob` puts exactly that copy in browser memory. It is here
+   * anyway because `auth/bridge.ts` requires both `x-lyraflow-ui` and
+   * `x-lyraflow-project` on the session path, and no `<a download>`, form,
+   * or opened window can set a header. The size ceiling this trade-off
+   * needs is enforced by the CALLER, which knows the person's event count
+   * -- not here.
+   *
+   * Shares `call`'s error path via `parseErrorCode` and nothing else: it is
+   * not built by refactoring `call` to accommodate a non-JSON SUCCESS body,
+   * because every other caller of `call` still wants that. The error body
+   * is JSON regardless -- see `parseErrorCode`'s own docstring.
+   */
+  async function callBlob(path: string, projectId: number): Promise<Blob> {
+    const headers = new Headers()
+    headers.set('x-lyraflow-ui', '1')
+    headers.set('x-lyraflow-project', String(projectId))
+    const res = await fetchImpl(path, { headers, credentials: 'include' })
+
+    if (!res.ok) {
+      const { code } = await parseErrorCode(res)
+      throw new ApiError(res.status, code)
+    }
+
+    return res.blob()
   }
 
   return {
@@ -451,5 +519,11 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
           projectId,
         )
       ).values.map((v) => v.value),
+    person: (projectId, id) => call(`/v1/persons/${encodeURIComponent(id)}`, {}, projectId),
+    deletePerson: (projectId, id) =>
+      call(`/v1/persons/${encodeURIComponent(id)}`, { method: 'DELETE' }, projectId),
+    deletion: (projectId, requestId) => call(`/v1/deletions/${requestId}`, {}, projectId),
+    personExport: (projectId, id) =>
+      callBlob(`/v1/persons/${encodeURIComponent(id)}/export`, projectId),
   }
 }

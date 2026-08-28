@@ -93,7 +93,15 @@ export function TraitForm(props: {
 
   return (
     <div className="flex min-w-0 flex-col gap-1">
-      <div className="flex min-w-0 flex-wrap items-end gap-2">
+      {/* `items-start`, not `items-end`: `PropertyCombobox` renders a hint
+       * line below its input (this call passes one) that `OperatorSelect`
+       * has no equivalent of, making the Trait column taller than the
+       * Operator one. Bottom-aligning the row therefore pushed the Trait
+       * input itself up relative to the Operator select -- the two never
+       * sat on the same line. Every column here now begins with a `Label`
+       * of the same height, so aligning tops lines up the controls beneath
+       * them and lets the hint hang below harmlessly. */}
+      <div className="flex min-w-0 flex-wrap items-start gap-2">
         <PropertyCombobox
           client={client}
           projectId={projectId}

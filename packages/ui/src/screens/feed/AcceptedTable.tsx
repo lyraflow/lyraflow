@@ -1,4 +1,6 @@
+import { User } from 'lucide-react'
 import { Fragment, useState } from 'react'
+import { Link } from 'react-router'
 import type { LyraEvent } from '../../api/types.js'
 import type { DetailField } from '../../components/DetailList.js'
 import { DetailPanel, DetailSection, ExpandToggle, FieldList } from '../../components/DetailList.js'
@@ -10,6 +12,7 @@ import {
   TableHeader,
   TableRow,
 } from '../../components/ui/table.js'
+import { personPath } from '../people/params.js'
 import { formatEventTime } from './format.js'
 
 /**
@@ -137,8 +140,21 @@ export function AcceptedTable(props: {
    * An empty result under a filter has a different remedy from an empty
    * result without one, and the copy has to offer the right one. */
   filteredEvent?: string
+  /**
+   * Turns the Visitor cell into a link to that id's profile. **Off by
+   * default** so every existing caller and test -- built before
+   * `people/People.tsx` existed -- is unaffected.
+   *
+   * `Feed.tsx` turns this on: which id recorded an event is the identity
+   * stitching made visible, and a feed row is usually the first place an
+   * operator meets an id worth looking up. The profile's own timeline
+   * (`people/Timeline.tsx`) leaves it off -- every row there is the same
+   * person already on screen, and a link to the page you are on is noise,
+   * not stitching.
+   */
+  linkPeople?: boolean
 }) {
-  const { events, loadFailed = false, rangeLabel, filteredEvent } = props
+  const { events, loadFailed = false, rangeLabel, filteredEvent, linkPeople = false } = props
 
   // Keyed by `event_id`, never by row index: this table is re-rendered from
   // a fresh poll every few seconds and a new event shifts every index down
@@ -237,7 +253,40 @@ export function AcceptedTable(props: {
                 </TableCell>
                 <TableCell className="font-medium">{event.event_name}</TableCell>
                 <TableCell className="font-mono text-muted-foreground">
-                  {event.user_id || event.anonymous_id}
+                  {linkPeople ? (
+                    <Link
+                      to={personPath(event.user_id || event.anonymous_id)}
+                      className="inline-flex items-center gap-1 hover:underline"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {/* The icon marks "identified", not "linked" -- every
+                       * row here links, but only a non-empty user_id names
+                       * a real person. An anonymous_id-only row's link
+                       * does NOT open a profile: `resolvePersonScope`
+                       * reaches a device only through `identity_bindings`
+                       * (its step 4, `mostRecentPersonFor`), and the one
+                       * writer of that table is `identify()` carrying both
+                       * ids (`ingest/routes.ts`). A visitor who has only
+                       * ever been `track`ed therefore has no binding, so
+                       * the scope is that id alone with no devices and no
+                       * windows, the event summary counts zero, and the
+                       * read answers `404 person_not_found` (#18).
+                       * The link is offered anyway, deliberately: hiding
+                       * it would contradict the feed the operator is
+                       * looking at, which is showing that visitor's events
+                       * right now, and the profile's four-cause 404 copy
+                       * is what handles the landing. The icon is what
+                       * marks the rows where the link pays off -- so keep
+                       * it on `event.user_id` alone. Widening it to "any
+                       * linked row" would promise a profile on exactly the
+                       * rows that 404, and turn the icon back into
+                       * decoration. */}
+                      {event.user_id && <User className="size-4" aria-hidden="true" />}
+                      {event.user_id || event.anonymous_id}
+                    </Link>
+                  ) : (
+                    event.user_id || event.anonymous_id
+                  )}
                 </TableCell>
                 <TableCell className="text-muted-foreground">
                   {event.path || event.url || '—'}

@@ -1167,6 +1167,7 @@ describe('funnel semantics', () => {
     interface PeoplePage {
       members: {
         person_id: string
+        identified: boolean
         traits: Record<string, string>
         traits_num: Record<string, number>
         trait_total: number
@@ -1348,6 +1349,38 @@ describe('funnel semantics', () => {
       expect(without?.traits).toEqual({})
       expect(without?.traits_num).toEqual({})
       expect(without?.trait_total).toBe(0)
+    })
+
+    /**
+     * THE FIXTURE THAT PROVES `identified` MEANS ANYTHING, not just that the
+     * field is present -- same shape as the traits test just above: one
+     * person reaches this page only through `track`'s bare `anonymous_id`,
+     * never `identify()`d, resolved purely through the device fallback; one
+     * was identified via a real `user_id`. A member-row projection
+     * hardcoded to `identified: true` would pass on the identified half
+     * alone and fail only on the anonymous one.
+     */
+    it('marks an identified member true and a device-only member false', async () => {
+      const s1 = `sp-id1-${randomUUID()}`
+      const identified = `sp-identified-${randomUUID()}`
+      const anon = `sp-anon-${randomUUID()}`
+      await send([
+        {
+          type: 'identify',
+          message_id: randomUUID(),
+          anonymous_id: identified,
+          user_id: identified,
+        },
+        track(identified, s1, ago(20 * HOUR)),
+        track(anon, s1, ago(20 * HOUR)),
+      ])
+      await reloadIdentityDictionaries()
+      const id = await createFunnel([{ event: s1 }, unreachedStep()])
+
+      const page = await peoplePage(id, 1, 'reached')
+      expect(page.members.map((m) => m.person_id).sort()).toEqual([anon, identified].sort())
+      expect(page.members.find((m) => m.person_id === identified)?.identified).toBe(true)
+      expect(page.members.find((m) => m.person_id === anon)?.identified).toBe(false)
     })
 
     /**

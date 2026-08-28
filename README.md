@@ -27,11 +27,20 @@ under Docker, and nothing leaves it.
 > things, and a condition can now ask for text, presence, a flag or a relative
 > date rather than only equality and ordering.
 >
-> There is still **no person profile**: no per-person event history, and no way
-> to open someone who is neither in a segment nor at a funnel step. Journeys,
-> dashboards and path analysis are still ahead, and neither report can be
-> saved — each lives in its URL. See [Web UI](#web-ui) for exactly what exists
-> and what does not.
+> There is now a **person profile**: their stitched identity, traits, latest
+> context and full event history, opened from a segment member row, a funnel
+> step's people panel, the feed, the sidebar, or either of the two ways in on
+> the screen itself — a lookup box for an id you already have, and a **trait
+> search** for when you have none, which pages through everyone matching and
+> links each row to a profile, where there is one to open: a visitor who was
+> never identified has events and no profile, and that link 404s. The search
+> takes one condition on one named trait, with the operator list a segment
+> condition has — comparison, text matching, presence, true/false, relative
+> date. What it will not do is combine conditions, look for a value across
+> every trait at once, or list **everyone** without naming a condition at all.
+> Journeys, dashboards and path analysis are still ahead, and neither report
+> can be saved — each lives in its URL. See [Web UI](#web-ui) for exactly what
+> exists and what does not.
 
 ## What it is good at
 
@@ -324,7 +333,7 @@ it flips the last step into a success state and waits for you to click
 done with it. There is also a "Skip to dashboard" for the case where you
 cannot instrument the target site right now.
 
-Past the wizard (or immediately, if a project already exists), there are six
+Past the wizard (or immediately, if a project already exists), there are seven
 screens, reachable from the sidebar:
 
 - **Feed** — a live event feed, split into an **Accepted** tab and a
@@ -422,6 +431,52 @@ screens, reachable from the sidebar:
   longer parses opens read-only rather than being offered for editing as
   though the builder understood it.
 
+- **People** — a person profile at `/people?id=…`: the canonical id and every
+  id ever bound to it, split into user ids and device ids; first seen, last
+  seen and the event count; their traits; their latest context — device,
+  browser, OS, country, referrer and campaign — read from their newest event;
+  and their full event timeline, newest first, paged backwards a page at a
+  time and bounded by their own first-seen and last-seen rather than by the
+  last 24 hours — so a customer last active in June opens on June, not on an
+  empty screen. Reached from a segment member row, a funnel step's people
+  panel, the feed's person cell, the sidebar, or either of the two searches
+  on the screen itself.
+
+  Those two sit side by side whenever no id is in the URL. The **lookup box**
+  takes an id you already have. **Find by trait** is for when you have none:
+  one condition on one named trait, built exactly as a segment's trait
+  condition is and offering the same operators — compare, text (contains,
+  starts with, ends with, and their negations), presence, true or false,
+  relative date — with the value box that operator calls for, or none at all
+  for `is set` and `is true`. It runs through the same engine a segment
+  preview uses, listing everyone who matches with their traits and a link to
+  each profile, paged the way a segment's member list is. One condition is
+  the shape of the search, not a claim that the matching is exact: what it
+  will not do is combine several conditions — that is what a segment is for
+  — look for a value across every trait at once, since you name the trait,
+  or list everyone without naming a condition at all. The condition lives in
+  the URL, so a search that matched nobody is still a link that says so after
+  a reload.
+
+  **The entry points reach further than the profile does.** A person only
+  enters the identity graph through `identify()`, so a visitor who has only
+  ever been tracked anonymously has events — visible in the feed, under their
+  `anonymous_id` — and no profile to open. The feed still links their rows,
+  and the profile answers by naming that as the first of the four things a
+  "nothing to show" can mean, rather than by hiding the link or by claiming
+  the id was never seen. On a fresh install, where little has been identified
+  yet, that is the common case. It is the same limit *Privacy: deletion and export* below
+  documents for the API, met from the UI side. The rows that *do* open a
+  profile carry a person icon — in the feed's accepted table and in every
+  member list — so which link pays off is visible before the click.
+
+  Two privacy actions sit on the profile. **Export** buffers the subject-access
+  response in the browser and triggers a save — past 50,000 events it shows
+  the equivalent `lyraflow persons export` command instead, because a button
+  that starts a download doomed to hang is worse than no button. **Delete**
+  is the same two-step, typed-id-confirm pattern project deletion uses, then
+  polls to completion rather than trusting the request that started it.
+
 The account menu in the header also has a **Profile** screen, for changing the
 admin's email address and password. Both changes require the current password —
 a session is enough to read everything this install holds and deliberately not
@@ -455,16 +510,18 @@ retried rather than leaving data nothing will ever sweep again. Settings shows
 the progress; `lyraflow projects deletion get <id>` reports the same thing, and
 `lyraflow projects deletion retry <id>` resumes one that gave up.
 
-**Volunteering the limit:** that is the whole UI. People and person profiles
-have **no** screens at all yet; reach them the way the rest of this document
-shows, over the HTTP API or the CLI.
+**Volunteering the limit:** that is the whole UI. A person profile exists, but
+there is no **People list** — nothing browses or searches persons, so the
+lookup box above only helps when you already hold an id, and only when that id
+belongs to someone `identify()` has bound. Reach anyone else the way the rest
+of this document shows, over the HTTP API or the CLI.
 
 The funnel screen's per-step people panel is backed by
 `POST /v1/funnels/:id/people` (see *Funnels* below) — the same bounded member
-list Segments uses, traits and all. It does not open a person profile from
-there, because there still isn't one (see above). The CLI has not caught up
-to this yet: `lyraflow funnels dropoff` still only walks the dropped
-population, so reading who *reached* a step is UI- and API-only for now.
+list Segments uses, traits and all. It opens a person profile from there now,
+same as Segments and the Feed do. The CLI has not caught up to this yet:
+`lyraflow funnels dropoff` still only walks the dropped population, so
+reading who *reached* a step is UI- and API-only for now.
 
 ## Tracking more than one site
 
@@ -1224,11 +1281,30 @@ curl -i "http://localhost:3000/v1/persons/user-42" \
 {
   "person_id": "user-42",
   "ids": ["user-42", "visitor-1"],
+  "devices": ["visitor-1"],
   "first_seen": "2026-08-01T12:00:00.000Z",
   "last_seen": "2026-08-06T09:30:00.000Z",
-  "events": 14
+  "events": 14,
+  "traits": {"plan": "pro"},
+  "traits_num": {},
+  "trait_total": 1,
+  "traits_withheld": false
 }
 ```
+
+`devices` is the subset of `ids` that are device ids rather than ids you
+assigned — `ids` alone cannot say which is which, and the profile's identity
+header shows the two as different things.
+
+`traits`, `traits_num` and `trait_total` are the same shape a segment member
+row already carries, capped the same way. **`traits_withheld: true` does not
+mean this person has no traits — it means a deletion boundary exists for
+them, and a trait cannot be split at it.** `004_person_traits.sql` stores
+traits as `argMax` states with the timestamp discarded, so unlike an event a
+trait carries nothing to compare against `suppressed_at`; the read agrees
+with the export's own refusal (see *Exporting a person* below) rather than
+inventing a second answer, and returns empty maps with `traits_withheld: true`
+in that case instead of ones that merely look empty.
 
 `:id` can be any id that has ever pointed at this person — a device id, the
 current canonical id, or an id since merged away by `/v1/alias` — and the
@@ -1334,8 +1410,9 @@ curl -s http://localhost:3000/v1/segments/preview \
   "as_of": "2026-08-07T09:30:00.000Z",
   "members": [
     { "person_id": "user-42", "first_seen": "2026-07-01T00:00:00.000Z",
-      "last_seen": "2026-08-06T09:30:00.000Z", "country": "US", "region": "CA",
-      "city": "San Francisco", "device_type": "desktop", "os": "macOS",
+      "last_seen": "2026-08-06T09:30:00.000Z", "identified": true,
+      "country": "US", "region": "CA", "city": "San Francisco",
+      "device_type": "desktop", "os": "macOS",
       "browser": "Chrome", "referrer": "https://google.com",
       "utm_source": "google", "utm_medium": "cpc", "utm_campaign": "launch",
       "traits": { "plan": "trial", "company": "Acme" },
@@ -1347,11 +1424,19 @@ curl -s http://localhost:3000/v1/segments/preview \
 }
 ```
 
-Each member row carries `person_id`, `first_seen`, `last_seen`, and the ten
-`context` fields (see *Node types* below) at their **current** value — not the
-`first_touch` one, even for the four fields that are only ever recorded as
-first-touch (see the caveat below `context` for why `latest` reads the same
-value there).
+Each member row carries `person_id`, `first_seen`, `last_seen`, `identified`,
+and the ten `context` fields (see *Node types* below) at their **current**
+value — not the `first_touch` one, even for the four fields that are only ever
+recorded as first-touch (see the caveat below `context` for why `latest` reads
+the same value there).
+
+`identified` says whether that person has ever been `identify()`d, as opposed
+to reached only through the device fallback: `true` when at least one of their
+events carried a real `user_id`, `false` when their `person_id` is an
+`anonymous_id` that nothing has ever tied to a person. The two are
+indistinguishable as strings, and the difference is what decides whether there
+is a profile behind the row: `GET /v1/persons/:id` answers `404` for the
+unidentified one, for the reason *Privacy: deletion and export* gives below.
 
 It also carries that person's **traits**, split by type the way they are
 stored: strings in `traits`, numbers in `traits_num`. At most 50 of each are
@@ -2063,6 +2148,7 @@ The response:
   "members": [
     { "person_id": "user-42", "first_seen": "2026-07-01T00:00:00.000Z",
       "last_seen": "2026-08-08T09:20:00.000Z", "entered_at": "2026-08-08T09:12:00.000Z",
+      "identified": true,
       "country": "US", "region": "CA", "city": "San Francisco", "device_type": "desktop",
       "os": "macOS", "browser": "Chrome", "referrer": "https://google.com",
       "utm_source": "google", "utm_medium": "cpc", "utm_campaign": "launch",
@@ -2075,6 +2161,10 @@ The response:
   "window_exhausted": false
 }
 ```
+
+Each row is a segment member row plus `entered_at`, `identified` included —
+see *Retrieving members, not just the count* above for what that field means
+and why a caller wants it.
 
 `person_count` is its own query, taken at the same `as_of` the page is —
 never the run's cached step number, because a run and a `/people` call can
@@ -2309,7 +2399,8 @@ curl -s "http://localhost:3000/v1/events?since=2026-08-09T03:16:00.000Z&limit=2"
     { "event_id": "22222222-2222-2222-2222-222222222223", "timestamp": "2026-08-09T03:17:34.357Z", "event_name": "signup", "anonymous_id": "visitor-3", "user_id": "", "properties": {"plan":"trial"}, "properties_num": {}, "url": "", "path": "", "referrer": "", "utm_source": "", "utm_medium": "", "utm_campaign": "", "utm_term": "", "utm_content": "", "device_type": "desktop", "os": "macos", "browser": "chrome", "country": "", "region": "", "city": "" },
     { "event_id": "22222222-2222-2222-2222-222222222224", "timestamp": "2026-08-09T03:17:34.364Z", "event_name": "signup", "anonymous_id": "visitor-4", "user_id": "", "properties": {"plan":"trial"}, "properties_num": {}, "url": "", "path": "", "referrer": "", "utm_source": "", "utm_medium": "", "utm_campaign": "", "utm_term": "", "utm_content": "", "device_type": "desktop", "os": "macos", "browser": "chrome", "country": "", "region": "", "city": "" }
   ],
-  "next_cursor": "WyIyMDI2LTA4LTA5IDAzOjE3OjM0LjM2NCIsIjIyMjIyMjIyLTIyMjItMjIyMi0yMjIyLTIyMjIyMjIyMjIyNCJd"
+  "next_cursor": "WyIyMDI2LTA4LTA5IDAzOjE3OjM0LjM2NCIsIjIyMjIyMjIyLTIyMjItMjIyMi0yMjIyLTIyMjIyMjIyMjIyNCJd",
+  "prev_cursor": "WyIyMDI2LTA4LTA5IDAzOjE3OjM0LjM1NyIsIjIyMjIyMjIyLTIyMjItMjIyMi0yMjIyLTIyMjIyMjIyMjIyMyJd"
 }
 ```
 
@@ -2320,26 +2411,35 @@ curl -s "http://localhost:3000/v1/events?since=2026-08-09T03:16:00.000Z&limit=2"
 | `event` | exact event name |
 | `person` | a person id, resolved exactly the way `GET /v1/persons/:id` resolves one (alias and device-id lookup — see *Identity resolution* above) |
 | `limit` | events per page, default 50, capped at 500 |
-| `after` | an opaque cursor from a previous response's `next_cursor`, to continue from there |
+| `after` | an opaque cursor from a previous response's `next_cursor`, to walk forward from there |
+| `before` | an opaque cursor from a previous response's `prev_cursor`, to walk backward from there |
 
-**When `since` is omitted and no cursor (`after`) is given either, the server
-defaults to the last 24 hours.** That default deliberately does not apply once
-a cursor is present: a cursor already carries its own lower bound, and
-stacking the 24-hour default on top of an older cursor would silently drop
+**`before` and `after` are mutually exclusive** — sending both is `400`. They
+name opposite directions over the same keyset, and **every response is
+ordered oldest-first regardless of which one you sent**: `prev_cursor` is
+always the page's own oldest row and `next_cursor` its own newest, whichever
+direction produced the page. A screen paging backwards (the person profile's
+timeline does) reverses the page itself to show newest-first; the wire
+contract stays one ordering, always.
+
+**When `since` is omitted and no cursor (`after` or `before`) is given either,
+the server defaults to the last 24 hours.** That default deliberately does not
+apply once a cursor is present: a cursor already carries its own lower bound,
+and stacking the 24-hour default on top of an older cursor would silently drop
 every event between the cursor's real position and the default's edge — a gap
 that, once `next_cursor` has advanced past it, is never reachable again. An
 explicit `since` alongside a cursor still applies normally; it is only the
 *default* that backs off in a cursor's presence.
 
-`next_cursor` is a **keyset position over `(timestamp, event_id)`, and
-opaque** — treat it as an opaque token, never decoded or constructed by hand.
-Unlike the segment cursor above, it is not signed: forging one only lets a
-caller holding the server key read their own project's events in a different
-order, which they could already do by choosing their own `since`/`until`, so
-there is nothing here for a signature to protect. `next_cursor` is `null` on
-an empty page. `limit` above 500 is rejected with `400 {"error":"invalid_query"}`,
-never silently clamped. A malformed, truncated, or hand-built `after` is a
-`400`:
+`next_cursor` and `prev_cursor` are **keyset positions over `(timestamp,
+event_id)`, and opaque** — treat either as an opaque token, never decoded or
+constructed by hand. Unlike the segment cursor above, neither is signed:
+forging one only lets a caller holding the server key read their own
+project's events in a different order, which they could already do by
+choosing their own `since`/`until`, so there is nothing here for a signature
+to protect. Both are `null` on an empty page. `limit` above 500 is rejected
+with `400 {"error":"invalid_query"}`, never silently clamped. A malformed,
+truncated, or hand-built `after` or `before` is a `400`:
 
 ```json
 { "error": "invalid_cursor" }
@@ -2617,7 +2717,7 @@ has been deleted exports only the events recorded after the deletion
 boundary, and a person with nothing left after that boundary is `404`, the
 same `{ "error": "person_not_found" }` an unresolvable id gets. As with
 `DELETE`, that `404` also covers a visitor who has never been through
-`/v1/identify` — see *Deleting a person* above, where the same limit is
+`/v1/identify` — see *Privacy: deletion and export* above, where the same limit is
 described in full. An `anonymous_id` alone is not enough to export a subject.
 Traits are omitted entirely once a boundary exists — a trait carries no
 event time (it is the *latest* value known for that key, not a timestamped

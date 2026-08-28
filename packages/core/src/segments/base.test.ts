@@ -70,6 +70,16 @@ describe('baseCte', () => {
     expect(sql).toContain('GROUP BY person_id')
   })
 
+  // The identified/anonymous distinction a member list marks with an icon
+  // (AcceptedTable.tsx's feed icon, taken to its person-level meaning) --
+  // true the instant ANY of a person's device-index rows carried a real
+  // user_id, cast to a real ClickHouse `Bool` so it reaches JSON as
+  // `true`/`false` rather than `1`/`0`.
+  it('marks a person identified the instant any of their device rows carried a real user_id', () => {
+    const { sql } = build()
+    expect(sql).toContain("CAST(max(user_id != ''), 'Bool') AS identified")
+  })
+
   it('takes latest context by last_seen and first touch by first_seen', () => {
     const { sql } = build()
     expect(sql).toMatch(/argMax\(m_latest_country,\s*m_last_seen\)/)

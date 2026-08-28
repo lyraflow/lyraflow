@@ -131,13 +131,20 @@ interface SegmentsListResponse {
 }
 
 /** One row of a segment run's `members` (segments/cache.ts's `MemberRow`) —
- * `person_id`/`first_seen`/`last_seen` are guaranteed; anything else is a
- * context field this table does not attempt to show. */
+ * `person_id`/`first_seen`/`last_seen`/`identified` are guaranteed; anything
+ * else is a context field or a trait map this table does not attempt to show.
+ *
+ * The index signature mirrors `MemberRow`'s own, character for character, and
+ * it has to: `--json` echoes the row whole, so anything the wire carries that
+ * this type cannot express is a claim this interface makes falsely about
+ * output the CLI already forwards intact. `identified` was exactly that — a
+ * `boolean` under a `string | number` signature. */
 interface MemberRecord {
   person_id: string
   first_seen: string
   last_seen: string
-  [field: string]: string | number
+  identified: boolean
+  [field: string]: string | number | boolean | Record<string, string> | Record<string, number>
 }
 
 /** POST /v1/segments/:id/preview's response shape (segments/routes.ts). #21:

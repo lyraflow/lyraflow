@@ -4,6 +4,7 @@ import { Feed } from '../screens/Feed.js'
 import { FunnelBuilder } from '../screens/FunnelBuilder.js'
 import { FunnelDetail } from '../screens/FunnelDetail.js'
 import { Funnels } from '../screens/Funnels.js'
+import { People } from '../screens/People.js'
 import { Profile } from '../screens/Profile.js'
 import { Retention } from '../screens/Retention.js'
 import { SegmentBuilder } from '../screens/SegmentBuilder.js'
@@ -32,6 +33,7 @@ export const ROUTES = {
   segmentNew: '/segments/new',
   retention: '/retention',
   trends: '/trends',
+  people: '/people',
 } as const
 
 /** Path builders for the parameterised routes. Numeric ids only, so no final
@@ -137,6 +139,7 @@ export function AppRouter(props: {
       onUnauthorized={props.onUnauthorized}
     />
   )
+  const people = <People client={props.client} onUnauthorized={props.onUnauthorized} />
   return (
     <BrowserRouter>
       <Shell email={props.email} onLogout={props.onLogout} client={props.client}>
@@ -165,6 +168,7 @@ export function AppRouter(props: {
           <Route path={ROUTES.segmentNew} element={segmentNew} />
           <Route path="/segments/:id" element={segmentDetail} />
           <Route path="/segments/:id/edit" element={segmentEdit} />
+          <Route path={ROUTES.people} element={people} />
           <Route path="*" element={feed} />
         </Routes>
       </Shell>

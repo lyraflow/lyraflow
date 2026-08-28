@@ -45,6 +45,13 @@ export { MEMBER_PAGE_SIZE, MEMBER_WINDOW_MAX } from './limits.js'
  * Traits ARE returned, bounded — see `boundedTraitMap` for the bound and for
  * why this reversed. They cost no extra join: the `traits` CTE is built and
  * LEFT JOINed for every compiled segment already, because predicates read it.
+ *
+ * `identified` is `base`'s own column (see base.ts's `base` CTE) — reading it
+ * unqualified here is what lets this SAME projection compile unchanged for
+ * the funnel people query, which joins `base` by name rather than embedding
+ * it: a version of this column computed here instead would need re-deriving
+ * (or re-joining) wherever `memberProjection` is called, and there are two
+ * such call sites (`compileSegment`, `funnels/compile.ts`'s members branch).
  */
 /**
  * How many of one person's traits a member row carries.
@@ -105,6 +112,7 @@ export function memberProjection(): string {
     'person_id',
     'first_seen',
     'last_seen',
+    'identified',
     ...context,
     `${boundedTraitMap('string')} AS traits`,
     `${boundedTraitMap('number')} AS traits_num`,

@@ -13,6 +13,7 @@ const result = (rows = 0): CachedResult => ({
     person_id: `p${i}`,
     first_seen: '2026-01-01 00:00:00.000',
     last_seen: '2026-01-02 00:00:00.000',
+    identified: false,
     traits: {},
     traits_num: {},
     trait_total: 0,

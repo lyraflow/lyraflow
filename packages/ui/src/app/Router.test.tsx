@@ -139,6 +139,21 @@ describe('AppRouter', () => {
     expect(link).toHaveAttribute('aria-current', 'page')
   })
 
+  // Same resolution guard as Funnels' and Segments' own pair above, for the
+  // route Task 6 adds. `/people` with no `?id=` renders the lookup state
+  // (no fetch to mock), so the plain `renderAt` client above is enough.
+  it('resolves /people to People, not the feed catch-all', async () => {
+    renderAt('/people')
+    expect(await screen.findByRole('heading', { name: /^people$/i })).toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: /accepted/i })).not.toBeInTheDocument()
+  })
+
+  it('marks People as current at /people', async () => {
+    renderAt('/people')
+    const link = await screen.findByRole('link', { name: /people/i })
+    expect(link).toHaveAttribute('aria-current', 'page')
+  })
+
   // IMPORTANT 3 from the whole-branch review: `onUnauthorized` used to be
   // handed only to `Feed` -- an admin on `/settings` with an expired
   // session had no unauthorized detector of its own, only `App`'s hour-long

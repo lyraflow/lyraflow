@@ -202,6 +202,15 @@ export interface LyraEvent {
 export interface EventsPage {
   events: LyraEvent[]
   next_cursor: string | null
+  /**
+   * Built from the page's FIRST (oldest) row, the same way `next_cursor` is
+   * built from its last (newest) one -- present on every response regardless
+   * of which direction produced it. Paired with `next_cursor` this lets a
+   * caller that opened on a `before` walk keep walking backwards, or turn
+   * around and walk forwards again, without re-deriving a cursor from row
+   * data itself.
+   */
+  prev_cursor: string | null
 }
 
 export interface StatsBucket {
@@ -235,7 +244,22 @@ export interface EventsQuery {
   since?: string
   until?: string
   after?: string
+  /**
+   * The backwards half of the keyset walk. Mutually exclusive with `after`
+   * -- the server 400s `invalid_query` if both are sent, rather than
+   * picking a winner.
+   */
+  before?: string
   event?: string
+  /**
+   * A user id, anonymous id or device id -- narrows the feed to one
+   * person's own events, resolved server-side the same way `GET
+   * /v1/persons/:id` resolves its own path parameter
+   * (`identity/scope.ts`'s `resolvePersonScope`). The feed screen never
+   * sets this; `people/Timeline.tsx` (Task 7) is the first caller, walking
+   * one person's history rather than the project's.
+   */
+  person?: string
 }
 export interface StatsQuery {
   interval?: '1m' | '1h' | '1d' | '1w'
@@ -413,10 +437,18 @@ export interface MemberRow {
   person_id: string
   first_seen: string
   last_seen: string
+  /** True the instant any of this person's device-index rows carried a real
+   * `user_id` -- i.e. they were ever `identify()`d, rather than resolved
+   * purely through the device fallback (core's `base.ts`, the `base` CTE).
+   * `person_id` alone cannot tell the two apart, which is the whole reason
+   * this field exists: `MemberList` uses it the same way the feed's
+   * `AcceptedTable` uses `event.user_id` -- to mark which rows lead to a
+   * real profile, per #18. */
+  identified: boolean
   traits: Record<string, string>
   traits_num: Record<string, number>
   trait_total: number
-  [field: string]: string | number | Record<string, string> | Record<string, number>
+  [field: string]: string | number | boolean | Record<string, string> | Record<string, number>
 }
 
 /** Both preview routes. `members`, `next_cursor` and `window_exhausted` are
@@ -512,3 +544,65 @@ export interface RetentionRequest {
  */
 export type TrendPoint = StatsBucket
 export type TrendResult = StatsPage
+
+/**
+ * `GET /v1/persons/:id`.
+ *
+ * `ids` is every id this person owns -- their group of user ids and device
+ * ids together, deduped and sorted -- and `devices` is the subset of those
+ * that are device ids. `ids` alone cannot tell the two groups apart, which
+ * is why both travel: the identity header renders them apart, and needs
+ * `devices` to know which of `ids` to label which way.
+ *
+ * `traits_withheld` is true exactly when a deletion boundary exists for
+ * this person. Under it, `traits` and `traits_num` are both `{}` and
+ * `trait_total` is `0` -- but that is NOT the same fact as "this person has
+ * no traits", and a screen rendering these two cases must say different
+ * things for them. A trait carries no timestamp (the `argMax` states in
+ * `004_person_traits.sql` discard it), so unlike an event it cannot be
+ * split at a boundary -- the whole trait set is withheld or none of it is.
+ *
+ * `trait_total` is what the person HAS, which may exceed what `traits` /
+ * `traits_num` actually carry: both maps are capped at 50 entries, same
+ * discipline as `MemberRow`'s field of the same name.
+ */
+export interface Person {
+  person_id: string
+  /** Every id this person owns: user ids and device ids together. */
+  ids: string[]
+  /** The device ids among them -- a subset of `ids`. The identity header
+   * renders the two groups apart; `ids` alone cannot tell them apart. */
+  devices: string[]
+  first_seen: string
+  last_seen: string
+  events: number
+  traits: Record<string, string>
+  traits_num: Record<string, number>
+  trait_total: number
+  /** True when a deletion boundary exists. `traits` is then empty because a
+   * trait carries no timestamp and cannot be split at one -- NOT because
+   * the person has none. */
+  traits_withheld: boolean
+}
+
+/** `DELETE /v1/persons/:id`'s 202 response. `request_id` is the id
+ * `deletion()` below polls by -- not the person's own id, which travels
+ * separately as `person_id`. */
+export interface PersonDeletion {
+  request_id: number
+  person_id: string
+  suppressed_at: string
+}
+
+/**
+ * `GET /v1/deletions/:id`. Same cache discipline as `ProjectDeletion`:
+ * `completed_at` is `null` while pending or in progress, and `error` is set
+ * for a `failed` status, or for a `pending` retry that has already failed
+ * once and will try again.
+ */
+export interface DeletionStatus {
+  status: 'pending' | 'in_progress' | 'completed' | 'failed'
+  requested_at: string
+  completed_at: string | null
+  error?: string | null
+}

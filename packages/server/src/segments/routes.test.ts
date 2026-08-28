@@ -629,6 +629,54 @@ describe('POST /v1/segments/preview', () => {
     expect(atLeastOnce.statusCode).toBe(200)
     expect(atLeastOnce.json().person_count).toBe(1)
   })
+
+  /**
+   * THE FIXTURE THAT PROVES `identified` MEANS ANYTHING, not just that the
+   * field is present. One person is reached only through `track`'s bare
+   * `anonymous_id` -- never `identify()`d, resolved purely through the
+   * device fallback; one is reached through a real `user_id` directly. A
+   * member-row projection hardcoded to `identified: true` would pass on the
+   * first half of this test and fail only on the second.
+   */
+  it('marks an identified member true and a device-only member false', async () => {
+    const eventName = `identity-flag-${randomUUID()}`
+    const identifiedUser = `identity-flag-identified-${randomUUID()}`
+    const anonId = `identity-flag-anon-${randomUUID()}`
+
+    await app.inject({
+      method: 'POST',
+      url: '/v1/batch',
+      headers: { 'x-lyraflow-write-key': WRITE_KEY, 'user-agent': 'vitest' },
+      payload: {
+        batch: [
+          { type: 'track', message_id: randomUUID(), user_id: identifiedUser, event: eventName },
+          { type: 'track', message_id: randomUUID(), anonymous_id: anonId, event: eventName },
+        ],
+      },
+    })
+    await app.deps.buffer.flush()
+
+    const res = await preview({
+      ast_version: 1,
+      filter: {
+        kind: 'behavior',
+        event: eventName,
+        aggregate: 'count',
+        operator: '>=',
+        value: 1,
+        window: { kind: 'ever' },
+      },
+      include: ['members'],
+    })
+    expect(res.statusCode).toBe(200)
+    const members = res.json().members as Array<{ person_id: string; identified: boolean }>
+    // Both people, so a filter or join mistake dropping either one is not
+    // mistaken for the field just reading wrong on the one that remains.
+    expect(members.map((m) => m.person_id).sort()).toEqual([anonId, identifiedUser].sort())
+
+    expect(members.find((m) => m.person_id === identifiedUser)?.identified).toBe(true)
+    expect(members.find((m) => m.person_id === anonId)?.identified).toBe(false)
+  })
 })
 
 describe('/v1/segments CRUD and run', () => {
