@@ -11,17 +11,26 @@ Lyraflow records what people do in your product, stitches anonymous visits to
 known accounts, and lets you ask who did what. It runs on your own machine
 under Docker, and nothing leaves it.
 
-> **Early days.** v0.9 is the API and the operations behind it — ingest,
+> **Early days.** v0.11 is the API and the operations behind it — ingest,
 > identity, segments, funnels, event reads, privacy, retention, quotas and
 > backup — with a web UI over the top: a live event feed where any event opens
 > to show everything it arrived with, funnels that read as a flow and whose
 > steps can gate on who someone is as well as what they did, a segment builder
 > that filters on an event's own attributes as well as its properties, and
 > settings for your projects and your own account. Clicking a funnel step or a
-> segment lists the people behind the number, with their traits. There is
-> still **no person profile**: no per-person event history, and no way to open
-> someone who is neither in a segment nor at a funnel step. Journeys and
-> dashboards are still ahead. See [Web UI](#web-ui) for exactly what exists
+> segment lists the people behind the number, with their traits.
+>
+> This release finishes the reporting line it started: **retention grids** — of
+> the people who did one thing in a period, how many came back and did another
+> — and **trends**, an event over time split by a property or a column. Both
+> take conditions on the events they name, so one event name can mean two
+> things, and a condition can now ask for text, presence, a flag or a relative
+> date rather than only equality and ordering.
+>
+> There is still **no person profile**: no per-person event history, and no way
+> to open someone who is neither in a segment nor at a funnel step. Journeys,
+> dashboards and path analysis are still ahead, and neither report can be
+> saved — each lives in its URL. See [Web UI](#web-ui) for exactly what exists
 > and what does not.
 
 ## What it is good at
@@ -696,7 +705,7 @@ anything.
 
 ### `GET /v1/meta`
 
-**What release this install is running**, as `{"version": "0.10.0"}`. The Settings
+**What release this install is running**, as `{"version": "0.11.0"}`. The Settings
 screen's Install card reads it, which is where an operator finds the number to
 quote into a bug report or to compare against the latest release.
 

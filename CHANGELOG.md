@@ -21,7 +21,7 @@ here as it happened rather than tagged retroactively, for the same reason 0.1.0
 is: a tag created after the fact names a moment nobody could have fetched. Its
 one fix is contained in 0.3.0.
 
-## Unreleased
+## 0.11.0 — 2026-08-28
 
 ### Added
 
@@ -188,6 +188,12 @@ one fix is contained in 0.3.0.
   travel to GitHub in a referrer. The version also appears as small dimmed
   text at the foot of the sidebar, on every screen — hidden below `sm`,
   where that sidebar reflows into a top bar that already scrolls at 390px.
+  Beside it is a **changelog link, which points at `CHANGELOG.md` on `main`
+  rather than at this version's tag.** The Install card's "Release notes" link
+  already answers "what shipped in the version I am running"; from inside a
+  running install the useful question is the opposite one — what has shipped
+  since — and the file is newest-first, so it opens on exactly that. It also
+  cannot 404, which a tag link can before a release object exists.
 
 - **A link to the repository in the dashboard header**, beside the theme
   toggle — the label "Star on GitHub" at `sm` and wider, the star icon
