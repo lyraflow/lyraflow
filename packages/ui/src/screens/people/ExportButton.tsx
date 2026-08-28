@@ -50,10 +50,14 @@ import { Button } from '../../components/ui/button.js'
  *
  * A single event's bytes ARE bounded, just not by anything property-shaped:
  * Fastify's `bodyLimit` (`packages/server/src/app.ts`) caps the whole
- * ingest request -- one event per request -- at 1,048,576 bytes, past which
- * the server answers 413 before any route handler runs. So the true worst
- * case at 50,000 events is 50,000 events each up to that ceiling, roughly
- * **50 GB**, not the 7.7 GB an earlier version of this comment quoted --
+ * ingest request at 1,048,576 bytes, past which the server answers 413
+ * before any route handler runs. That is ONE global limit and there is no
+ * per-route override, so it bounds a single-event `/v1/track` body and a
+ * `/v1/batch` of up to 500 items (`payloads.ts`'s `BatchPayload`) alike --
+ * which means the per-EVENT ceiling is the single-event request, since a
+ * batch only divides the same million bytes among more events. So the true
+ * worst case at 50,000 events is 50,000 events each up to that ceiling,
+ * roughly **50 GB**, not the 7.7 GB an earlier version of this comment quoted --
  * that figure came from extrapolating the 164,744-byte sample above, which
  * is what the worst OBSERVED event looked like, not what ingest actually
  * permits.
