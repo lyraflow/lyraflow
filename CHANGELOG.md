@@ -21,6 +21,41 @@ here as it happened rather than tagged retroactively, for the same reason 0.1.0
 is: a tag created after the fact names a moment nobody could have fetched. Its
 one fix is contained in 0.3.0.
 
+## Unreleased
+
+### Added
+
+- **A person profile screen**, at `/people?id=…` (**#208**): a person's
+  stitched identity — canonical id, every id ever bound to it, split into
+  user ids and device ids, first seen, last seen, event count — their
+  traits, their latest context read from their newest event, and their full
+  event timeline, newest first, paged backwards a page at a time and
+  anchored to their own last-seen rather than the last 24 hours. Reached
+  from a segment member row, a funnel step's people panel, the feed's
+  person cell, a sidebar entry, and a lookup box on the screen itself —
+  there is still no People *list* to browse without an id in hand.
+
+  Two privacy actions sit on the profile. Export buffers the subject-access
+  response in the browser and triggers a save; past 50,000 events it shows
+  the equivalent `lyraflow persons export` command instead of a button that
+  would start a download doomed to hang. Delete is the same two-step,
+  typed-id-confirm pattern project deletion already uses, then polls to
+  completion.
+
+  `GET /v1/persons/:id` gains `traits`, `traits_num`, `trait_total`,
+  `devices` and `traits_withheld` to back it — the same trait shape a
+  segment member row already carries. **`traits_withheld: true` does not
+  mean this person has no traits**: it means a deletion boundary exists for
+  them, and a trait carries no timestamp to split at one, so this read
+  agrees with the export's own refusal rather than returning empty maps
+  that would read as "never had a trait."
+
+  `GET /v1/events` gains `before`, the backwards half of its keyset walk
+  and mutually exclusive with `after`, and every response now carries
+  `prev_cursor` alongside `next_cursor` — the page's own oldest and newest
+  rows, in every response, regardless of which direction produced the page,
+  which stays ordered oldest-first either way.
+
 ## 0.11.0 — 2026-08-28
 
 ### Added

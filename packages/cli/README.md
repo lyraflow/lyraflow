@@ -432,8 +432,14 @@ main README).
 lyraflow persons get user-42 --json
 ```
 ```json
-{"person_id":"user-42","ids":["user-42","visitor-1"],"first_seen":"2026-08-09T03:16:15.405Z","last_seen":"2026-08-09T03:20:31.657Z","events":4}
+{"person_id":"user-42","ids":["user-42","visitor-1"],"devices":["visitor-1"],"first_seen":"2026-08-09T03:16:15.405Z","last_seen":"2026-08-09T03:20:31.657Z","events":4,"traits":{"plan":"pro"},"traits_num":{},"trait_total":1,"traits_withheld":false}
 ```
+
+`traits`, `traits_num`, `trait_total`, `devices` and `traits_withheld` are new
+fields on `GET /v1/persons/:id` — this command has always printed the server's
+response body verbatim, so `persons get` prints traits now with no code change
+of its own. See *Reading a person* in the main README for what
+`traits_withheld` means.
 
 ### `persons export <id>`
 
