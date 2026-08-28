@@ -313,13 +313,23 @@ export function MemberList(props: {
                         {/* The icon marks "identified", not "linked" -- every
                          * row here links (unlike AcceptedTable's optional
                          * `linkPeople`), but only `m.identified` names a
-                         * real person. A member matched purely through the
-                         * device fallback still resolves to a real profile
-                         * page, yet marking it the same way would promise a
-                         * profile on exactly the rows that open a 404
-                         * (#18). Same rule, same icon, same sizing as the
-                         * feed's AcceptedTable -- two different marks for
-                         * one concept would be worse than none. */}
+                         * real person. `identified: false` means this
+                         * `person_id` is an `anonymous_id`
+                         * `resolvedPersonExpr` fell back to, and that id
+                         * does NOT resolve back: `resolvePersonScope`
+                         * reaches a device only through
+                         * `identity_bindings`, whose one writer is
+                         * `identify()` carrying both ids, so a
+                         * never-identified visitor has no binding and the
+                         * profile read answers `404 person_not_found`
+                         * (#18). The link is offered on every row anyway,
+                         * deliberately -- withholding it would contradict
+                         * the count this list just stood behind -- and the
+                         * profile's four-cause 404 copy handles the
+                         * landing. The icon marks the rows where the link
+                         * pays off. Same rule, same icon, same sizing as
+                         * the feed's AcceptedTable -- two different marks
+                         * for one concept would be worse than none. */}
                         {m.identified && <User className="size-4" aria-hidden="true" />}
                         {m.person_id}
                       </Link>

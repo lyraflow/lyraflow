@@ -261,13 +261,25 @@ export function AcceptedTable(props: {
                     >
                       {/* The icon marks "identified", not "linked" -- every
                        * row here links, but only a non-empty user_id names
-                       * a real person. An anonymous_id-only row still
-                       * resolves through resolvePersonScope's device
-                       * fallback, so its link is real too, yet marking it
-                       * the same way would promise a profile on exactly
-                       * the rows that open a 404 (#18). Keep this on
-                       * `event.user_id` alone -- widening it to "any
-                       * linked row" quietly turns the icon back into
+                       * a real person. An anonymous_id-only row's link
+                       * does NOT open a profile: `resolvePersonScope`
+                       * reaches a device only through `identity_bindings`
+                       * (its step 4, `mostRecentPersonFor`), and the one
+                       * writer of that table is `identify()` carrying both
+                       * ids (`ingest/routes.ts`). A visitor who has only
+                       * ever been `track`ed therefore has no binding, so
+                       * the scope is that id alone with no devices and no
+                       * windows, the event summary counts zero, and the
+                       * read answers `404 person_not_found` (#18).
+                       * The link is offered anyway, deliberately: hiding
+                       * it would contradict the feed the operator is
+                       * looking at, which is showing that visitor's events
+                       * right now, and the profile's four-cause 404 copy
+                       * is what handles the landing. The icon is what
+                       * marks the rows where the link pays off -- so keep
+                       * it on `event.user_id` alone. Widening it to "any
+                       * linked row" would promise a profile on exactly the
+                       * rows that 404, and turn the icon back into
                        * decoration. */}
                       {event.user_id && <User className="size-4" aria-hidden="true" />}
                       {event.user_id || event.anonymous_id}
