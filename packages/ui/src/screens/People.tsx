@@ -69,6 +69,27 @@ function LookupForm(props: {
 }
 
 /**
+ * The chrome every non-loaded branch shares -- the page heading, plus
+ * whatever that branch has to say beneath it.
+ *
+ * Pulled out rather than repeated five times (one per `Status` member plus
+ * the no-id state) because three more tasks mount into this file -- the
+ * timeline, the export button, the delete button -- and the moment any of
+ * them adds shared chrome (a toolbar for the two buttons is the obvious
+ * case), that change would otherwise have to be applied by hand in five
+ * places, with "four of five" the likely outcome. Cheapest to fix at five
+ * branches; only gets worse after.
+ */
+function Screen(props: { children: ReactNode }) {
+  return (
+    <div className="flex flex-col gap-6">
+      <h1 className="font-semibold text-lg">People</h1>
+      {props.children}
+    </div>
+  )
+}
+
+/**
  * A person profile -- one stitched identity, its traits, and (from Task 7)
  * the events it did.
  *
@@ -143,36 +164,38 @@ export function People(props: { client: ApiClient; onUnauthorized?: () => void }
 
   if (id === null) {
     return (
-      <div className="flex flex-col gap-6">
-        <h1 className="font-semibold text-lg">People</h1>
+      <Screen>
         <LookupForm draft={draft} onChange={setDraft} onSubmit={submit} />
-      </div>
+      </Screen>
     )
   }
 
   if (status.kind === 'fragmented') {
     return (
-      <div className="flex flex-col gap-6">
-        <h1 className="font-semibold text-lg">People</h1>
+      <Screen>
         {/* The 400 copy, verbatim. Past `MAX_PERSON_RANGE_CLAUSES` (200)
          * device windows, this route refuses to assemble the profile in one
          * query -- a real answer, not a bug, and one this screen names
          * rather than rendering as a broken page. `lyraflow persons get`
-         * still reads them, in chunks. */}
-        <p>
+         * still reads them, in chunks.
+         *
+         * `role="alert"` matches the 404 and generic-error branches below --
+         * all three are "we cannot show you this person, and here is why",
+         * and a screen-reader user should not get an assertive announcement
+         * for two of the three and silence for this one. */}
+        <p role="alert">
           <strong>This person&apos;s history spans more than 200 device windows</strong>, which is
           more than this screen can assemble in one query. They are still readable through the API —{' '}
           <code className="font-mono">lyraflow persons get {id}</code> — which walks their history
           in chunks.
         </p>
-      </div>
+      </Screen>
     )
   }
 
   if (status.kind === 'not-found') {
     return (
-      <div className="flex flex-col gap-6">
-        <h1 className="font-semibold text-lg">People</h1>
+      <Screen>
         <LookupForm
           draft={draft}
           onChange={setDraft}
@@ -194,27 +217,22 @@ export function People(props: { client: ApiClient; onUnauthorized?: () => void }
             </span>
           }
         />
-      </div>
+      </Screen>
     )
   }
 
   if (status.kind === 'error') {
     return (
-      <div className="flex flex-col gap-6">
-        <h1 className="font-semibold text-lg">People</h1>
+      <Screen>
         <p role="alert" className="text-destructive text-sm">
           Could not load this person. Reload to try again.
         </p>
-      </div>
+      </Screen>
     )
   }
 
   if (status.kind === 'loading') {
-    return (
-      <div className="flex flex-col gap-6">
-        <h1 className="font-semibold text-lg">People</h1>
-      </div>
-    )
+    return <Screen>{null}</Screen>
   }
 
   const { person } = status

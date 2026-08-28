@@ -19,6 +19,14 @@ describe('personPath / readPersonId', () => {
   it('encodes with encodeURIComponent, not encodeURI -- & # and = travel inside the value', () => {
     // encodeURI leaves &, # and = alone, each of which would otherwise end
     // or split the query parameter rather than stay part of the id.
+    //
+    // This is the ONLY test in this file that would catch an encodeURI
+    // regression. The round-trip test above uses '@', '/' and '.' -- all
+    // three are left unescaped by encodeURI too, and an unescaped '/'
+    // still round-trips through URLSearchParams, so that test passes
+    // identically under either function. Only a character URLSearchParams
+    // itself treats specially (here, '&' splitting the query string) can
+    // tell them apart.
     for (const id of ['a&b', 'a#b', 'a=b']) {
       const path = personPath(id)
       expect(path).not.toContain(`id=${id}`)
