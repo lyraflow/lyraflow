@@ -5,7 +5,14 @@
 // person counted in two cohorts, a return that predates the cohort quietly
 // landing in column 0. None of those is visible in the query text.
 import { join } from 'node:path'
-import { Params, type RetentionQuery, compileRetention } from '@lyraflow/core'
+import {
+  AST_VERSION,
+  type FilterNode,
+  Params,
+  type RetentionQuery,
+  compileRetention,
+  compileSegment,
+} from '@lyraflow/core'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { type PgDictionarySource, ensureIdentityDictionaries } from '../identity/dictionaries.js'
@@ -253,5 +260,76 @@ describe('retention grid (live ClickHouse)', () => {
     // stopping at `until` would report it as zero.
     const r = await grid({ until: '2026-06-08T00:00:00Z' })
     expect(row(r, W0)?.retained).toEqual([1, 2, 1, 1])
+  })
+})
+
+/**
+ * A grid restricted to a segment.
+ *
+ * Its own block because it is the one path that compiles TWO queries into one
+ * parameter sequence, and because it was broken: the person-set filter was
+ * appended after the `GROUP BY` rather than ANDed into the `WHERE`, which
+ * does not parse. Nothing caught it -- the only other test naming a segment
+ * named one that does not exist, which leaves the filter empty and the SQL
+ * valid.
+ *
+ * So this compiles a REAL segment through the same `compileSegment(select:
+ * 'persons')` call the route makes, threading one `Params` instance the way
+ * the route does.
+ */
+describe('a grid restricted to a segment (live ClickHouse)', () => {
+  const restricted = async (filter: FilterNode) => {
+    const params = new Params()
+    const segmentPersonSql = compileSegment({
+      query: { ast_version: AST_VERSION, filter },
+      projectId: PROJECT,
+      database: CH_DB,
+      now: SETTLED,
+      select: 'persons',
+      params,
+    }).sql
+    const query: RetentionQuery = {
+      start_event: 'signed_up',
+      return_event: 'project_created',
+      granularity: 'week',
+      periods: 3,
+      since: '2026-06-01T00:00:00Z',
+      until: '2026-06-15T00:00:00Z',
+    }
+    const compiled = compileRetention({
+      query,
+      projectId: PROJECT,
+      database: CH_DB,
+      now: SETTLED,
+      segmentPersonSql,
+      params,
+    })
+    return runRetention({ client: ch, compiled, query, now: SETTLED })
+  }
+
+  it('runs at all -- the filter has to be valid SQL in the position it is spliced into', async () => {
+    // The assertion that was missing. A `GROUP BY x WHERE y` throws a parse
+    // error, so this test fails on the exception rather than on a number.
+    const everyone: FilterNode = {
+      kind: 'lifecycle',
+      field: 'first_seen',
+      operator: '>=',
+      value: '2000-01-01T00:00:00Z',
+    } as unknown as FilterNode
+    const r = await restricted(everyone)
+    expect(r.cohorts.length).toBeGreaterThan(0)
+  })
+
+  it('narrows the cohorts to the segment population', async () => {
+    // Nobody can have been first seen in the future, so this segment is
+    // empty and every cohort must vanish -- which also proves the filter is
+    // actually applied rather than merely parsing.
+    const nobody: FilterNode = {
+      kind: 'lifecycle',
+      field: 'first_seen',
+      operator: '>=',
+      value: '2099-01-01T00:00:00Z',
+    } as unknown as FilterNode
+    expect((await restricted(nobody)).cohorts).toHaveLength(0)
   })
 })

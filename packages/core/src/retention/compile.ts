@@ -140,8 +140,14 @@ export function compileRetention(opts: {
   const startCond = startName === null ? '1' : `event_name = ${startName}`
   const returnCond = returnName === null ? '1' : `event_name = ${returnName}`
 
+  // ANDed into the WHERE, not appended after the GROUP BY. It was the
+  // latter, which is not merely stylistically wrong -- `GROUP BY x WHERE …`
+  // does not parse, so every grid carrying a real `segment_id` failed at
+  // ClickHouse. It went unnoticed because the only test naming a segment
+  // named one that does not exist, which leaves `segmentPersonSql`
+  // undefined and this string empty.
   const segmentFilter = segmentPersonSql
-    ? `\n    WHERE ${RESOLVED_PERSON_ALIAS} IN (${segmentPersonSql})`
+    ? ` AND ${RESOLVED_PERSON_ALIAS} IN (${segmentPersonSql})`
     : ''
 
   const sql = `
@@ -165,8 +171,8 @@ cohorts AS (
     ${RESOLVED_PERSON_ALIAS},
     ${bucket.of('min(timestamp)')} AS cohort
   FROM scan
-  WHERE ${startCond} AND timestamp < ${untilParam}
-  GROUP BY ${RESOLVED_PERSON_ALIAS}${segmentFilter}
+  WHERE ${startCond} AND timestamp < ${untilParam}${segmentFilter}
+  GROUP BY ${RESOLVED_PERSON_ALIAS}
 ),
 activity AS (
   SELECT
