@@ -1,5 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import { ApiError } from '../../api/client.js'
@@ -209,5 +210,32 @@ describe('ExportButton -- cancellation', () => {
     // Whoever is on screen now must not be thrown to the login form by an
     // export nobody is waiting for.
     expect(onUnauthorized).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * `live.current = true` in the effect body, not only at `useRef(true)`'s
+ * own initialiser. `StrictMode` runs a component's effects mount, cleanup,
+ * mount again on initial mount (dev only) precisely to catch a cleanup with
+ * no matching re-arm -- without this line, the sequence leaves `live`
+ * permanently `false`: initial value `true`, first cleanup sets `false`,
+ * second mount does nothing to undo it. Every export after that point is
+ * silently a no-op, in dev, with no error anywhere.
+ *
+ * `render` alone does not exercise this -- none of the tests above wrap in
+ * `StrictMode`, so none of them would notice this line's absence.
+ */
+describe('ExportButton -- StrictMode', () => {
+  it('still downloads after the dev-only double mount/unmount/remount', async () => {
+    const client = makeClient()
+    ;(client.personExport as Mock).mockResolvedValue(new Blob(['x']))
+    render(
+      <StrictMode>
+        <ExportButton eventCount={10} {...base(client)} />
+      </StrictMode>,
+    )
+    await click(/export/i)
+    await waitFor(() => expect(createObjectURL).toHaveBeenCalled())
+    expect(lastAnchor).not.toBeNull()
   })
 })
