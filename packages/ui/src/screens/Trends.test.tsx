@@ -365,6 +365,28 @@ describe('Trends -- saving and reopening a saved report', () => {
     )
   })
 
+  // I2 from the whole-branch review: `/trends/new` -> `/trends/:id` on
+  // CREATE is a full remount (`Router.tsx` gives the two routes different
+  // `key`s), and the remount's load effect used to auto-run again -- the
+  // exact chart already on screen, re-fetched for nothing. Asserting on the
+  // CALL COUNT is the point: a version that merely waits for `stats` to
+  // have been called at all would pass whether it ran once or twice.
+  it('does not re-run the query a moment after Save -- the results are already on screen', async () => {
+    const client = renderAt('/trends/new?event=signup&interval=1d')
+    await click(/^run$/i)
+    await waitFor(() => expect(client.stats).toHaveBeenCalledTimes(1))
+    await type(/name/i, 'Signups by day')
+    await click(/save/i)
+    await waitFor(() => expect(client.createTrendReport).toHaveBeenCalled())
+    // Give the remount's own load effect a tick to do whatever it is going
+    // to do before reading the call count -- it fetches the report's
+    // metadata either way, so that fetch having resolved is the signal the
+    // effect has run its course.
+    await waitFor(() => expect(client.trendReport).toHaveBeenCalled())
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(client.stats).toHaveBeenCalledTimes(1)
+  })
+
   it('never includes the range in a saved report’s body', async () => {
     // Mutation table: sending the range would be the first step toward
     // storing it despite decision 1 -- so this asserts the body's whole

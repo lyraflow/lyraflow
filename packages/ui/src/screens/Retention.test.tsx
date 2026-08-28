@@ -394,6 +394,28 @@ describe('Retention -- saving and reopening a saved report', () => {
     )
   })
 
+  // I2 from the whole-branch review: `/retention/new` -> `/retention/:id` on
+  // CREATE is a full remount (`Router.tsx` gives the two routes different
+  // `key`s), and the remount's load effect used to auto-run again -- a full
+  // ClickHouse cohort scan, for a grid already on screen. Asserting on the
+  // CALL COUNT is the point: a version that merely waits for `runRetention`
+  // to have been called at all would pass whether it ran once or twice.
+  it('does not re-run the scan a moment after Save -- the grid is already on screen', async () => {
+    const client = renderAt('/retention/new?start=signed_up&return=project_created')
+    await click(/^run$/i)
+    await waitFor(() => expect(client.runRetention).toHaveBeenCalledTimes(1))
+    await type(/name/i, 'Signup to purchase')
+    await click(/save/i)
+    await waitFor(() => expect(client.createRetentionReport).toHaveBeenCalled())
+    // Give the remount's own load effect a tick to do whatever it is going
+    // to do before reading the call count -- it fetches the report's
+    // metadata either way, so that fetch having resolved is the signal the
+    // effect has run its course.
+    await waitFor(() => expect(client.retentionReport).toHaveBeenCalled())
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(client.runRetention).toHaveBeenCalledTimes(1)
+  })
+
   it('never includes the range in a saved report’s body', async () => {
     // Mutation table: sending the range would be the first step toward
     // storing it despite decision 1 -- so this asserts the body's whole key

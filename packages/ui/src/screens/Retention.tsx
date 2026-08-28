@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useNavigate, useParams, useSearchParams } from 'react-router'
+import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import type { RetentionReportInput, RetentionResult } from '../api/types.js'
@@ -51,6 +51,27 @@ function reportBody(p: RetentionParams, name: string): RetentionReportInput {
 }
 
 /**
+ * What `handleSave` hands `navigate` on CREATE, and what the load effect
+ * below reads back on the far side of it.
+ *
+ * IMPORTANT from the whole-branch review: `/retention/new` and
+ * `/retention/:id` carry different `key`s in `Router.tsx`, so a
+ * create-then-navigate is a full remount -- `result` starts back at `null`,
+ * and the load effect (which fires whenever `reportId` newly names a
+ * report) would otherwise call `run()` again -- a full ClickHouse cohort
+ * scan -- for a grid already sitting on screen a moment before. This
+ * screen's own module docstring says "a grid is a real scan, so it runs
+ * when asked"; nobody asked for a second one just because Save happened to
+ * remount the screen. Carrying the just-computed result through router
+ * state -- rather than, say, skipping the load effect outright -- means the
+ * freshly-created report's own address renders with its numbers
+ * immediately, with no re-fetch and no flash of "nothing here yet".
+ */
+interface JustSavedState {
+  result: RetentionResult
+}
+
+/**
  * Retention: of the people who did X in one period, how many did Y in the
  * periods after it.
  *
@@ -80,6 +101,7 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
   const { client, onUnauthorized } = props
   const { activeId } = useProject()
   const navigate = useNavigate()
+  const location = useLocation()
   const routeParams = useParams<{ id: string }>()
   const rawId = routeParams.id == null ? null : Number(routeParams.id)
   const reportId = rawId != null && Number.isSafeInteger(rawId) ? rawId : null
@@ -87,7 +109,12 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
   const [search, setSearch] = useSearchParams()
   const params = readRetentionParams(search)
 
-  const [result, setResult] = useState<RetentionResult | null>(null)
+  // Seeded from `JustSavedState` when this render is the remount a CREATE's
+  // `navigate` just produced -- see that type's own comment. `null` in
+  // every other case, exactly as before.
+  const [result, setResult] = useState<RetentionResult | null>(
+    () => (location.state as JustSavedState | null)?.result ?? null,
+  )
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -214,6 +241,21 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
     loadedIdentityRef.current = identity
     let cancelled = false
     setReportError(null)
+    // I2 from the whole-branch review. A CREATE's `navigate` (in
+    // `handleSave` below) leaves THIS render's `location` carrying
+    // `JustSavedState` -- read fresh here rather than off a ref frozen at
+    // mount, so this is right whether or not this identity change happens
+    // to be a full remount. Consumed at most once: cleared from history
+    // right away so a later reload of this exact address (which keeps
+    // whatever `history.state` is current) runs the query for real rather
+    // than replaying these results forever.
+    const justSaved = (location.state as JustSavedState | null)?.result != null
+    if (justSaved) {
+      navigate(
+        { pathname: location.pathname, search: location.search },
+        { replace: true, state: null },
+      )
+    }
     client
       .retentionReport(activeId, reportId)
       .then((r) => {
@@ -252,7 +294,11 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
         // unconditionally for the same reason. The operator still gets the
         // Run button -- this only stops the AUTOMATIC run decision 5 exists
         // to guard, exactly as it stops one for an over-cap report.
+        // `justSaved` skips exactly the scan this task exists to stop
+        // repeating -- the results it protects are already in `result`,
+        // seeded by this same render's lazy `useState` initializer above.
         if (
+          !justSaved &&
           finalParams.start !== '' &&
           finalParams.return !== '' &&
           seededUnfinished === 0 &&
@@ -304,10 +350,21 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
         // same way `Trends.tsx` does for a saved trend -- see that
         // screen's own comment on why the current search is carried across
         // rather than left to reset.
+        //
+        // I2 from the whole-branch review: `result` (whatever is on screen
+        // right now, possibly `null` if nothing was ever run) rides along
+        // as router state -- see `JustSavedState`'s own comment for why,
+        // and the load effect above for where it is read back. Only ever
+        // carries a REAL result: if nothing was run before Save, there is
+        // nothing "already on screen" to protect, and the remount's normal
+        // fetch-and-maybe-run is the first run, not a repeat of one.
         if (reportId == null) {
           navigate(
             { pathname: retentionReportPath(saved.id), search: search.toString() },
-            { replace: true },
+            {
+              replace: true,
+              state: result === null ? undefined : ({ result } satisfies JustSavedState),
+            },
           )
         }
       })
@@ -325,7 +382,18 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
         )
       })
       .finally(() => setSaving(false))
-  }, [canSave, activeId, params, trimmedName, reportId, client, navigate, search, onUnauthorized])
+  }, [
+    canSave,
+    activeId,
+    params,
+    trimmedName,
+    reportId,
+    client,
+    navigate,
+    search,
+    result,
+    onUnauthorized,
+  ])
 
   return (
     <section className="flex flex-col gap-6">
