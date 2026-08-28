@@ -1,3 +1,4 @@
+import { INTERVALS } from '@lyraflow/core'
 import type { Pool } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
@@ -10,13 +11,24 @@ export interface TrendDeps {
   pg: Pool
 }
 
-/** Same enum `020_saved_reports.sql`'s CHECK constraint and the UI's
- *  `INTERVALS` agree on -- restated here rather than imported, the same
- *  choice `reports/routes.ts` already made for its own request shapes: the
- *  server package does not depend on the UI package, and the point of
- *  restating it is to refuse an unknown bucket width here rather than let a
- *  CHECK violation reach Postgres as an unmapped 500. */
-const Interval = z.enum(['1m', '1h', '1d', '1w'])
+/**
+ * `INTERVALS` from `@lyraflow/core` -- the single TypeScript source of truth
+ * for the four bucket widths, shaped exactly like `GRANULARITIES` in
+ * `reports/routes.ts`'s own precedent: THAT file imports `GRANULARITIES`
+ * from core rather than restating it, and this now does the same rather than
+ * carrying an independent literal that could drift from `TrendStore`'s own
+ * `Interval` (also imported from core -- see `trend-store.ts`).
+ *
+ * `020_saved_reports.sql`'s CHECK constraint (`interval IN
+ * ('1m','1h','1d','1w')`) is still a SEPARATE, hand-written copy, and that is
+ * a floor rather than an oversight left over from this fix: SQL cannot
+ * import a TypeScript module, so the constraint can only ever be kept in
+ * agreement by hand -- exactly the position `granularity`'s own CHECK
+ * constraint is already in against `GRANULARITIES`. Two copies (this core
+ * constant, the migration) is the fewest this can ever be; one is the
+ * fewest the TypeScript side needs, which is what importing here achieves.
+ */
+const Interval = z.enum(INTERVALS)
 
 const CreateBody = z.object({
   name: z.string().min(1).max(200),

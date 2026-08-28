@@ -107,6 +107,77 @@ describe('TrendStore', () => {
     )
   })
 
+  /**
+   * `group_by`'s tri-state PATCH -- mirrors `FunnelStore.update`'s five
+   * `segment_id` tests (funnels/store.test.ts) exactly, adapted to a store
+   * with no cached snapshot to also assert on. `TrendStore.update`'s
+   * `group_by = CASE WHEN $6 THEN $7 ELSE group_by END` has three branches
+   * (set, clear, leave alone) and nothing here exercises it without these:
+   * a swapped `$6`/`$7` binding, or a mis-bound "was this key present"
+   * flag, would leave every OTHER trend-store test green.
+   */
+  describe("group_by's tri-state update", () => {
+    it('group_by set for the first time', async () => {
+      const made = await store.create(projectA, {
+        name: 'First breakdown',
+        event: 'e',
+        interval: '1d',
+        group_by: null,
+      })
+      await store.update(projectA, made.id, { group_by: 'attribute:country' })
+      expect((await store.get(projectA, made.id))?.group_by).toBe('attribute:country')
+    })
+
+    it('group_by cleared to null having previously been set', async () => {
+      const made = await store.create(projectA, {
+        name: 'Clearable',
+        event: 'e',
+        interval: '1d',
+        group_by: 'attribute:country',
+      })
+      await store.update(projectA, made.id, { group_by: null })
+      expect((await store.get(projectA, made.id))?.group_by).toBeNull()
+    })
+
+    it('group_by re-sent at its current value', async () => {
+      const made = await store.create(projectA, {
+        name: 'Unchanged breakdown',
+        event: 'e',
+        interval: '1d',
+        group_by: 'attribute:country',
+      })
+      await store.update(projectA, made.id, { group_by: 'attribute:country' })
+      expect((await store.get(projectA, made.id))?.group_by).toBe('attribute:country')
+    })
+
+    it('group_by explicitly re-cleared to null when it was already null', async () => {
+      const made = await store.create(projectA, {
+        name: 'Already clear',
+        event: 'e',
+        interval: '1d',
+        group_by: null,
+      })
+      await store.update(projectA, made.id, { group_by: null })
+      expect((await store.get(projectA, made.id))?.group_by).toBeNull()
+    })
+
+    it('tells a null group_by apart from an absent one', async () => {
+      // undefined (the key omitted from the patch) leaves the breakdown
+      // alone; explicit null clears it. Collapsing the two would make
+      // "remove the breakdown" unexpressible through PATCH.
+      const made = await store.create(projectA, {
+        name: 'Renamed, not re-grouped',
+        event: 'e',
+        interval: '1d',
+        group_by: 'attribute:country',
+      })
+      await store.update(projectA, made.id, { name: 'Renamed, not re-grouped v2' })
+      expect((await store.get(projectA, made.id))?.group_by).toBe('attribute:country')
+      await store.update(projectA, made.id, { group_by: null })
+      expect((await store.get(projectA, made.id))?.group_by).toBeNull()
+    })
+  })
+
   it('a deleted project takes its trends with it', async () => {
     const made = await store.create(projectA, {
       name: 'Doomed',

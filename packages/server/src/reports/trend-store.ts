@@ -1,13 +1,11 @@
+import type { Interval } from '@lyraflow/core'
 import type { Pool } from '@lyraflow/db'
-
-/** The four bucket widths `020_saved_reports.sql`'s CHECK constraint allows. */
-export type TrendInterval = '1m' | '1h' | '1d' | '1w'
 
 export interface StoredTrend {
   id: number
   name: string
   event: string
-  interval: TrendInterval
+  interval: Interval
   group_by: string | null
   created_at: string
   updated_at: string
@@ -24,7 +22,7 @@ export interface StoredTrend {
 export interface TrendInput {
   name: string
   event: string
-  interval: TrendInterval
+  interval: Interval
   group_by: string | null
 }
 
@@ -42,7 +40,7 @@ interface Row {
   id: string
   name: string
   event: string
-  interval: TrendInterval
+  interval: Interval
   group_by: string | null
   created_at: string
   updated_at: string
