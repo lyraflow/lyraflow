@@ -206,11 +206,16 @@ export interface EventsPage {
 
 export interface StatsBucket {
   bucket: string
+  /** Present only for `group_by=event_name`, kept for pre-trends callers. */
   event_name?: string
+  /** The breakdown value. Absent when nothing was grouped. */
+  series?: string
   events: number
 }
 export interface StatsPage {
   buckets: StatsBucket[]
+  /** How many series the server folded into `(other)`. Absent when ungrouped. */
+  folded_series?: number
 }
 
 export interface Rejection {
@@ -233,7 +238,7 @@ export interface EventsQuery {
   event?: string
 }
 export interface StatsQuery {
-  interval?: '1m' | '1h' | '1d'
+  interval?: '1m' | '1h' | '1d' | '1w'
   since?: string
   until?: string
   /** One event name. The same field `EventsQuery` carries, because the feed
@@ -241,6 +246,15 @@ export interface StatsQuery {
    * filter reaching only one of them would put two different questions on
    * one screen. */
   event?: string
+  /**
+   * `event_name`, `attribute:<column>` or `property:<key>`.
+   *
+   * A string rather than a union, because the `property:` half carries a
+   * caller-supplied key no union can enumerate. `screens/trends/params.ts`
+   * builds it; the server refuses anything it does not recognise rather than
+   * ignoring it.
+   */
+  group_by?: string
 }
 export interface RejectionsQuery {
   limit?: number
@@ -484,3 +498,12 @@ export interface RetentionRequest {
   until?: string
   segment_id?: number | null
 }
+
+/**
+ * A trend is a `StatsPage` -- the SAME response the feed's chart reads, with
+ * a `series` field on each bucket. Aliased rather than redeclared: two shapes
+ * for one endpoint is how the feed and this screen would come to disagree
+ * about what the server returns.
+ */
+export type TrendPoint = StatsBucket
+export type TrendResult = StatsPage

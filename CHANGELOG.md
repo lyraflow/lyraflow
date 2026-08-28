@@ -25,6 +25,42 @@ one fix is contained in 0.3.0.
 
 ### Added
 
+- **Trends: an event over time, split by a property or a column** (**#72**,
+  the trends half). `GET /v1/events/stats` — the endpoint the Feed's chart
+  already used — gains `group_by=attribute:<column>` and
+  `group_by=property:<key>` alongside the `event_name` it always took, plus a
+  `1w` interval. A **Trends** screen draws it.
+
+  Extended rather than given its own route, so the bucket cap, the `event_id`
+  deduplication and the deletion boundary are the ones that route already
+  enforced rather than a second set to keep in agreement. `group_by=event_name`
+  still returns the `event_name` field the CLI's snippet command reads.
+
+  **Events with no value there are a `(not set)` series, not dropped rows**,
+  so a split always adds up to the same total the ungrouped request returns
+  and can be checked against the Feed. A property is read from **both**
+  property bags, so a numeric property splits by its value instead of
+  collapsing into one empty series.
+
+  **At most ten series, with the rest summed into a labelled `(other)` and
+  counted** in `folded_series`. Ranked by total over the window rather than by
+  any single bucket, so a series does not appear and disappear as the window
+  moves. A breakdown past 20,000 bucket/series rows is **refused** with
+  `too_many_series` rather than truncated.
+
+  **Weeks start Monday, in UTC** — the same anchoring a retention cohort uses,
+  measured against ClickHouse rather than assumed, so a weekly trend and a
+  weekly cohort row cannot disagree about where a week begins.
+
+  The screen draws a split as **small multiples on one shared scale** rather
+  than overlaid coloured lines. Lyraflow's palette is a single copper ramp,
+  built and documented for *ordinal* data like funnel stages; a breakdown's
+  values are categorical, so a lightness ramp over them would spend the only
+  channel there is on a rank the data does not have. A categorical palette is
+  a brand-tooling change with its own contrast script, not something a
+  component invents.
+
+
 - **Retention grids** (**#72**, the retention half of the v0.2 reporting
   line). `POST /v1/reports/retention` and a **Retention** screen: of the
   people who did one thing in a period, how many came back and did another in

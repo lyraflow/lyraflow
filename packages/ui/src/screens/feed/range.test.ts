@@ -13,7 +13,9 @@ import {
  * Restated rather than imported: the UI package does not depend on the
  * server, and a copy that drifts is exactly what the test below catches. */
 const STATS_MAX_BUCKETS = 1000
-const INTERVAL_MS = { '1m': 60_000, '1h': 3_600_000, '1d': 86_400_000 }
+/** Every interval the endpoint accepts, so this map cannot be the narrower of
+ * the two when the server learns another one -- which it did, for trends. */
+const INTERVAL_MS = { '1m': 60_000, '1h': 3_600_000, '1d': 86_400_000, '1w': 604_800_000 }
 /** Both ceilings, and which one binds depends on the span -- at thirty days
  * it is the display one, at every other span it is the server's. */
 const CAP = Math.min(STATS_MAX_BUCKETS, MAX_DISPLAY_BUCKETS)
@@ -38,9 +40,13 @@ describe('FEED_RANGES', () => {
   it('takes the FINEST resolution each span can legally carry', () => {
     // The bound above is satisfied by answering `1d` to everything, which
     // would draw an hour of traffic as a single bar. This is the other half.
+    // `1w` deliberately absent: no feed range uses it, and including it would
+    // make this assert that the 90-day range should have been weekly.
     const order = ['1m', '1h', '1d'] as const
     for (const range of FEED_RANGES) {
-      const finer = order[order.indexOf(range.interval) - 1]
+      const at = (order as readonly string[]).indexOf(range.interval)
+      if (at === -1) continue
+      const finer = order[at - 1]
       if (finer === undefined) continue
       const buckets = Math.ceil(range.spanMs / INTERVAL_MS[finer])
       expect(buckets).toBeGreaterThan(CAP)

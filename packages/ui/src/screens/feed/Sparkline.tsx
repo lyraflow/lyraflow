@@ -51,6 +51,14 @@ const BUCKET_MS_BY_INTERVAL = {
   '1m': 60_000,
   '1h': 60 * 60_000,
   '1d': 24 * 60 * 60_000,
+  // No feed range asks for this one today -- the widest is 90 days at `1d`.
+  // It is here because `FeedRange.interval` is derived from the ENDPOINT's
+  // interval set (`StatsQuery['interval']`), so the moment the server learned
+  // `1w` for trends this map became the narrower of the two, and the gap is a
+  // compile error rather than something anyone would notice at review. Adding
+  // the width keeps the two in step; the alternative is redeclaring the feed's
+  // own narrower union and letting them drift instead.
+  '1w': 7 * 24 * 60 * 60_000,
 } as const
 
 export type SparklineInterval = keyof typeof BUCKET_MS_BY_INTERVAL
