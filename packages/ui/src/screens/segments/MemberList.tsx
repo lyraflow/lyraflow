@@ -1,5 +1,6 @@
 import { MEMBER_PAGE_SIZE } from '@lyraflow/core/segments/limits.js'
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router'
 import type { MemberRow } from '../../api/types.js'
 import { DetailPanel, ExpandToggle } from '../../components/DetailList.js'
 import { Button } from '../../components/ui/button.js'
@@ -11,6 +12,7 @@ import {
   TableHeader,
   TableRow,
 } from '../../components/ui/table.js'
+import { personPath } from '../people/params.js'
 import { AttributesSection, TraitsSection } from '../shared/PersonFields.js'
 import { formatDate } from '../shared/format.js'
 
@@ -295,7 +297,21 @@ export function MemberList(props: {
                         onToggle={toggle}
                       />
                     </TableCell>
-                    <TableCell className="font-mono text-muted-foreground">{m.person_id}</TableCell>
+                    <TableCell className="font-mono text-muted-foreground">
+                      {/* `stopPropagation` for the same reason `ExpandToggle`
+                       * carries it (see that component's own comment): the
+                       * row's own onClick would otherwise also fire on this
+                       * click and toggle the panel underneath the
+                       * navigation. `AcceptedTable`'s person cell is the
+                       * same pattern for the same reason. */}
+                      <Link
+                        to={personPath(m.person_id)}
+                        className="hover:underline"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {m.person_id}
+                      </Link>
+                    </TableCell>
                     <TableCell className="text-muted-foreground">
                       {formatDate(m.first_seen)}
                     </TableCell>

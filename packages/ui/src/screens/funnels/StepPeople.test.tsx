@@ -1,11 +1,24 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import type { ReactNode } from 'react'
+import { MemoryRouter } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import { ApiError } from '../../api/client.js'
 import type { ApiClient } from '../../api/client.js'
 import type { FunnelPeoplePage, MemberRow } from '../../api/types.js'
 import { StepPeople } from './StepPeople.js'
+
+/**
+ * `StepPeople` renders `MemberList`, which now wraps every person id in a
+ * `react-router` `<Link>` unconditionally (#<issue>) -- so a render without
+ * a router in scope throws, where it used to render fine. Every test in
+ * this file needs one, not just tests that click the link, because the row
+ * itself carries the link whether or not a given test looks at it.
+ */
+function Router(props: { children: ReactNode }) {
+  return <MemoryRouter>{props.children}</MemoryRouter>
+}
 
 function member(id: string): MemberRow {
   return {
@@ -41,7 +54,7 @@ const BASE_PROPS = { projectId: 1, funnelId: 7, step: 2, range: RANGE }
 describe('StepPeople', () => {
   it('renders a reached/dropped toggle over a MemberList that is already loading', () => {
     const funnelPeople = vi.fn(async () => page())
-    render(<StepPeople client={fakeClient(funnelPeople)} {...BASE_PROPS} />)
+    render(<StepPeople client={fakeClient(funnelPeople)} {...BASE_PROPS} />, { wrapper: Router })
     expect(screen.getByRole('button', { name: /^reached/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^dropped here/i })).toBeInTheDocument()
     // No "Show people" gate: selecting a step IS the request, so the list is
@@ -51,7 +64,7 @@ describe('StepPeople', () => {
 
   it('fetches reached (the default mode) for the given project/funnel/step/range', async () => {
     const funnelPeople = vi.fn(async () => page({ person_count: 134 }))
-    render(<StepPeople client={fakeClient(funnelPeople)} {...BASE_PROPS} />)
+    render(<StepPeople client={fakeClient(funnelPeople)} {...BASE_PROPS} />, { wrapper: Router })
     await waitFor(() => expect(funnelPeople).toHaveBeenCalledTimes(1))
     expect(funnelPeople).toHaveBeenCalledWith(1, 7, {
       step: 2,
@@ -66,7 +79,7 @@ describe('StepPeople', () => {
     const funnelPeople = vi.fn(async (_p: number, _f: number, body: { mode: string }) =>
       body.mode === 'reached' ? page({ person_count: 134 }) : page({ person_count: 47 }),
     )
-    render(<StepPeople client={fakeClient(funnelPeople)} {...BASE_PROPS} />)
+    render(<StepPeople client={fakeClient(funnelPeople)} {...BASE_PROPS} />, { wrapper: Router })
 
     expect(await screen.findByRole('button', { name: 'Reached (134)' })).toBeInTheDocument()
     // Dropped has not been fetched yet -- its button must not show ANY
@@ -103,7 +116,7 @@ describe('StepPeople', () => {
       }
       return page({ members: [member('person-dropped-0')], person_count: 47 })
     })
-    render(<StepPeople client={fakeClient(funnelPeople)} {...BASE_PROPS} />)
+    render(<StepPeople client={fakeClient(funnelPeople)} {...BASE_PROPS} />, { wrapper: Router })
 
     // Load reached's first page, then its second -- a real cursor now exists.
     await userEvent.click(await screen.findByRole('button', { name: /load more/i }))
@@ -135,7 +148,7 @@ describe('StepPeople', () => {
     const funnelPeople = vi.fn(async () => {
       throw new Error('boom')
     })
-    render(<StepPeople client={fakeClient(funnelPeople)} {...BASE_PROPS} />)
+    render(<StepPeople client={fakeClient(funnelPeople)} {...BASE_PROPS} />, { wrapper: Router })
     expect(await screen.findByRole('alert')).toHaveTextContent(/could not load/i)
     expect(screen.getByRole('button', { name: /^reached/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^dropped here/i })).toBeInTheDocument()
@@ -152,6 +165,7 @@ describe('StepPeople', () => {
         {...BASE_PROPS}
         onUnauthorized={onUnauthorized}
       />,
+      { wrapper: Router },
     )
     await waitFor(() => expect(onUnauthorized).toHaveBeenCalledTimes(1))
   })
@@ -172,6 +186,7 @@ describe('StepPeople -- seeded counts', () => {
         {...BASE_PROPS}
         seedCounts={{ reached: 134, dropped: 47 }}
       />,
+      { wrapper: Router },
     )
     expect(screen.getByRole('button', { name: 'Reached (134)' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Dropped here (47)' })).toBeInTheDocument()
@@ -182,7 +197,7 @@ describe('StepPeople -- seeded counts', () => {
     // then require "Show people". The panel is remounted on both, so that
     // second click came back every single time.
     const funnelPeople = vi.fn(async () => page())
-    render(<StepPeople client={fakeClient(funnelPeople)} {...BASE_PROPS} />)
+    render(<StepPeople client={fakeClient(funnelPeople)} {...BASE_PROPS} />, { wrapper: Router })
     expect(screen.queryByRole('button', { name: /show people/i })).not.toBeInTheDocument()
     expect(funnelPeople).toHaveBeenCalledTimes(1)
   })
@@ -199,6 +214,7 @@ describe('StepPeople -- seeded counts', () => {
         {...BASE_PROPS}
         seedCounts={{ reached: 134, dropped: 47 }}
       />,
+      { wrapper: Router },
     )
     // Seeded, pre-fetch.
     expect(screen.getByRole('button', { name: 'Reached (134)' })).toBeInTheDocument()
@@ -220,7 +236,9 @@ describe('StepPeople on an optional step', () => {
     // work. And "dropped" would be wrong even if the server allowed it:
     // nobody drops out at a branch, they carried on down the funnel.
     const funnelPeople = vi.fn(async () => page())
-    render(<StepPeople client={fakeClient(funnelPeople)} {...OPTIONAL_PROPS} />)
+    render(<StepPeople client={fakeClient(funnelPeople)} {...OPTIONAL_PROPS} />, {
+      wrapper: Router,
+    })
     expect(screen.getByRole('button', { name: /^did video_submitted/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^did not/i })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /dropped/i })).not.toBeInTheDocument()
@@ -229,7 +247,9 @@ describe('StepPeople on an optional step', () => {
 
   it('asks for mode `skipped`, not `dropped`, when the second option is chosen', async () => {
     const funnelPeople = vi.fn(async () => page({ person_count: 50 }))
-    render(<StepPeople client={fakeClient(funnelPeople)} {...OPTIONAL_PROPS} />)
+    render(<StepPeople client={fakeClient(funnelPeople)} {...OPTIONAL_PROPS} />, {
+      wrapper: Router,
+    })
     await waitFor(() => expect(funnelPeople).toHaveBeenCalledTimes(1))
     await userEvent.click(screen.getByRole('button', { name: /^did not/i }))
     await waitFor(() => expect(funnelPeople).toHaveBeenCalledTimes(2))
@@ -250,6 +270,7 @@ describe('StepPeople on an optional step', () => {
         {...OPTIONAL_PROPS}
         seedCounts={{ reached: 30, skipped: 50 }}
       />,
+      { wrapper: Router },
     )
     expect(screen.getByRole('button', { name: 'Did video_submitted (30)' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Did not (50)' })).toBeInTheDocument()
@@ -268,6 +289,7 @@ describe('StepPeople on an optional step', () => {
     const funnelPeople = vi.fn(async () => page())
     const { rerender } = render(
       <StepPeople client={fakeClient(funnelPeople)} {...OPTIONAL_PROPS} />,
+      { wrapper: Router },
     )
     await userEvent.click(screen.getByRole('button', { name: /^did not/i }))
     await waitFor(() => expect(funnelPeople).toHaveBeenCalledTimes(2))
@@ -318,6 +340,7 @@ describe('StepPeople on an optional step', () => {
     const funnelPeople = vi.fn(async () => page())
     const { rerender } = render(
       <StepPeople client={fakeClient(funnelPeople)} {...OPTIONAL_PROPS} />,
+      { wrapper: Router },
     )
     await userEvent.click(screen.getByRole('button', { name: /^did not/i }))
     await waitFor(() => expect(funnelPeople).toHaveBeenCalledTimes(2))
@@ -347,7 +370,7 @@ describe('StepPeople on an optional step', () => {
     // The common case must not have moved. `optional` absent is a required
     // step, and its two labels are the ones every existing test names.
     const funnelPeople = vi.fn(async () => page())
-    render(<StepPeople client={fakeClient(funnelPeople)} {...BASE_PROPS} />)
+    render(<StepPeople client={fakeClient(funnelPeople)} {...BASE_PROPS} />, { wrapper: Router })
     expect(screen.getByRole('button', { name: 'Reached' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Dropped here' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^did /i })).not.toBeInTheDocument()
