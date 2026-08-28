@@ -315,7 +315,7 @@ it flips the last step into a success state and waits for you to click
 done with it. There is also a "Skip to dashboard" for the case where you
 cannot instrument the target site right now.
 
-Past the wizard (or immediately, if a project already exists), there are four
+Past the wizard (or immediately, if a project already exists), there are five
 screens, reachable from the sidebar:
 
 - **Feed** — a live event feed, split into an **Accepted** tab and a
@@ -365,6 +365,17 @@ screens, reachable from the sidebar:
   Click a step and a Reached/Dropped panel opens beneath the chart — two
   different populations, each counted on its own rather than assumed from the
   chart above (see *Who reached a step, or stopped there* under Funnels below).
+
+- **Retention** — pick a start event, a return event, a condition on either of
+  them, a period and how many of them, and run a cohort grid. It does **not** run on render and does not
+  re-run when you change the controls: a grid is a real scan, and numbers from
+  one definition sitting under the controls of another is a wrong answer
+  stated confidently, so the grid clears and waits for you. Cells shade by
+  retention, and a period that had not finished when the grid ran shows a dash
+  rather than 0% — with a line underneath saying how many did, because a dash
+  read as a zero is the one way this chart misleads. The whole definition
+  lives in the URL, so a grid is shareable as a link and there is nothing to
+  save.
 
 - **Segments** — build a filter tree in the browser: `and`/`or` groups, traits,
   context, lifecycle bounds, and behaviours with their own `where` predicates.
@@ -2072,12 +2083,102 @@ caveats.
 There is **no time-to-convert**: you get how many people reached each step,
 not how long it took them. There is **no breakdown** — you cannot split a
 funnel by campaign, device or country. There is **no strict mode**, where a
-later step appearing early breaks the chain. Retention grids, trends and path
-analysis are not here either. All are planned; none exist today.
+later step appearing early breaks the chain. Trends and path analysis are not
+here either. All are planned; none exist today. **Retention grids do now
+exist** — see below.
 
 A funnel is computed on demand every time you run it, with nothing cached and
 nothing precomputed. A wide range over a high-volume event like `$page` is a
 large scan, and the response will warn you when it is about to be one.
+
+## Retention
+
+*Of the people who did one thing in a period, how many came back and did
+another in the periods after it.* Funnels ask where people stop inside one
+flow; this asks whether they return at all.
+
+```sh
+curl -s http://localhost:3000/v1/reports/retention \
+  -H "X-Lyraflow-Key: sk_..." -H 'Content-Type: application/json' \
+  -d '{ "start_event": "signed_up", "return_event": "project_created",
+        "granularity": "week", "periods": 8 }'
+```
+
+```json
+{ "granularity": "week", "periods": 8,
+  "cohorts": [
+    { "cohort": "2026-06-01", "size": 412, "retained": [180, 96, 71, 64, 58, 55, 51, 49, 47] },
+    { "cohort": "2026-06-08", "size": 388, "retained": [166, 88, 66, 60, 55, 51, 48, null, null] }
+  ],
+  "computed_at": "2026-08-27T09:00:00.000Z", "warnings": [] }
+```
+
+`retained[k]` is how many of that cohort did the return event in period *k*.
+Period 0 is the cohort's **own** period — when the two events are the same it
+is the whole cohort by construction, and when they differ it is usually the
+most interesting number in the grid.
+
+**`null` is not zero.** A cell is `null` when that period had not finished
+when the grid was computed. This is the single most important thing about
+reading one: a retention grid that reported unfinished periods as `0` would
+show a collapse in its newest cohorts, in exactly the corner a reader scans
+for a trend. `computed_at` says when "not yet" was decided; the same request
+run later fills those cells in.
+
+### What you choose
+
+| field | meaning |
+| --- | --- |
+| `start_event` | what puts somebody in a cohort. `*` means any event, so `*` cohorts people by when you first saw them. |
+| `start_where` | which *occurrence* of it counts — the same `where` grammar a funnel step and a segment behaviour take. |
+| `return_event` | what counts as coming back. May be the same as `start_event`; `*` means any activity. |
+| `return_where` | the same, for the return side, and **independent** of `start_where`. |
+| `granularity` | `day`, `week` or `month`. Weeks start **Monday**, and every bucket is UTC. |
+| `periods` | how many periods after the cohort's own to measure, up to 26. |
+| `since` / `until` | bound who **enters** a cohort. Optional; defaults to the last `periods` periods. |
+| `segment_id` | restrict the whole grid to a saved segment's population. |
+
+**The two `where` lists are what make one event name usable.** On a site where
+every navigation is a `$page`, "viewed the home page, then came back and
+registered" is one event name and two different conditions:
+
+```json
+{ "start_event": "$page",
+  "start_where":  [{ "source": "attribute", "attribute": "path", "operator": "=", "value": "/" }],
+  "return_event": "$page",
+  "return_where": [{ "source": "attribute", "attribute": "path", "operator": "=", "value": "/register" }],
+  "granularity": "week", "periods": 8 }
+```
+
+Predicates on one side are ANDed together, and the two sides never see each
+other's. They are the same shape a funnel step's `where` takes, including the
+text, presence, boolean and relative-date operators — so a predicate is
+written identically in all three places.
+
+**A person belongs to the cohort of their FIRST start event inside the range**
+— not their first ever, which would make the range decorative — and to exactly
+one cohort per run. Doing the start event again later does not move them or
+count them twice.
+
+**`since`/`until` bound entry, not observation.** Measuring period 8 of the
+last cohort needs events from eight periods after `until`, and the scan runs
+on to fetch them. This is the same entry/observation split funnels make.
+
+Cohorts are **calendar**-anchored, so a row is "the week of 3 June" rather
+than "day 0–6 since signup". One consequence is worth knowing: somebody who
+starts on a Sunday gets a one-day period 0. Rolling-from-signup retention is a
+different report and is not this one.
+
+### Limits, and what this does not do yet
+
+A range wider than **60 cohorts** is refused rather than truncated — a grid
+silently missing its oldest rows is a chart with a trend that is not in the
+data. `periods` is capped at 26.
+
+There is **no breakdown** — you cannot split a grid by campaign or country —
+and **no saved retention reports**: a grid is two event names, a granularity
+and a range, so the Web UI keeps it in the URL and the screen is shareable as
+a link. Nothing is cached; every run is a real scan.
 
 ## Reading events
 

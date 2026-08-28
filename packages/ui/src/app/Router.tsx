@@ -5,6 +5,7 @@ import { FunnelBuilder } from '../screens/FunnelBuilder.js'
 import { FunnelDetail } from '../screens/FunnelDetail.js'
 import { Funnels } from '../screens/Funnels.js'
 import { Profile } from '../screens/Profile.js'
+import { Retention } from '../screens/Retention.js'
 import { SegmentBuilder } from '../screens/SegmentBuilder.js'
 import { SegmentDetail } from '../screens/SegmentDetail.js'
 import { Segments } from '../screens/Segments.js'
@@ -28,6 +29,7 @@ export const ROUTES = {
   funnelNew: '/funnels/new',
   segments: '/segments',
   segmentNew: '/segments/new',
+  retention: '/retention',
 } as const
 
 /** Path builders for the parameterised routes. Numeric ids only, so no final
@@ -83,6 +85,7 @@ export function AppRouter(props: {
     />
   )
   const funnels = <Funnels client={props.client} onUnauthorized={props.onUnauthorized} />
+  const retention = <Retention client={props.client} onUnauthorized={props.onUnauthorized} />
   // Distinct `key`s for the same reason the segment builders carry them:
   // <Routes> reconciles its single child by TYPE AND POSITION, so navigating
   // /funnels/7/edit -> /funnels/new hands the same component instance a new
@@ -153,6 +156,7 @@ export function AppRouter(props: {
           <Route path={ROUTES.funnelNew} element={funnelNew} />
           <Route path="/funnels/:id" element={funnelDetail} />
           <Route path="/funnels/:id/edit" element={funnelEdit} />
+          <Route path={ROUTES.retention} element={retention} />
           <Route path={ROUTES.segments} element={segments} />
           <Route path={ROUTES.segmentNew} element={segmentNew} />
           <Route path="/segments/:id" element={segmentDetail} />

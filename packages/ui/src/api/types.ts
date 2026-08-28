@@ -446,3 +446,46 @@ export interface SchemaProperty {
   name: string
   kind: PropertyKind
 }
+
+/**
+ * One cohort's row of a retention grid. `retained[k]` is how many of `size`
+ * came back in period `k`, or `null` when that period had not finished when
+ * the grid was computed.
+ *
+ * `number | null`, not `number`. Collapsing the two is how a retention grid
+ * reports "these weeks have not happened yet" as "nobody came back", which
+ * is a cliff in exactly the corner a reader looks at for a trend.
+ */
+export interface CohortRow {
+  cohort: string
+  size: number
+  retained: (number | null)[]
+}
+
+export interface RetentionResult {
+  granularity: 'day' | 'week' | 'month'
+  periods: number
+  cohorts: CohortRow[]
+  start_event: string
+  return_event: string
+  since: string
+  until: string
+  /** When measurability was decided; a `null` cell is only "not yet" as of this. */
+  computed_at: string
+  warnings: { path: string; reason: string }[]
+}
+
+export interface RetentionRequest {
+  start_event: string
+  return_event: string
+  /** Which occurrence of each event counts. The segment/funnel `where`
+   * grammar verbatim -- typed as `unknown[]` here only because this module
+   * describes the wire and does not import core's schema. */
+  start_where?: unknown[]
+  return_where?: unknown[]
+  granularity: 'day' | 'week' | 'month'
+  periods: number
+  since?: string
+  until?: string
+  segment_id?: number | null
+}

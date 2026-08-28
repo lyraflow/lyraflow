@@ -1,0 +1,491 @@
+//
+// Seeds a real ClickHouse and asserts a GRID, not SQL text. `sumForEach` over
+// an indicator array is the kind of construct that parses, runs, and answers
+// a slightly different question -- an off-by-one in the period index, a
+// person counted in two cohorts, a return that predates the cohort quietly
+// landing in column 0. None of those is visible in the query text.
+import { join } from 'node:path'
+import {
+  AST_VERSION,
+  type FilterNode,
+  Params,
+  type RetentionQuery,
+  compileRetention,
+  compileSegment,
+} from '@lyraflow/core'
+import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { type PgDictionarySource, ensureIdentityDictionaries } from '../identity/dictionaries.js'
+import { runRetention } from './execute.js'
+
+const CH_DB = 'lyraflow_test'
+const PROJECT = 7702
+
+// Every one of these is a MONDAY, which is what `toStartOfWeek(t, 1)` buckets
+// to. Named rather than inlined because every expectation below is read
+// against them, and a grid whose rows are off by one week is a report that
+// looks entirely plausible.
+const W0 = '2026-06-01'
+const W1 = '2026-06-08'
+const W2 = '2026-06-15'
+
+const pg = createPgPool('postgres://lyraflow:lyraflow@localhost:5433/lyraflow_test')
+const ch = createChClient({
+  url: 'http://localhost:8123',
+  username: 'lyraflow',
+  password: 'lyraflow',
+  database: CH_DB,
+})
+
+const pgSource: PgDictionarySource = {
+  host: 'postgres',
+  port: 5432,
+  user: 'lyraflow',
+  password: 'lyraflow',
+  database: CH_DB,
+}
+
+const uuid = (n: number) => `77020000-0000-4000-8000-${String(n).padStart(12, '0')}`
+
+let seq = 0
+const ev = (person: string, name: string, day: string) => ({
+  project_id: PROJECT,
+  event_id: uuid(++seq),
+  anonymous_id: `dev-${person}`,
+  user_id: person,
+  event_name: name,
+  timestamp: `${day} 10:00:00.000`,
+  received_at: `${day} 10:00:00.000`,
+  trusted: 1,
+  properties: {},
+  properties_num: {},
+})
+
+/** Long after every seeded event, so every cell is measurable. */
+const SETTLED = new Date('2026-07-15T00:00:00.000Z')
+
+const grid = async (over: Partial<RetentionQuery>, now: Date = SETTLED) => {
+  const query: RetentionQuery = {
+    start_event: 'signed_up',
+    return_event: 'project_created',
+    granularity: 'week',
+    periods: 3,
+    since: '2026-06-01T00:00:00Z',
+    until: '2026-06-15T00:00:00Z',
+    ...over,
+  }
+  const compiled = compileRetention({
+    query,
+    projectId: PROJECT,
+    database: CH_DB,
+    now,
+    params: new Params(),
+  })
+  return runRetention({ client: ch, compiled, query, now })
+}
+
+const row = (r: Awaited<ReturnType<typeof grid>>, cohort: string) =>
+  r.cohorts.find((c) => c.cohort === cohort)
+
+beforeAll(async () => {
+  await migrate({
+    pg,
+    ch,
+    migrations: loadMigrations(join(import.meta.dirname, '../../../db/migrations')),
+    appSchemaVersion: 999,
+  })
+
+  await pg.query('DELETE FROM projects WHERE id = $1', [PROJECT])
+  await pg.query(
+    `INSERT INTO projects (id, name, slug, write_key, server_key_hash)
+     VALUES ($1, 'Retention', 'retention-test', 'wk_retention', 'h')`,
+    [PROJECT],
+  )
+  // Same self-healing as segments/execute.test.ts: `device_index` is written
+  // by a materialized view that an `events` DELETE never reaches, and the
+  // base population is built from it.
+  for (const table of ['events', 'device_index', 'person_traits']) {
+    await ch.command({
+      query: `ALTER TABLE ${table} DELETE WHERE project_id = ${PROJECT}`,
+      clickhouse_settings: { mutations_sync: '1' },
+    })
+  }
+  await ensureIdentityDictionaries(ch, pgSource)
+  await ch.command({ query: `SYSTEM RELOAD DICTIONARY ${CH_DB}.suppressed_persons` })
+
+  await ch.insert({
+    table: 'events',
+    format: 'JSONEachRow',
+    values: [
+      // Cohort W0.
+      ev('a1', 'signed_up', '2026-06-03'),
+      ev('a1', 'project_created', '2026-06-04'), // period 0
+      ev('a1', 'project_created', '2026-06-09'), // period 1
+      ev('a1', 'project_created', '2026-06-16'), // period 2
+      // Period 3, so the LAST column of W0's row is non-zero. With a zero
+      // there, an indicator array one cell short is arithmetically invisible
+      // -- which is exactly how that mutation survived the first pass.
+      ev('a1', 'project_created', '2026-06-23'),
+      ev('a2', 'signed_up', '2026-06-05'),
+      ev('a2', 'project_created', '2026-06-10'), // period 1
+      // ...and signs up AGAIN in W1. Their cohort must stay W0: a person
+      // belongs to the period of their FIRST start event in the range, and a
+      // second one must not move them or duplicate them.
+      ev('a2', 'signed_up', '2026-06-11'),
+      ev('a3', 'signed_up', '2026-06-06'), // never returns
+
+      // Cohort W1.
+      ev('b1', 'signed_up', '2026-06-09'),
+      ev('b1', 'project_created', '2026-06-17'), // period 1
+      // c1 returns BEFORE they enter. Their cohort is W1, and the W0 event
+      // sits at period -1 -- it must not be counted anywhere, least of all in
+      // column 0, which is where an unsigned index would put it.
+      ev('c1', 'project_created', '2026-06-02'),
+      ev('c1', 'signed_up', '2026-06-09'),
+    ],
+  })
+})
+
+afterAll(async () => {
+  await pg.query('DELETE FROM projects WHERE id = $1', [PROJECT])
+  await pg.end()
+  await ch.close()
+})
+
+describe('retention grid (live ClickHouse)', () => {
+  it('buckets people into the week of their first start event', async () => {
+    const r = await grid({})
+    expect(r.cohorts.map((c) => c.cohort)).toEqual([W0, W1])
+    expect(row(r, W0)?.size).toBe(3)
+    expect(row(r, W1)?.size).toBe(2)
+  })
+
+  it('counts a return in the period it happened, and nowhere else', async () => {
+    const r = await grid({})
+    // a1 in 0, 1, 2; a2 in 1; a3 never.
+    expect(row(r, W0)?.retained).toEqual([1, 2, 1, 1])
+  })
+
+  it('does not re-cohort or duplicate a person who starts a second time', async () => {
+    const r = await grid({})
+    // a2 signed up again in W1. W1 holds b1 and c1 only.
+    expect(row(r, W1)?.size).toBe(2)
+    const total = r.cohorts.reduce((n, c) => n + c.size, 0)
+    expect(total).toBe(5)
+  })
+
+  it('ignores a return that predates the cohort rather than counting it at period 0', async () => {
+    const r = await grid({})
+    // c1's only project_created is in W0, a week BEFORE their W1 cohort.
+    // b1 returns in period 1. So period 0 is nobody.
+    expect(row(r, W1)?.retained).toEqual([0, 1, 0, 0])
+  })
+
+  it('marks a period that has not finished as null, never as zero', async () => {
+    // 2026-06-20 is inside W2, so W2 is unfinished: W0's period 2 (which ends
+    // 2026-06-22) and everything after it cannot have been measured.
+    const r = await grid({}, new Date('2026-06-20T00:00:00.000Z'))
+    expect(row(r, W0)?.retained).toEqual([1, 2, null, null])
+    expect(row(r, W1)?.retained).toEqual([0, null, null, null])
+  })
+
+  it('fills those cells in once the periods have closed', async () => {
+    // The same request, later. This is the assertion that would fail if
+    // measurability were baked into the SQL rather than applied to the result.
+    const r = await grid({})
+    expect(row(r, W0)?.retained[2]).toBe(1)
+  })
+
+  it('reads * as any event on the start side', async () => {
+    const r = await grid({ start_event: '*' })
+    // c1's FIRST event is a project_created on 2026-06-02, which is W0 --
+    // so `*` moves them out of W1, where `signed_up` put them.
+    expect(row(r, W0)?.size).toBe(4)
+    expect(row(r, W1)?.size).toBe(1)
+  })
+
+  it('reads * as any activity on the return side', async () => {
+    const r = await grid({ return_event: '*' })
+    // Everyone is active in their own cohort week, because the start event
+    // itself is activity.
+    expect(row(r, W0)?.retained[0]).toBe(3)
+    expect(row(r, W1)?.retained[0]).toBe(2)
+  })
+
+  it('gives period 0 as the whole cohort when start and return are the same event', async () => {
+    const r = await grid({ start_event: 'signed_up', return_event: 'signed_up' })
+    expect(row(r, W0)?.retained[0]).toBe(row(r, W0)?.size)
+    // a2 signed up again in W1, which is period 1 of their own cohort.
+    expect(row(r, W0)?.retained[1]).toBe(1)
+  })
+
+  it('returns a row of exactly periods + 1 cells', async () => {
+    const r = await grid({ periods: 6 })
+    for (const c of r.cohorts) expect(c.retained).toHaveLength(7)
+  })
+
+  it('refuses a row whose cell count disagrees with `periods`, rather than padding it', async () => {
+    // Not reachable through the API -- `compileRetention` and `runRetention`
+    // derive the length from the same `periods`. It is asserted because the
+    // ALTERNATIVE was reachable: a `?? 0` fallback rendered a short array as
+    // a column of zeroes, and zero is a real answer here.
+    const query: RetentionQuery = {
+      start_event: 'signed_up',
+      return_event: 'project_created',
+      granularity: 'week',
+      periods: 3,
+      since: '2026-06-01T00:00:00Z',
+      until: '2026-06-15T00:00:00Z',
+    }
+    const compiled = compileRetention({
+      query,
+      projectId: PROJECT,
+      database: CH_DB,
+      now: SETTLED,
+      params: new Params(),
+    })
+    await expect(
+      runRetention({ client: ch, compiled, query: { ...query, periods: 5 }, now: SETTLED }),
+    ).rejects.toThrow(/has 4 cells, expected 6/)
+  })
+
+  it('excludes anyone whose first start event falls outside the range', async () => {
+    // until = W1, so W1 entrants are excluded entirely.
+    const r = await grid({ until: '2026-06-08T00:00:00Z' })
+    expect(r.cohorts.map((c) => c.cohort)).toEqual([W0])
+  })
+
+  it('measures past `until`, because the range bounds entry rather than observation', async () => {
+    // W0's period 2 is the week of 2026-06-15, a week past `until`. A scan
+    // stopping at `until` would report it as zero.
+    const r = await grid({ until: '2026-06-08T00:00:00Z' })
+    expect(row(r, W0)?.retained).toEqual([1, 2, 1, 1])
+  })
+})
+
+/**
+ * A grid restricted to a segment.
+ *
+ * Its own block because it is the one path that compiles TWO queries into one
+ * parameter sequence, and because it was broken: the person-set filter was
+ * appended after the `GROUP BY` rather than ANDed into the `WHERE`, which
+ * does not parse. Nothing caught it -- the only other test naming a segment
+ * named one that does not exist, which leaves the filter empty and the SQL
+ * valid.
+ *
+ * So this compiles a REAL segment through the same `compileSegment(select:
+ * 'persons')` call the route makes, threading one `Params` instance the way
+ * the route does.
+ */
+describe('a grid restricted to a segment (live ClickHouse)', () => {
+  const restricted = async (filter: FilterNode) => {
+    const params = new Params()
+    const segmentPersonSql = compileSegment({
+      query: { ast_version: AST_VERSION, filter },
+      projectId: PROJECT,
+      database: CH_DB,
+      now: SETTLED,
+      select: 'persons',
+      params,
+    }).sql
+    const query: RetentionQuery = {
+      start_event: 'signed_up',
+      return_event: 'project_created',
+      granularity: 'week',
+      periods: 3,
+      since: '2026-06-01T00:00:00Z',
+      until: '2026-06-15T00:00:00Z',
+    }
+    const compiled = compileRetention({
+      query,
+      projectId: PROJECT,
+      database: CH_DB,
+      now: SETTLED,
+      segmentPersonSql,
+      params,
+    })
+    return runRetention({ client: ch, compiled, query, now: SETTLED })
+  }
+
+  it('runs at all -- the filter has to be valid SQL in the position it is spliced into', async () => {
+    // The assertion that was missing. A `GROUP BY x WHERE y` throws a parse
+    // error, so this test fails on the exception rather than on a number.
+    const everyone: FilterNode = {
+      kind: 'lifecycle',
+      field: 'first_seen',
+      operator: '>=',
+      value: '2000-01-01T00:00:00Z',
+    } as unknown as FilterNode
+    const r = await restricted(everyone)
+    expect(r.cohorts.length).toBeGreaterThan(0)
+  })
+
+  it('narrows the cohorts to the segment population', async () => {
+    // Nobody can have been first seen in the future, so this segment is
+    // empty and every cohort must vanish -- which also proves the filter is
+    // actually applied rather than merely parsing.
+    const nobody: FilterNode = {
+      kind: 'lifecycle',
+      field: 'first_seen',
+      operator: '>=',
+      value: '2099-01-01T00:00:00Z',
+    } as unknown as FilterNode
+    expect((await restricted(nobody)).cohorts).toHaveLength(0)
+  })
+})
+
+/**
+ * Retention on ONE event name, told apart by a `where` predicate.
+ *
+ * The gap Cem hit on 2026-08-28: a site whose every navigation is a `$page`
+ * could only cohort by "viewed any page", so "viewed the home page, then came
+ * back and registered" was not expressible at all -- the grid answered a
+ * different question with total confidence.
+ *
+ * Its own project, for the reason the other blocks in this file have theirs:
+ * the `*` tests above count ANY event, so seeding four more people into their
+ * project would silently change three assertions that have nothing to do with
+ * predicates.
+ */
+describe('a grid narrowed by where predicates (live ClickHouse)', () => {
+  const WP = 7704
+  const wpUuid = (n: number) => `77040000-0000-4000-8000-${String(n).padStart(12, '0')}`
+  let wpSeq = 0
+
+  const page = (person: string, day: string, path: string, section = '') => ({
+    project_id: WP,
+    event_id: wpUuid(++wpSeq),
+    anonymous_id: `wp-${person}`,
+    user_id: person,
+    event_name: '$page',
+    timestamp: `${day} 10:00:00.000`,
+    received_at: `${day} 10:00:00.000`,
+    trusted: 1,
+    path,
+    properties: section === '' ? {} : { section },
+    properties_num: {},
+  })
+
+  const wpGrid = async (over: Partial<RetentionQuery>) => {
+    const query: RetentionQuery = {
+      start_event: '$page',
+      return_event: '$page',
+      granularity: 'week',
+      periods: 3,
+      since: '2026-06-01T00:00:00Z',
+      until: '2026-06-15T00:00:00Z',
+      ...over,
+    }
+    const compiled = compileRetention({
+      query,
+      projectId: WP,
+      database: CH_DB,
+      now: SETTLED,
+      params: new Params(),
+    })
+    return runRetention({ client: ch, compiled, query, now: SETTLED })
+  }
+
+  beforeAll(async () => {
+    await pg.query('DELETE FROM projects WHERE id = $1', [WP])
+    await pg.query(
+      `INSERT INTO projects (id, name, slug, write_key, server_key_hash)
+       VALUES ($1, 'Retention Where', 'retention-where-test', 'wk_retention_where', 'h')`,
+      [WP],
+    )
+    for (const table of ['events', 'device_index', 'person_traits']) {
+      await ch.command({
+        query: `ALTER TABLE ${table} DELETE WHERE project_id = ${WP}`,
+        clickhouse_settings: { mutations_sync: '1' },
+      })
+    }
+    await ch.insert({
+      table: 'events',
+      format: 'JSONEachRow',
+      values: [
+        // p1: home in W0, then registered in W1. The one the grid is for.
+        page('p1', '2026-06-03', '/', 'marketing'),
+        page('p1', '2026-06-10', '/register', 'signup'),
+        // p2: home in W0, never registered.
+        page('p2', '2026-06-04', '/', 'marketing'),
+        // p3: only ever saw /pricing -- must not enter a `/` cohort at all.
+        page('p3', '2026-06-03', '/pricing', 'marketing'),
+        // p4: registered in W0 WITHOUT ever seeing home. Must not enter
+        // either -- the start predicate defines the cohort, not the name.
+        page('p4', '2026-06-05', '/register', 'signup'),
+      ],
+    })
+  })
+
+  afterAll(async () => {
+    await pg.query('DELETE FROM projects WHERE id = $1', [WP])
+  })
+
+  it('is useless without predicates, which is why they exist', async () => {
+    // Every one of the four is a `$page`, so the unnarrowed grid cohorts all
+    // of them together and answers "did they view any page again".
+    const r = await wpGrid({})
+    expect(row(r, W0)?.size).toBe(4)
+  })
+
+  it('cohorts on the START predicate, not merely on the event name', async () => {
+    const r = await wpGrid({
+      start_where: [{ source: 'attribute', attribute: 'path', operator: '=', value: '/' }],
+    })
+    // p1 and p2 only. p3 saw /pricing, p4 saw /register.
+    expect(row(r, W0)?.size).toBe(2)
+  })
+
+  it('measures the RETURN predicate independently of the start one', async () => {
+    // The question Cem named: viewed `/`, then came back and viewed
+    // `/register`. p1 did; p2 did not.
+    const r = await wpGrid({
+      start_where: [{ source: 'attribute', attribute: 'path', operator: '=', value: '/' }],
+      return_where: [{ source: 'attribute', attribute: 'path', operator: '=', value: '/register' }],
+    })
+    expect(row(r, W0)?.size).toBe(2)
+    expect(row(r, W0)?.retained).toEqual([0, 1, 0, 0])
+  })
+
+  it('lets the two predicates differ on the same event name', async () => {
+    // Reversed: cohort on /register, return on /. Nobody does that here, so
+    // the grid is a cohort with no returns -- which is a real answer, and a
+    // different one from the test above.
+    const r = await wpGrid({
+      start_where: [{ source: 'attribute', attribute: 'path', operator: '=', value: '/register' }],
+      return_where: [{ source: 'attribute', attribute: 'path', operator: '=', value: '/' }],
+    })
+    expect(row(r, W0)?.size).toBe(1)
+    expect(row(r, W0)?.retained).toEqual([0, 0, 0, 0])
+  })
+
+  it('narrows on a PROPERTY as well as a column', async () => {
+    const r = await wpGrid({
+      start_where: [{ property: 'section', operator: '=', value: 'marketing' }],
+    })
+    // p1, p2 and p3 all landed on a marketing page; p4 went straight to
+    // signup.
+    expect(row(r, W0)?.size).toBe(3)
+  })
+
+  it('takes the new operator families, since it is the same grammar', async () => {
+    const r = await wpGrid({
+      start_where: [
+        { source: 'attribute', attribute: 'path', operator: 'starts_with', value: '/PRI' },
+      ],
+    })
+    // Case-insensitive, so `/PRI` finds `/pricing` -- p3 alone.
+    expect(row(r, W0)?.size).toBe(1)
+  })
+
+  it('ANDs several predicates rather than ORing them', async () => {
+    const r = await wpGrid({
+      start_where: [
+        { source: 'attribute', attribute: 'path', operator: '=', value: '/' },
+        { property: 'section', operator: '=', value: 'signup' },
+      ],
+    })
+    // No event is both `/` and section=signup.
+    expect(r.cohorts).toHaveLength(0)
+  })
+})

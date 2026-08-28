@@ -21,6 +21,8 @@ import type {
   RangeBody,
   RejectionsPage,
   RejectionsQuery,
+  RetentionRequest,
+  RetentionResult,
   SchemaProperty,
   Segment,
   SegmentPreview,
@@ -180,6 +182,7 @@ export interface ApiClient {
     q: string,
   ): Promise<SchemaProperty[]>
   schemaEvents(projectId: number, q: string): Promise<string[]>
+  runRetention(projectId: number, body: RetentionRequest): Promise<RetentionResult>
   // The values one trait holds. `trait` is required, not optional like
   // `schemaProperties`' `event`: the endpoint refuses a request without one,
   // and the type says so here rather than letting a caller discover it as a
@@ -415,6 +418,12 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
       (projectId: number, event: string | undefined, q: string) =>
         `${projectId}\u0000${event ?? ''}\u0000${q}`,
     ),
+    runRetention: (projectId, body) =>
+      call<RetentionResult>(
+        '/v1/reports/retention',
+        { method: 'POST', body: JSON.stringify(body) },
+        projectId,
+      ),
     schemaEvents: dedupeInFlight(
       async (projectId: number, q: string) =>
         // `last_seen` is in the response and deliberately dropped here: this
