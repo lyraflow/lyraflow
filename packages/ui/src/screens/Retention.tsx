@@ -130,6 +130,28 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
   // that discovers it -- the warning stays on screen for as long as this
   // report is open, not just for the render that loaded it.
   const [stale, setStale] = useState(false)
+  // M5 from the whole-branch review. A stale report's predicates fail to
+  // reproduce in one of two ways: an element that fails core's schema but
+  // still passes `looksLikePredicate` (say, an unknown `operator`) SURVIVES
+  // seeding and shows up as a real, editable row -- `incompletePredicates`
+  // counts it, and `unfinished === 0` below already blocks Run and Save
+  // until the operator fixes or removes it. An element that fails
+  // `looksLikePredicate` itself (no `operator` field at all, say) is
+  // DROPPED by `whereFromStored` before it ever reaches a row -- nothing
+  // visible, nothing for `unfinished` to count, so without this flag Save
+  // would be enabled with `startWhere`/`returnWhere` silently narrower than
+  // what was actually stored, and would overwrite the stored predicates
+  // with that narrower list. This flag is what makes the second shape
+  // block Save the same way the first one already does. Set at seed time
+  // (below) whenever seeding drops anything; cleared the moment `update`
+  // touches either side's predicates (`predicatesLostOnLoad` at that call
+  // site) -- editing IS rebuilding, whether or not the edit happens to
+  // repair the exact element that failed to parse. Run is deliberately NOT
+  // gated on this: the retention list's own seed-effect comment (and the
+  // 0.11.0 changelog entry it backs) already makes leaving Run available on
+  // a stale report a deliberate choice, so the operator can still see what
+  // the current controls ask for rather than being locked out of Run too.
+  const [predicatesLostOnLoad, setPredicatesLostOnLoad] = useState(false)
 
   // The (project, report) pair this screen is currently open on. Same
   // mechanism `Trends.tsx` uses and for the same reason -- see that
@@ -147,6 +169,7 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
     setReportError(null)
     setSaveError(null)
     setStale(false)
+    setPredicatesLostOnLoad(false)
   }, [identity])
 
   const update = useCallback(
@@ -159,6 +182,15 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
       // clearing it is what makes "Run" mean something.
       setResult(null)
       setError(null)
+      // M5: editing either side's predicates is "rebuilding the
+      // conditions" -- see `predicatesLostOnLoad`'s own comment. Cleared on
+      // ANY touch to either side, not only one that happens to repair the
+      // exact element that failed to parse: the operator has taken
+      // ownership of what this side now says, which is what makes a
+      // subsequent Save an intentional write rather than an accidental one.
+      if ('startWhere' in patch || 'returnWhere' in patch) {
+        setPredicatesLostOnLoad(false)
+      }
     },
     [setSearch],
   )
@@ -263,18 +295,35 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
         setName(r.name)
         setStale(r.stale)
         const alreadyDefined = hasRetentionDefinitionParams(search)
-        const finalParams: RetentionParams = alreadyDefined
-          ? params
-          : {
-              start: r.start_event,
-              return: r.return_event,
-              startWhere: whereFromStored(r.start_where),
-              returnWhere: whereFromStored(r.return_where),
-              granularity: r.granularity,
-              periods: r.periods,
-              segmentId: r.segment_id,
-              range: params.range,
-            }
+        let finalParams: RetentionParams
+        if (alreadyDefined) {
+          finalParams = params
+        } else {
+          const startWhere = whereFromStored(r.start_where)
+          const returnWhere = whereFromStored(r.return_where)
+          // M5: `whereFromStored` silently drops any stored element that
+          // does not even look like a predicate (see `predicatesLostOnLoad`'s
+          // own comment) -- comparing the raw stored count against what
+          // survived is how this notices, without `whereFromStored` itself
+          // needing to change (it is also used to read a hand-edited URL,
+          // where silently degrading garbage is the correct behaviour).
+          if (
+            startWhere.length < r.start_where.length ||
+            returnWhere.length < r.return_where.length
+          ) {
+            setPredicatesLostOnLoad(true)
+          }
+          finalParams = {
+            start: r.start_event,
+            return: r.return_event,
+            startWhere,
+            returnWhere,
+            granularity: r.granularity,
+            periods: r.periods,
+            segmentId: r.segment_id,
+            range: params.range,
+          }
+        }
         if (!alreadyDefined) {
           setSearch(
             (prev) => writeRetentionParams(prev, { ...finalParams, range: readRange(prev) }),
@@ -328,7 +377,12 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
     trimmedName !== '' &&
     params.start !== '' &&
     params.return !== '' &&
-    unfinished === 0
+    unfinished === 0 &&
+    // M5: a saved report whose stored predicates were silently narrowed on
+    // load must not be saved as-is -- that would overwrite the stored
+    // `start_where`/`return_where` with the narrower list. See
+    // `predicatesLostOnLoad`'s own comment.
+    !predicatesLostOnLoad
 
   const handleSave = useCallback(() => {
     // Repeats the `canSave` gate the button's `disabled` prop already

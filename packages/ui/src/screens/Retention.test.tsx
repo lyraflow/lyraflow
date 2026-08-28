@@ -488,4 +488,65 @@ describe('Retention -- saving and reopening a saved report', () => {
     expect(await screen.findByTestId('retention-stale')).toBeInTheDocument()
     expect(client.runRetention).not.toHaveBeenCalled()
   })
+
+  // M5 from the whole-branch review: a stale report's predicates fail to
+  // reproduce in one of two ways, and they used to diverge. This is the
+  // shape that already worked -- an element that fails core's schema but
+  // still LOOKS like a predicate survives seeding as a real, editable row,
+  // so `unfinished` counts it and blocks Save the same way an operator's
+  // own half-built row does.
+  it('disables Save when a stale predicate survives seeding as an unfinished row', async () => {
+    renderAt('/retention/3', {
+      retentionReport: vi.fn(async () =>
+        reportFixture({
+          stale: true,
+          start_where: [{ property: 'plan', operator: 'not-a-real-op', value: 'x' }],
+        }),
+      ),
+    })
+    await screen.findByTestId('retention-stale')
+    expect(screen.getByTestId('retention-unfinished')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+  })
+
+  // The shape that was broken: an element that fails `looksLikePredicate`
+  // itself (no `operator` at all) is dropped by `whereFromStored` before it
+  // ever becomes a row -- nothing on screen looks unfinished, so `unfinished`
+  // stays 0. Before the fix, Save was enabled here, and clicking it would
+  // have overwritten the report's stored `start_where` with an empty array.
+  it('disables Save when a stale predicate is dropped entirely, not only when it survives as a row', async () => {
+    const client = renderAt('/retention/3', {
+      retentionReport: vi.fn(async () =>
+        reportFixture({ stale: true, start_where: [{ nonsense: true }] }),
+      ),
+    })
+    await screen.findByTestId('retention-stale')
+    // Nothing visibly incomplete -- the predicate never became a row.
+    expect(screen.queryByTestId('retention-unfinished')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+    // And Save, if it were somehow reachable, must never have been asked to
+    // write over the stored predicates with the narrower list.
+    expect(client.patchRetentionReport).not.toHaveBeenCalled()
+  })
+
+  // The gate must not stick forever once the operator has actually rebuilt
+  // the side that lost a predicate -- editing IS rebuilding, whether or not
+  // the edit happens to repair the exact element that failed to parse.
+  // Add-then-Remove nets the SAME empty array `startWhere` already held,
+  // but it is a deliberate edit of that side rather than the load's own
+  // silent narrowing, which is the distinction the fix draws.
+  it('re-enables Save once the operator edits the side that lost a predicate', async () => {
+    renderAt('/retention/3', {
+      retentionReport: vi.fn(async () =>
+        reportFixture({ stale: true, start_where: [{ nonsense: true }] }),
+      ),
+    })
+    await screen.findByTestId('retention-stale')
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+    const start = screen.getByTestId('retention-start-where-where')
+    await userEvent.click(within(start).getByRole('button', { name: /add predicate/i }))
+    await userEvent.click(within(start).getByRole('button', { name: /remove/i }))
+    expect(screen.queryByTestId('retention-unfinished')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeEnabled()
+  })
 })
