@@ -2,9 +2,10 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
+import type { Mock } from 'vitest'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
-import type { Person } from '../api/types.js'
+import type { EventsPage, LyraEvent, Person } from '../api/types.js'
 import { ProjectProvider } from '../app/ProjectContext.js'
 import { People } from './People.js'
 
@@ -36,6 +37,53 @@ const PERSON: Person = {
 
 function person(overrides: Partial<Person> = {}): Person {
   return { ...PERSON, ...overrides }
+}
+
+/** The context fields an event that carried none of them still arrives with
+ * on the wire -- ClickHouse has no null here, matching
+ * `AcceptedTable.test.tsx`'s own fixture. */
+const EMPTY_CONTEXT = {
+  url: '',
+  referrer: '',
+  utm_source: '',
+  utm_medium: '',
+  utm_campaign: '',
+  utm_term: '',
+  utm_content: '',
+  device_type: '',
+  os: '',
+  browser: '',
+  country: '',
+  region: '',
+  city: '',
+}
+
+function event(over: Partial<LyraEvent> = {}): LyraEvent {
+  return {
+    ...EMPTY_CONTEXT,
+    event_id: 'e1',
+    timestamp: '2026-08-20T15:30:00.000Z',
+    event_name: 'page_view',
+    anonymous_id: 'anon_1',
+    user_id: '',
+    properties: {},
+    properties_num: {},
+    path: '',
+    ...over,
+  }
+}
+
+function eventsPage(events: LyraEvent[] = [], over: Partial<EventsPage> = {}): EventsPage {
+  return { events, next_cursor: null, prev_cursor: null, ...over }
+}
+
+/** A client whose `events` resolves to an empty, single (`ended`) page --
+ * used by every test above the timeline that has nothing to say about it:
+ * the person read is what those tests are about, and the timeline mounting
+ * underneath must not crash them while contributing nothing to what they
+ * assert. */
+function noTimeline() {
+  return vi.fn(async () => eventsPage())
 }
 
 function renderPeople(path: string, client: ApiClient, opts: { onUnauthorized?: () => void } = {}) {
@@ -120,14 +168,16 @@ describe('People', () => {
       person: vi.fn(async () =>
         person({ person_id: 'u1', ids: ['u1', 'u2', 'dev-a'], devices: ['dev-a'] }),
       ),
+      events: noTimeline(),
     } as unknown as ApiClient
     renderPeople('/people?id=u1', client)
     expect(await screen.findByTestId('identity-ids')).toHaveTextContent('dev-a')
   })
 
-  it('renders traits and context from the person read', async () => {
+  it('renders traits from the person read', async () => {
     const client = {
       person: vi.fn(async () => person({ traits: { plan: 'pro' }, traits_num: { seats: 12 } })),
+      events: noTimeline(),
     } as unknown as ApiClient
     renderPeople('/people?id=u1', client)
     expect(await screen.findByText('plan')).toBeInTheDocument()
@@ -137,6 +187,7 @@ describe('People', () => {
   it('says traits were withheld rather than that there are none', async () => {
     const client = {
       person: vi.fn(async () => person({ traits: {}, trait_total: 0, traits_withheld: true })),
+      events: noTimeline(),
     } as unknown as ApiClient
     renderPeople('/people?id=u1', client)
     expect(await screen.findByText(/cannot be split/i)).toBeInTheDocument()
@@ -154,10 +205,70 @@ describe('People', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
-  it('shows a placeholder where the timeline goes, marked as not yet built', async () => {
-    const client = { person: vi.fn(async () => person()) } as unknown as ApiClient
+  it('anchors the timeline to the person read, not to the URL', async () => {
+    // Task 7's own placeholder is gone -- this is the real timeline now,
+    // and this test pins the one thing People.tsx itself is responsible
+    // for handing it: last_seen from the profile just read, not some other
+    // instant.
+    const events: Mock = vi.fn(async () => eventsPage())
+    const client = {
+      person: vi.fn(async () => person({ last_seen: '2026-08-20T15:30:00.000Z' })),
+      events,
+    } as unknown as ApiClient
     renderPeople('/people?id=u1', client)
-    expect(await screen.findByTestId('timeline-placeholder')).toBeInTheDocument()
+    await waitFor(() => expect(events).toHaveBeenCalled())
+    expect(events.mock.calls[0]?.[1]).toMatchObject({
+      person: 'u1',
+      until: '2026-08-20T15:30:00.000Z',
+    })
+  })
+
+  it('leaves the header and traits standing when the timeline fails', async () => {
+    // The panels render independently: the header/traits/context come from
+    // the person read and the timeline from a second fetch, and either can
+    // fail alone. A timeline error must not blank a header that rendered
+    // fine.
+    const client = {
+      person: vi.fn(async () => person({ person_id: 'u1', traits: { plan: 'pro' } })),
+      events: vi.fn(async () => {
+        throw new ApiError(503, 'unavailable')
+      }),
+    } as unknown as ApiClient
+    renderPeople('/people?id=u1', client)
+    expect(await screen.findByText('pro')).toBeInTheDocument()
+    // Awaited, not `getByText`: the person read and the timeline are two
+    // separate fetches, and the timeline's own only starts once the person
+    // read has already landed and mounted it -- it needs its own tick to
+    // reject and re-render, even though both promises resolve immediately.
+    expect(await screen.findByText(/could not load .*timeline/i)).toBeInTheDocument()
+  })
+
+  it('says the context is unknown when there is no newest event to read it from', async () => {
+    // Context comes off the timeline's first row. With no timeline there is
+    // nothing to read, and ten empty rows would assert this person has no
+    // device, browser or country -- which the screen never established.
+    const client = {
+      person: vi.fn(async () => person({ person_id: 'u1' })),
+      events: vi.fn(async () => {
+        throw new ApiError(503, 'unavailable')
+      }),
+    } as unknown as ApiClient
+    renderPeople('/people?id=u1', client)
+    expect(await screen.findByText(/no context to show/i)).toBeInTheDocument()
+    expect(screen.queryByText(/have no value recorded/i)).toBeNull()
+  })
+
+  it('fills the context panel from the timeline once it loads', async () => {
+    // The other half of the pair above: once the timeline's newest event
+    // does land, the context panel reads it rather than staying stuck on
+    // "no context to show".
+    const client = {
+      person: vi.fn(async () => person({ person_id: 'u1' })),
+      events: vi.fn(async () => eventsPage([event({ browser: 'firefox' })])),
+    } as unknown as ApiClient
+    renderPeople('/people?id=u1', client)
+    expect(await screen.findByText('firefox')).toBeInTheDocument()
+    expect(screen.queryByText(/no context to show/i)).toBeNull()
   })
 })
 
@@ -172,11 +283,14 @@ describe('People -- invented mutations', () => {
       person: vi.fn(async () => {
         throw new ApiError(404, 'person_not_found')
       }),
+      events: noTimeline(),
     } as unknown as ApiClient
     renderPeople('/people?id=ghost', client)
     await screen.findByTestId('person-not-found')
     expect(screen.queryByTestId('identity-ids')).toBeNull()
-    expect(screen.queryByTestId('timeline-placeholder')).toBeNull()
+    // Never reached: the timeline never mounts behind a 404, so the second
+    // fetch it would have made is never sent either.
+    expect(client.events).not.toHaveBeenCalled()
   })
 
   it('never calls the export or delete endpoints -- this task builds neither', async () => {
@@ -184,6 +298,7 @@ describe('People -- invented mutations', () => {
     const deletePerson = vi.fn()
     const client = {
       person: vi.fn(async () => person()),
+      events: noTimeline(),
       personExport,
       deletePerson,
     } as unknown as ApiClient

@@ -12,6 +12,7 @@ import {
   TableRow,
 } from '../../components/ui/table.js'
 import { AttributesSection, TraitsSection } from '../shared/PersonFields.js'
+import { formatDate } from '../shared/format.js'
 
 /** One page of the walk, decoupled from `SegmentPreview`'s optional fields --
  * a caller always has all of these once it decides to ask for members at all.
@@ -29,17 +30,6 @@ export interface MemberPage {
   next_cursor: string | null
   window_exhausted: boolean
   person_count: number
-}
-
-/** `first_seen`/`last_seen` are ISO instants; only the calendar date matters
- * here, unlike the event feed's own `formatEventTime` which also carries a
- * same-day time. `undefined` (never sent by the server, but not worth a
- * crash) falls through `new Date(undefined)` to `Invalid Date`, caught by
- * the same `isNaN` guard as a genuinely malformed string. */
-function formatDate(iso: string): string {
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return 'unknown'
-  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
 }
 
 /** How this walk ended -- `null` while it has not. See `MemberList`'s own

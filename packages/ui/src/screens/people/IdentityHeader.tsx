@@ -1,16 +1,6 @@
 import type { Person } from '../../api/types.js'
 import { DetailSection } from '../../components/DetailList.js'
-
-/** `first_seen`/`last_seen` are ISO instants; only the calendar date matters
- * here, matching `MemberList.tsx`'s own `formatDate`. `undefined` (never
- * sent by the server, but not worth a crash) falls through `new
- * Date(undefined)` to `Invalid Date`, caught by the same `isNaN` guard as a
- * genuinely malformed string. */
-function formatDate(iso: string): string {
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return 'unknown'
-  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
-}
+import { formatDate } from '../shared/format.js'
 
 /** One column of the id split -- a plain list of ids, or a line saying there
  * are none, since an empty `<ul>` reads as though the panel forgot to

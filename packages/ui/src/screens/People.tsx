@@ -3,12 +3,14 @@ import { useEffect, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
-import type { Person } from '../api/types.js'
+import type { LyraEvent, Person } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
+import { DetailSection } from '../components/DetailList.js'
 import { Button } from '../components/ui/button.js'
 import { Input } from '../components/ui/input.js'
 import { Label } from '../components/ui/label.js'
 import { IdentityHeader } from './people/IdentityHeader.js'
+import { Timeline } from './people/Timeline.js'
 import { personPath, readPersonId } from './people/params.js'
 import { AttributesSection, TraitsSection } from './shared/PersonFields.js'
 
@@ -113,6 +115,13 @@ export function People(props: { client: ApiClient; onUnauthorized?: () => void }
 
   const [draft, setDraft] = useState(id ?? '')
   const [status, setStatus] = useState<Status>({ kind: 'loading' })
+  // Fed by the timeline's own newest event (Task 7) -- `null` until that
+  // second fetch lands, which is why `AttributesSection` below is gated on
+  // it rather than always rendered against `{}`. The two panels come from
+  // two different requests and fail independently; this is what lets the
+  // context panel say "no context to show" instead of silently asserting an
+  // empty one.
+  const [newestEvent, setNewestEvent] = useState<LyraEvent | null>(null)
 
   // Keeps the lookup box in step with the URL -- both for a fresh navigation
   // (submitting the form below) and for a direct load of `/people?id=…`
@@ -126,6 +135,10 @@ export function People(props: { client: ApiClient; onUnauthorized?: () => void }
     if (id === null || activeId == null) return
     let cancelled = false
     setStatus({ kind: 'loading' })
+    // A stale newest event from whoever was looked up before must not
+    // survive into this lookup's context panel while its own timeline is
+    // still loading.
+    setNewestEvent(null)
     client
       .person(activeId, id)
       .then((person) => {
@@ -239,25 +252,46 @@ export function People(props: { client: ApiClient; onUnauthorized?: () => void }
   return (
     <div className="flex flex-col gap-6">
       <IdentityHeader person={person} />
-      {/* `AttributesSection` is fed by the timeline's newest event -- Task
-       * 7's job. Until then there is no source to read context from, so
-       * this renders the state the brief specifies (empty) rather than
-       * inventing one: an empty source is truthful about what this task
-       * built, not a placeholder pretending to be data. */}
-      <AttributesSection source={{}} />
+      {/*
+       * Context comes off the timeline's newest event, not the person read
+       * -- `AttributesSection` renders it once that second fetch lands.
+       * Rendering it against `{}` in the meantime (or if the timeline never
+       * loads at all) would assert this person has no device, browser or
+       * country recorded, which is a claim about DATA, and this screen has
+       * never actually looked: the timeline fetch either hasn't finished or
+       * has failed independently of the person read above, which rendered
+       * fine either way.
+       */}
+      {newestEvent != null ? (
+        // `LyraEvent` has no index signature of its own (unlike `MemberRow`,
+        // which was given one for exactly this reason -- see
+        // `PersonFields.tsx`'s own doc comment), so this cast is what
+        // `AttributesSection`'s callers all need when their source is a
+        // plain, fully-typed interface rather than a row shape built with
+        // an index signature already in mind.
+        <AttributesSection source={newestEvent as unknown as Record<string, unknown>} />
+      ) : (
+        <DetailSection title="Attributes">
+          <p className="text-muted-foreground text-sm">
+            No context to show yet — this person&apos;s timeline has not loaded.
+          </p>
+        </DetailSection>
+      )}
       <TraitsSection
         traits={person.traits}
         traits_num={person.traits_num}
         trait_total={person.trait_total}
         withheld={person.traits_withheld}
       />
-      {/* Task 7 fills this in with the person's event timeline. */}
-      <div
-        data-testid="timeline-placeholder"
-        className="rounded-md border border-border border-dashed p-6 text-center text-muted-foreground text-sm"
-      >
-        Event timeline coming soon.
-      </div>
+      {activeId != null && (
+        <Timeline
+          client={client}
+          projectId={activeId}
+          personId={person.person_id}
+          lastSeen={person.last_seen}
+          onNewestEvent={setNewestEvent}
+        />
+      )}
     </div>
   )
 }

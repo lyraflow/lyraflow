@@ -251,6 +251,15 @@ export interface EventsQuery {
    */
   before?: string
   event?: string
+  /**
+   * A user id, anonymous id or device id -- narrows the feed to one
+   * person's own events, resolved server-side the same way `GET
+   * /v1/persons/:id` resolves its own path parameter
+   * (`identity/scope.ts`'s `resolvePersonScope`). The feed screen never
+   * sets this; `people/Timeline.tsx` (Task 7) is the first caller, walking
+   * one person's history rather than the project's.
+   */
+  person?: string
 }
 export interface StatsQuery {
   interval?: '1m' | '1h' | '1d' | '1w'

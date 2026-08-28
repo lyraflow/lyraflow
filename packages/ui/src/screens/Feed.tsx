@@ -303,6 +303,7 @@ export function Feed(props: {
             loadFailed={eventsLoadFailed}
             rangeLabel={range.label}
             filteredEvent={eventParam}
+            linkPeople
           />
         </TabsContent>
         <TabsContent value="rejected" className="min-w-0">
