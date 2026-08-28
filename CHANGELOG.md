@@ -91,6 +91,26 @@ one fix is contained in 0.3.0.
   the icon says which of those links lands on a profile rather than on the
   page explaining that a "nothing to show" means one of four things.
 
+- **Trends and retention grids can be saved and reopened**, the same way a
+  funnel already could. `GET`/`POST /v1/trends` and `GET`/`PATCH`/`DELETE
+  /v1/trends/:id` store a name, an event, an interval and a breakdown; the
+  same four verbs on `/v1/retention-reports` store a name, the two events,
+  their conditions, a granularity, a period count and an optional segment.
+  Neither adds a `/run` endpoint — a saved trend is answered by the same
+  `GET /v1/events/stats` call the ad hoc chart already used, and a saved
+  retention report by the same `POST /v1/reports/retention`, with the
+  stored fields filled in. Both screens gain a list view and a Save
+  control, matching Funnels and Segments.
+
+  **The range is deliberately not part of what's saved.** A trend or a
+  retention report stores the question, not the window it was asked over,
+  so reopening one runs it over whatever range the screen currently has,
+  never the one it was created with. Reopening a saved retention report
+  over a range too short for the periods it stores is not refused or
+  quietly narrowed to fewer cohorts: the cohorts it can measure run, and
+  the rest come back as the same dash the grid already gives an unfinished
+  period, with a count of how many are waiting.
+
 ## 0.11.0 — 2026-08-28
 
 ### Added
