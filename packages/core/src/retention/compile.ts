@@ -1,6 +1,8 @@
 import { RESOLVED_PERSON_ALIAS, resolvedPersonExpr } from '../identity/resolve.js'
 import { notSuppressedExpr } from '../privacy/suppression.js'
+import type { WherePredicate } from '../segments/ast.js'
 import { type Params, chDateTime } from '../segments/params.js'
+import { attributeColumns, wherePredicate } from '../segments/predicates.js'
 import { ANY_EVENT, type Granularity, type RetentionQuery, validateRetention } from './ast.js'
 
 export interface CompiledRetention {
@@ -137,8 +139,44 @@ export function compileRetention(opts: {
   const nameFilter =
     anyStart || anyReturn ? '' : `\n      AND event_name IN (${[...new Set(names)].join(', ')})`
 
-  const startCond = startName === null ? '1' : `event_name = ${startName}`
-  const returnCond = returnName === null ? '1' : `event_name = ${returnName}`
+  // A `where` list is ANDed onto its own side's event condition. Compiled
+  // through the SAME `wherePredicate` a segment behaviour and a funnel step
+  // use, so an operator writes a predicate identically in all three places.
+  //
+  // Compiled BEFORE the SQL below, so their bound values take their place in
+  // the one positional parameter sequence.
+  const clause = (base: string, where: readonly WherePredicate[] | undefined) => {
+    const parts = [base, ...(where ?? []).map((w) => wherePredicate(w, params, now))]
+    const real = parts.filter((p) => p !== '1')
+    return real.length === 0 ? '1' : real.join(' AND ')
+  }
+  const startCond = clause(
+    startName === null ? '1' : `event_name = ${startName}`,
+    query.start_where,
+  )
+  const returnCond = clause(
+    returnName === null ? '1' : `event_name = ${returnName}`,
+    query.return_where,
+  )
+
+  // Only what some predicate actually names, never every column: `events` is
+  // columnar and this is the one table the report reads, so projecting the
+  // property maps for a grid that filters on none of them would cost every
+  // run in the product. Same rule `behaviour.ts` and `funnels/compile.ts`
+  // follow, through the same helper.
+  const allWhere = [...(query.start_where ?? []), ...(query.return_where ?? [])]
+  const attrs = attributeColumns(allWhere)
+  const needsProperties = allWhere.some((w) => w.source !== 'attribute')
+  const predicateColumns = [...(needsProperties ? ['properties', 'properties_num'] : []), ...attrs]
+  const innerSelect = predicateColumns.length > 0 ? `, ${predicateColumns.join(', ')}` : ''
+  // Re-projected out of the resolved scan under their own names, because
+  // `wherePredicate` emits a bare column for an attribute and
+  // `properties[key]` for a property -- both have to resolve against `scan`,
+  // which is what `cohorts` and `activity` read.
+  const scanSelect =
+    predicateColumns.length > 0
+      ? `,\n    ${predicateColumns.map((c) => `e.${c} AS ${c}`).join(',\n    ')}`
+      : ''
 
   // ANDed into the WHERE, not appended after the GROUP BY. It was the
   // latter, which is not merely stylistically wrong -- `GROUP BY x WHERE …`
@@ -155,9 +193,9 @@ WITH scan AS (
   SELECT
     ${resolved} AS ${RESOLVED_PERSON_ALIAS},
     e.event_name AS event_name,
-    e.timestamp  AS timestamp
+    e.timestamp  AS timestamp${scanSelect}
   FROM (
-    SELECT project_id, anonymous_id, user_id, timestamp, event_name, event_id
+    SELECT project_id, anonymous_id, user_id, timestamp, event_name, event_id${innerSelect}
     FROM events
     WHERE project_id = ${projectParam}
       AND timestamp >= ${sinceParam}

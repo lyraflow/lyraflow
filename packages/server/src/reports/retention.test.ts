@@ -333,3 +333,159 @@ describe('a grid restricted to a segment (live ClickHouse)', () => {
     expect((await restricted(nobody)).cohorts).toHaveLength(0)
   })
 })
+
+/**
+ * Retention on ONE event name, told apart by a `where` predicate.
+ *
+ * The gap Cem hit on 2026-08-28: a site whose every navigation is a `$page`
+ * could only cohort by "viewed any page", so "viewed the home page, then came
+ * back and registered" was not expressible at all -- the grid answered a
+ * different question with total confidence.
+ *
+ * Its own project, for the reason the other blocks in this file have theirs:
+ * the `*` tests above count ANY event, so seeding four more people into their
+ * project would silently change three assertions that have nothing to do with
+ * predicates.
+ */
+describe('a grid narrowed by where predicates (live ClickHouse)', () => {
+  const WP = 7704
+  const wpUuid = (n: number) => `77040000-0000-4000-8000-${String(n).padStart(12, '0')}`
+  let wpSeq = 0
+
+  const page = (person: string, day: string, path: string, section = '') => ({
+    project_id: WP,
+    event_id: wpUuid(++wpSeq),
+    anonymous_id: `wp-${person}`,
+    user_id: person,
+    event_name: '$page',
+    timestamp: `${day} 10:00:00.000`,
+    received_at: `${day} 10:00:00.000`,
+    trusted: 1,
+    path,
+    properties: section === '' ? {} : { section },
+    properties_num: {},
+  })
+
+  const wpGrid = async (over: Partial<RetentionQuery>) => {
+    const query: RetentionQuery = {
+      start_event: '$page',
+      return_event: '$page',
+      granularity: 'week',
+      periods: 3,
+      since: '2026-06-01T00:00:00Z',
+      until: '2026-06-15T00:00:00Z',
+      ...over,
+    }
+    const compiled = compileRetention({
+      query,
+      projectId: WP,
+      database: CH_DB,
+      now: SETTLED,
+      params: new Params(),
+    })
+    return runRetention({ client: ch, compiled, query, now: SETTLED })
+  }
+
+  beforeAll(async () => {
+    await pg.query('DELETE FROM projects WHERE id = $1', [WP])
+    await pg.query(
+      `INSERT INTO projects (id, name, slug, write_key, server_key_hash)
+       VALUES ($1, 'Retention Where', 'retention-where-test', 'wk_retention_where', 'h')`,
+      [WP],
+    )
+    for (const table of ['events', 'device_index', 'person_traits']) {
+      await ch.command({
+        query: `ALTER TABLE ${table} DELETE WHERE project_id = ${WP}`,
+        clickhouse_settings: { mutations_sync: '1' },
+      })
+    }
+    await ch.insert({
+      table: 'events',
+      format: 'JSONEachRow',
+      values: [
+        // p1: home in W0, then registered in W1. The one the grid is for.
+        page('p1', '2026-06-03', '/', 'marketing'),
+        page('p1', '2026-06-10', '/register', 'signup'),
+        // p2: home in W0, never registered.
+        page('p2', '2026-06-04', '/', 'marketing'),
+        // p3: only ever saw /pricing -- must not enter a `/` cohort at all.
+        page('p3', '2026-06-03', '/pricing', 'marketing'),
+        // p4: registered in W0 WITHOUT ever seeing home. Must not enter
+        // either -- the start predicate defines the cohort, not the name.
+        page('p4', '2026-06-05', '/register', 'signup'),
+      ],
+    })
+  })
+
+  afterAll(async () => {
+    await pg.query('DELETE FROM projects WHERE id = $1', [WP])
+  })
+
+  it('is useless without predicates, which is why they exist', async () => {
+    // Every one of the four is a `$page`, so the unnarrowed grid cohorts all
+    // of them together and answers "did they view any page again".
+    const r = await wpGrid({})
+    expect(row(r, W0)?.size).toBe(4)
+  })
+
+  it('cohorts on the START predicate, not merely on the event name', async () => {
+    const r = await wpGrid({
+      start_where: [{ source: 'attribute', attribute: 'path', operator: '=', value: '/' }],
+    })
+    // p1 and p2 only. p3 saw /pricing, p4 saw /register.
+    expect(row(r, W0)?.size).toBe(2)
+  })
+
+  it('measures the RETURN predicate independently of the start one', async () => {
+    // The question Cem named: viewed `/`, then came back and viewed
+    // `/register`. p1 did; p2 did not.
+    const r = await wpGrid({
+      start_where: [{ source: 'attribute', attribute: 'path', operator: '=', value: '/' }],
+      return_where: [{ source: 'attribute', attribute: 'path', operator: '=', value: '/register' }],
+    })
+    expect(row(r, W0)?.size).toBe(2)
+    expect(row(r, W0)?.retained).toEqual([0, 1, 0, 0])
+  })
+
+  it('lets the two predicates differ on the same event name', async () => {
+    // Reversed: cohort on /register, return on /. Nobody does that here, so
+    // the grid is a cohort with no returns -- which is a real answer, and a
+    // different one from the test above.
+    const r = await wpGrid({
+      start_where: [{ source: 'attribute', attribute: 'path', operator: '=', value: '/register' }],
+      return_where: [{ source: 'attribute', attribute: 'path', operator: '=', value: '/' }],
+    })
+    expect(row(r, W0)?.size).toBe(1)
+    expect(row(r, W0)?.retained).toEqual([0, 0, 0, 0])
+  })
+
+  it('narrows on a PROPERTY as well as a column', async () => {
+    const r = await wpGrid({
+      start_where: [{ property: 'section', operator: '=', value: 'marketing' }],
+    })
+    // p1, p2 and p3 all landed on a marketing page; p4 went straight to
+    // signup.
+    expect(row(r, W0)?.size).toBe(3)
+  })
+
+  it('takes the new operator families, since it is the same grammar', async () => {
+    const r = await wpGrid({
+      start_where: [
+        { source: 'attribute', attribute: 'path', operator: 'starts_with', value: '/PRI' },
+      ],
+    })
+    // Case-insensitive, so `/PRI` finds `/pricing` -- p3 alone.
+    expect(row(r, W0)?.size).toBe(1)
+  })
+
+  it('ANDs several predicates rather than ORing them', async () => {
+    const r = await wpGrid({
+      start_where: [
+        { source: 'attribute', attribute: 'path', operator: '=', value: '/' },
+        { property: 'section', operator: '=', value: 'signup' },
+      ],
+    })
+    // No event is both `/` and section=signup.
+    expect(r.cohorts).toHaveLength(0)
+  })
+})

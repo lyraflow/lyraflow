@@ -17,6 +17,7 @@ import {
   toRequest,
   writeRetentionParams,
 } from './retention/params.js'
+import { WherePredicates } from './segments/WherePredicates.js'
 
 /**
  * Retention: of the people who did X in one period, how many did Y in the
@@ -85,7 +86,12 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
         </p>
       </header>
 
-      <div className="flex flex-wrap items-end gap-3">
+      {/* Each event is a CARD carrying its own predicates, rather than four
+       * controls in one row. `$page where path = /` and `$page where path =
+       * /register` is the ordinary question this report exists for, and the
+       * two `where` lists are what tell those apart -- putting them in one
+       * flat row leaves no way to see which list belongs to which event. */}
+      <div className="flex flex-col gap-2 rounded-md border border-input p-3">
         <EventCombobox
           client={client}
           projectId={activeId ?? 0}
@@ -95,6 +101,21 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
           accessibleName="Start event"
           onUnauthorized={onUnauthorized}
         />
+        <WherePredicates
+          id="retention-start-where"
+          // `undefined`, never `''`: the combobox reports an empty string
+          // when cleared, and `WherePredicates` reads `''` as an event named
+          // the empty string rather than as "no scoping".
+          event={params.start === '' ? undefined : params.start}
+          client={client}
+          projectId={activeId ?? 0}
+          value={params.startWhere}
+          onChange={(next) => update({ startWhere: next ?? [] })}
+          onUnauthorized={onUnauthorized}
+        />
+      </div>
+
+      <div className="flex flex-col gap-2 rounded-md border border-input p-3">
         <EventCombobox
           client={client}
           projectId={activeId ?? 0}
@@ -104,6 +125,18 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
           accessibleName="Return event"
           onUnauthorized={onUnauthorized}
         />
+        <WherePredicates
+          id="retention-return-where"
+          event={params.return === '' ? undefined : params.return}
+          client={client}
+          projectId={activeId ?? 0}
+          value={params.returnWhere}
+          onChange={(next) => update({ returnWhere: next ?? [] })}
+          onUnauthorized={onUnauthorized}
+        />
+      </div>
+
+      <div className="flex flex-wrap items-end gap-3">
         <div className="flex min-w-0 flex-col gap-1">
           <Label htmlFor="retention-granularity">Period</Label>
           <select
@@ -143,7 +176,10 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
       {!ready && (
         <p className="text-muted-foreground text-sm">
           Name both events to run a grid. Use <code>*</code> for “any event” — a start of{' '}
-          <code>*</code> cohorts people by when you first saw them.
+          <code>*</code> cohorts people by when you first saw them. Add a condition to either one
+          when the same event name means several things: <code>$page</code> where <code>path</code>{' '}
+          is <code>/</code>, then <code>$page</code> where <code>path</code> is{' '}
+          <code>/register</code>.
         </p>
       )}
 

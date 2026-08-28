@@ -2,9 +2,11 @@ import {
   GRANULARITIES,
   type Granularity,
   MAX_PERIODS,
+  MAX_WHERE_PREDICATES,
   Params,
   RetentionValidationError,
   type SegmentQuery,
+  WherePredicate,
   compileRetention,
   compileSegment,
 } from '@lyraflow/core'
@@ -35,6 +37,11 @@ const DEFAULT_PERIODS = 8
 const Body = z.object({
   start_event: z.string().min(1).max(128),
   return_event: z.string().min(1).max(128),
+  // The segment/funnel `where` grammar verbatim. Validated by the same schema
+  // the other two use, so an over-long list or a bad operator is a field-level
+  // error here for the same reason it is there.
+  start_where: z.array(WherePredicate).max(MAX_WHERE_PREDICATES).optional(),
+  return_where: z.array(WherePredicate).max(MAX_WHERE_PREDICATES).optional(),
   granularity: z.enum(GRANULARITIES).default('week'),
   periods: z.number().int().positive().max(MAX_PERIODS).default(DEFAULT_PERIODS),
   since: z.string().datetime().optional(),
@@ -117,6 +124,8 @@ export function registerReportRoutes(app: FastifyInstance, deps: ReportDeps): vo
     const query = {
       start_event: q.start_event,
       return_event: q.return_event,
+      ...(q.start_where === undefined ? {} : { start_where: q.start_where }),
+      ...(q.return_where === undefined ? {} : { return_where: q.return_where }),
       granularity: q.granularity,
       periods: q.periods,
       since: since.toISOString(),
@@ -137,6 +146,8 @@ export function registerReportRoutes(app: FastifyInstance, deps: ReportDeps): vo
         ...result,
         start_event: q.start_event,
         return_event: q.return_event,
+        start_where: q.start_where ?? [],
+        return_where: q.return_where ?? [],
         since: query.since,
         until: query.until,
         // The instant measurability was decided against, echoed so a reader

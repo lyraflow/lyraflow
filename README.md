@@ -366,8 +366,8 @@ screens, reachable from the sidebar:
   different populations, each counted on its own rather than assumed from the
   chart above (see *Who reached a step, or stopped there* under Funnels below).
 
-- **Retention** — pick a start event, a return event, a period and how many
-  of them, and run a cohort grid. It does **not** run on render and does not
+- **Retention** — pick a start event, a return event, a condition on either of
+  them, a period and how many of them, and run a cohort grid. It does **not** run on render and does not
   re-run when you change the controls: a grid is a real scan, and numbers from
   one definition sitting under the controls of another is a wrong answer
   stated confidently, so the grid clears and waits for you. Cells shade by
@@ -2130,11 +2130,30 @@ run later fills those cells in.
 | field | meaning |
 | --- | --- |
 | `start_event` | what puts somebody in a cohort. `*` means any event, so `*` cohorts people by when you first saw them. |
+| `start_where` | which *occurrence* of it counts — the same `where` grammar a funnel step and a segment behaviour take. |
 | `return_event` | what counts as coming back. May be the same as `start_event`; `*` means any activity. |
+| `return_where` | the same, for the return side, and **independent** of `start_where`. |
 | `granularity` | `day`, `week` or `month`. Weeks start **Monday**, and every bucket is UTC. |
 | `periods` | how many periods after the cohort's own to measure, up to 26. |
 | `since` / `until` | bound who **enters** a cohort. Optional; defaults to the last `periods` periods. |
 | `segment_id` | restrict the whole grid to a saved segment's population. |
+
+**The two `where` lists are what make one event name usable.** On a site where
+every navigation is a `$page`, "viewed the home page, then came back and
+registered" is one event name and two different conditions:
+
+```json
+{ "start_event": "$page",
+  "start_where":  [{ "source": "attribute", "attribute": "path", "operator": "=", "value": "/" }],
+  "return_event": "$page",
+  "return_where": [{ "source": "attribute", "attribute": "path", "operator": "=", "value": "/register" }],
+  "granularity": "week", "periods": 8 }
+```
+
+Predicates on one side are ANDed together, and the two sides never see each
+other's. They are the same shape a funnel step's `where` takes, including the
+text, presence, boolean and relative-date operators — so a predicate is
+written identically in all three places.
 
 **A person belongs to the cohort of their FIRST start event inside the range**
 — not their first ever, which would make the range decorative — and to exactly
