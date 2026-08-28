@@ -126,10 +126,32 @@ function renderLivePeople(client: ApiClient, initialPath: string, to: string, la
 
 describe('People', () => {
   it('shows a lookup input when there is no id', () => {
-    const client = { person: vi.fn() } as unknown as ApiClient
+    // `schemaProperties` is stubbed here (and in the other two `id === null`
+    // tests below) because `TraitSearch`'s trait-name field, like every
+    // `PropertyCombobox`, fetches on mount -- see that component's own doc
+    // comment on why that is cheap and deliberate. Without the stub the
+    // debounced lookup calls a method this fixture does not have.
+    const client = {
+      person: vi.fn(),
+      schemaProperties: vi.fn(async () => []),
+    } as unknown as ApiClient
     renderPeople('/people', client)
     expect(screen.getByLabelText(/user id, or the anonymous or device id/i)).toBeInTheDocument()
     expect(client.person).not.toHaveBeenCalled()
+  })
+
+  it('also shows the trait-search control beside the id lookup, both visible at once', () => {
+    // The repo owner asked for a second way in, alongside rather than
+    // instead of the id lookup -- both on screen with no id, each with its
+    // own submit.
+    const client = {
+      person: vi.fn(),
+      schemaProperties: vi.fn(async () => []),
+    } as unknown as ApiClient
+    renderPeople('/people', client)
+    expect(screen.getByLabelText(/user id, or the anonymous or device id/i)).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: /^trait$/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^search$/i })).toBeInTheDocument()
   })
 
   it('names all four reasons a person cannot be shown', async () => {
@@ -182,7 +204,10 @@ describe('People', () => {
     // the same fact the 404 copy above now names. A label stating a
     // capability the server does not have sends an operator to a dead end
     // and then blames their id.
-    const client = { person: vi.fn() } as unknown as ApiClient
+    const client = {
+      person: vi.fn(),
+      schemaProperties: vi.fn(async () => []),
+    } as unknown as ApiClient
     renderPeople('/people', client)
     const label = screen.getByText(/^user id, or the anonymous or device id/i)
     expect(label).toHaveTextContent(/already identified/i)
@@ -208,6 +233,7 @@ describe('People', () => {
       person: vi.fn(async () => {
         throw new ApiError(404, 'person_not_found')
       }),
+      schemaProperties: vi.fn(async () => []),
     } as unknown as ApiClient
     renderPeople('/people', client)
     const user = userEvent.setup()

@@ -13,6 +13,7 @@ import { DeleteButton } from './people/DeleteButton.js'
 import { ExportButton } from './people/ExportButton.js'
 import { IdentityHeader } from './people/IdentityHeader.js'
 import { Timeline } from './people/Timeline.js'
+import { TraitSearch } from './people/TraitSearch.js'
 import { personPath, readPersonId } from './people/params.js'
 import { AttributesSection, TraitsSection } from './shared/PersonFields.js'
 
@@ -249,6 +250,16 @@ export function People(props: { client: ApiClient; onUnauthorized?: () => void }
     return (
       <Screen>
         <LookupForm draft={draft} onChange={setDraft} onSubmit={submit} />
+        {/* The second way in, beside the id lookup above -- both visible at
+         * once, each with its own submit, rather than a mode toggle or one
+         * box that guesses which was meant. Gated on `activeId` the same
+         * way the timeline and the two privacy actions further down are:
+         * `TraitSearch` needs a real project to call `previewSegment`
+         * against, and `activeId` is only ever `null` in the sliver of a
+         * render between mount and the project context settling. */}
+        {activeId != null && (
+          <TraitSearch client={client} projectId={activeId} onUnauthorized={onUnauthorized} />
+        )}
       </Screen>
     )
   }

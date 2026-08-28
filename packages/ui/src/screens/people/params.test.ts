@@ -1,5 +1,6 @@
+import type { Trait } from '@lyraflow/core/segments/ast.js'
 import { describe, expect, it } from 'vitest'
-import { personPath, readPersonId } from './params.js'
+import { personPath, readPersonId, readTraitQuery, traitSearchPath } from './params.js'
 
 describe('personPath / readPersonId', () => {
   it('round-trips an id containing a dot, an at sign and a slash', () => {
@@ -32,5 +33,55 @@ describe('personPath / readPersonId', () => {
       expect(path).not.toContain(`id=${id}`)
       expect(readPersonId(new URL(`http://x${path}`).search)).toBe(id)
     }
+  })
+})
+
+describe('traitSearchPath / readTraitQuery', () => {
+  it('round-trips a comparison clause, value included', () => {
+    const node: Trait = { kind: 'trait', key: 'plan', operator: '=', value: 'pro' }
+    const path = traitSearchPath(node)
+    expect(readTraitQuery(new URL(`http://x${path}`).search)).toEqual(node)
+  })
+
+  it('round-trips a `between` pair and a relative window object, not just a scalar', () => {
+    // These are the two value shapes JSON-encoding exists for: a tuple and a
+    // plain object, neither of which a single unencoded query parameter
+    // could carry.
+    const between: Trait = { kind: 'trait', key: 'seats', operator: 'between', value: [1, 12] }
+    expect(readTraitQuery(new URL(`http://x${traitSearchPath(between)}`).search)).toEqual(between)
+
+    const relative: Trait = {
+      kind: 'trait',
+      key: 'last_login',
+      operator: 'in_last',
+      value: { n: 30, unit: 'days' },
+    }
+    expect(readTraitQuery(new URL(`http://x${traitSearchPath(relative)}`).search)).toEqual(relative)
+  })
+
+  it('round-trips a value-less clause with no stray value parameter', () => {
+    const node: Trait = { kind: 'trait', key: 'plan', operator: 'is_set' }
+    const path = traitSearchPath(node)
+    expect(path).not.toContain('trait_value')
+    expect(readTraitQuery(new URL(`http://x${path}`).search)).toEqual(node)
+  })
+
+  it('returns null for no search, an unknown operator, and a value that fails its clause', () => {
+    expect(readTraitQuery('')).toBeNull()
+    expect(readTraitQuery('?trait_key=plan')).toBeNull() // no operator at all
+    expect(readTraitQuery('?trait_key=plan&trait_op=not_a_real_operator')).toBeNull()
+    // `between` demands a two-element tuple -- a single value fails the
+    // clause's own refine, not just the JSON parse.
+    expect(
+      readTraitQuery(`?trait_key=seats&trait_op=between&trait_value=${encodeURIComponent('5')}`),
+    ).toBeNull()
+    // Malformed JSON in the value slot, e.g. a hand-truncated link.
+    expect(
+      readTraitQuery(`?trait_key=plan&trait_op=%3D&trait_value=${encodeURIComponent('{not json')}`),
+    ).toBeNull()
+  })
+
+  it('rejects an empty trait key the same way the AST does', () => {
+    expect(readTraitQuery('?trait_key=&trait_op=is_set')).toBeNull()
   })
 })
