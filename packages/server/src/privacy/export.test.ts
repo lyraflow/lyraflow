@@ -378,6 +378,26 @@ describe('GET /v1/persons/:id/export', () => {
     expect(afterLines[0]?.traits).toEqual({})
   })
 
+  // A refactor pin. identify() with a string trait, a numeric trait, and a
+  // numeric trait whose value is 0 -- the third is the one a truthiness
+  // check on has_num drops, and the one a merged/split shaper is most
+  // likely to disagree about.
+  it('emits the same trait object after the reader was extracted', async () => {
+    const userId = `exp-pin-${randomUUID()}`
+    const identifyRes = await identify(WRITE_KEY_A, {
+      message_id: randomUUID(),
+      anonymous_id: `anon-${userId}`,
+      user_id: userId,
+      traits: { plan: 'pro', seats: 12, credits: 0 },
+    })
+    expect(identifyRes.statusCode).toBe(202)
+
+    const res = await exportAs(userId, SERVER_KEY_A)
+    expect(res.statusCode).toBe(200)
+    const person = parseLines(res.body).find((l) => l.type === 'person')
+    expect(person?.traits).toEqual({ plan: 'pro', seats: 12, credits: 0 })
+  })
+
   // THE test for the anonymous-trait leak a review of this task caught: a
   // `user_id = ''` person_traits row is keyed only by anonymous_id, so it
   // cannot itself say which of a device's owners it belongs to. Correct
