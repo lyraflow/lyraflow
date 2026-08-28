@@ -20,7 +20,7 @@ describe('contextFields', () => {
   it('reads context off a LyraEvent as readily as off a MemberRow', () => {
     // The whole reason the parameter was widened: the profile's context panel
     // reads the newest event, not a member row.
-    const fields = contextFields({ country: 'TR', os: 'Linux', browser: '' } as never)
+    const fields = contextFields({ country: 'TR', os: 'Linux', browser: '' })
     expect(fields.find((f) => f.label === 'Country')?.value).toBe('TR')
   })
 })
@@ -46,6 +46,19 @@ describe('TraitsSection', () => {
     render(<TraitsSection traits={{}} traits_num={{}} trait_total={0} withheld />)
     expect(screen.getByText(/cannot be split/i)).toBeInTheDocument()
     expect(screen.queryByText(/No traits recorded/i)).not.toBeInTheDocument()
+  })
+})
+
+describe('TraitsSection withheld + trait_total', () => {
+  it('does not also claim traits are held back when they are withheld', () => {
+    // A nonzero trait_total alongside withheld would otherwise render two
+    // contradictory statements: "not shown for a deletion request" AND
+    // "N more traits are recorded and not shown here". The server keeps
+    // trait_total at 0 under a deletion boundary today, but this component
+    // must not depend on that upstream invariant to avoid contradicting itself.
+    render(<TraitsSection traits={{}} traits_num={{}} trait_total={12} withheld />)
+    expect(screen.getByText(/cannot be split/i)).toBeInTheDocument()
+    expect(screen.queryByText(/more traits are recorded/i)).not.toBeInTheDocument()
   })
 })
 

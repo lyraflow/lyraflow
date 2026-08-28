@@ -107,7 +107,10 @@ export function TraitsSection(props: {
 }) {
   const { traits: traitsMap, traits_num: traitsNumMap, trait_total: traitTotal, withheld } = props
   const traits = traitFields({ traits: traitsMap, traits_num: traitsNumMap })
-  const heldBack = Math.max(0, (traitTotal ?? traits.length) - traits.length)
+  // Suppressed under `withheld`: a nonzero `trait_total` arriving alongside
+  // it would otherwise render two contradictory statements -- "not shown for
+  // a deletion request" and "N more traits are recorded and not shown here".
+  const heldBack = withheld ? 0 : Math.max(0, (traitTotal ?? traits.length) - traits.length)
 
   return (
     <DetailSection title="Traits">
