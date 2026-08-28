@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter } from 'react-router'
+import { MemoryRouter, useNavigate } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import { ApiError } from '../api/client.js'
@@ -91,6 +91,34 @@ function renderPeople(path: string, client: ApiClient, opts: { onUnauthorized?: 
     <MemoryRouter initialEntries={[path]}>
       <ProjectProvider projects={PROJECTS} initialId={1}>
         <People client={client} onUnauthorized={opts.onUnauthorized} />
+      </ProjectProvider>
+    </MemoryRouter>,
+  )
+}
+
+/** A same-tab navigation trigger, matching `FunnelBuilder.test.tsx`'s own
+ * `GoTo` helper -- `People` reads its id from the query string, so the only
+ * way to prove a navigation between two profiles (rather than a fresh mount)
+ * is a real `useNavigate` push inside the same render tree. */
+function GoTo(props: { to: string; label: string }) {
+  const navigate = useNavigate()
+  return (
+    <button type="button" onClick={() => navigate(props.to)}>
+      {props.label}
+    </button>
+  )
+}
+
+/** Like `renderPeople`, but with a same-tab navigation trigger alongside
+ * `People` so a test can move from one profile to another without
+ * unmounting the tree -- the one thing `renderPeople` above cannot do,
+ * since `MemoryRouter`'s `initialEntries` is read once at construction. */
+function renderLivePeople(client: ApiClient, initialPath: string, to: string, label: string) {
+  render(
+    <MemoryRouter initialEntries={[initialPath]}>
+      <ProjectProvider projects={PROJECTS} initialId={1}>
+        <GoTo to={to} label={label} />
+        <People client={client} />
       </ProjectProvider>
     </MemoryRouter>,
   )
@@ -306,5 +334,83 @@ describe('People -- invented mutations', () => {
     await screen.findByTestId('identity-ids')
     expect(personExport).not.toHaveBeenCalled()
     expect(deletePerson).not.toHaveBeenCalled()
+  })
+})
+
+// Task 10 fix round: pins the invariant that navigating from one person's
+// profile to another's leaves neither `ExportButton` nor `DeleteButton`
+// carrying state across the switch (an open confirm, a stale error). Two
+// independent things make this true today, and both are exercised by these
+// tests together rather than singly:
+//
+// 1. `People` itself already forces a remount on every id change: the
+//    `status.kind === 'loading'` branch returns a different root element
+//    type than the loaded branch, and the id-keyed effect sets that status
+//    BEFORE its fetch resolves -- so the whole button subtree unmounts and
+//    remounts around every navigation regardless of any key. See the long
+//    comment in `People.tsx` right above where the buttons are rendered
+//    for the mount/unmount probe that confirmed this directly.
+// 2. `ExportButton`/`DeleteButton` are ALSO keyed on `person.person_id` in
+//    `People.tsx`, as an independent second guard -- proven independent by
+//    temporarily removing the loading-state reset in (1) and rerunning
+//    these same tests: keyless, they then fail (the leak the task-10
+//    review predicted becomes real); keyed, they still pass. That
+//    modification was reverted before committing -- it exists only to
+//    prove the key does its own work, not to ship.
+//
+// These tests therefore do NOT fail if either mechanism alone is removed
+// from the CURRENT code, because the other still holds the invariant --
+// that is what "defence in depth" means. They exist so that a later change
+// to EITHER one (an optimisation that skips the loading flash on a fast
+// re-fetch; a future button on this screen that forgets to key itself) is
+// still caught.
+describe('People -- navigating between profiles mid-flow', () => {
+  function personSwitchClient() {
+    return {
+      person: vi.fn(async (_projectId: number, id: string) => person({ person_id: id })),
+      events: noTimeline(),
+    } as unknown as ApiClient
+  }
+
+  it('does not carry an open delete confirmation from one profile to the next', async () => {
+    const client = personSwitchClient()
+    renderLivePeople(client, '/people?id=a', '/people?id=b', 'go to b')
+    await screen.findByTestId('identity-ids')
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: /delete this person/i }))
+    expect(screen.getByTestId('delete-warning')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'go to b' }))
+    await waitFor(() => expect(client.person).toHaveBeenCalledWith(1, 'b'))
+
+    // B's profile must render a CLEAN delete button, not A's open
+    // confirmation -- if the button survived the navigation as the same
+    // instance, the warning (and the typed-id input beneath it) would
+    // still be on screen, now attached to the wrong person.
+    expect(screen.queryByTestId('delete-warning')).toBeNull()
+    expect(screen.getByRole('button', { name: /delete this person/i })).toBeInTheDocument()
+  })
+
+  it('does not carry a stale export error from one profile to the next', async () => {
+    const client = {
+      person: vi.fn(async (_projectId: number, id: string) => person({ person_id: id })),
+      events: noTimeline(),
+      personExport: vi.fn(async () => {
+        throw new ApiError(503, 'unavailable')
+      }),
+    } as unknown as ApiClient
+    renderLivePeople(client, '/people?id=a', '/people?id=b', 'go to b')
+    await screen.findByTestId('identity-ids')
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: /^export$/i }))
+    expect(await screen.findByText(/could not be exported/i)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'go to b' }))
+    await waitFor(() => expect(client.person).toHaveBeenCalledWith(1, 'b'))
+
+    // B's profile must not show A's failed-export message.
+    expect(screen.queryByText(/could not be exported/i)).toBeNull()
   })
 })

@@ -275,10 +275,53 @@ export function People(props: { client: ApiClient; onUnauthorized?: () => void }
        * sliver of a render between mount and the project context settling.
        * The two privacy actions sit side by side: export reads, delete
        * erases, and an operator reaching for one is often about to reach
-       * for the other. */}
+       * for the other.
+       *
+       * A `key` derived from `person.person_id` on BOTH, prefixed per
+       * button since `key` is scoped to this list of children and two
+       * sibling elements sharing the bare id as their key is itself a
+       * React warning, regardless of the two being different component
+       * types.
+       *
+       * `<Routes>` never remounts `People` on an id change -- the id lives
+       * in the query string (`people/params.ts`'s own docstring explains
+       * why) -- so navigating from A's profile to B's (e.g. a person link
+       * out of `MemberList`/`AcceptedTable`) hands `ExportButton` and
+       * `DeleteButton` the SAME fiber under a new `personId`, unless
+       * something forces a remount. Something already does, today: the
+       * `status.kind === 'loading'` branch above returns `<Screen>{null}
+       * </Screen>`, a different root element type from this branch's raw
+       * `<div>`, and the id-keyed effect sets that status SYNCHRONOUSLY
+       * before its fetch -- so every id change already unmounts this whole
+       * subtree for one render, then remounts it fresh once the new
+       * person loads. Verified directly (not just reasoned about): a probe
+       * effect logging mount/unmount inside `DeleteButton` shows
+       * MOUNT-A / UNMOUNT-A / MOUNT-B on an A-to-B navigation with NO key
+       * present at all, and `People.test.tsx`'s own mid-flow navigation
+       * tests pass keyless against the code as it stands today.
+       *
+       * The key is still kept, as an INDEPENDENT second guard -- the same
+       * "defence in depth, deliberately unpinned" shape `Router.tsx`
+       * already documents for `FunnelBuilder`/`SegmentBuilder`'s identical
+       * reconciliation gap (see that file's own comment). Proven
+       * independent by the same probe with the loading reset temporarily
+       * removed: keyless, the navigation tests fail -- `DeleteButton`'s
+       * `confirming`/`typed`/`deletionId`/`error` (and `ExportButton`'s own
+       * `exporting`/`error`) genuinely do survive into B's profile,
+       * misreporting which person a destructive/exporting action is
+       * mid-flow for, though never acting on the wrong one (both buttons
+       * close over `personId` at call time). Keyed, the same modified
+       * build passes clean. The two mechanisms are why this survives a
+       * later change to EITHER: an optimisation that skips the loading
+       * flash for a fast re-fetch, or a future button that forgets to key
+       * itself the way `Timeline` already resets its own state instead
+       * (its effect's dependency array is `[client, projectId, personId,
+       * lastSeen]`, and it is the one component on this screen that needs
+       * no key at all). */}
       {activeId != null && (
         <div className="flex flex-wrap items-start gap-2">
           <ExportButton
+            key={`export-${person.person_id}`}
             client={client}
             projectId={activeId}
             personId={person.person_id}
@@ -286,6 +329,7 @@ export function People(props: { client: ApiClient; onUnauthorized?: () => void }
             onUnauthorized={onUnauthorized}
           />
           <DeleteButton
+            key={`delete-${person.person_id}`}
             client={client}
             projectId={activeId}
             personId={person.person_id}
