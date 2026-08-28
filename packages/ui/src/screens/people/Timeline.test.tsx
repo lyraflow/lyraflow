@@ -50,28 +50,69 @@ function page(events: LyraEvent[], over: Partial<EventsPage> = {}): EventsPage {
 
 const T1 = '2026-08-01T09:00:00.000Z'
 const T2 = '2026-08-02T09:00:00.000Z'
+const FIRST_SEEN = '2026-06-01T09:00:00.000Z'
 const LAST_SEEN = '2026-08-20T15:30:00.000Z'
 
 function base(client: ApiClient) {
-  return { client, projectId: 1, personId: 'u1', lastSeen: LAST_SEEN }
+  return { client, projectId: 1, personId: 'u1', firstSeen: FIRST_SEEN, lastSeen: LAST_SEEN }
 }
 
 describe('Timeline', () => {
-  it('anchors the first page to last_seen, not to the last 24 hours', async () => {
-    // THE TRAP THIS EXISTS FOR. /v1/events defaults `since` to 24h ago when
-    // there is no cursor, so a customer last seen in June opens to an empty
-    // timeline with no explanation -- on a screen whose whole purpose is
-    // their history.
+  it('anchors the first page to the person at BOTH ends, not to the last 24 hours', async () => {
+    // THE TRAP THIS EXISTS FOR, and this test used to assert the trap
+    // itself. It was named for the anchor and pinned
+    // `since === undefined` -- which is precisely the request that returns
+    // nothing for anyone last seen over a day ago, because `/v1/events`
+    // gates its 24h `since` default on `!cursor` ALONE. `until` does not
+    // turn it off, so `until: lastSeen` with no `since` compiles to
+    // `timestamp >= now-24h AND timestamp <= lastSeen`: an empty
+    // intersection, no rows, and no `prev_cursor` to start the walk from.
+    //
+    // Measured against the live stack, which is how it was found rather
+    // than argued: a person with events at -30h and -25h returned
+    // `{"events":[]}` for that exact request and both events once `since`
+    // was set to their `first_seen`.
+    //
+    // So `since` must be SENT, and it must be `first_seen`. A new event
+    // landing between the profile read and this one can only move
+    // `last_seen` forward; it can never move `first_seen` backward, so the
+    // floor stays valid.
     const events: Mock = vi.fn(async () => page([]))
     const client = { events } as unknown as ApiClient
-    render(<Timeline {...base(client)} lastSeen="2026-06-01T10:00:00.000Z" />)
+    render(
+      <Timeline
+        {...base(client)}
+        firstSeen="2026-01-04T08:00:00.000Z"
+        lastSeen="2026-06-01T10:00:00.000Z"
+      />,
+    )
     await waitFor(() => expect(events).toHaveBeenCalled())
     expect(events.mock.calls[0]?.[1]).toMatchObject({
       person: 'u1',
+      since: '2026-01-04T08:00:00.000Z',
       until: '2026-06-01T10:00:00.000Z',
       limit: TIMELINE_PAGE,
     })
-    expect(events.mock.calls[0]?.[1].since).toBeUndefined()
+  })
+
+  it('sends no since on an older page, leaving the cursor to bound the scan', async () => {
+    // The other half of the same guard, and the one a fix for the first
+    // half is most likely to break by making `since` unconditional. A
+    // cursor is ITSELF a bound on the scan; a second, tighter floor
+    // underneath it silently drops everything between the cursor and the
+    // window edge, which is the defect `events/routes.ts`'s own `!cursor`
+    // comment was written for. `before` pages carry the cursor and nothing
+    // else.
+    const events: Mock = vi
+      .fn()
+      .mockResolvedValueOnce(page([ev('new', T2)], { prev_cursor: 'CUR' }))
+      .mockResolvedValueOnce(page([ev('old', T1)], { prev_cursor: null }))
+    const client = { events } as unknown as ApiClient
+    render(<Timeline {...base(client)} />)
+    await userEvent.click(await screen.findByRole('button', { name: /load older/i }))
+    expect(events.mock.calls[1]?.[1]).toMatchObject({ person: 'u1', before: 'CUR' })
+    expect(events.mock.calls[1]?.[1].since).toBeUndefined()
+    expect(events.mock.calls[1]?.[1].until).toBeUndefined()
   })
 
   it('renders newest first, reversing the ascending response', async () => {
@@ -137,6 +178,34 @@ describe('Timeline', () => {
     await waitFor(() =>
       expect(onNewestEvent).toHaveBeenCalledWith(expect.objectContaining({ event_id: 'evt-b' })),
     )
+  })
+
+  it('reports an empty first page as null rather than staying silent', async () => {
+    // "There is nothing to read" is an answer and the context panel needs
+    // it. Staying silent leaves that panel in the same state as "the
+    // timeline has not come back yet", and it then tells the operator the
+    // timeline has not loaded for a timeline that loaded fine -- see
+    // `People.tsx`'s `Context` type.
+    const onNewestEvent = vi.fn()
+    const events = vi.fn(async () => page([]))
+    const client = { events } as unknown as ApiClient
+    render(<Timeline {...base(client)} onNewestEvent={onNewestEvent} />)
+    await waitFor(() => expect(onNewestEvent).toHaveBeenCalledWith(null))
+  })
+
+  it('stays silent when the first page fails, rather than reporting it as empty', async () => {
+    // The third state, and the reason the guard is on the `.then()` and not
+    // on the promise: a failed timeline has established NOTHING about this
+    // person's data, so reporting `null` here would let the panel claim
+    // there was nothing to read when nobody ever managed to look.
+    const onNewestEvent = vi.fn()
+    const events = vi.fn(async () => {
+      throw new ApiError(503, 'unavailable')
+    })
+    const client = { events } as unknown as ApiClient
+    render(<Timeline {...base(client)} onNewestEvent={onNewestEvent} />)
+    expect(await screen.findByText(/could not load .*timeline/i)).toBeInTheDocument()
+    expect(onNewestEvent).not.toHaveBeenCalled()
   })
 })
 

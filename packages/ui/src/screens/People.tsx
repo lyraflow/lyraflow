@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
@@ -28,6 +28,33 @@ type Status =
   | { kind: 'fragmented' }
   | { kind: 'error' }
   | { kind: 'loaded'; person: Person }
+
+/**
+ * What the context panel is entitled to say, which is not the same question
+ * as "do we have an event".
+ *
+ * Three states, because there are three facts and the panel's copy asserts
+ * a different one in each:
+ *
+ * - `pending` -- the timeline has not reported back. Either it is still in
+ *   flight, or it failed (`Timeline` deliberately does not call
+ *   `onNewestEvent` on a failure, so a failure stays here). The panel says
+ *   the timeline has not loaded, which is a statement about THIS SCREEN and
+ *   is true in both cases.
+ * - `empty` -- the timeline loaded and returned zero events. The panel says
+ *   there was nothing to read context from, which is a statement about the
+ *   DATA and is only sayable because the query actually ran.
+ * - `event` -- the newest event, which is the latest context by definition.
+ *
+ * `empty` used to be folded into `pending`, and the panel told the operator
+ * the timeline "has not loaded" for a timeline that had loaded fine. That
+ * was wrong on its own terms, and it was also the DEFAULT rendering for
+ * every lapsed person while the timeline's first page was mis-anchored
+ * (see `Timeline`'s docstring) -- a false progress claim sitting on top of
+ * a real, separate defect, which is the shape that makes a bug take two
+ * sessions instead of one.
+ */
+type Context = { kind: 'pending' } | { kind: 'empty' } | { kind: 'event'; event: LyraEvent }
 
 /**
  * The lookup box, shared by the empty state and by a 404 -- a failed lookup
@@ -131,13 +158,23 @@ export function People(props: { client: ApiClient; onUnauthorized?: () => void }
 
   const [draft, setDraft] = useState(id ?? '')
   const [status, setStatus] = useState<Status>({ kind: 'loading' })
-  // Fed by the timeline's own newest event (Task 7) -- `null` until that
-  // second fetch lands, which is why `AttributesSection` below is gated on
+  // Fed by the timeline's own first page -- `pending` until that second
+  // fetch reports back, which is why `AttributesSection` below is gated on
   // it rather than always rendered against `{}`. The two panels come from
   // two different requests and fail independently; this is what lets the
-  // context panel say "no context to show" instead of silently asserting an
-  // empty one.
-  const [newestEvent, setNewestEvent] = useState<LyraEvent | null>(null)
+  // context panel say why it has nothing instead of silently asserting an
+  // empty one. See `Context` above for why "nothing yet" and "nothing
+  // there" are two states and not one.
+  const [context, setContext] = useState<Context>({ kind: 'pending' })
+  // `useCallback`, and it is not decoration: this is in `Timeline`'s fetch
+  // effect's dependency array (that component's own doc comment on the prop
+  // says so), so an inline arrow would be a new function every render and
+  // the first page would re-fetch forever. Empty deps -- `setContext` is a
+  // `useState` dispatch and is itself stable, so this closure never needs
+  // rebuilding.
+  const onNewestEvent = useCallback((event: LyraEvent | null) => {
+    setContext(event == null ? { kind: 'empty' } : { kind: 'event', event })
+  }, [])
   // Bumped by `DeleteButton.onDeleted` to force the person-read effect
   // below to run again against the SAME id -- the erasure itself does not
   // change the URL, so `id` alone never changes and the effect would
@@ -169,8 +206,9 @@ export function People(props: { client: ApiClient; onUnauthorized?: () => void }
     setStatus({ kind: 'loading' })
     // A stale newest event from whoever was looked up before must not
     // survive into this lookup's context panel while its own timeline is
-    // still loading.
-    setNewestEvent(null)
+    // still loading -- and it must go back to `pending`, not to `empty`:
+    // nothing has been asked about this person yet.
+    setContext({ kind: 'pending' })
     client
       .person(activeId, id)
       .then((person) => {
@@ -390,18 +428,26 @@ export function People(props: { client: ApiClient; onUnauthorized?: () => void }
        * has failed independently of the person read above, which rendered
        * fine either way.
        */}
-      {newestEvent != null ? (
+      {context.kind === 'event' ? (
         // `LyraEvent` has no index signature of its own (unlike `MemberRow`,
         // which was given one for exactly this reason -- see
         // `PersonFields.tsx`'s own doc comment), so this cast is what
         // `AttributesSection`'s callers all need when their source is a
         // plain, fully-typed interface rather than a row shape built with
         // an index signature already in mind.
-        <AttributesSection source={newestEvent as unknown as Record<string, unknown>} />
+        <AttributesSection source={context.event as unknown as Record<string, unknown>} />
       ) : (
         <DetailSection title="Attributes">
+          {/* Two sentences, not one, and which one renders is the whole
+            * point of `Context` having three members. "has not loaded" is a
+            * claim about this screen's own progress; "nothing to read it
+            * from" is a claim about the person's data. Saying the first
+            * when the second is true tells an operator to wait for
+            * something that already happened. */}
           <p className="text-muted-foreground text-sm">
-            No context to show yet — this person&apos;s timeline has not loaded.
+            {context.kind === 'empty'
+              ? 'No context to show — this person’s timeline came back with no events, so there is nothing to read a device, browser or location from.'
+              : 'No context to show yet — this person’s timeline has not loaded.'}
           </p>
         </DetailSection>
       )}
@@ -416,8 +462,14 @@ export function People(props: { client: ApiClient; onUnauthorized?: () => void }
           client={client}
           projectId={activeId}
           personId={person.person_id}
+          // BOTH bounds, from this same profile read. `lastSeen` alone is
+          // not an anchor -- `GET /v1/events` keeps its 24h `since` default
+          // under a bare `until`, so the pair is what makes the first page
+          // the person's history rather than the empty intersection of
+          // their history and the last day. See `Timeline`'s own docstring.
+          firstSeen={person.first_seen}
           lastSeen={person.last_seen}
-          onNewestEvent={setNewestEvent}
+          onNewestEvent={onNewestEvent}
         />
       )}
     </div>

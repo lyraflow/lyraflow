@@ -262,22 +262,50 @@ describe('People', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
-  it('anchors the timeline to the person read, not to the URL', async () => {
+  it('anchors the timeline to the person read at both ends, not to the URL', async () => {
     // Task 7's own placeholder is gone -- this is the real timeline now,
-    // and this test pins the one thing People.tsx itself is responsible
-    // for handing it: last_seen from the profile just read, not some other
-    // instant.
+    // and this test pins what People.tsx itself is responsible for handing
+    // it: BOTH bounds off the profile just read, not some other instant.
+    //
+    // It used to pin `until` alone, matching `Timeline.test.tsx`'s own
+    // version of the same mistake one layer down. `until` on its own is not
+    // an anchor: `/v1/events` keeps its 24h `since` default under a bare
+    // `until`, so this fixture's person -- first seen in June, last seen in
+    // August -- read back zero events from the live server while every
+    // mock-backed test here passed. `first_seen` is the floor that makes
+    // the window the person's history instead of the last day of it.
     const events: Mock = vi.fn(async () => eventsPage())
     const client = {
-      person: vi.fn(async () => person({ last_seen: '2026-08-20T15:30:00.000Z' })),
+      person: vi.fn(async () =>
+        person({ first_seen: '2026-06-01T09:00:00.000Z', last_seen: '2026-08-20T15:30:00.000Z' }),
+      ),
       events,
     } as unknown as ApiClient
     renderPeople('/people?id=u1', client)
     await waitFor(() => expect(events).toHaveBeenCalled())
     expect(events.mock.calls[0]?.[1]).toMatchObject({
       person: 'u1',
+      since: '2026-06-01T09:00:00.000Z',
       until: '2026-08-20T15:30:00.000Z',
     })
+  })
+
+  it('does not re-fetch the timeline forever now that the callback is not a bare setState', async () => {
+    // `Timeline`'s fetch effect has `onNewestEvent` in its dependency array.
+    // `People` used to pass `setNewestEvent` -- a `useState` dispatch, stable
+    // for free. It now passes a handler that maps event-or-null into the
+    // three-state `Context`, which is only stable because it is wrapped in
+    // `useCallback`. Drop that wrapper and the first page re-fetches on every
+    // render, forever; this is the test that catches it.
+    const events: Mock = vi.fn(async () => eventsPage([event({ event_name: 'checkout' })]))
+    const client = {
+      person: vi.fn(async () => person({ person_id: 'u1' })),
+      events,
+    } as unknown as ApiClient
+    renderPeople('/people?id=u1', client)
+    await screen.findByText('checkout')
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(events).toHaveBeenCalledTimes(1)
   })
 
   it('leaves the header and traits standing when the timeline fails', async () => {
@@ -300,10 +328,14 @@ describe('People', () => {
     expect(await screen.findByText(/could not load .*timeline/i)).toBeInTheDocument()
   })
 
-  it('says the context is unknown when there is no newest event to read it from', async () => {
+  it('says the timeline has not loaded when the timeline FAILED', async () => {
     // Context comes off the timeline's first row. With no timeline there is
     // nothing to read, and ten empty rows would assert this person has no
     // device, browser or country -- which the screen never established.
+    //
+    // "has not loaded" is right here specifically because the fetch failed:
+    // this screen genuinely does not have the timeline, and it does not know
+    // what is in it. The test below is the other half.
     const client = {
       person: vi.fn(async () => person({ person_id: 'u1' })),
       events: vi.fn(async () => {
@@ -311,7 +343,41 @@ describe('People', () => {
       }),
     } as unknown as ApiClient
     renderPeople('/people?id=u1', client)
-    expect(await screen.findByText(/no context to show/i)).toBeInTheDocument()
+    // Waited on the TIMELINE's own error first, then the context panel
+    // checked in the same tick -- not `findByText` on the panel's copy
+    // directly. "has not loaded" is also what the panel renders on its
+    // FIRST render, before the timeline has rejected at all, so a
+    // `findByText` for it resolves on the opening poll and passes no matter
+    // what the component does afterwards. Caught by mutation: making the
+    // failure path report `onNewestEvent(null)` (which is exactly the
+    // conflation this pair of tests exists to forbid) left the naive
+    // version of this test green.
+    await screen.findByText(/could not load .*timeline/i)
+    expect(screen.getByText(/this person.s timeline has not loaded/i)).toBeInTheDocument()
+    expect(screen.queryByText(/nothing to read a device/i)).toBeNull()
+    expect(screen.queryByText(/have no value recorded/i)).toBeNull()
+  })
+
+  it('says there was nothing to read when the timeline LOADED and was empty', async () => {
+    // The two states this used to collapse into one. A timeline that
+    // returned zero events has loaded -- perfectly, in one round trip -- and
+    // telling the operator it "has not loaded" is a false claim about this
+    // screen's own progress, made at the exact moment they are trying to
+    // work out whether to wait or to go and look somewhere else.
+    //
+    // It was also not a corner: while the timeline's first page was
+    // mis-anchored (see `Timeline`'s docstring), an empty page was what
+    // EVERY person last seen over a day ago got, so this wrong sentence was
+    // the default rendering for every lapsed customer on the screen built to
+    // show them.
+    const client = {
+      person: vi.fn(async () => person({ person_id: 'u1' })),
+      events: vi.fn(async () => eventsPage()),
+    } as unknown as ApiClient
+    renderPeople('/people?id=u1', client)
+    expect(await screen.findByText(/nothing to read a device, browser or location from/i))
+      .toBeInTheDocument()
+    expect(screen.queryByText(/this person.s timeline has not loaded/i)).toBeNull()
     expect(screen.queryByText(/have no value recorded/i)).toBeNull()
   })
 

@@ -25,20 +25,44 @@ type Status = { kind: 'loading' } | { kind: 'fragmented' } | { kind: 'error' } |
  * time -- the identity header's counterpart for "what did this person
  * actually do".
  *
- * **Anchored to the person, not to now.** The first fetch sends `until:
- * lastSeen` and no `since`. Without `until`, `GET /v1/events` applies its
- * own 24h `since` default (`STATS_DEFAULT_WINDOW_MS` is the stats route's
- * equivalent; the feed route's is unconditional) and a person last seen in
- * June would open to an empty timeline with no explanation, on a screen
- * whose whole purpose is their history. `until` is inclusive
- * (`timestamp <= until` in the route), so this includes their last event
- * rather than stopping one short of it.
+ * **Anchored to the person at BOTH ends, not to now.** The first fetch
+ * sends `until: lastSeen` AND `since: firstSeen`, both taken from the
+ * profile read that already ran. `until` is inclusive (`timestamp <= until`
+ * in the route) and so is `since` (`timestamp >= since`), so the pair spans
+ * the person's whole history inclusive of their first and last event.
  *
- * `since` is deliberately never set to the person's `first_seen`: it would
- * be correct and redundant -- `before` walks backwards and stops on its own
- * once their events run out -- and it only creates a way for two reads
- * (the profile fetch and this one) to disagree if an event lands between
- * them.
+ * **`since` is not redundant, and the reason is the whole point of this
+ * component.** `GET /v1/events` defaults `since` to 24h ago whenever the
+ * caller omits it and sends no cursor -- and `until` does NOT disable that
+ * default; only a cursor does (`events/routes.ts`, the `else if (!cursor)`
+ * branch). So `until: lastSeen` on its own compiles to `timestamp >=
+ * now-24h AND timestamp <= lastSeen`, which is an EMPTY INTERSECTION for
+ * every person last seen more than a day ago. Measured against the live
+ * stack, not reasoned about: a person with events at -30h and -25h read
+ * back `{"events":[]}` from that exact request, while the same request
+ * with `since=first_seen` returned both. The screen's own header said "2
+ * events" directly above a timeline saying there were none, with no
+ * `prev_cursor` to offer a "Load older" click -- so the walk could not even
+ * start, and the empty state was the permanent one.
+ *
+ * An earlier version of this component omitted `since` on the argument
+ * that a floor at `first_seen` is "correct and redundant", since `before`
+ * walks backwards and stops on its own once the person's events run out.
+ * That argument is about the SECOND page onwards and does not reach the
+ * first, which has no cursor and therefore gets the default. The worry
+ * that went with it -- that an event landing between the two reads makes
+ * them disagree -- cannot bite either: a new event can only move
+ * `last_seen` forwards, never `first_seen` backwards, so a `first_seen`
+ * read a moment ago is still a valid floor under this person's history.
+ * Being one event short at the newest end is what `until` already accepts
+ * (and what a page of 100 walking backwards makes invisible); being 24
+ * hours short at the oldest end is a blank screen.
+ *
+ * **Only the first page carries it.** `loadOlder` sends `before` and
+ * nothing else: a cursor is itself a lower bound on the scan, the route
+ * suppresses the default whenever one is present, and adding a second
+ * floor underneath a keyset walk is the exact defect that route's own
+ * `!cursor` comment exists to prevent.
  *
  * **Kept in ascending order internally, the same order every `/v1/events`
  * response already arrives in** -- an older page's events are PREPENDED as
@@ -64,10 +88,24 @@ export function Timeline(props: {
   projectId: number
   personId: string
   lastSeen: string
-  /** Called with the newest event once the anchored page lands, so the
-   * profile's context panel has something to read. Never called again after
+  /** The person's `first_seen`, from the same profile read `lastSeen` comes
+   * from -- the first page's `since` floor. See this component's own
+   * docstring for why the pair is required rather than merely tidy. */
+  firstSeen: string
+  /** Called once the anchored first page lands -- with its newest event, or
+   * with `null` when that page came back EMPTY. Never called again after
    * that: a `before` page only ever adds events OLDER than what is already
    * shown, so the newest event never changes once the first page is in.
+   *
+   * **`null` is a real answer, not the absence of one.** The profile's
+   * context panel reads its device/browser/location off this event, and it
+   * has three states to tell apart, not two: not asked yet, asked and there
+   * was nothing to read, asked and it failed. Firing only on a non-empty
+   * page collapsed the first two, so a timeline that loaded perfectly well
+   * and returned zero events left the panel claiming the timeline "has not
+   * loaded" -- a claim about this screen's own progress that was simply
+   * false. Not called at all on a failure, which is what keeps the third
+   * state distinct from the second.
    *
    * Called from INSIDE the same `.then()` that sets this table's own state
    * below, not from a separate effect reacting to `events` -- React 18
@@ -80,10 +118,15 @@ export function Timeline(props: {
    * the context panel above it still claimed "this person's timeline has
    * not loaded" -- caught by `People.test.tsx`'s "never shows the timeline
    * row and 'has not loaded' at the same time", which failed on ~60% of
-   * runs against that version. */
-  onNewestEvent?: (event: LyraEvent) => void
+   * runs against that version.
+   *
+   * Must be referentially stable across renders -- it is in this
+   * component's fetch effect's dependency array, so a fresh closure every
+   * render would re-fetch the first page forever. `People` wraps it in
+   * `useCallback` for exactly that reason. */
+  onNewestEvent?: (event: LyraEvent | null) => void
 }) {
-  const { client, projectId, personId, lastSeen, onNewestEvent } = props
+  const { client, projectId, personId, lastSeen, firstSeen, onNewestEvent } = props
 
   const [events, setEvents] = useState<LyraEvent[]>([])
   const [status, setStatus] = useState<Status>({ kind: 'loading' })
@@ -100,7 +143,16 @@ export function Timeline(props: {
     setEnded(false)
     setOlderError(false)
     client
-      .events(projectId, { person: personId, until: lastSeen, limit: TIMELINE_PAGE })
+      .events(projectId, {
+        person: personId,
+        // BOTH ends, and `since` is the one that is easy to drop -- see the
+        // component docstring: without it the route's own 24h default
+        // intersects `until` to nothing for anyone last seen over a day
+        // ago.
+        since: firstSeen,
+        until: lastSeen,
+        limit: TIMELINE_PAGE,
+      })
       .then((page) => {
         if (cancelled) return
         setEvents(page.events)
@@ -112,11 +164,15 @@ export function Timeline(props: {
         // the prop for why that used to be two commits instead of one.
         // Ascending order -- the LAST element is the newest. `.at(-1)`
         // rather than `page.events[page.events.length - 1]`: the two are
-        // the same value once `page.events.length > 0`, but only the
-        // `!= null` check on the `.at()` read proves that to the compiler
-        // under `noUncheckedIndexedAccess`.
-        const newest = page.events.at(-1)
-        if (newest != null) onNewestEvent?.(newest)
+        // the same value once `page.events.length > 0`, and under
+        // `noUncheckedIndexedAccess` `.at()` is already typed
+        // `LyraEvent | undefined`, which is precisely the case `?? null`
+        // has to carry rather than swallow.
+        //
+        // `?? null`, not a `!= null` guard around the call: an empty first
+        // page is a fact the context panel needs told, not a reason to stay
+        // silent -- see this prop's own doc comment.
+        onNewestEvent?.(page.events.at(-1) ?? null)
       })
       .catch((err: unknown) => {
         if (cancelled) return
@@ -134,10 +190,17 @@ export function Timeline(props: {
       cancelled = true
     }
     // `onNewestEvent` joins the dependency array now that it is called from
-    // here -- safe against extra re-fetches: `People` passes `setNewestEvent`
-    // directly, and a `useState` dispatch function is referentially stable
-    // across renders, so this never changes on its own.
-  }, [client, projectId, personId, lastSeen, onNewestEvent])
+    // here -- safe against extra re-fetches only because every caller keeps
+    // it referentially stable (see the prop's own doc comment). `People`
+    // used to pass its `useState` dispatch function directly, which is
+    // stable for free; it now passes a `useCallback`, since it has to map
+    // the event-or-null into its own three-state context, and that is the
+    // version this dependency is safe against.
+    //
+    // `firstSeen` joins it for the same reason `lastSeen` is already there:
+    // it is part of the request, so a profile re-read that moved it must
+    // re-anchor the walk rather than leave a stale bound in place.
+  }, [client, projectId, personId, lastSeen, firstSeen, onNewestEvent])
 
   function loadOlder() {
     if (cursor == null || loadingOlder) return

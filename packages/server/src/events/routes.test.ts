@@ -667,6 +667,94 @@ describe('GET /v1/events', () => {
     expect(ids).not.toContain(uuid(71))
   })
 
+  /**
+   * THE SEAM. `until` does NOT suppress the 24h `since` default; only a
+   * cursor does. No test on this route had ever sent `until` WITHOUT
+   * `since`, so the route's actual answer to that combination was
+   * unwritten — and a UI test, mocking this client entirely, was free to
+   * assert a guarantee the server had never made. It did: the profile
+   * timeline's first fetch was `?person=…&until=<last_seen>&limit=100` with
+   * no `since`, and its own test asserted `since` was undefined and called
+   * that "anchored to the person". The compiled predicate is `timestamp >=
+   * now-24h AND timestamp <= until`, so for every person last seen more
+   * than a day ago the two bounds do not overlap and the answer is nothing
+   * at all — with no `prev_cursor`, so the caller cannot even start walking
+   * backwards to find out why.
+   *
+   * This pins that behaviour as the route's, deliberately. It is NOT a
+   * defect here: widening the gate to `!cursor && !until` would reopen an
+   * unbounded-below scan for a bare `?until=`, which is the exact
+   * operational ceiling the default was added to close (see the long
+   * comment on `sinceClause` in routes.ts). The caller that wants a whole
+   * history bounded above must say so, by sending `since` as well —
+   * `packages/ui/src/screens/people/Timeline.tsx` now sends
+   * `since: first_seen` on its first page for this reason.
+   *
+   * So the assertion below looks like a bug and is a contract: read it as
+   * "an `until` alone is a ceiling, never a window", and change the copy of
+   * the timeline that depends on it before ever changing this.
+   *
+   * Own event name, like every fixture in this file — one project and one
+   * `events` table are shared across the whole suite, and the event name is
+   * the only thing isolating them.
+   */
+  it('keeps the 24h since default under a bare until, so an older window reads back empty', async () => {
+    const oldId = uuid(72)
+    const olderId = uuid(73)
+    await ch.insert({
+      table: 'events',
+      format: 'JSONEachRow',
+      values: [
+        {
+          project_id: projectA,
+          event_id: olderId,
+          anonymous_id: '',
+          user_id: 'until-no-since-user',
+          event_name: 'feed_until_without_since_event',
+          timestamp: chAtRealMsAgo(30 * 60 * 60 * 1000),
+          received_at: chAtRealMsAgo(30 * 60 * 60 * 1000),
+          trusted: 1,
+          properties: {},
+          properties_num: {},
+        },
+        {
+          project_id: projectA,
+          event_id: oldId,
+          anonymous_id: '',
+          user_id: 'until-no-since-user',
+          event_name: 'feed_until_without_since_event',
+          timestamp: chAtRealMsAgo(25 * 60 * 60 * 1000),
+          received_at: chAtRealMsAgo(25 * 60 * 60 * 1000),
+          trusted: 1,
+          properties: {},
+          properties_num: {},
+        },
+      ],
+    })
+
+    // `until` anchored at the newest of the two, exactly as a profile
+    // screen would anchor it at the person's `last_seen`.
+    const lastSeen = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString()
+    const bare = await get(
+      `/v1/events?event=feed_until_without_since_event&limit=100&until=${encodeURIComponent(lastSeen)}`,
+    )
+    expect(bare.statusCode).toBe(200)
+    expect(bare.json().events).toEqual([])
+    // And no way out of it: nothing to page backwards from either.
+    expect(bare.json().prev_cursor).toBeNull()
+
+    // The same request with an explicit floor returns both. This half is
+    // what makes the half above a statement about the DEFAULT rather than
+    // about `until`, the fixture, or the person resolution.
+    const firstSeen = new Date(Date.now() - 31 * 60 * 60 * 1000).toISOString()
+    const bounded = await get(
+      `/v1/events?event=feed_until_without_since_event&limit=100&until=${encodeURIComponent(lastSeen)}&since=${encodeURIComponent(firstSeen)}`,
+    )
+    expect(bounded.statusCode).toBe(200)
+    const ids = bounded.json().events.map((e: { event_id: string }) => e.event_id)
+    expect(ids).toEqual([olderId, oldId])
+  })
+
   // THE test for the default-`since`/cursor interaction. A cursor is
   // ITSELF a lower bound (`(timestamp, event_id) > (at, aid)`), so the
   // default `since` must never also apply once a cursor is present — two
