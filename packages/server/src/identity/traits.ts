@@ -15,10 +15,11 @@ export interface TraitRow {
  *
  * Traits carry no event time (see 004_person_traits.sql: value_str/
  * value_num/has_num are `argMax(…, timestamp)` states with the timestamp
- * itself discarded, not stored per row) — so unlike the events query below,
- * there is no per-event timestamp predicate to add here. That absence is
- * exactly why the caller only calls this when there is no deletion boundary
- * at all: a trait cannot be split at an instant it does not carry.
+ * itself discarded, not stored per row) — so unlike an event, which the
+ * export route's own per-event query can filter by timestamp, there is no
+ * per-event timestamp predicate to add here. That absence is exactly why
+ * the caller only calls this when there is no deletion boundary at all: a
+ * trait cannot be split at an instant it does not carry.
  *
  * An anonymous trait row (`user_id = ''`) is keyed only by `anonymous_id` —
  * it cannot itself say WHICH owner of that device it belongs to, and a
@@ -50,6 +51,11 @@ export async function readPersonTraitRows(
 ): Promise<TraitRow[]> {
   const params: Record<string, unknown> = { projectId, group: scope.group }
   const currentDevices = scope.windows.filter((w) => !Number.isFinite(w.to)).map((w) => w.device)
+  // Mirrors personEventsPredicate's own conditional device branch: omitted
+  // entirely when this group owns no device's current window (e.g.
+  // server-side-only identify(), or every device it ever touched has since
+  // moved on to someone else), rather than binding an empty Array(String) for
+  // no reason.
   let deviceClause = ''
   if (currentDevices.length > 0) {
     params.devices = currentDevices
