@@ -902,9 +902,23 @@ describe('GET /v1/events/stats', () => {
       `?interval=1m&group_by=event_name&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`,
     )
     expect(res.statusCode).toBe(200)
+    // `series` carries the same value as `event_name` since trends made the
+    // breakdown generic. `event_name` is the field that predates it and the
+    // one the CLI reads, so it is asserted by name here rather than being
+    // allowed to become "whichever of the two happens to be present".
     expect(res.json().buckets).toEqual([
-      { bucket: new Date(bucket1).toISOString(), event_name: 'stats_group_a', events: 2 },
-      { bucket: new Date(bucket1).toISOString(), event_name: 'stats_group_b', events: 1 },
+      {
+        bucket: new Date(bucket1).toISOString(),
+        event_name: 'stats_group_a',
+        series: 'stats_group_a',
+        events: 2,
+      },
+      {
+        bucket: new Date(bucket1).toISOString(),
+        event_name: 'stats_group_b',
+        series: 'stats_group_b',
+        events: 1,
+      },
     ])
   })
 
@@ -1004,7 +1018,12 @@ describe('GET /v1/events/stats', () => {
     )
     expect(res.statusCode).toBe(200)
     expect(res.json().buckets).toEqual([
-      { bucket: new Date(bucket1).toISOString(), event_name: 'stats_fg_wanted', events: 1 },
+      {
+        bucket: new Date(bucket1).toISOString(),
+        event_name: 'stats_fg_wanted',
+        series: 'stats_fg_wanted',
+        events: 1,
+      },
     ])
   })
 

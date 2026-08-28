@@ -1,5 +1,13 @@
 import { WherePredicate } from '@lyraflow/core/segments/ast.js'
 import type { RetentionRequest } from '../../api/types.js'
+import {
+  DEFAULT_RANGE,
+  type RangeChoice,
+  bucketsIn,
+  readRange,
+  resolveRange,
+  writeRange,
+} from '../shared/range.js'
 
 export const GRANULARITIES = ['day', 'week', 'month'] as const
 export type Granularity = (typeof GRANULARITIES)[number]
@@ -17,7 +25,22 @@ export interface RetentionParams {
   returnWhere: WherePredicate[]
   granularity: Granularity
   periods: number
+  range: RangeChoice
 }
+
+/** An upper bound on one period, for the cohort-count check only. A month is
+ * taken as its SHORTEST (28 days) so this can only over-count cohorts, which
+ * fails safe -- the same direction `validateRetention` errs in on the
+ * server. */
+const PERIOD_MS: Record<Granularity, number> = {
+  day: 86_400_000,
+  week: 7 * 86_400_000,
+  month: 28 * 86_400_000,
+}
+
+/** `MAX_COHORTS` in `core/retention/ast.ts`. Restated for the reason
+ * `MAX_PERIODS` is: a control must not offer a run the server refuses. */
+export const MAX_COHORTS = 60
 
 export const DEFAULTS: RetentionParams = {
   start: '',
@@ -26,6 +49,22 @@ export const DEFAULTS: RetentionParams = {
   returnWhere: [],
   granularity: 'week',
   periods: 8,
+  range: DEFAULT_RANGE,
+}
+
+export function cohortCount(p: RetentionParams, now: Date): number | null {
+  return bucketsIn(p.range, PERIOD_MS[p.granularity], now)
+}
+
+export function tooManyCohorts(p: RetentionParams, now: Date): boolean {
+  const n = cohortCount(p, now)
+  return n !== null && n > MAX_COHORTS
+}
+
+function granularityOf(raw: string | null): Granularity {
+  return (GRANULARITIES as readonly string[]).includes(raw ?? '')
+    ? (raw as Granularity)
+    : DEFAULTS.granularity
 }
 
 /**
@@ -36,42 +75,56 @@ export const DEFAULTS: RetentionParams = {
  * would mean a link that silently reproduces a DIFFERENT grid from the one
  * whoever shared it was looking at.
  *
- * Validated through core's own `WherePredicate`, per element, rather than
- * trusted as parsed JSON. A hand-edited or truncated link then degrades to
- * "no predicates" instead of building a tree the server refuses -- and a
- * predicate that survives here is one the compiler can definitely compile.
+ * **Deliberately LENIENT about completeness.** This validated every element
+ * against core's full `WherePredicate` and that was a real bug: the editor
+ * adds a blank row (`{ property: '', operator: '=', value: '' }`) and
+ * `property` is `z.string().min(1)`, so a newly-added row failed on the way
+ * back out and "Add predicate" looked like a dead button. The control was
+ * fine; this function ate its output.
+ *
+ * So the check is STRUCTURAL -- is this shaped like a predicate the editor
+ * can render -- not "is this finished". Finishedness is a separate question,
+ * answered by `incompletePredicates` and reported on the screen, because a
+ * half-built row must block the run rather than be dropped from it: dropping
+ * it would quietly widen the grid the operator thought they had built.
+ *
+ * Garbage is still refused. An array of numbers, strings or objects with no
+ * operator degrades to no predicates, which is what a hand-edited or
+ * truncated link should do.
  */
+function looksLikePredicate(v: unknown): v is WherePredicate {
+  if (typeof v !== 'object' || v === null) return false
+  const o = v as Record<string, unknown>
+  if (typeof o.operator !== 'string') return false
+  if (o.source === 'attribute') return typeof o.attribute === 'string'
+  return typeof o.property === 'string'
+}
+
 function readWhere(raw: string | null): WherePredicate[] {
   if (!raw) return []
   try {
     const parsed: unknown = JSON.parse(raw)
     if (!Array.isArray(parsed)) return []
-    const out: WherePredicate[] = []
-    for (const item of parsed) {
-      const one = WherePredicate.safeParse(item)
-      if (one.success) out.push(one.data)
-    }
-    return out
+    return parsed.filter(looksLikePredicate)
   } catch {
     return []
   }
 }
 
-function granularityOf(raw: string | null): Granularity {
-  return (GRANULARITIES as readonly string[]).includes(raw ?? '')
-    ? (raw as Granularity)
-    : DEFAULTS.granularity
+/**
+ * How many predicates are not yet finished.
+ *
+ * Checked against core's own schema, so "finished" means exactly "the server
+ * would accept it" rather than a second opinion about it that could drift.
+ * The screen disables Run and says the count: sending an incomplete
+ * predicate is a 400 the operator did not ask for, and silently dropping it
+ * runs a wider grid than they built.
+ */
+export function incompletePredicates(p: RetentionParams): number {
+  return [...p.startWhere, ...p.returnWhere].filter((w) => !WherePredicate.safeParse(w).success)
+    .length
 }
 
-/**
- * Reads the grid's whole definition out of the URL.
- *
- * This report has no store — the URL IS its persistence (see the design
- * note), so this and `writeRetentionParams` are the only place its shape is
- * decided. Every unreadable value falls back to the default rather than
- * failing: a hand-edited or truncated link should open a usable screen, not
- * an error page.
- */
 export function readRetentionParams(search: URLSearchParams): RetentionParams {
   const rawPeriods = Number(search.get('periods'))
   return {
@@ -79,6 +132,7 @@ export function readRetentionParams(search: URLSearchParams): RetentionParams {
     return: search.get('return') ?? DEFAULTS.return,
     startWhere: readWhere(search.get('start_where')),
     returnWhere: readWhere(search.get('return_where')),
+    range: readRange(search),
     granularity: granularityOf(search.get('granularity')),
     periods:
       Number.isInteger(rawPeriods) && rawPeriods > 0 && rawPeriods <= MAX_PERIODS
@@ -112,12 +166,14 @@ export function writeRetentionParams(
   // screen still has a clean `/retention` address.
   set('start_where', next.startWhere.length > 0 ? JSON.stringify(next.startWhere) : '', '')
   set('return_where', next.returnWhere.length > 0 ? JSON.stringify(next.returnWhere) : '', '')
-  return out
+  return writeRange(out, next.range)
 }
 
 /** The request body a set of params compiles to. */
-export function toRequest(p: RetentionParams): RetentionRequest {
+export function toRequest(p: RetentionParams, now: Date = new Date()): RetentionRequest {
+  const bounds = resolveRange(p.range, now)
   return {
+    ...bounds,
     start_event: p.start,
     return_event: p.return,
     granularity: p.granularity,

@@ -25,6 +25,66 @@ one fix is contained in 0.3.0.
 
 ### Added
 
+- **A date range on the Trends and Retention screens.** Both held their whole
+  definition in the URL and ran on demand, and neither had a range control:
+  each fell back to a window the server scales to the resolution. That is a
+  good default and a bad only option — a project whose data stopped a week ago
+  draws an empty chart with nothing on screen explaining why.
+
+  Presets plus a two-date range, shared by both screens, held in the URL like
+  everything else. The default is still "let the server choose", so the tuned
+  per-resolution windows stay the default rather than being replaced by a
+  fixed span.
+
+  **Each screen refuses a combination the server would refuse, before
+  sending it.** 30 days at one-minute resolution is 43,200 buckets against a
+  ceiling of 1000; a year of daily cohorts is 365 against a ceiling of 60.
+  Both are what somebody builds by accident when span and resolution are two
+  independent choices, and being told which limit was hit beats a 400.
+
+- **Trends: an event over time, split by a property or a column** (**#72**,
+  the trends half). `GET /v1/events/stats` — the endpoint the Feed's chart
+  already used — gains `group_by=attribute:<column>` and
+  `group_by=property:<key>` alongside the `event_name` it always took, plus a
+  `1w` interval. A **Trends** screen draws it.
+
+  Extended rather than given its own route, so the bucket cap, the `event_id`
+  deduplication and the deletion boundary are the ones that route already
+  enforced rather than a second set to keep in agreement. `group_by=event_name`
+  still returns the `event_name` field the CLI's snippet command reads.
+
+  **Events with no value there are a `(not set)` series, not dropped rows**,
+  so a split always adds up to the same total the ungrouped request returns
+  and can be checked against the Feed. A property is read from **both**
+  property bags, so a numeric property splits by its value instead of
+  collapsing into one empty series.
+
+  **At most ten series, with the rest summed into a labelled `(other)` and
+  counted** in `folded_series`. Ranked by total over the window rather than by
+  any single bucket, so a series does not appear and disappear as the window
+  moves. A breakdown past 20,000 bucket/series rows is **refused** with
+  `too_many_series` rather than truncated.
+
+  **Weeks start Monday, in UTC** — the same anchoring a retention cohort uses,
+  measured against ClickHouse rather than assumed, so a weekly trend and a
+  weekly cohort row cannot disagree about where a week begins.
+
+  **Every point carries a dot, and hovering one reads out its bucket and its
+  value in every panel at once** — shared rather than per-panel, which is the
+  payoff of small multiples: the pointer picks a moment and each series says
+  what it was doing then. Dots are drawn as zero-length round-capped strokes
+  rather than as `<circle>`s, because the panel scales its width freely and a
+  circle under that transform renders as a wide ellipse.
+
+  The screen draws a split as **small multiples on one shared scale** rather
+  than overlaid coloured lines. Lyraflow's palette is a single copper ramp,
+  built and documented for *ordinal* data like funnel stages; a breakdown's
+  values are categorical, so a lightness ramp over them would spend the only
+  channel there is on a rank the data does not have. A categorical palette is
+  a brand-tooling change with its own contrast script, not something a
+  component invents.
+
+
 - **Retention grids** (**#72**, the retention half of the v0.2 reporting
   line). `POST /v1/reports/retention` and a **Retention** screen: of the
   people who did one thing in a period, how many came back and did another in
@@ -49,12 +109,29 @@ one fix is contained in 0.3.0.
   deduplication, the deletion boundary and an optional `segment_id` are all
   the ones the funnel engine already uses.
 
+  **"Add predicate" added nothing** in the first build of this, and the
+  control was not at fault: the editor adds a blank row, `property` is
+  `z.string().min(1)`, and validating each element against the full schema on
+  the way back out of the URL threw the new row away before it could render.
+  The read is now structural — is this shaped like a predicate the editor can
+  render — and finishedness is a separate question the screen reports, because
+  a half-built condition must block the run rather than be dropped from it:
+  dropping it would quietly measure a wider population than was built.
+
   **Each side takes a `where` list**, the same grammar a funnel step and a
   segment behaviour use, and the two are independent. Without it the report
   could not ask its most ordinary question: on a site where every navigation
   is a `$page`, "viewed the home page, then came back and registered" is one
   event name and two different conditions, so a grid without predicates
   answered a different question with total confidence.
+
+  **Cell shading is relative to the strongest cell in that grid**, on a
+  square-root curve, and the screen says so. Shading against an absolute 100%
+  was linear and worked only for grids whose numbers were already large: a
+  report narrowed with `where` predicates peaks around 51% with most cells
+  under 15%, which rendered as a table with no colour at all. Colours therefore
+  compare within one grid and never between two — the percentages, printed in
+  every cell, are what compare.
 
   **No stored retention reports, deliberately.** A grid is two event names, a
   granularity and a range — small enough to live in the URL, which is how the

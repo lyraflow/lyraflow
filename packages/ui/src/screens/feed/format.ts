@@ -19,7 +19,7 @@ function isSameLocalDay(d: Date, now: Date): boolean {
  * than depending on the real clock at the instant it happens to run.
  */
 /** The resolutions `GET /v1/events/stats` can bucket at. */
-export type BucketInterval = '1m' | '1h' | '1d'
+export type BucketInterval = '1m' | '1h' | '1d' | '1w'
 
 export function formatEventTime(iso: string, now: Date = new Date()): string {
   const d = new Date(iso)
@@ -49,6 +49,13 @@ export function formatBucketTime(iso: string, interval: BucketInterval = '1m'): 
   // minutes -- and once the window became a choice it meant every bar on a
   // 90-day chart read "00:00", the same string ninety times, in the readout
   // whose whole job is to say WHICH bar you are pointing at.
+  // A week is named by the Monday it starts, with the same day-and-month
+  // shape a day uses -- the bucket is seven days wide, so a time on it would
+  // claim a precision it does not have. `w/c` (week commencing) is what makes
+  // "3 Jun" in a weekly readout distinguishable from "3 Jun" in a daily one.
+  if (interval === '1w') {
+    return `w/c ${d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`
+  }
   if (interval === '1d') {
     return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
   }

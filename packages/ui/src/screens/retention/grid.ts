@@ -19,18 +19,65 @@ export function share(cell: number | null, size: number): number | null {
 }
 
 /**
- * How strongly to tint a cell, 0–1.
+ * The strongest measured cell in the grid, as a percentage.
  *
- * Linear in the percentage and capped well below 1, because the tint is
- * behind text that still has to be read: at full strength the strongest
- * cells lose their contrast, which is the one thing `marketing/brand`'s
- * rules refuse to trade away.
+ * What every other cell's shading is drawn relative to. `0` when nothing is
+ * measured yet, which the caller reads as "no shading".
  */
-export const MAX_TINT = 0.32
+export function peakShare(cohorts: CohortRow[]): number {
+  let peak = 0
+  for (const c of cohorts) {
+    for (const cell of c.retained) {
+      const pct = share(cell, c.size)
+      if (pct !== null && pct > peak) peak = pct
+    }
+  }
+  return peak
+}
 
-export function tint(pct: number | null): number {
-  if (pct === null) return 0
-  return Math.max(0, Math.min(100, pct)) * (MAX_TINT / 100)
+/** The strongest tint any cell gets. */
+export const MAX_TINT = 0.32
+/**
+ * The faintest tint a NON-ZERO cell gets.
+ *
+ * A cell where somebody came back must never be indistinguishable from one
+ * where nobody did. Same reasoning as the feed sparkline's minimum bar
+ * height: the floor is what stops "very small" rendering as "nothing".
+ */
+export const MIN_TINT = 0.05
+
+/**
+ * How strongly to tint a cell, 0-1 -- **relative to the grid's own strongest
+ * cell, on a square-root curve**.
+ *
+ * Both halves of that are corrections to a linear scale against an absolute
+ * 100%, which is what this was and which failed exactly the way the feed
+ * sparkline's own comment predicts: "a linear scale is the honest default and
+ * it stops working at this shape".
+ *
+ * Measured on a real grid. A retention report narrowed with `where` predicates
+ * -- viewed `/`, then came back and viewed `/signup` -- peaks at 51% and has
+ * most of its measured cells between 0 and 15%. Linearly against 100 those are
+ * opacities of 0.00 to 0.05, which is a table with no shading at all; the same
+ * report unnarrowed has a column of 100% and looked fine, so the scale worked
+ * only for the grid whose numbers were biggest. Reported as "you removed the
+ * gradient" on 2026-08-28, which is what it looks like from outside.
+ *
+ * RELATIVE, so the strongest cell in any grid is always fully tinted. The cost
+ * is that colour no longer means an absolute rate and two grids are not
+ * comparable by shade -- accepted, and STATED under the table, because every
+ * cell prints its own percentage: the number is the measurement and the colour
+ * is a guide to where to look.
+ *
+ * SQUARE ROOT rather than linear, for the reason `Sparkline` gives for its bar
+ * heights: it lifts the middle of the range off the floor while leaving the
+ * order and the zero exactly as they were. Log was not tried here because the
+ * range is bounded at both ends, unlike an event count.
+ */
+export function tint(pct: number | null, peak: number): number {
+  if (pct === null || pct <= 0 || peak <= 0) return 0
+  const fraction = Math.min(1, pct / peak)
+  return Math.max(MIN_TINT, Math.sqrt(fraction) * MAX_TINT)
 }
 
 /**

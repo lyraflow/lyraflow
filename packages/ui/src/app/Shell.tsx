@@ -3,6 +3,7 @@ import {
   Filter,
   Grid3x3,
   LayoutList,
+  LineChart,
   LogOut,
   Settings as SettingsIcon,
   Star,
@@ -318,6 +319,19 @@ export function Shell(props: {
           >
             <Filter className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
             <span className="sr-only sm:not-sr-only">Funnels</span>
+          </NavLink>
+          <NavLink
+            to={ROUTES.trends}
+            className={({ isActive }) =>
+              `flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium ${
+                isActive
+                  ? 'text-foreground'
+                  : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+              }`
+            }
+          >
+            <LineChart className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
+            <span className="sr-only sm:not-sr-only">Trends</span>
           </NavLink>
           <NavLink
             to={ROUTES.retention}

@@ -11,13 +11,19 @@ import { RetentionGrid } from './retention/RetentionGrid.js'
 import { unmeasuredCount } from './retention/grid.js'
 import {
   GRANULARITIES,
+  MAX_COHORTS,
   MAX_PERIODS,
   type RetentionParams,
+  cohortCount,
+  incompletePredicates,
   readRetentionParams,
   toRequest,
+  tooManyCohorts,
   writeRetentionParams,
 } from './retention/params.js'
 import { WherePredicates } from './segments/WherePredicates.js'
+import { RangePicker } from './shared/RangePicker.js'
+import { rangeIncomplete } from './shared/range.js'
 
 /**
  * Retention: of the people who did X in one period, how many did Y in the
@@ -60,14 +66,29 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
     [setSearch],
   )
 
-  const ready = params.start !== '' && params.return !== '' && activeId != null
+  // A half-built condition blocks the run rather than being dropped from it.
+  // Dropping it would quietly measure a WIDER population than the operator
+  // built, which is the failure this screen refuses everywhere else.
+  const unfinished = incompletePredicates(params)
+  const cohorts = cohortCount(params, new Date())
+  const overCap = tooManyCohorts(params, new Date())
+  const incompleteRange = rangeIncomplete(params.range)
+  const ready =
+    params.start !== '' &&
+    params.return !== '' &&
+    activeId != null &&
+    unfinished === 0 &&
+    !overCap &&
+    !incompleteRange
 
   const run = useCallback(async () => {
     if (activeId == null) return
     setRunning(true)
     setError(null)
     try {
-      setResult(await client.runRetention(activeId, toRequest(params)))
+      // Resolved at RUN time: a relative range read on mount drifts from
+      // "now" the longer the tab stays open.
+      setResult(await client.runRetention(activeId, toRequest(params, new Date())))
     } catch (err) {
       setResult(null)
       setError(err instanceof Error ? err.message : 'That grid could not be computed.')
@@ -168,6 +189,11 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
             className="w-24"
           />
         </div>
+        <RangePicker
+          id="retention-range"
+          value={params.range}
+          onChange={(range) => update({ range })}
+        />
         <Button type="button" onClick={run} disabled={!ready || running}>
           {running ? 'Running…' : 'Run'}
         </Button>
@@ -180,6 +206,27 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
           when the same event name means several things: <code>$page</code> where <code>path</code>{' '}
           is <code>/</code>, then <code>$page</code> where <code>path</code> is{' '}
           <code>/register</code>.
+        </p>
+      )}
+
+      {incompleteRange && (
+        <p data-testid="retention-range-unfinished" className="text-muted-foreground text-sm">
+          Pick both dates, or choose a preset range.
+        </p>
+      )}
+
+      {overCap && (
+        <p data-testid="retention-too-many-cohorts" className="text-muted-foreground text-sm">
+          That range at this period is {cohorts?.toLocaleString()} cohorts, above the limit of{' '}
+          {MAX_COHORTS}. Pick a longer period or a shorter range.
+        </p>
+      )}
+
+      {unfinished > 0 && (
+        <p data-testid="retention-unfinished" className="text-muted-foreground text-sm">
+          {unfinished === 1
+            ? 'One condition is not finished — give it a field and a value, or remove it.'
+            : `${unfinished} conditions are not finished — give each a field and a value, or remove it.`}
         </p>
       )}
 

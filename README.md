@@ -315,7 +315,7 @@ it flips the last step into a success state and waits for you to click
 done with it. There is also a "Skip to dashboard" for the case where you
 cannot instrument the target site right now.
 
-Past the wizard (or immediately, if a project already exists), there are five
+Past the wizard (or immediately, if a project already exists), there are six
 screens, reachable from the sidebar:
 
 - **Feed** — a live event feed, split into an **Accepted** tab and a
@@ -366,12 +366,29 @@ screens, reachable from the sidebar:
   different populations, each counted on its own rather than assumed from the
   chart above (see *Who reached a step, or stopped there* under Funnels below).
 
+- **Trends** — how many of an event over time, optionally split by an event
+  column or by a key from its own properties. Like Retention it holds its
+  definition in the URL and runs on demand rather than on render. A split is
+  drawn as **small multiples** — one panel per value, all on one shared scale,
+  which the screen states — rather than as overlaid coloured lines: Lyraflow's
+  palette is a single copper ramp built for *ordinal* data like funnel stages,
+  and a breakdown's values have no order, so there is no honest colour to give
+  them. Ten panels at most; everything smaller is summed into `(other)`, and
+  the screen says how many values that was so the panels still add up. Every
+  point is marked, and hovering one reads out its bucket and its value in
+  **every** panel at once — the pointer picks a moment and each series says
+  what it was doing then.
+
 - **Retention** — pick a start event, a return event, a condition on either of
-  them, a period and how many of them, and run a cohort grid. It does **not** run on render and does not
+  them, a period and how many of them, and run a cohort grid. It does **not**
+  run on render and does not
   re-run when you change the controls: a grid is a real scan, and numbers from
   one definition sitting under the controls of another is a wrong answer
   stated confidently, so the grid clears and waits for you. Cells shade by
-  retention, and a period that had not finished when the grid ran shows a dash
+  retention **relative to the strongest cell in that grid**, which the screen
+  states — a narrowed grid peaking at 15% would otherwise render with no
+  visible colour at all, so shades compare within one grid and never between
+  two. A period that had not finished when the grid ran shows a dash
   rather than 0% — with a line underneath saying how many did, because a dash
   read as a zero is the one way this chart misleads. The whole definition
   lives in the URL, so a grid is shareable as a link and there is nothing to
@@ -2082,14 +2099,92 @@ caveats.
 
 There is **no time-to-convert**: you get how many people reached each step,
 not how long it took them. There is **no breakdown** — you cannot split a
-funnel by campaign, device or country. There is **no strict mode**, where a
-later step appearing early breaks the chain. Trends and path analysis are not
-here either. All are planned; none exist today. **Retention grids do now
-exist** — see below.
+*funnel* by campaign, device or country, though a trend can be split that way
+(see [Trends](#trends)). There is **no strict mode**, where a later step
+appearing early breaks the chain. Path analysis is not here either. All are
+planned; none exist today. **Retention grids and trends do now exist** — see
+below.
 
 A funnel is computed on demand every time you run it, with nothing cached and
 nothing precomputed. A wide range over a high-volume event like `$page` is a
 large scan, and the response will warn you when it is about to be one.
+
+## Trends
+
+*How many of this event over time, and how does that split by something?* The
+first question anyone has after instrumenting a site, and the one the Feed's
+chart cannot answer because it counts everything at once.
+
+```sh
+curl -s -H "X-Lyraflow-Key: sk_..." \
+  "http://localhost:3000/v1/events/stats?event=checkout&interval=1d&group_by=property:plan"
+```
+
+```json
+{ "buckets": [
+    { "bucket": "2026-08-01T00:00:00.000Z", "series": "pro",       "events": 41 },
+    { "bucket": "2026-08-01T00:00:00.000Z", "series": "free",      "events": 12 },
+    { "bucket": "2026-08-01T00:00:00.000Z", "series": "(not set)", "events": 3 }
+  ],
+  "folded_series": 0 }
+```
+
+This is the **same** `GET /v1/events/stats` the Feed's chart already used,
+with a breakdown added rather than a second endpoint — so the bucket cap, the
+`event_id` deduplication and the deletion boundary are the ones that route
+already enforced.
+
+### Splitting
+
+`group_by` takes three forms:
+
+| value | splits by |
+| --- | --- |
+| `event_name` | the event's name. **Unchanged** — this is the only value the parameter took before, and it still returns an `event_name` field on every bucket. |
+| `attribute:<column>` | a column of the event: `path`, `url`, `referrer`, `utm_source`, `country`, `browser`, and the rest of the context fields. |
+| `property:<key>` | a key from the event's own `properties`. |
+
+A property is read from **both** property bags, so a numeric property splits
+by its value rather than collapsing into one empty series — routing is per
+value at ingest, so the same key can land in either.
+
+**An event with no value there is a `(not set)` series, not a dropped row.**
+That is what keeps a split reconcilable: the series always add up to the same
+total the ungrouped request returns, so a number here can be checked against
+the Feed.
+
+### Resolution
+
+`interval` is `1m`, `1h`, `1d` or `1w`. **Weeks start Monday**, in UTC — the
+same anchoring a retention cohort uses, so a weekly trend and a weekly cohort
+row cannot disagree about where a week begins.
+
+`since` and `until` are optional; without them the window is scaled to the
+resolution. The Web UI offers presets and a two-date range, and **says before
+you run** when a span and a resolution would pair into more buckets than the
+server accepts — 30 days at `1m` is 43,200 against a ceiling of 1000, which is
+exactly what somebody builds by accident when span and resolution are two
+independent choices.
+
+### Limits
+
+**At most 10 series come back; the rest are summed into one `(other)` series
+and counted.** `folded_series` says how many values went into it, so a caller
+can say "and 340 others" rather than implying there were ten. `(other)` is
+kept and labelled rather than dropped, for the reason `(not set)` exists: a
+chart whose parts do not add up to the total is one nobody can reconcile.
+
+Series are ranked by their **total over the whole window**, not by any single
+bucket, so a series does not appear and disappear as the window moves.
+
+**A breakdown producing more than 20,000 bucket/series rows is refused**, with
+`too_many_series`, rather than truncated. Splitting a 90-day daily chart by
+`utm_content` on a busy site is that request; a chart silently missing its
+rarest series still looks plausible and the caller cannot tell.
+
+There is **no breakdown by trait** — only by event column and event property.
+A trait lives on the person rather than the event and needs a join this route
+does not do; it is the obvious next step rather than a decision against it.
 
 ## Retention
 
@@ -2135,7 +2230,7 @@ run later fills those cells in.
 | `return_where` | the same, for the return side, and **independent** of `start_where`. |
 | `granularity` | `day`, `week` or `month`. Weeks start **Monday**, and every bucket is UTC. |
 | `periods` | how many periods after the cohort's own to measure, up to 26. |
-| `since` / `until` | bound who **enters** a cohort. Optional; defaults to the last `periods` periods. |
+| `since` / `until` | bound who **enters** a cohort. Optional; defaults to the last `periods` periods. The Web UI offers presets and a two-date range for this. |
 | `segment_id` | restrict the whole grid to a saved segment's population. |
 
 **The two `where` lists are what make one event name usable.** On a site where

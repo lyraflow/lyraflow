@@ -13,6 +13,16 @@ import {
 import { parseChDateTime } from '../ingest/row.js'
 import { countParam } from '../numeric-id.js'
 import { SEGMENT_MAX_EXECUTION_SECONDS, SEGMENT_MAX_MEMORY_BYTES } from '../segments/execute.js'
+import {
+  type Breakdown,
+  BreakdownError,
+  MAX_BREAKDOWN_ROWS,
+  breakdownColumns,
+  breakdownExpr,
+  breakdownOverflowed,
+  foldSeries,
+  parseBreakdown,
+} from './breakdown.js'
 import { FeedCursorError, decodeFeedCursor, encodeFeedCursor } from './cursor.js'
 
 /**
@@ -52,6 +62,17 @@ export const STATS_INTERVALS = {
   '1m': 'INTERVAL 1 MINUTE',
   '1h': 'INTERVAL 1 HOUR',
   '1d': 'INTERVAL 1 DAY',
+  // Weekly, because `1d` cannot draw a quarter: 90 days is 90 buckets, but a
+  // year is 365 against a cap of 1000 and is unreadable long before it is
+  // refused.
+  //
+  // MONDAY, and measured rather than assumed: `toStartOfInterval(t, INTERVAL
+  // 1 WEEK)` buckets 2026-06-03 (a Wednesday) to 2026-06-01 against
+  // ClickHouse 24.8 -- the same Monday `toStartOfWeek(t, 1)` gives, and the
+  // same anchoring the retention grid settled on. A weekly trend and a weekly
+  // cohort row that disagreed about where a week starts would be two charts
+  // nobody could read against each other.
+  '1w': 'INTERVAL 1 WEEK',
 } as const
 
 /**
@@ -64,6 +85,7 @@ const STATS_INTERVAL_MS: Record<keyof typeof STATS_INTERVALS, number> = {
   '1m': 60_000,
   '1h': 60 * 60_000,
   '1d': 24 * 60 * 60_000,
+  '1w': 7 * 24 * 60 * 60_000,
 }
 
 /**
@@ -111,6 +133,10 @@ export const STATS_DEFAULT_WINDOW_MS: Record<keyof typeof STATS_INTERVALS, numbe
   '1m': 60 * 60_000,
   '1h': 24 * 60 * 60_000,
   '1d': 7 * 24 * 60 * 60_000,
+  // 12 buckets, not the 60/24/7 the others use: a quarter is the span a
+  // weekly trend is FOR, and seven weeks is a window somebody would have
+  // picked `1d` for.
+  '1w': 12 * 7 * 24 * 60 * 60_000,
 }
 
 /**
@@ -182,7 +208,7 @@ const Query = z.object({
 const StatsQuery = z.object({
   since: z.string().datetime().optional(),
   until: z.string().datetime().optional(),
-  interval: z.enum(['1m', '1h', '1d']).default('1h'),
+  interval: z.enum(['1m', '1h', '1d', '1w']).default('1h'),
   /**
    * One event name, narrowing the aggregate the same way `Query.event`
    * narrows the feed above -- same field, same ceiling, same semantics.
@@ -198,7 +224,18 @@ const StatsQuery = z.object({
    * would be a rule the caller has to learn for no reason.
    */
   event: z.string().max(128).optional(),
-  group_by: z.literal('event_name').optional(),
+  /**
+   * Free-typed here and parsed by `parseBreakdown`, not a Zod enum, because
+   * the `property:<key>` form carries a caller-supplied key that no enum can
+   * enumerate. The two halves that DO reach SQL as identifiers -- an event
+   * column name, and the interval -- are both checked against closed lists
+   * before they get there; a property key is a bound parameter and never an
+   * identifier at all.
+   *
+   * `event_name` still parses bare, which is the only value this parameter
+   * had before trends and is what `cli/src/api/commands/snippet.ts` sends.
+   */
+  group_by: z.string().max(160).optional(),
 })
 
 /**
@@ -212,6 +249,7 @@ const StatsQuery = z.object({
 interface StatsRow {
   bucket: string
   event_name?: string
+  series?: string
   events: string
 }
 
@@ -595,7 +633,19 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
     const q = StatsQuery.safeParse(req.query)
     if (!q.success) return reply.code(400).send({ error: 'invalid_query' })
     const { since, until, interval, event, group_by } = q.data
-    const groupBy = group_by === 'event_name'
+
+    let breakdown: Breakdown | undefined
+    try {
+      breakdown = parseBreakdown(group_by)
+    } catch (err) {
+      if (!(err instanceof BreakdownError)) throw err
+      return reply.code(400).send({ error: 'invalid_group_by', detail: err.message })
+    }
+    // Kept as its own flag: `group_by=event_name` must still put an
+    // `event_name` field on every row, which is what the CLI's snippet
+    // command reads. The generic `series` field is added alongside it rather
+    // than replacing it.
+    const groupBy = breakdown?.source === 'event_name'
 
     const sinceDate = since
       ? new Date(since)
@@ -640,6 +690,16 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
     const eventClause =
       event === undefined ? '' : ` AND event_name = ${params.add(event, 'String')}`
 
+    // Built BEFORE the SQL below so its bound property key takes its place in
+    // the same positional parameter sequence. Only the columns a breakdown
+    // actually names are projected out of the inner scan -- the same rule
+    // `attributeColumns` follows for segment predicates, and for the same
+    // reason: `events` is columnar and the hot path, so reading two map
+    // columns that nothing references would cost every trend in the product.
+    const seriesExpr = breakdown ? breakdownExpr(breakdown, params) : null
+    const extraColumns = breakdownColumns(breakdown)
+    const extraSelect = extraColumns.length > 0 ? `, ${extraColumns.join(', ')}` : ''
+
     // The identical suppression derivation the feed uses above:
     // `notSuppressedExpr` against each event's own timestamp, inside the
     // same nested shape — one clause, never a second bespoke one.
@@ -664,19 +724,26 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
     // `count()` here. Kept as DISTINCT anyway — it costs nothing, and
     // stays correct if the inner subquery's dedup shape ever changes —
     // but no test can, or should try to, prove it necessary on its own.
+    // `LIMIT MAX_BREAKDOWN_ROWS + 1` is a TRIPWIRE, not a page. Nothing
+    // truncated is ever returned: the handler reads one row past the ceiling
+    // and refuses the whole request, because a chart silently missing its
+    // rarest series is one the caller cannot tell is incomplete. No ORDER BY
+    // is needed to make that sound -- which rows come back does not matter
+    // when the only thing done with an over-limit result is to reject it.
+    const rowCap = seriesExpr === null ? '' : `\n      LIMIT ${MAX_BREAKDOWN_ROWS + 1}`
     const sql = `
       SELECT toStartOfInterval(timestamp, ${STATS_INTERVALS[interval]}) AS bucket,
-             ${groupBy ? 'event_name,' : ''}
+             ${seriesExpr === null ? '' : `${seriesExpr} AS series,`}
              count(DISTINCT event_id) AS events
       FROM (
-        SELECT project_id, event_id, timestamp, event_name, anonymous_id, user_id
+        SELECT project_id, event_id, timestamp, event_name, anonymous_id, user_id${extraSelect}
         FROM events
         WHERE project_id = ${projectParam}${sinceClause}${untilClause}${eventClause}
         LIMIT 1 BY project_id, event_id
       ) AS e
       WHERE ${notSuppressed}
-      GROUP BY bucket${groupBy ? ', event_name' : ''}
-      ORDER BY bucket ASC${groupBy ? ', event_name ASC' : ''}
+      GROUP BY bucket${seriesExpr === null ? '' : ', series'}
+      ORDER BY bucket ASC${seriesExpr === null ? '' : ', series ASC'}${rowCap}
     `
 
     const rs = await ch.query({
@@ -695,12 +762,59 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
     })
     const rows = await rs.json<StatsRow>()
 
+    if (seriesExpr !== null && breakdownOverflowed(rows.length)) {
+      return reply.code(400).send({
+        error: 'too_many_series',
+        detail: `that breakdown produces more than ${MAX_BREAKDOWN_ROWS} bucket/series rows; pick a lower-cardinality field, a coarser interval, or a narrower window`,
+      })
+    }
+
+    const points = rows.map((r) => ({
+      bucket: parseChDateTime(r.bucket).toISOString(),
+      series: r.series ?? '',
+      events: Number(r.events),
+    }))
+
+    if (seriesExpr === null) {
+      return reply.code(200).send({
+        buckets: points.map((p) => ({ bucket: p.bucket, events: p.events })),
+      })
+    }
+
+    // Folded HERE rather than in SQL, deliberately. Ranking series by their
+    // total needs every series' total, so doing it in SQL means either a
+    // second scan of `events` or a window function over an inlined CTE that
+    // ClickHouse would scan twice anyway. The row cap above is what makes it
+    // safe to bring them all back and rank them in memory.
+    //
+    // NEVER for `group_by=event_name`, and that is a contract rather than a
+    // preference. That form predates trends and its callers -- the CLI's
+    // snippet command among them -- read it as the LIST of event names this
+    // project has recorded; folding the rarest into `(other)` would silently
+    // shorten that list, which is exactly the "silent cap" this fold exists
+    // in the other direction to avoid. It also needs no cap: event-name
+    // cardinality is already bounded at ingest (`event_name_cardinality` is a
+    // rejection reason), unlike a property key, which is bounded by nothing.
+    //
+    // Caught by an existing test rather than reasoned about: a rare probe
+    // event vanished from a `group_by=event_name` response the moment the
+    // fold was applied to it.
+    const { points: folded, folded: foldedCount } = groupBy
+      ? { points, folded: 0 }
+      : foldSeries(points)
+
     return reply.code(200).send({
-      buckets: rows.map((r) => ({
-        bucket: parseChDateTime(r.bucket).toISOString(),
-        ...(groupBy ? { event_name: r.event_name } : {}),
-        events: Number(r.events),
+      buckets: folded.map((p) => ({
+        bucket: p.bucket,
+        // `event_name` is the pre-trends field and stays exactly where it
+        // was for `group_by=event_name`; `series` is the general one.
+        ...(groupBy ? { event_name: p.series } : {}),
+        series: p.series,
+        events: p.events,
       })),
+      // Named so a caller can say "and 340 others" rather than implying there
+      // were only ten. Zero when nothing was folded.
+      folded_series: foldedCount,
     })
   })
 
