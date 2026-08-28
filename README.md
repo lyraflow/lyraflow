@@ -32,13 +32,15 @@ under Docker, and nothing leaves it.
 > step's people panel, the feed, the sidebar, or either of the two ways in on
 > the screen itself — a lookup box for an id you already have, and a **trait
 > search** for when you have none, which pages through everyone matching and
-> links each of them to their profile. That search is one exact condition,
-> the same kind a segment is built from: not a partial match, not a search
-> across every trait at once, and still **no list of everyone** to browse
-> without naming a condition at all. Journeys,
-> dashboards and path analysis are still ahead, and neither report can be
-> saved — each lives in its URL. See [Web UI](#web-ui) for exactly what exists
-> and what does not.
+> links each row to a profile, where there is one to open: a visitor who was
+> never identified has events and no profile, and that link 404s. The search
+> takes one condition on one named trait, with the operator list a segment
+> condition has — comparison, text matching, presence, true/false, relative
+> date. What it will not do is combine conditions, look for a value across
+> every trait at once, or list **everyone** without naming a condition at all.
+> Journeys, dashboards and path analysis are still ahead, and neither report
+> can be saved — each lives in its URL. See [Web UI](#web-ui) for exactly what
+> exists and what does not.
 
 ## What it is good at
 
@@ -442,14 +444,19 @@ screens, reachable from the sidebar:
 
   Those two sit side by side whenever no id is in the URL. The **lookup box**
   takes an id you already have. **Find by trait** is for when you have none:
-  one exact condition — a trait, an operator, a value — run through the same
-  engine a segment preview uses, listing everyone who matches with their
-  traits and a link to each profile, paged the way a segment's member list
-  is. It is one exact condition and nothing more: no partial or prefix
-  matching, no asking about several traits at once, and still no list of
-  everyone to browse without naming a condition. The condition lives in the
-  URL, so a search that matched nobody is still a link that says so after a
-  reload.
+  one condition on one named trait, built exactly as a segment's trait
+  condition is and offering the same operators — compare, text (contains,
+  starts with, ends with, and their negations), presence, true or false,
+  relative date — with the value box that operator calls for, or none at all
+  for `is set` and `is true`. It runs through the same engine a segment
+  preview uses, listing everyone who matches with their traits and a link to
+  each profile, paged the way a segment's member list is. One condition is
+  the shape of the search, not a claim that the matching is exact: what it
+  will not do is combine several conditions — that is what a segment is for
+  — look for a value across every trait at once, since you name the trait,
+  or list everyone without naming a condition at all. The condition lives in
+  the URL, so a search that matched nobody is still a link that says so after
+  a reload.
 
   **The entry points reach further than the profile does.** A person only
   enters the identity graph through `identify()`, so a visitor who has only

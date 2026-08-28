@@ -58,17 +58,20 @@ one fix is contained in 0.3.0.
   which stays ordered oldest-first either way.
 
 - **Finding someone without an id in hand**, on the same `/people` screen
-  (**#208**): one exact trait condition — a trait, an operator, a value,
-  the same triple a segment condition is built from — run through the
+  (**#208**): one condition on one named trait, built exactly as a
+  segment's trait condition is and offering the same five operator
+  families — compare, text (contains, starts with, ends with, and their
+  negations), presence, true or false, relative date — run through the
   segment engine that already answers one, listing everyone who matches
   with their traits and a link to each profile, paged the way a segment's
   member list is. It suggests trait names from the event schema and only
   scans for a trait's *values* once a value box is focused, so opening the
   screen costs nothing. The condition lives in the URL, so a search that
-  matched nobody is still a link that says so after a reload. It is one
-  exact condition and nothing more: no partial or prefix matching, no
-  asking about several traits at once, and still no list of everyone to
-  browse without naming a condition.
+  matched nobody is still a link that says so after a reload. One
+  condition is the shape of the search, not a claim that the matching is
+  exact: it will not combine several conditions — that is what a segment
+  is for — look for a value across every trait at once, since you name the
+  trait, or list everyone without naming a condition at all.
 
 - **Member rows say whether the person was ever identified.** `POST
   /v1/segments/preview`, `POST /v1/segments/:id/preview` and `POST
