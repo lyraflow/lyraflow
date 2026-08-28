@@ -70,7 +70,16 @@ function SavedReportRowItem(props: {
   return (
     <li className="flex items-center justify-between gap-3 rounded-md border border-border bg-card px-4 py-3">
       <Link to={hrefFor(row.id)} className="flex min-w-0 flex-1 flex-col gap-1 hover:bg-muted">
-        <span className="font-medium text-foreground">{row.name}</span>
+        {/* `break-words` for the SAME reason the summary below carries it,
+         * and it is the name that actually needed it: a report name is
+         * typed by an operator and often has no spaces at all
+         * (`checkout_funnel_weekly_breakdown_by_utm_source_and_plan_tier_v2`).
+         * Without it that one line ran ~180px past the card's right border
+         * at 390px wide -- over the Delete button and out of the row -- and
+         * took the whole list into horizontal scroll with it. `break-words`
+         * rather than `break-all`, so an ordinary multi-word name still
+         * breaks at its spaces. */}
+        <span className="min-w-0 break-words font-medium text-foreground">{row.name}</span>
         <span className="min-w-0 break-words text-sm text-muted-foreground">{row.summary}</span>
         <span className="flex items-center gap-2 text-sm text-muted-foreground">
           {row.stale && (
@@ -156,8 +165,16 @@ export function SavedReportList(props: {
       )}
 
       {rows != null && rows.length === 0 && !loadFailed && (
+        // The link is styled, because an unstyled `Link` inside a muted
+        // paragraph is the same colour and weight as the sentence around it
+        // -- on screen it reads as the last two words of the message rather
+        // than as the control it is. Same treatment the in-app links on the
+        // funnel and segment detail screens already use.
         <p className="text-sm text-muted-foreground">
-          {emptyMessage} <Link to={newHref}>Create one</Link>
+          {emptyMessage}{' '}
+          <Link to={newHref} className="text-primary hover:underline">
+            Create one
+          </Link>
         </p>
       )}
 

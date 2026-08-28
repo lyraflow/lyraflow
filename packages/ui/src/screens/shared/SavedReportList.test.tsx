@@ -76,6 +76,28 @@ describe('SavedReportList', () => {
     expect(screen.queryByRole('list')).toBeNull()
   })
 
+  // Both of these pin what a screenshot showed and no behavioural test
+  // could: a class name is invisible to every query in this file, so the
+  // list rendered "correctly" for a name that in fact ran out of its own
+  // card, and offered a link that looked like prose.
+  it('wraps a long report name with break-words, not break-all', () => {
+    // A report name is typed by an operator and frequently has no spaces.
+    // Unwrapped, this one overflowed the row by ~180px at 390px wide and
+    // put the whole list into horizontal scroll. `break-all` would fix the
+    // overflow too and is the wrong tool -- it splits ordinary names
+    // mid-word even when they would fit.
+    const name = 'checkout_funnel_weekly_breakdown_by_utm_source_and_plan_tier_v2'
+    renderRows([{ ...ROW, name }])
+    const label = screen.getByText(name)
+    expect(label.className).toContain('break-words')
+    expect(label.className).not.toContain('break-all')
+  })
+
+  it('renders "Create one" as a link and not as the last two words of the message', () => {
+    renderRows([])
+    expect(screen.getByRole('link', { name: /create one/i }).className).toContain('text-primary')
+  })
+
   it('distinguishes a failed load from an empty list', () => {
     renderRows([], { loadFailed: true })
     expect(screen.getByRole('alert')).toHaveTextContent(/could not load/i)
