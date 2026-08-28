@@ -298,6 +298,32 @@ describe('People', () => {
     expect(await screen.findByText('firefox')).toBeInTheDocument()
     expect(screen.queryByText(/no context to show/i)).toBeNull()
   })
+
+  it('never shows the timeline row and "has not loaded" at the same time', async () => {
+    // The two panels are driven by different state: the table below reads
+    // `Timeline`'s own `events`, the context panel above reads
+    // `newestEvent`, which `People` only learns about via a callback
+    // `Timeline` fires from a SEPARATE effect reacting to that same
+    // `events` state -- so the table's own commit and the callback's
+    // commit are two renders, not one, and a poll (or a real paint) can
+    // land between them.
+    //
+    // The test above this one (`fills the context panel...`) cannot catch
+    // that gap: it waits on the CONTEXT panel's own text, which by
+    // definition cannot resolve until the panel has already caught up.
+    // This one waits on the TABLE's text instead, then checks the context
+    // panel synchronously in the SAME tick -- a second `await` here would
+    // let the panel's own poll catch up and pass regardless of whether the
+    // two ever land together, which is exactly the gap this test exists to
+    // close.
+    const client = {
+      person: vi.fn(async () => person({ person_id: 'u1' })),
+      events: vi.fn(async () => eventsPage([event({ event_name: 'checkout_completed' })])),
+    } as unknown as ApiClient
+    renderPeople('/people?id=u1', client)
+    await waitFor(() => expect(screen.getByText('checkout_completed')).toBeInTheDocument())
+    expect(screen.queryByText(/this person.s timeline has not loaded/i)).toBeNull()
+  })
 })
 
 // Invented mutation: a component that shows the profile view regardless of

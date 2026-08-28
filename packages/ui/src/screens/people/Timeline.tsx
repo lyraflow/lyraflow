@@ -67,7 +67,20 @@ export function Timeline(props: {
   /** Called with the newest event once the anchored page lands, so the
    * profile's context panel has something to read. Never called again after
    * that: a `before` page only ever adds events OLDER than what is already
-   * shown, so the newest event never changes once the first page is in. */
+   * shown, so the newest event never changes once the first page is in.
+   *
+   * Called from INSIDE the same `.then()` that sets this table's own state
+   * below, not from a separate effect reacting to `events` -- React 18
+   * batches every `setState` call made within one synchronous callback,
+   * regardless of which component owns the state, so calling it here lands
+   * the parent's context panel and this table in the same commit. A
+   * separate effect watching `events` used to do this instead, and it
+   * produced a real, observed race: the table's own commit could paint
+   * before the effect ran, showing the timeline already populated while
+   * the context panel above it still claimed "this person's timeline has
+   * not loaded" -- caught by `People.test.tsx`'s "never shows the timeline
+   * row and 'has not loaded' at the same time", which failed on ~60% of
+   * runs against that version. */
   onNewestEvent?: (event: LyraEvent) => void
 }) {
   const { client, projectId, personId, lastSeen, onNewestEvent } = props
@@ -94,6 +107,16 @@ export function Timeline(props: {
         setCursor(page.prev_cursor)
         setEnded(page.events.length === 0)
         setStatus({ kind: 'ready' })
+        // In the SAME batch as the state above, not a separate effect
+        // reacting to `events` -- see `onNewestEvent`'s own doc comment on
+        // the prop for why that used to be two commits instead of one.
+        // Ascending order -- the LAST element is the newest. `.at(-1)`
+        // rather than `page.events[page.events.length - 1]`: the two are
+        // the same value once `page.events.length > 0`, but only the
+        // `!= null` check on the `.at()` read proves that to the compiler
+        // under `noUncheckedIndexedAccess`.
+        const newest = page.events.at(-1)
+        if (newest != null) onNewestEvent?.(newest)
       })
       .catch((err: unknown) => {
         if (cancelled) return
@@ -110,16 +133,11 @@ export function Timeline(props: {
     return () => {
       cancelled = true
     }
-  }, [client, projectId, personId, lastSeen])
-
-  useEffect(() => {
-    // Ascending order -- the LAST element is the newest. `.at(-1)` rather
-    // than `events[events.length - 1]`: the two are the same value once
-    // `events.length > 0`, but only the `!= null` check on the `.at()` read
-    // proves that to the compiler under `noUncheckedIndexedAccess`.
-    const newest = events.at(-1)
-    if (newest != null) onNewestEvent?.(newest)
-  }, [events, onNewestEvent])
+    // `onNewestEvent` joins the dependency array now that it is called from
+    // here -- safe against extra re-fetches: `People` passes `setNewestEvent`
+    // directly, and a `useState` dispatch function is referentially stable
+    // across renders, so this never changes on its own.
+  }, [client, projectId, personId, lastSeen, onNewestEvent])
 
   function loadOlder() {
     if (cursor == null || loadingOlder) return
