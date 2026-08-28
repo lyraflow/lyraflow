@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   DEFAULTS,
   MAX_PERIODS,
+  incompletePredicates,
   readRetentionParams,
   toRequest,
   writeRetentionParams,
@@ -126,5 +127,53 @@ describe('toRequest', () => {
       startWhere: [{ property: 'p', operator: '=', value: 'x' }],
     })
     expect(body.start_where).toHaveLength(1)
+  })
+})
+
+describe('a half-built predicate', () => {
+  // The bug Cem hit on 2026-08-28: "Add predicate" appeared to do nothing.
+  // `WherePredicates` adds `{ property: '', operator: '=', value: '' }`, and
+  // `property` is `z.string().min(1)` -- so validating each element against
+  // the full schema on the way back OUT of the URL threw the new row away
+  // before it could be rendered. The control worked; the round trip ate it.
+  const BLANK = { property: '', operator: '=', value: '' }
+
+  it('survives the URL round trip, or the editor can never add one', () => {
+    const written = writeRetentionParams(new URLSearchParams(), {
+      ...DEFAULTS,
+      startWhere: [BLANK as never],
+    })
+    expect(readRetentionParams(written).startWhere).toHaveLength(1)
+  })
+
+  it('is still refused as garbage when it is not predicate-shaped at all', () => {
+    // Leniency has to stop somewhere: a hand-edited link full of nonsense
+    // must still degrade to no predicates rather than to rows the editor
+    // cannot render.
+    const junk = encodeURIComponent(JSON.stringify([{ nope: 1 }, 'string', 42, null]))
+    expect(readRetentionParams(new URLSearchParams(`start_where=${junk}`)).startWhere).toEqual([])
+  })
+
+  it('is reported as incomplete, so Run does not send a request the server refuses', () => {
+    // Dropping it silently at request time would run a WIDER grid than the
+    // operator built, which is the failure this screen refuses everywhere
+    // else.
+    expect(incompletePredicates({ ...DEFAULTS, startWhere: [BLANK as never] })).toBe(1)
+    expect(
+      incompletePredicates({
+        ...DEFAULTS,
+        startWhere: [{ property: 'plan', operator: '=', value: 'pro' }],
+      }),
+    ).toBe(0)
+  })
+
+  it('counts both sides', () => {
+    expect(
+      incompletePredicates({
+        ...DEFAULTS,
+        startWhere: [BLANK as never],
+        returnWhere: [BLANK as never],
+      }),
+    ).toBe(2)
   })
 })

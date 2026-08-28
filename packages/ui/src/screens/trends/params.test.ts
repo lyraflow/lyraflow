@@ -12,6 +12,7 @@ const read = (qs: string) => readTrendParams(new URLSearchParams(qs))
 describe('readTrendParams', () => {
   it('reads a full definition', () => {
     expect(read('event=checkout&interval=1w&source=property&field=plan')).toEqual({
+      ...DEFAULTS,
       event: 'checkout',
       interval: '1w',
       source: 'property',
@@ -32,6 +33,7 @@ describe('writeTrendParams', () => {
 
   it('round-trips a chosen definition', () => {
     const chosen = {
+      ...DEFAULTS,
       event: 'checkout',
       interval: '1h' as const,
       source: 'attribute' as const,

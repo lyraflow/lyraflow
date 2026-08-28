@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
@@ -144,5 +144,68 @@ describe('Retention', () => {
     // start-side condition to the return side.
     expect(document.querySelector('[data-testid^="retention-start-where"]')).not.toBeNull()
     expect(document.querySelector('[data-testid^="retention-return-where"]')).not.toBeNull()
+  })
+
+  it('actually adds a row when Add predicate is clicked', async () => {
+    // The bug Cem hit: the button appeared dead. `WherePredicates` adds a
+    // BLANK row, and validating each element against the full schema on the
+    // way out of the URL threw it away before it could render. End to end
+    // through the real editor, because neither half was wrong on its own.
+    harness({}, READY)
+    const start = screen.getByTestId('retention-start-where-where')
+    await userEvent.click(within(start).getByRole('button', { name: /add predicate/i }))
+    expect(within(start).getAllByRole('combobox', { name: /operator/i })).toHaveLength(1)
+  })
+
+  it('adds to one side without touching the other', async () => {
+    harness({}, READY)
+    const start = screen.getByTestId('retention-start-where-where')
+    await userEvent.click(within(start).getByRole('button', { name: /add predicate/i }))
+    const ret = screen.getByTestId('retention-return-where-where')
+    expect(within(ret).queryAllByRole('combobox', { name: /operator/i })).toHaveLength(0)
+  })
+
+  it('blocks the run while a condition is unfinished, and says so', async () => {
+    // Not dropped silently: a half-built condition removed at request time
+    // measures a wider population than the operator built.
+    harness({}, READY)
+    const start = screen.getByTestId('retention-start-where-where')
+    await userEvent.click(within(start).getByRole('button', { name: /add predicate/i }))
+    expect(screen.getByTestId('retention-unfinished')).toBeInTheDocument()
+    expect(runButton()).toBeDisabled()
+  })
+
+  it('sends no bounds on the default range', async () => {
+    const client = harness({}, READY)
+    await userEvent.click(runButton())
+    await waitFor(() => expect(client.runRetention).toHaveBeenCalled())
+    const body = (client.runRetention as unknown as { mock: { calls: unknown[][] } }).mock
+      .calls[0]?.[1] as Record<string, unknown>
+    expect('since' in body).toBe(false)
+  })
+
+  it('sends the chosen range', async () => {
+    const client = harness({}, `${READY}&range=custom&from=2026-06-01&to=2026-06-30`)
+    await userEvent.click(runButton())
+    await waitFor(() => expect(client.runRetention).toHaveBeenCalled())
+    const body = (client.runRetention as unknown as { mock: { calls: unknown[][] } }).mock
+      .calls[0]?.[1] as Record<string, string>
+    expect(body.since).toBe('2026-06-01T00:00:00.000Z')
+    // Inclusive end: somebody who picks the 30th means the whole of it.
+    expect(body.until).toBe('2026-06-30T23:59:59.999Z')
+  })
+
+  it('refuses a range that would exceed the cohort cap, before sending it', async () => {
+    // 365 days of DAILY cohorts is 365 against a ceiling of 60. The server
+    // refuses rather than truncating; saying so here is the better answer.
+    harness({}, `${READY}&granularity=day&range=365d`)
+    expect(screen.getByTestId('retention-too-many-cohorts')).toHaveTextContent('365')
+    expect(runButton()).toBeDisabled()
+  })
+
+  it('blocks a half-filled custom range', async () => {
+    harness({}, `${READY}&range=custom&from=2026-06-01`)
+    expect(screen.getByTestId('retention-range-unfinished')).toBeInTheDocument()
+    expect(runButton()).toBeDisabled()
   })
 })

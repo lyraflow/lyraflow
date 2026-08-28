@@ -6,14 +6,19 @@ import { useProject } from '../app/ProjectContext.js'
 import { EventCombobox } from '../components/EventCombobox.js'
 import { Button } from '../components/ui/button.js'
 import { Label } from '../components/ui/label.js'
+import { RangePicker } from './shared/RangePicker.js'
+import { rangeIncomplete, resolveRange } from './shared/range.js'
 import { BreakdownPicker } from './trends/BreakdownPicker.js'
 import { TrendPanels } from './trends/TrendPanels.js'
 import {
   INTERVALS,
+  MAX_BUCKETS,
   type TrendParams,
   breakdownIncomplete,
+  bucketCount,
   groupByOf,
   readTrendParams,
+  tooManyBuckets,
   writeTrendParams,
 } from './trends/params.js'
 import { toSeries } from './trends/series.js'
@@ -62,6 +67,10 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
       setResult(
         await client.stats(activeId, {
           interval: params.interval,
+          // Resolved at RUN time, not at render: a relative range read once
+          // on mount would drift from "now" the longer the tab stayed open,
+          // and the chart would quietly answer for a window that had moved.
+          ...resolveRange(params.range, new Date()),
           ...(params.event === '' ? {} : { event: params.event }),
           ...(groupByOf(params) === undefined ? {} : { group_by: groupByOf(params) }),
         }),
@@ -75,6 +84,11 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
   }, [client, activeId, params])
 
   const series = result ? toSeries(result.buckets) : []
+  // Recomputed on render rather than memoised against a frozen `now`: the
+  // number only has to be right when it is shown.
+  const buckets = bucketCount(params, new Date())
+  const overCap = tooManyBuckets(params, new Date())
+  const incompleteRange = rangeIncomplete(params.range)
 
   return (
     <section className="flex flex-col gap-6">
@@ -126,7 +140,16 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
             ))}
           </select>
         </div>
-        <Button type="button" onClick={run} disabled={running || activeId == null}>
+        <RangePicker
+          id="trend-range"
+          value={params.range}
+          onChange={(range) => update({ range })}
+        />
+        <Button
+          type="button"
+          onClick={run}
+          disabled={running || activeId == null || overCap || incompleteRange}
+        >
           {running ? 'Running…' : 'Run'}
         </Button>
       </div>
@@ -135,6 +158,19 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
         <p className="text-muted-foreground text-sm">
           A key from the event's own properties — whatever your app put in <code>properties</code>{' '}
           when it sent the event.
+        </p>
+      )}
+
+      {incompleteRange && (
+        <p data-testid="trend-range-unfinished" className="text-muted-foreground text-sm">
+          Pick both dates, or choose a preset range.
+        </p>
+      )}
+
+      {overCap && (
+        <p data-testid="trend-too-many-buckets" className="text-muted-foreground text-sm">
+          That range at this resolution is {buckets?.toLocaleString()} points, above the limit of{' '}
+          {MAX_BUCKETS.toLocaleString()}. Pick a coarser resolution or a shorter range.
         </p>
       )}
 

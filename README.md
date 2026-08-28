@@ -2156,6 +2156,13 @@ the Feed.
 same anchoring a retention cohort uses, so a weekly trend and a weekly cohort
 row cannot disagree about where a week begins.
 
+`since` and `until` are optional; without them the window is scaled to the
+resolution. The Web UI offers presets and a two-date range, and **says before
+you run** when a span and a resolution would pair into more buckets than the
+server accepts — 30 days at `1m` is 43,200 against a ceiling of 1000, which is
+exactly what somebody builds by accident when span and resolution are two
+independent choices.
+
 ### Limits
 
 **At most 10 series come back; the rest are summed into one `(other)` series
@@ -2220,7 +2227,7 @@ run later fills those cells in.
 | `return_where` | the same, for the return side, and **independent** of `start_where`. |
 | `granularity` | `day`, `week` or `month`. Weeks start **Monday**, and every bucket is UTC. |
 | `periods` | how many periods after the cohort's own to measure, up to 26. |
-| `since` / `until` | bound who **enters** a cohort. Optional; defaults to the last `periods` periods. |
+| `since` / `until` | bound who **enters** a cohort. Optional; defaults to the last `periods` periods. The Web UI offers presets and a two-date range for this. |
 | `segment_id` | restrict the whole grid to a saved segment's population. |
 
 **The two `where` lists are what make one event name usable.** On a site where

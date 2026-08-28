@@ -142,4 +142,48 @@ describe('Trends', () => {
       screen.getByText(/whatever your app put in/i),
     )
   })
+
+  it('sends no bounds on the default range, keeping the server’s tuned window', async () => {
+    const client = harness({}, '/trends?event=checkout')
+    await userEvent.click(runButton())
+    await waitFor(() => expect(client.stats).toHaveBeenCalled())
+    const q = (client.stats as unknown as { mock: { calls: unknown[][] } }).mock
+      .calls[0]?.[1] as Record<string, unknown>
+    expect('since' in q).toBe(false)
+    expect('until' in q).toBe(false)
+  })
+
+  it('sends bounds once a range is chosen', async () => {
+    const client = harness({}, '/trends?event=checkout&range=90d')
+    await userEvent.click(runButton())
+    await waitFor(() => expect(client.stats).toHaveBeenCalled())
+    const q = (client.stats as unknown as { mock: { calls: unknown[][] } }).mock
+      .calls[0]?.[1] as Record<string, string>
+    expect(new Date(q.until as string).getTime() - new Date(q.since as string).getTime()).toBe(
+      90 * 86_400_000,
+    )
+  })
+
+  it('refuses a span-and-resolution pairing the server would refuse, before sending it', async () => {
+    // 30 days at one-minute resolution is 43,200 buckets against a ceiling of
+    // 1000. Saying so beats a 400 the operator has to interpret.
+    const client = harness({}, '/trends?event=checkout&interval=1m&range=30d')
+    expect(screen.getByTestId('trend-too-many-buckets')).toHaveTextContent('43,200')
+    expect(runButton()).toBeDisabled()
+    expect(client.stats).not.toHaveBeenCalled()
+  })
+
+  it('blocks a half-filled custom range instead of pairing a start with no end', async () => {
+    harness({}, '/trends?event=checkout&range=custom&from=2026-06-01')
+    expect(screen.getByTestId('trend-range-unfinished')).toBeInTheDocument()
+    expect(runButton()).toBeDisabled()
+  })
+
+  it('clears the chart when the range changes, like every other control', async () => {
+    harness({}, '/trends?event=checkout&range=90d')
+    await userEvent.click(runButton())
+    await waitFor(() => expect(screen.getByTestId('trend-panels')).toBeInTheDocument())
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: /range/i }), '30d')
+    expect(screen.queryByTestId('trend-panels')).toBeNull()
+  })
 })

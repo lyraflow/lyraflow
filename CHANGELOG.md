@@ -25,6 +25,23 @@ one fix is contained in 0.3.0.
 
 ### Added
 
+- **A date range on the Trends and Retention screens.** Both held their whole
+  definition in the URL and ran on demand, and neither had a range control:
+  each fell back to a window the server scales to the resolution. That is a
+  good default and a bad only option — a project whose data stopped a week ago
+  draws an empty chart with nothing on screen explaining why.
+
+  Presets plus a two-date range, shared by both screens, held in the URL like
+  everything else. The default is still "let the server choose", so the tuned
+  per-resolution windows stay the default rather than being replaced by a
+  fixed span.
+
+  **Each screen refuses a combination the server would refuse, before
+  sending it.** 30 days at one-minute resolution is 43,200 buckets against a
+  ceiling of 1000; a year of daily cohorts is 365 against a ceiling of 60.
+  Both are what somebody builds by accident when span and resolution are two
+  independent choices, and being told which limit was hit beats a 400.
+
 - **Trends: an event over time, split by a property or a column** (**#72**,
   the trends half). `GET /v1/events/stats` — the endpoint the Feed's chart
   already used — gains `group_by=attribute:<column>` and
@@ -91,6 +108,15 @@ one fix is contained in 0.3.0.
   the same entry/observation split funnels make. Person resolution, `event_id`
   deduplication, the deletion boundary and an optional `segment_id` are all
   the ones the funnel engine already uses.
+
+  **"Add predicate" added nothing** in the first build of this, and the
+  control was not at fault: the editor adds a blank row, `property` is
+  `z.string().min(1)`, and validating each element against the full schema on
+  the way back out of the URL threw the new row away before it could render.
+  The read is now structural — is this shaped like a predicate the editor can
+  render — and finishedness is a separate question the screen reports, because
+  a half-built condition must block the run rather than be dropped from it:
+  dropping it would quietly measure a wider population than was built.
 
   **Each side takes a `where` list**, the same grammar a funnel step and a
   segment behaviour use, and the two are independent. Without it the report
