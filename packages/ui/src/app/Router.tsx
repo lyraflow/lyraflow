@@ -1,4 +1,4 @@
-import { BrowserRouter, Route, Routes } from 'react-router'
+import { BrowserRouter, Navigate, Route, Routes, useSearchParams } from 'react-router'
 import type { ApiClient } from '../api/client.js'
 import { Feed } from '../screens/Feed.js'
 import { FunnelBuilder } from '../screens/FunnelBuilder.js'
@@ -7,6 +7,7 @@ import { Funnels } from '../screens/Funnels.js'
 import { People } from '../screens/People.js'
 import { Profile } from '../screens/Profile.js'
 import { Retention } from '../screens/Retention.js'
+import { hasRetentionDefinitionParams } from '../screens/retention/params.js'
 import { RetentionReports } from '../screens/RetentionReports.js'
 import { SegmentBuilder } from '../screens/SegmentBuilder.js'
 import { SegmentDetail } from '../screens/SegmentDetail.js'
@@ -14,6 +15,7 @@ import { Segments } from '../screens/Segments.js'
 import { Settings } from '../screens/Settings.js'
 import { TrendReports } from '../screens/TrendReports.js'
 import { Trends } from '../screens/Trends.js'
+import { hasTrendDefinitionParams } from '../screens/trends/params.js'
 import { Shell } from './Shell.js'
 
 /**
@@ -48,6 +50,38 @@ export const segmentPath = (id: number) => `/segments/${id}`
 export const segmentEditPath = (id: number) => `/segments/${id}/edit`
 export const trendReportPath = (id: number) => `/trends/${id}`
 export const retentionReportPath = (id: number) => `/retention/${id}`
+
+/**
+ * `/trends` used to BE the builder; it is now the saved-trend list, and the
+ * list never reads the query string. A bookmark or shared link built before
+ * this task -- `/trends?event=signup&interval=1d` -- would otherwise open
+ * an empty list with no trace of what was asked. This redirects such a URL
+ * to `/trends/new`, carrying its search string across untouched, so the
+ * link still answers the question it used to; a bare `/trends` (no
+ * definition) renders the list as intended.
+ *
+ * `hasTrendDefinitionParams` is the SAME predicate `Trends.tsx`'s own seed
+ * effect uses to decide whether a URL already carries a definition -- reused
+ * rather than restated, so there is exactly one notion of "this URL carries
+ * a trend" in the codebase.
+ */
+function TrendsEntry(props: { client: ApiClient; onUnauthorized?(): void }) {
+  const [search] = useSearchParams()
+  if (hasTrendDefinitionParams(search)) {
+    return <Navigate to={{ pathname: ROUTES.trendNew, search: search.toString() }} replace />
+  }
+  return <TrendReports client={props.client} onUnauthorized={props.onUnauthorized} />
+}
+
+/** `/retention`'s counterpart to `TrendsEntry` above, for the same reason and
+ * against the same failure -- see that component's own comment. */
+function RetentionEntry(props: { client: ApiClient; onUnauthorized?(): void }) {
+  const [search] = useSearchParams()
+  if (hasRetentionDefinitionParams(search)) {
+    return <Navigate to={{ pathname: ROUTES.retentionNew, search: search.toString() }} replace />
+  }
+  return <RetentionReports client={props.client} onUnauthorized={props.onUnauthorized} />
+}
 
 /**
  * Wraps `Shell` in a `BrowserRouter` so the nav's links are real
@@ -95,8 +129,8 @@ export function AppRouter(props: {
     />
   )
   const funnels = <Funnels client={props.client} onUnauthorized={props.onUnauthorized} />
-  const retentionReports = (
-    <RetentionReports client={props.client} onUnauthorized={props.onUnauthorized} />
+  const retentionEntry = (
+    <RetentionEntry client={props.client} onUnauthorized={props.onUnauthorized} />
   )
   // Distinct `key`s for the same reason `trendNew`/`trendDetail` carry them
   // below: `<Routes>` reconciles its single child by TYPE AND POSITION, so
@@ -113,7 +147,7 @@ export function AppRouter(props: {
   const retentionDetail = (
     <Retention key="retention-detail" client={props.client} onUnauthorized={props.onUnauthorized} />
   )
-  const trendReports = <TrendReports client={props.client} onUnauthorized={props.onUnauthorized} />
+  const trendsEntry = <TrendsEntry client={props.client} onUnauthorized={props.onUnauthorized} />
   // Distinct `key`s for the same reason `funnelNew`/`funnelEdit` and
   // `segmentNew`/`segmentEdit` carry them below: `<Routes>` reconciles its
   // single child by TYPE AND POSITION, so navigating /trends/7 -> /trends/new
@@ -200,10 +234,10 @@ export function AppRouter(props: {
           <Route path={ROUTES.funnelNew} element={funnelNew} />
           <Route path="/funnels/:id" element={funnelDetail} />
           <Route path="/funnels/:id/edit" element={funnelEdit} />
-          <Route path={ROUTES.trends} element={trendReports} />
+          <Route path={ROUTES.trends} element={trendsEntry} />
           <Route path={ROUTES.trendNew} element={trendNew} />
           <Route path="/trends/:id" element={trendDetail} />
-          <Route path={ROUTES.retention} element={retentionReports} />
+          <Route path={ROUTES.retention} element={retentionEntry} />
           <Route path={ROUTES.retentionNew} element={retentionNew} />
           <Route path="/retention/:id" element={retentionDetail} />
           <Route path={ROUTES.segments} element={segments} />

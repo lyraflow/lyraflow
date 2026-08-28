@@ -179,6 +179,21 @@ describe('AppRouter', () => {
     expect(screen.queryByRole('link', { name: /new trend/i })).not.toBeInTheDocument()
   })
 
+  // I1 from the whole-branch review: `/trends` used to BE the builder, so a
+  // bookmark or shared link built before this task names an event, an
+  // interval, a breakdown -- straight in the query string. Repointing
+  // `/trends` at the list without teaching it to read that string would
+  // open it empty, with no trace of what was asked. `TrendsEntry` forwards
+  // a definition-carrying URL to the builder instead, search intact, so
+  // the link still answers the question it used to.
+  it('forwards a definition-carrying /trends to the builder, search intact', async () => {
+    renderAt('/trends?event=signup&interval=1d')
+    expect(await screen.findByRole('button', { name: /^run$/i })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /new trend/i })).not.toBeInTheDocument()
+    expect(window.location.pathname).toBe('/trends/new')
+    expect(window.location.search).toBe('?event=signup&interval=1d')
+  })
+
   // Task 7: `/retention` used to render the URL-driven builder/viewer
   // directly (`Retention`) -- it now renders the saved-retention-reports
   // list (`RetentionReports`) instead, with `Retention` itself moved to
@@ -212,6 +227,17 @@ describe('AppRouter', () => {
     expect(await screen.findByRole('heading', { name: /^retention$/i })).toBeInTheDocument()
     expect(await screen.findByRole('button', { name: /^run$/i })).toBeInTheDocument()
     expect(screen.queryByRole('link', { name: /new retention report/i })).not.toBeInTheDocument()
+  })
+
+  // I1's counterpart for /retention -- see the matching /trends test above
+  // for why. A pre-existing bookmark like this one named the two events, the
+  // granularity and a `where` clause; the whole point is that it still does.
+  it('forwards a definition-carrying /retention to the builder, search intact', async () => {
+    renderAt('/retention?start=signed_up&return=project_created&granularity=day')
+    expect(await screen.findByRole('button', { name: /^run$/i })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /new retention report/i })).not.toBeInTheDocument()
+    expect(window.location.pathname).toBe('/retention/new')
+    expect(window.location.search).toBe('?start=signed_up&return=project_created&granularity=day')
   })
 
   // Same resolution guard as Funnels' and Segments' own pair above, for the

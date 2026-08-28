@@ -113,6 +113,16 @@ one fix is contained in 0.3.0.
   operator can still run the degraded version rather than being locked out
   of it.
 
+### Changed
+
+- **`/trends` and `/retention` are now the saved-report lists**; the
+  builders moved to `/trends/new` and `/retention/new`. A bookmark or shared
+  link built before this task — naming an event, a granularity, a `where`
+  clause and so on — still opens the exact chart or grid it used to: it is
+  redirected to the `…/new` builder with its search string carried across
+  unchanged. A bare `/trends` or `/retention` — no definition in the query
+  string — opens the list.
+
 ## 0.11.0 — 2026-08-28
 
 ### Added
