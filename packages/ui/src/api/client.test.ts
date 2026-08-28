@@ -100,10 +100,19 @@ describe('createClient', () => {
     expect(url).toMatch(/[?&]limit=\d+/)
   })
 
-  // The backwards half of the keyset walk (Task 2) -- mutually exclusive
-  // with `after`, and otherwise wired through `qs()` exactly like every
-  // other events param.
-  it('sends before on an events query', async () => {
+  // NOT a pin on `EventsQuery.before` existing -- it CANNOT fail on that
+  // absence. `events()` builds its URL by spreading the caller's whole query
+  // object through `qs()`, which forwards any key at runtime regardless of
+  // what `EventsQuery` declares; TypeScript erases at the vitest/esbuild
+  // boundary, so an object literal typed `{ before: 'CUR', limit: 10 }`
+  // reaches `qs()` unchanged whether or not `before` is a real field. The
+  // guard that actually catches a caller writing `before` without the type
+  // existing is `pnpm typecheck` (TS2353, excess property on an object
+  // literal), not this file. What this DOES pin: that `qs()` stays a generic
+  // passthrough rather than growing an allowlist that would silently drop
+  // `before` (or any other key) at runtime -- a regression this test can and
+  // would catch.
+  it('forwards an arbitrary events query key -- before included -- through qs()', async () => {
     const f = fakeFetch(200, { events: [], next_cursor: null, prev_cursor: null })
     await createClient(f as unknown as typeof fetch).events(7, { before: 'CUR', limit: 10 })
     const url = String(f.mock.calls[0]?.[0])

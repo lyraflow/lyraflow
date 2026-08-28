@@ -61,6 +61,40 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Parses an error response body -- shared by `call` and `callBlob`, the
+ * two `fetchImpl` call sites, because both need the same tolerance: a 5xx
+ * from a proxy is frequently HTML, so parsing must not throw a SyntaxError
+ * that replaces the real status with a parse failure. Both fall back to
+ * `'unknown'` rather than propagate one.
+ *
+ * `callBlob`'s SUCCESS body is NDJSON, not JSON -- that is the entire
+ * reason it exists instead of using `call`. Its ERROR body is JSON like
+ * every other route's, which is what makes one helper correct for both
+ * call sites rather than merely convenient.
+ */
+async function parseErrorCode(res: Response): Promise<{ code: string; detail?: ApiErrorDetail[] }> {
+  let code = 'unknown'
+  let detail: ApiErrorDetail[] | undefined
+  try {
+    const body = (await res.json()) as { error?: string; detail?: unknown }
+    if (typeof body.error === 'string') code = body.error
+    if (Array.isArray(body.detail)) {
+      const parsed = body.detail.filter(
+        (d): d is ApiErrorDetail =>
+          typeof d === 'object' &&
+          d !== null &&
+          typeof (d as Record<string, unknown>).path === 'string' &&
+          typeof (d as Record<string, unknown>).message === 'string',
+      )
+      if (parsed.length > 0) detail = parsed
+    }
+  } catch {
+    /* keep 'unknown', detail stays absent */
+  }
+  return { code, detail }
+}
+
 export interface ApiClient {
   authState(): Promise<{ configured: boolean }>
   login(email: string, password: string): Promise<{ email: string }>
@@ -298,26 +332,7 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
     const res = await fetchImpl(path, { ...init, headers, credentials: 'include' })
 
     if (!res.ok) {
-      // A 5xx from a proxy is frequently HTML. Parsing must not throw a
-      // SyntaxError that replaces the real status with a parse failure.
-      let code = 'unknown'
-      let detail: ApiErrorDetail[] | undefined
-      try {
-        const body = (await res.json()) as { error?: string; detail?: unknown }
-        if (typeof body.error === 'string') code = body.error
-        if (Array.isArray(body.detail)) {
-          const parsed = body.detail.filter(
-            (d): d is ApiErrorDetail =>
-              typeof d === 'object' &&
-              d !== null &&
-              typeof (d as Record<string, unknown>).path === 'string' &&
-              typeof (d as Record<string, unknown>).message === 'string',
-          )
-          if (parsed.length > 0) detail = parsed
-        }
-      } catch {
-        /* keep 'unknown', detail stays absent */
-      }
+      const { code, detail } = await parseErrorCode(res)
       throw new ApiError(res.status, code, detail)
     }
 
@@ -339,9 +354,10 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
    * needs is enforced by the CALLER, which knows the person's event count
    * -- not here.
    *
-   * Shares `call`'s error path and nothing else: it is not built by
-   * refactoring `call` to accommodate a non-JSON success body, because
-   * every other caller of `call` still wants that.
+   * Shares `call`'s error path via `parseErrorCode` and nothing else: it is
+   * not built by refactoring `call` to accommodate a non-JSON SUCCESS body,
+   * because every other caller of `call` still wants that. The error body
+   * is JSON regardless -- see `parseErrorCode`'s own docstring.
    */
   async function callBlob(path: string, projectId: number): Promise<Blob> {
     const headers = new Headers()
@@ -350,13 +366,7 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
     const res = await fetchImpl(path, { headers, credentials: 'include' })
 
     if (!res.ok) {
-      let code = 'unknown'
-      try {
-        const body = (await res.json()) as { error?: string }
-        if (typeof body.error === 'string') code = body.error
-      } catch {
-        /* keep 'unknown' */
-      }
+      const { code } = await parseErrorCode(res)
       throw new ApiError(res.status, code)
     }
 
