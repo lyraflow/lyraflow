@@ -184,6 +184,50 @@ describe('retention report routes', () => {
     expect(res.json().error).toBe('retention_report_not_found')
   })
 
+  // M1 from the whole-branch review: every cross-tenant test on this branch
+  // was a GET. The scope in `RetentionReportStore.update`'s own `WHERE
+  // project_id = $1 AND id = $2` is what this pins -- a mutation that drops
+  // `project_id` from that one statement makes this the only test that
+  // fails.
+  it("answers 404 retention_report_not_found on a PATCH to another project's id", async () => {
+    const created = await call('POST', '/v1/retention-reports', { name: 'Signups', ...report })
+    const id = created.json().id
+    const res = await call(
+      'PATCH',
+      `/v1/retention-reports/${id}`,
+      { name: 'Stolen' },
+      OTHER_SERVER_KEY,
+    )
+    expect(res.statusCode).toBe(404)
+    expect(res.json().error).toBe('retention_report_not_found')
+    // The row itself is untouched -- the PATCH never reached it.
+    expect((await call('GET', `/v1/retention-reports/${id}`)).json().name).toBe('Signups')
+  })
+
+  // M1's DELETE half -- pins `RetentionReportStore.remove`'s own `WHERE
+  // project_id = $1 AND id = $2` the same way the PATCH test above pins
+  // `update`'s.
+  it("answers 404 retention_report_not_found on a DELETE to another project's id", async () => {
+    const created = await call('POST', '/v1/retention-reports', { name: 'Signups', ...report })
+    const id = created.json().id
+    const res = await call('DELETE', `/v1/retention-reports/${id}`, undefined, OTHER_SERVER_KEY)
+    expect(res.statusCode).toBe(404)
+    expect(res.json().error).toBe('retention_report_not_found')
+    // Still there -- the DELETE never reached it.
+    expect((await call('GET', `/v1/retention-reports/${id}`)).statusCode).toBe(200)
+  })
+
+  // M3 from the whole-branch review: the store's own test for this
+  // (`retention-store.test.ts`) covers `DuplicateRetentionNameError`, but
+  // nothing exercised the ROUTE's 409 mapping on a rename -- only on
+  // create.
+  it('answers 409 on a PATCH that renames into a taken name', async () => {
+    await call('POST', '/v1/retention-reports', { name: 'One', ...report })
+    const two = await call('POST', '/v1/retention-reports', { name: 'Two', ...report })
+    const res = await call('PATCH', `/v1/retention-reports/${two.json().id}`, { name: 'One' })
+    expect(res.statusCode).toBe(409)
+  })
+
   it('reaches the routes with a session as well as a server key', async () => {
     // Both surfaces go through makeServerOrSessionAuthenticator, like trends.
     const login = await app.inject({
