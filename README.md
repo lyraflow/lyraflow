@@ -421,10 +421,12 @@ screens, reachable from the sidebar:
   Retention list. What is saved is the two events, their conditions, the
   granularity, the period count and the segment — not the range, so
   reopening a report runs it over whatever range the screen currently has.
-  A range too short for the periods a report stores is not refused or
-  quietly narrowed; the cohorts it can measure run, and the rest come back
-  as the same dash-and-count the honesty line above already gives an
-  unfinished period.
+  Two things can stop that run before it starts. A range and granularity
+  that would together exceed 60 cohorts disables Run and computes nothing —
+  the same ceiling and warning a fresh grid gets. A report whose stored
+  filters no longer parse says so and skips the automatic run too, but
+  leaves Run enabled, so the operator can still run the degraded version
+  knowingly rather than being locked out of it.
 
 - **Segments** — build a filter tree in the browser: `and`/`or` groups, traits,
   context, lifecycle bounds, and behaviours with their own `where` predicates.
@@ -2468,14 +2470,21 @@ belongs to another project, is a `404`.
 `return_where` no longer parse under today's grammar, `false` otherwise —
 and no route fails a report out for it: a row written by an older build
 stays listed, readable, renameable and deletable even after the grammar
-around it has moved on.
+around it has moved on. The Retention screen reads the same field: opening
+a stale report skips its automatic run and says *"The filters saved with
+this report no longer parse, so it cannot be reproduced as saved"* — but
+leaves Run enabled, so the operator can still run the degraded version
+rather than being locked out of it.
 
 **What is not stored is the range**, the same as a saved trend. Reopening a
-report runs it over whatever range the screen currently has — including one
-too short for the periods it stores. That is not refused or quietly
-narrowed to fewer cohorts: the cohorts it can measure run, and the rest come
-back exactly as the honesty line above already handles an unfinished period
-— a dash, and a count of how many are waiting.
+report runs it over whatever range the screen currently has, and that range
+— combined with the stored granularity — can land over the same 60-cohort
+ceiling an ad hoc grid is held to. When it does, nothing is computed: Run is
+disabled and the screen names the cohort count and the limit, the same
+warning a fresh grid gets for the same reason. That is a different case from
+the `null` cells above — those come from a grid that *did* run, on periods
+too recent to have closed yet; a report reopened over too wide a range, or
+too fine a granularity, never runs at all.
 
 ## Reading events
 

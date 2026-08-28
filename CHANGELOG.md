@@ -105,11 +105,13 @@ one fix is contained in 0.3.0.
   **The range is deliberately not part of what's saved.** A trend or a
   retention report stores the question, not the window it was asked over,
   so reopening one runs it over whatever range the screen currently has,
-  never the one it was created with. Reopening a saved retention report
-  over a range too short for the periods it stores is not refused or
-  quietly narrowed to fewer cohorts: the cohorts it can measure run, and
-  the rest come back as the same dash the grid already gives an unfinished
-  period, with a count of how many are waiting.
+  never the one it was created with. Reopening a retention report into a
+  range and granularity that would together exceed 60 cohorts disables Run
+  and computes nothing — the same ceiling and warning an ad hoc grid is
+  already held to. A stale report — one whose stored filters no longer
+  parse — skips its automatic run too, but leaves Run enabled, so the
+  operator can still run the degraded version rather than being locked out
+  of it.
 
 ## 0.11.0 — 2026-08-28
 
