@@ -178,6 +178,11 @@ describe('People', () => {
       person: vi.fn(async () => {
         throw new ApiError(404, 'person_not_found')
       }),
+      // Stubbed for the same reason the `id === null` tests above stub it:
+      // the 404 branch now renders `TraitSearch` beside the lookup box (see
+      // the recovery-path test below), so a `PropertyCombobox` mounts here
+      // too and fetches on mount.
+      schemaProperties: vi.fn(async () => []),
     } as unknown as ApiClient
     renderPeople('/people?id=ghost', client)
     const msg = await screen.findByTestId('person-not-found')
@@ -196,6 +201,31 @@ describe('People', () => {
     expect(msg).toHaveTextContent(/visible in the feed/i)
     expect(msg).toHaveTextContent(/one of four things/i)
     expect(msg).not.toHaveTextContent(/no such person/i)
+  })
+
+  it('offers the trait search on a 404 too, so the recovery path matches the entry path', async () => {
+    // The failed lookup is the moment an operator has run out of id -- and
+    // by the copy pinned in the test above, the likeliest reason is an id
+    // that was never identified, which no amount of retyping fixes. The 404
+    // branch used to render the lookup box ALONE, so the one screen state
+    // that most needs the other way in was the only one that did not offer
+    // it: the operator had to navigate back to `/people` to find a control
+    // that had been on screen a moment earlier.
+    //
+    // Asserted through the SAME two queries the no-id test uses, not
+    // through a new testid, so the two states are pinned as identical
+    // rather than as separately-passing.
+    const client = {
+      person: vi.fn(async () => {
+        throw new ApiError(404, 'person_not_found')
+      }),
+      schemaProperties: vi.fn(async () => []),
+    } as unknown as ApiClient
+    renderPeople('/people?id=ghost', client)
+    await screen.findByTestId('person-not-found')
+    expect(screen.getByLabelText(/user id, or the anonymous or device id/i)).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: /^trait$/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^search$/i })).toBeInTheDocument()
   })
 
   it('does not promise the lookup resolves an unidentified visitor', async () => {
@@ -460,6 +490,7 @@ describe('People -- invented mutations', () => {
         throw new ApiError(404, 'person_not_found')
       }),
       events: noTimeline(),
+      schemaProperties: vi.fn(async () => []),
     } as unknown as ApiClient
     renderPeople('/people?id=ghost', client)
     await screen.findByTestId('person-not-found')

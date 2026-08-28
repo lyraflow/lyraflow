@@ -335,6 +335,18 @@ export function People(props: { client: ApiClient; onUnauthorized?: () => void }
             </span>
           }
         />
+        {/* The trait search belongs HERE more than it does on the empty
+         * state. A failed lookup is the moment an operator has run out of
+         * id, and by this branch's own copy the most likely reason is that
+         * the id they hold was never identified -- so "try the other way
+         * in" is the recovery, and it should not require navigating back to
+         * `/people` to find it. Rendering the recovery path and the entry
+         * path identically is the point: whatever `submit` below leads to,
+         * both ways in are on screen either side of it. Same `activeId`
+         * gate as the no-id branch, for the same reason. */}
+        {activeId != null && (
+          <TraitSearch client={client} projectId={activeId} onUnauthorized={onUnauthorized} />
+        )}
       </Screen>
     )
   }
