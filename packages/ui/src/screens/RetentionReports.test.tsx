@@ -1,5 +1,4 @@
 import { render, screen, waitFor } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/client.js'
@@ -41,7 +40,6 @@ const ROW = {
 function renderList(reports: unknown[]) {
   const client = {
     retentionReports: vi.fn(async () => reports),
-    deleteRetentionReport: vi.fn(async () => {}),
   } as unknown as ApiClient
   render(
     <MemoryRouter>
@@ -58,7 +56,6 @@ function renderFailed() {
     retentionReports: vi.fn(async () => {
       throw new Error('boom')
     }),
-    deleteRetentionReport: vi.fn(async () => {}),
   } as unknown as ApiClient
   render(
     <MemoryRouter>
@@ -68,11 +65,6 @@ function renderFailed() {
     </MemoryRouter>,
   )
   return client
-}
-
-async function click(name: RegExp) {
-  const user = userEvent.setup({ delay: null })
-  await user.click(screen.getByRole('button', { name }))
 }
 
 beforeEach(() => {
@@ -108,24 +100,6 @@ describe('RetentionReports', () => {
     renderFailed()
     expect(await screen.findByText(/could not load/i)).toBeInTheDocument()
     expect(screen.queryByText(/no saved retention reports yet/i)).toBeNull()
-  })
-
-  it('requires a confirm before deleting, then deletes for the active project', async () => {
-    const client = renderList([ROW])
-    await screen.findByRole('link', { name: /Signup to purchase/ })
-    await click(/^delete$/i)
-    expect(client.deleteRetentionReport).not.toHaveBeenCalled()
-    await click(/^confirm$/i)
-    await waitFor(() => expect(client.deleteRetentionReport).toHaveBeenCalledWith(1, 3))
-  })
-
-  it('removes the row from the list once the delete resolves', async () => {
-    const client = renderList([ROW])
-    await screen.findByRole('link', { name: /Signup to purchase/ })
-    await click(/^delete$/i)
-    await click(/^confirm$/i)
-    await waitFor(() => expect(client.deleteRetentionReport).toHaveBeenCalled())
-    expect(await screen.findByText(/no saved retention reports yet/i)).toBeInTheDocument()
   })
 
   it('marks a stale row without breaking the list', async () => {

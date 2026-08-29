@@ -1,7 +1,6 @@
 import { render, screen } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { SavedReportList } from './SavedReportList.js'
 import type { SavedReportRow } from './SavedReportList.js'
 
@@ -14,30 +13,19 @@ const ROW: SavedReportRow = {
 
 function renderRows(
   rows: SavedReportRow[] | null,
-  overrides: Partial<{
-    loadFailed: boolean
-    onDelete(id: number): Promise<void>
-  }> = {},
+  overrides: Partial<{ loadFailed: boolean }> = {},
 ) {
-  const onDelete = overrides.onDelete ?? vi.fn(async () => {})
   render(
     <MemoryRouter>
       <SavedReportList
         rows={rows}
         loadFailed={overrides.loadFailed ?? false}
         hrefFor={(id) => `/reports/${id}`}
-        onDelete={onDelete}
         newHref="/reports/new"
         emptyMessage="Nothing saved here yet."
       />
     </MemoryRouter>,
   )
-  return { onDelete }
-}
-
-async function click(name: RegExp) {
-  const user = userEvent.setup()
-  await user.click(screen.getByRole('button', { name }))
 }
 
 describe('SavedReportList', () => {
@@ -48,7 +36,6 @@ describe('SavedReportList', () => {
           rows={null}
           loadFailed={false}
           hrefFor={(id) => `/reports/${id}`}
-          onDelete={vi.fn()}
           newHref="/reports/new"
           emptyMessage="Nothing saved here yet."
         />
@@ -104,30 +91,12 @@ describe('SavedReportList', () => {
     expect(screen.queryByText(/nothing saved here yet/i)).toBeNull()
   })
 
-  it('requires a confirm before calling onDelete, and passes the row id', async () => {
-    const { onDelete } = renderRows([ROW])
-    await click(/^delete$/i)
-    expect(onDelete).not.toHaveBeenCalled()
-    await click(/^confirm$/i)
-    expect(onDelete).toHaveBeenCalledWith(3)
-  })
-
-  it('cancel closes the confirm step without calling onDelete', async () => {
-    const { onDelete } = renderRows([ROW])
-    await click(/^delete$/i)
-    await click(/^cancel$/i)
-    expect(screen.queryByRole('button', { name: /^confirm$/i })).toBeNull()
-    expect(onDelete).not.toHaveBeenCalled()
-  })
-
-  it('shows an error and re-offers delete when onDelete rejects', async () => {
-    const onDelete = vi.fn(async () => {
-      throw new Error('boom')
-    })
-    renderRows([ROW], { onDelete })
-    await click(/^delete$/i)
-    await click(/^confirm$/i)
-    expect(await screen.findByRole('alert')).toHaveTextContent(/could not delete/i)
-    expect(screen.getByRole('button', { name: /^delete$/i })).toBeInTheDocument()
+  // No Delete control on a row -- it moved to the detail screen a row's
+  // link opens (`Trends`/`Retention`), the same place `FunnelDetail` and
+  // `SegmentDetail` already put it. This pins the negative: a row is a
+  // link and nothing else.
+  it('renders no button at all -- a row is a link, not an action', () => {
+    renderRows([ROW])
+    expect(screen.queryByRole('button')).toBeNull()
   })
 })

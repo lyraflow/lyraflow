@@ -1,7 +1,5 @@
-import { useState } from 'react'
 import { Link } from 'react-router'
 import { Badge } from '../../components/ui/badge.js'
-import { Button } from '../../components/ui/button.js'
 import { formatRelative } from '../funnels/format.js'
 
 /**
@@ -30,42 +28,14 @@ export interface SavedReportRow {
 
 /**
  * One row: a click-through link carrying the name, summary and a relative
- * "updated" timestamp (mirrors `FunnelRow`/`SegmentRow`'s own shape), plus a
- * delete control that needs its own confirm step -- OUTSIDE the link, since
- * a button nested inside an anchor is invalid HTML and would also fold the
- * button's own text into the link's accessible name.
- *
- * The confirm step is a plain two-button toggle, not `DeleteButton`'s
- * type-the-id gate: that gate exists because a person's erasure is
- * irreversible and writes a permanent suppression row (#19). Deleting a
- * saved report definition loses nothing but the definition itself, so the
- * heavier flow would be friction with no matching risk.
+ * "updated" timestamp (mirrors `FunnelRow`/`SegmentRow`'s own shape). Delete
+ * lives on the detail screen a row's link opens, not here -- the same place
+ * `Funnels`/`FunnelDetail` and `Segments`/`SegmentDetail` already put it, so
+ * a saved report follows the one interface convention every other list in
+ * this package already uses.
  */
-function SavedReportRowItem(props: {
-  row: SavedReportRow
-  hrefFor(id: number): string
-  onDelete(id: number): Promise<void>
-}) {
-  const { row, hrefFor, onDelete } = props
-  const [confirming, setConfirming] = useState(false)
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState(false)
-
-  async function confirmDelete() {
-    setBusy(true)
-    setError(false)
-    try {
-      await onDelete(row.id)
-      // No local removal here: `rows` is owned by the caller (the screen
-      // re-fetches, or filters its own state), same division of
-      // responsibility as everywhere else in this package that the network
-      // call and the list it belongs to live in different components.
-    } catch {
-      setError(true)
-      setBusy(false)
-      setConfirming(false)
-    }
-  }
+function SavedReportRowItem(props: { row: SavedReportRow; hrefFor(id: number): string }) {
+  const { row, hrefFor } = props
 
   return (
     <li className="flex items-center justify-between gap-3 rounded-md border border-border bg-card px-4 py-3">
@@ -75,10 +45,9 @@ function SavedReportRowItem(props: {
          * typed by an operator and often has no spaces at all
          * (`checkout_funnel_weekly_breakdown_by_utm_source_and_plan_tier_v2`).
          * Without it that one line ran ~180px past the card's right border
-         * at 390px wide -- over the Delete button and out of the row -- and
-         * took the whole list into horizontal scroll with it. `break-words`
-         * rather than `break-all`, so an ordinary multi-word name still
-         * breaks at its spaces. */}
+         * at 390px wide, taking the whole list into horizontal scroll with
+         * it. `break-words` rather than `break-all`, so an ordinary
+         * multi-word name still breaks at its spaces. */}
         <span className="min-w-0 break-words font-medium text-foreground">{row.name}</span>
         <span className="min-w-0 break-words text-sm text-muted-foreground">{row.summary}</span>
         <span className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -90,39 +59,6 @@ function SavedReportRowItem(props: {
           <span>Updated {formatRelative(row.updatedAt, new Date())}</span>
         </span>
       </Link>
-      <div className="flex shrink-0 flex-col items-end gap-1">
-        {confirming ? (
-          <div className="flex gap-2">
-            <Button
-              type="button"
-              size="sm"
-              variant="destructive"
-              disabled={busy}
-              onClick={confirmDelete}
-            >
-              Confirm
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={busy}
-              onClick={() => setConfirming(false)}
-            >
-              Cancel
-            </Button>
-          </div>
-        ) : (
-          <Button type="button" size="sm" variant="outline" onClick={() => setConfirming(true)}>
-            Delete
-          </Button>
-        )}
-        {error && (
-          <p role="alert" className="text-destructive text-xs">
-            Could not delete. Try again.
-          </p>
-        )}
-      </div>
     </li>
   )
 }
@@ -150,11 +86,10 @@ export function SavedReportList(props: {
   rows: SavedReportRow[] | null
   loadFailed: boolean
   hrefFor(id: number): string
-  onDelete(id: number): Promise<void>
   newHref: string
   emptyMessage: string
 }) {
-  const { rows, loadFailed, hrefFor, onDelete, newHref, emptyMessage } = props
+  const { rows, loadFailed, hrefFor, newHref, emptyMessage } = props
 
   return (
     <>
@@ -181,7 +116,7 @@ export function SavedReportList(props: {
       {rows != null && rows.length > 0 && (
         <ul className="flex flex-col gap-2">
           {rows.map((r) => (
-            <SavedReportRowItem key={r.id} row={r} hrefFor={hrefFor} onDelete={onDelete} />
+            <SavedReportRowItem key={r.id} row={r} hrefFor={hrefFor} />
           ))}
         </ul>
       )}

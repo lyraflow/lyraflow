@@ -1,5 +1,4 @@
 import { render, screen, waitFor } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/client.js'
@@ -35,7 +34,6 @@ const ROW = {
 function renderList(reports: unknown[]) {
   const client = {
     trendReports: vi.fn(async () => reports),
-    deleteTrendReport: vi.fn(async () => {}),
   } as unknown as ApiClient
   render(
     <MemoryRouter>
@@ -52,7 +50,6 @@ function renderFailed() {
     trendReports: vi.fn(async () => {
       throw new Error('boom')
     }),
-    deleteTrendReport: vi.fn(async () => {}),
   } as unknown as ApiClient
   render(
     <MemoryRouter>
@@ -62,11 +59,6 @@ function renderFailed() {
     </MemoryRouter>,
   )
   return client
-}
-
-async function click(name: RegExp) {
-  const user = userEvent.setup({ delay: null })
-  await user.click(screen.getByRole('button', { name }))
 }
 
 beforeEach(() => {
@@ -99,24 +91,6 @@ describe('TrendReports', () => {
     renderFailed()
     expect(await screen.findByText(/could not load/i)).toBeInTheDocument()
     expect(screen.queryByText(/no saved trends yet/i)).toBeNull()
-  })
-
-  it('requires a confirm before deleting, then deletes for the active project', async () => {
-    const client = renderList([ROW])
-    await screen.findByRole('link', { name: /Signups by day/ })
-    await click(/^delete$/i)
-    expect(client.deleteTrendReport).not.toHaveBeenCalled()
-    await click(/^confirm$/i)
-    await waitFor(() => expect(client.deleteTrendReport).toHaveBeenCalledWith(1, 3))
-  })
-
-  it('removes the row from the list once the delete resolves', async () => {
-    const client = renderList([ROW])
-    await screen.findByRole('link', { name: /Signups by day/ })
-    await click(/^delete$/i)
-    await click(/^confirm$/i)
-    await waitFor(() => expect(client.deleteTrendReport).toHaveBeenCalled())
-    expect(await screen.findByText(/no saved trends yet/i)).toBeInTheDocument()
   })
 })
 

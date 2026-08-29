@@ -88,15 +88,6 @@ export function TrendReports(props: { client: ApiClient; onUnauthorized?: () => 
     }
   }, [client, activeId, onUnauthorized])
 
-  async function handleDelete(id: number) {
-    if (activeId == null) return
-    await client.deleteTrendReport(activeId, id)
-    // Removed locally rather than re-fetched -- the row the operator just
-    // deleted is exactly the one this filters out, and a re-fetch would
-    // cost a request to learn the same thing.
-    setReports((prev) => (prev === null ? prev : prev.filter((r) => r.id !== id)))
-  }
-
   return (
     <div className="flex min-w-0 flex-col gap-6">
       <div className="flex items-center justify-between gap-2">
@@ -110,7 +101,6 @@ export function TrendReports(props: { client: ApiClient; onUnauthorized?: () => 
         rows={reports === null ? null : reports.map(toRow)}
         loadFailed={error}
         hrefFor={trendReportPath}
-        onDelete={handleDelete}
         newHref={ROUTES.trendNew}
         emptyMessage="No saved trends yet."
       />
