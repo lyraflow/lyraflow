@@ -210,6 +210,31 @@ describe('TrendStore', () => {
       expect((await store.get(projectA, made.id))?.group_by).toBeNull()
     })
   })
+
+  // Creates and deletes its OWN project rather than `projectA`, unlike an
+  // earlier version of this test -- `projectA` is shared by every other
+  // test in this file, so deleting it outright made this test's position
+  // load-bearing: appended after it, the next describe block would run
+  // every test against a project that no longer exists. A throwaway project
+  // needs no `afterAll` cleanup (it is gone by the end of the test) and
+  // this test can now sit anywhere in the file.
+  it('a deleted project takes its trends with it', async () => {
+    const doomed = await pg.query<{ id: string }>(
+      `INSERT INTO projects (name, slug, write_key, server_key_hash)
+       VALUES ('Doomed', 'trendstore-doomed', 'wk_trendstore_doomed', 'h') RETURNING id`,
+    )
+    const doomedProjectId = Number(doomed.rows[0]?.id)
+    const made = await store.create(doomedProjectId, {
+      name: 'Doomed',
+      event: 'e',
+      interval: '1d',
+      group_by: null,
+      where: [],
+    })
+    await pg.query('DELETE FROM projects WHERE id = $1', [doomedProjectId])
+    const { rows } = await pg.query('SELECT 1 FROM trend_reports WHERE id = $1', [made.id])
+    expect(rows).toHaveLength(0)
+  })
 })
 
 describe('TrendStore where predicates', () => {
@@ -226,6 +251,7 @@ describe('TrendStore where predicates', () => {
     expect(made.stale).toBe(false)
     const read = await store.get(projectA, made.id)
     expect(read?.where).toEqual(made.where)
+    expect(read?.stale).toBe(false)
   })
 
   it('defaults to no predicates', async () => {
@@ -259,9 +285,11 @@ describe('TrendStore where predicates', () => {
 
   it('reports a row it cannot parse as stale instead of throwing', async () => {
     // One row a past build wrote, that a later grammar can no longer parse,
-    // must not take the whole LIST down with it. The healthy row alongside
-    // it is the proof: without it, the assertion below would pass just as
-    // well if `list` quietly dropped the broken row instead of flagging it.
+    // must not take the whole LIST down with it. Without the healthy row
+    // alongside it, this file's own `beforeEach` leaves the table with
+    // exactly the one broken row, and a length assertion greater than one
+    // row is unreachable -- so this test could only ever prove the flag
+    // flipped, never that a broken row survives a LIST beside healthy ones.
     await store.create(projectA, { ...base, name: 'healthy', where: [] })
     const made = await store.create(projectA, { ...base, name: 'broken', where: [] })
     await pg.query(
@@ -270,8 +298,14 @@ describe('TrendStore where predicates', () => {
       [made.id],
     )
     const listed = await store.list(projectA)
-    expect(listed.find((t) => t.id === made.id)?.stale).toBe(true)
-    expect(listed.length).toBeGreaterThan(1)
+    const broken = listed.find((t) => t.id === made.id)
+    expect(broken?.stale).toBe(true)
+    // The raw, unparsed JSON survives rather than being discarded -- a
+    // failure branch that returned `[]` instead would pass every other
+    // assertion in this suite.
+    expect(broken?.where).toEqual([{ property: 'path', operator: 'wat' }])
+    expect(listed).toHaveLength(2)
+    expect(listed.find((t) => t.name === 'healthy')?.stale).toBe(false)
   })
 
   it('re-stamps the version when the predicates are written', async () => {
@@ -292,19 +326,4 @@ describe('TrendStore where predicates', () => {
     const patched = await store.update(projectA, made.id, { name: 'unstamped-2' })
     expect(patched?.definition_version).toBe(0)
   })
-})
-
-// Last in the file: it deletes projectA outright, which every other test in
-// this suite depends on still existing.
-it('a deleted project takes its trends with it', async () => {
-  const made = await store.create(projectA, {
-    name: 'Doomed',
-    event: 'e',
-    interval: '1d',
-    group_by: null,
-    where: [],
-  })
-  await pg.query('DELETE FROM projects WHERE id = $1', [projectA])
-  const { rows } = await pg.query('SELECT 1 FROM trend_reports WHERE id = $1', [made.id])
-  expect(rows).toHaveLength(0)
 })

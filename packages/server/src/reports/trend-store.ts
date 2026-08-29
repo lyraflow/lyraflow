@@ -109,12 +109,14 @@ const COLUMNS =
  *
  * Deliberately NOT the shape `FunnelStore` is: no cached last-run snapshot to
  * invalidate on write. `020_saved_reports.sql`'s own comment gives the
- * reason -- a trend's definition is three scalar values plus a predicate
- * list, not a compiled step sequence, so there is nothing here that can go
- * stale the way a funnel's cached counts can. `where` can still fail to
- * parse, which is what `stale` is for; that is a narrower claim than "there
- * is nothing here that can fail to parse" and this docstring used to
- * overstate it.
+ * reason -- these lists render the definition itself, which is derived from
+ * the row being displayed, so there is nothing here that can go stale the
+ * way a funnel's cached counts can. `where` can still fail to PARSE, though,
+ * which is what `stale` is for; that is a narrower claim than "there is
+ * nothing here that can fail to parse" and this docstring used to overstate
+ * it, back when `020_saved_reports.sql` itself still described a trend's
+ * definition as three scalar columns -- true when that migration was
+ * written, and no longer true once 021 added `event_where`.
  */
 export class TrendStore {
   constructor(private readonly pool: Pool) {}
