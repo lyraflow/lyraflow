@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
@@ -655,5 +655,77 @@ describe('Trends where predicates', () => {
     expect(vi.mocked(client.stats).mock.calls[0]?.[1]).toMatchObject({
       where: JSON.stringify([ONE]),
     })
+  })
+})
+
+describe('Trends -- a stale saved report', () => {
+  it('warns on load instead of auto-running its unparseable predicates', async () => {
+    // F2 from the whole-branch review: `Retention.tsx` already does this
+    // (its own test, `Retention.test.tsx`'s "warns on a stale report..."),
+    // and this screen's load effect had the same gap.
+    const client = renderAt('/trends/3', {
+      trendReport: vi.fn(async () => reportFixture({ stale: true })),
+    })
+    expect(await screen.findByTestId('trend-stale')).toBeInTheDocument()
+    expect(client.stats).not.toHaveBeenCalled()
+  })
+
+  // F2's own shape: a stale predicate that fails core's schema but still
+  // LOOKS like a predicate (`looksLikePredicate`) survives seeding as a
+  // real, editable row -- `unfinished` counts it, but before the fix the
+  // auto-run effect did not check `unfinished` at all, so it fired the
+  // request anyway and the screen showed a raw `invalid_where` under the
+  // chart instead of the warning it already had the data to show.
+  it('does not auto-run when a stale predicate survives seeding as an unfinished row', async () => {
+    const client = renderAt('/trends/3', {
+      trendReport: vi.fn(async () =>
+        reportFixture({
+          stale: true,
+          where: [{ property: 'plan', operator: 'not-a-real-op', value: 'x' }],
+        }),
+      ),
+    })
+    await screen.findByTestId('trend-stale')
+    expect(await screen.findByText(/1 filter is unfinished/i)).toBeInTheDocument()
+    expect(client.stats).not.toHaveBeenCalled()
+  })
+
+  // F1 -- THE ONE THAT MATTERS. An element that fails `looksLikePredicate`
+  // itself (no `operator` at all) is dropped by `whereFromStored` before it
+  // ever becomes a row -- nothing on screen looks unfinished, so `unfinished`
+  // stays 0. Before the fix, `canSave` was therefore true, and pressing Save
+  // would have PATCHed `where: []` over the report's actually-stored
+  // predicates -- the exact data loss this exists to prevent.
+  it('disables Save when a stale predicate is dropped entirely, not only when it survives as a row', async () => {
+    const client = renderAt('/trends/3', {
+      trendReport: vi.fn(async () => reportFixture({ stale: true, where: [{ nonsense: true }] })),
+    })
+    await screen.findByTestId('trend-stale')
+    // The positive assertion first: Save is disabled by the same load
+    // effect that set the banner, so it is a real signal.
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+    // Nothing visibly incomplete -- the predicate never became a row.
+    expect(screen.queryByText(/unfinished/i)).not.toBeInTheDocument()
+    // And Save, if it were somehow reachable, must never have been asked to
+    // write over the stored predicates with the narrower (empty) list.
+    expect(client.patchTrendReport).not.toHaveBeenCalled()
+  })
+
+  // The gate must not stick forever once the operator has actually rebuilt
+  // the filter -- editing IS rebuilding, whether or not the edit happens to
+  // repair the exact element that failed to parse. Add-then-Remove nets the
+  // same empty array the filter already held, but it is now a deliberate
+  // edit rather than the load effect's own silent narrowing.
+  it('re-enables Save once the operator edits the filter that lost a predicate', async () => {
+    renderAt('/trends/3', {
+      trendReport: vi.fn(async () => reportFixture({ stale: true, where: [{ nonsense: true }] })),
+    })
+    await screen.findByTestId('trend-stale')
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+    const whereBlock = await screen.findByTestId('trend-where-where')
+    await userEvent.click(within(whereBlock).getByRole('button', { name: /add predicate/i }))
+    await userEvent.click(within(whereBlock).getByRole('button', { name: /remove/i }))
+    expect(screen.queryByText(/unfinished/i)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeEnabled()
   })
 })

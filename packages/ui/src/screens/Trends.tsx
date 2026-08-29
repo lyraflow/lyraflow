@@ -118,6 +118,30 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  // True once a fetched report comes back `stale: true` -- its stored
+  // `where` no longer parses under core's grammar (`TrendReport`'s own
+  // docstring in `api/types.ts`). Kept as its own piece of state, same
+  // reasoning as `Retention.tsx`'s `stale`: it must survive past the seed
+  // effect that discovers it, for as long as this report stays open.
+  const [stale, setStale] = useState(false)
+  // F1 from the whole-branch review, the single-list version of
+  // `Retention.tsx`'s `sidesWithLostPredicates`: a trend has one `where`
+  // list rather than retention's two sides, so this is one flag rather than
+  // a set. A stale trend's predicates fail to reproduce in one of two ways
+  // -- an element that fails core's schema but still LOOKS like a predicate
+  // (`looksLikePredicate` in `shared/where.ts`) survives seeding as a real,
+  // editable row, and `unfinished` below already counts it and blocks Run
+  // and Save until it is fixed or removed. An element that fails
+  // `looksLikePredicate` itself is DROPPED by `whereFromStored` before it
+  // ever becomes a row -- nothing for `unfinished` to count, so without this
+  // flag `canSave` would be true with `where` silently narrower than what
+  // was actually stored, and Save would PATCH over the stored predicates
+  // with that narrower (possibly empty) list. Set at seed time by comparing
+  // the raw stored count against what survived seeding; cleared the moment
+  // the operator edits the filter (`update`, below) -- editing IS
+  // rebuilding, whether or not the edit happens to repair the exact element
+  // that failed to parse.
+  const [lostPredicates, setLostPredicates] = useState(false)
 
   // The (project, report) pair this screen is currently open on. Only
   // matters for navigating directly from one saved report to another
@@ -145,6 +169,8 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
     setName('')
     setReportError(null)
     setSaveError(null)
+    setStale(false)
+    setLostPredicates(false)
     setConfirmingDelete(false)
     setDeleteError(null)
   }, [identity])
@@ -156,6 +182,11 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
       })
       setResult(null)
       setError(null)
+      // F1: editing the filter is "rebuilding" it -- see `lostPredicates`'s
+      // own comment. The operator has taken ownership of what `where` now
+      // says, which is what makes a subsequent Save an intentional write
+      // rather than the load effect's own silent narrowing.
+      if ('where' in patch) setLostPredicates(false)
     },
     [setSearch],
   )
@@ -206,10 +237,17 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
 
   // Fetch the stored report, seed the URL from it if the URL is not
   // already carrying a definition of its own, and -- THE POINT OF THIS
-  // TASK -- auto-run exactly once, using the SAME ceiling check the Run
-  // button's `disabled` prop already applies, so a saved report born
-  // invalid (decision 5) shows the warning instead of firing the doomed
-  // request.
+  // TASK -- auto-run exactly once, using the SAME gates the Run button's
+  // `disabled` prop already applies (the ceiling check, the range check,
+  // the unfinished-predicate count, and staleness), so a saved report born
+  // invalid (decision 5) -- including one whose stored predicate survives
+  // seeding as an unparseable row, or whose predicates could not be
+  // reproduced at all -- shows the warning instead of firing the doomed
+  // request. F2 from the whole-branch review: this used to check only the
+  // first two and the comment claimed all four: a stale report whose
+  // predicate survived seeding as an unfinished row (an unknown operator,
+  // say) fired the request anyway and showed a raw `invalid_where` under
+  // the chart.
   //
   // Deliberately ONE effect rather than two. An earlier version split
   // "load and seed" from "auto-run" behind a `readyToRun` flag, and that
@@ -267,34 +305,43 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
       .then((r) => {
         if (cancelled) return
         setName(r.name)
+        setStale(r.stale)
         const alreadyDefined = hasTrendDefinitionParams(search)
-        const finalParams: TrendParams = alreadyDefined
-          ? params
-          : {
-              event: r.event,
-              interval: r.interval,
-              ...sourceAndFieldFromGroupBy(r.group_by),
-              // Minimal seed for a field `TrendParams` did not carry before
-              // this task: the full predicate editor and its `stale`
-              // handling are the next task's job, but a stored report's
-              // filter must still round-trip through a seeded URL rather
-              // than silently dropping to no filter the moment `where`
-              // became a required field.
-              where: whereFromStored(r.where),
-              range: params.range,
-            }
+        let finalParams: TrendParams
+        if (alreadyDefined) {
+          finalParams = params
+        } else {
+          const seededWhere = whereFromStored(r.where)
+          // F1: `whereFromStored` silently drops any stored element that
+          // does not even look like a predicate (see `lostPredicates`'s own
+          // comment) -- comparing the raw stored count against what
+          // survived is how this notices, without `whereFromStored` itself
+          // needing to change (it is also used to read a hand-edited URL,
+          // where silently degrading garbage is the correct behaviour).
+          if (seededWhere.length < r.where.length) setLostPredicates(true)
+          finalParams = {
+            event: r.event,
+            interval: r.interval,
+            ...sourceAndFieldFromGroupBy(r.group_by),
+            where: seededWhere,
+            range: params.range,
+          }
+        }
         if (!alreadyDefined) {
           setSearch((prev) => writeTrendParams(prev, { ...finalParams, range: readRange(prev) }), {
             replace: true,
           })
         }
+        const seededUnfinished = incompletePredicates(finalParams)
         // `justSaved` skips exactly the query this task exists to stop
         // repeating -- the results it protects are already in `result`,
         // seeded by this same render's lazy `useState` initializer above.
         if (
           !justSaved &&
           !tooManyBuckets(finalParams, new Date()) &&
-          !rangeIncomplete(finalParams.range)
+          !rangeIncomplete(finalParams.range) &&
+          seededUnfinished === 0 &&
+          !r.stale
         ) {
           run(finalParams)
         }
@@ -326,7 +373,11 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
     trimmedName !== '' &&
     params.event !== '' &&
     !breakdownIncomplete(params) &&
-    unfinished === 0
+    unfinished === 0 &&
+    // F1: a saved report whose stored predicates were silently narrowed on
+    // load must not be saved as-is -- that would overwrite the stored
+    // `where` with the narrower list. See `lostPredicates`'s own comment.
+    !lostPredicates
 
   const handleSave = useCallback(() => {
     // Repeats the `canSave` gate the button's `disabled` prop already
@@ -585,6 +636,13 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
         <p className="text-muted-foreground text-sm">
           A key from the event's own properties — whatever your app put in <code>properties</code>{' '}
           when it sent the event.
+        </p>
+      )}
+
+      {stale && (
+        <p data-testid="trend-stale" className="text-muted-foreground text-sm">
+          The filters saved with this report no longer parse, so it cannot be reproduced as saved.
+          Run below to see what these controls ask for now, or fix the conditions and save over it.
         </p>
       )}
 
