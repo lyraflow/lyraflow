@@ -4,7 +4,7 @@ import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import type { TrendReportInput, TrendResult } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
-import { trendReportPath } from '../app/Router.js'
+import { ROUTES, trendReportPath } from '../app/Router.js'
 import { EventCombobox } from '../components/EventCombobox.js'
 import { Button } from '../components/ui/button.js'
 import { Input } from '../components/ui/input.js'
@@ -106,6 +106,9 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
   const [reportError, setReportError] = useState<string | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
 
   // The (project, report) pair this screen is currently open on. Only
   // matters for navigating directly from one saved report to another
@@ -114,6 +117,13 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
   // the far more common path (create, then this screen becomes that
   // report) is already a full remount and starts every piece of this
   // state fresh on its own.
+  //
+  // `confirmingDelete`/`deleteError` are reset here for the same reason
+  // `SegmentDetail` resets them on its own id-change effect: this screen
+  // stays mounted across a same-route navigation from one saved report to
+  // another, so a confirmation left standing would simply re-aim -- Delete
+  // this report, follow a link to a different one, and the next click
+  // deletes whichever report is now open, which was never confirmed.
   const identity = `${activeId ?? 'none'}:${reportId ?? 'new'}`
   const resetIdentityRef = useRef<string | null>(identity)
   // Guards the load-and-maybe-run effect below so its work happens at most
@@ -126,6 +136,8 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
     setName('')
     setReportError(null)
     setSaveError(null)
+    setConfirmingDelete(false)
+    setDeleteError(null)
   }, [identity])
 
   const update = useCallback(
@@ -360,6 +372,28 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
     onUnauthorized,
   ])
 
+  // Behind a confirmation, deliberately -- deletion is the one action on
+  // this screen with no undo, same reasoning as `FunnelDetail`'s own
+  // `handleDelete`. `deleteError` deliberately does NOT reuse `error` (the
+  // run banner) or `saveError`: a failed delete leaves everything else on
+  // the screen still true, so it gets its own line.
+  function handleDelete() {
+    if (activeId == null || reportId == null) return
+    setDeleting(true)
+    setDeleteError(null)
+    client
+      .deleteTrendReport(activeId, reportId)
+      .then(() => navigate(ROUTES.trends))
+      .catch((err: unknown) => {
+        if (err instanceof ApiError && err.status === 401) {
+          onUnauthorized?.()
+          return
+        }
+        setDeleteError('Could not delete this trend. Try again.')
+      })
+      .finally(() => setDeleting(false))
+  }
+
   return (
     <section className="flex flex-col gap-6">
       <header className="flex flex-col gap-1">
@@ -388,11 +422,58 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
         <Button type="button" onClick={handleSave} disabled={!canSave || saving}>
           {saving ? 'Saving…' : 'Save'}
         </Button>
+        {/* Only for a saved report -- there is nothing to delete at
+         * `/trends/new`, same reasoning `FunnelDetail` gates its own Delete
+         * on `funnel != null`. */}
+        {reportId != null && !confirmingDelete && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setConfirmingDelete(true)}
+          >
+            Delete
+          </Button>
+        )}
       </div>
 
       {saveError != null && (
         <p role="alert" className="text-sm text-destructive">
           {saveError}
+        </p>
+      )}
+
+      {/* A second, explicit click behind the first -- deletion has no undo,
+       * so this screen never treats one click on "Delete" as consent. */}
+      {confirmingDelete && (
+        <div className="flex flex-wrap items-center gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">
+          <p className="text-foreground">Delete this trend? This cannot be undone.</p>
+          <div className="ml-auto flex gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setConfirmingDelete(false)}
+              disabled={deleting}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              size="sm"
+              onClick={handleDelete}
+              disabled={deleting}
+            >
+              Delete trend
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {deleteError != null && (
+        <p role="alert" className="text-sm text-destructive">
+          {deleteError}
         </p>
       )}
 

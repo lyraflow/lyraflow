@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter, Route, Routes } from 'react-router'
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
@@ -93,12 +93,22 @@ function renderAt(url: string, over: Partial<ApiClient> = {}) {
       async (_projectId: number, id: number, body: Partial<TrendReportInput>) =>
         reportFixture({ id, ...body }),
     ),
+    // A no-op default, matching the other saved-report methods above --
+    // only the delete tests care what this actually does, and every other
+    // test in this file should not have to stub it just to avoid an
+    // unrelated "not a function" crash if it were ever called by accident.
+    deleteTrendReport: vi.fn(async () => undefined),
     ...over,
   } as unknown as ApiClient
   render(
     <MemoryRouter initialEntries={[url]}>
       <ProjectProvider projects={PROJECTS} initialId={1}>
         <Routes>
+          {/* A successful delete navigates to the list route (matches
+           * `FunnelDetail.test.tsx`'s own harness) -- this placeholder gives
+           * that navigation somewhere to land instead of logging "no routes
+           * matched". */}
+          <Route path="/trends" element={<p>trends list</p>} />
           <Route path="/trends/new" element={<Trends client={client} />} />
           <Route path="/trends/:id" element={<Trends client={client} />} />
         </Routes>
@@ -410,5 +420,153 @@ describe('Trends -- saving and reopening a saved report', () => {
     await click(/save/i)
     expect(await screen.findByText(/already/i)).toBeInTheDocument()
     expect(screen.getByDisplayValue('Taken')).toBeInTheDocument()
+  })
+})
+
+// A same-route navigation trigger for the id-change guard test below --
+// clicking it changes the `:id` param WITHOUT unmounting `Trends` (same
+// position in the same `<Route>`, matching `FunnelDetail.test.tsx`'s own
+// `Nav`), which is what lets a confirmation opened for one report still be
+// standing when a different report's id lands in the URL.
+function Nav(props: { to: string }) {
+  const navigate = useNavigate()
+  return (
+    <button type="button" onClick={() => navigate(props.to)}>
+      go
+    </button>
+  )
+}
+
+function renderWithNav(fromId: number, toId: number, over: Partial<ApiClient> = {}) {
+  const client = {
+    stats: vi.fn(async () => PAGE),
+    schemaEvents: vi.fn(async () => ['checkout', 'signup']),
+    schemaProperties: vi.fn(async () => [{ name: 'plan', kind: 'string' as const }]),
+    trendReport: vi.fn(async (_projectId: number, id: number) =>
+      reportFixture({ id, name: `Report ${id}` }),
+    ),
+    deleteTrendReport: vi.fn(async () => undefined),
+    ...over,
+  } as unknown as ApiClient
+  render(
+    <MemoryRouter initialEntries={[`/trends/${fromId}`]}>
+      <ProjectProvider projects={PROJECTS} initialId={1}>
+        <Routes>
+          <Route
+            path="/trends/:id"
+            element={
+              <>
+                <Trends client={client} />
+                <Nav to={`/trends/${toId}`} />
+              </>
+            }
+          />
+        </Routes>
+      </ProjectProvider>
+    </MemoryRouter>,
+  )
+  return client
+}
+
+describe('Trends -- delete', () => {
+  it('offers no Delete button on an unsaved report', async () => {
+    harness({}, '/trends?event=checkout')
+    expect(screen.queryByRole('button', { name: /^delete$/i })).toBeNull()
+  })
+
+  it('offers Delete only once the saved report has loaded', async () => {
+    renderAt('/trends/3')
+    expect(await screen.findByRole('button', { name: /^delete$/i })).toBeInTheDocument()
+  })
+
+  it('asks for confirmation first -- deleteTrendReport is not called before it', async () => {
+    const client = renderAt('/trends/3')
+    await screen.findByRole('button', { name: /^delete$/i })
+    await click(/^delete$/i)
+    expect(screen.getByText(/delete this trend\?/i)).toBeInTheDocument()
+    expect(client.deleteTrendReport).not.toHaveBeenCalled()
+  })
+
+  it('cancelling the confirmation leaves the report in place', async () => {
+    const client = renderAt('/trends/3')
+    await screen.findByRole('button', { name: /^delete$/i })
+    await click(/^delete$/i)
+    await click(/^cancel$/i)
+    expect(screen.queryByText(/delete this trend\?/i)).toBeNull()
+    expect(screen.getByRole('button', { name: /^delete$/i })).toBeInTheDocument()
+    expect(client.deleteTrendReport).not.toHaveBeenCalled()
+  })
+
+  it('confirming calls deleteTrendReport with the project and report id, then leaves for the list', async () => {
+    const client = renderAt('/trends/3')
+    await screen.findByRole('button', { name: /^delete$/i })
+    await click(/^delete$/i)
+    await click(/^delete trend$/i)
+    await waitFor(() => expect(client.deleteTrendReport).toHaveBeenCalledWith(1, 3))
+    expect(await screen.findByText('trends list')).toBeInTheDocument()
+  })
+
+  it('a failed delete shows its own error and leaves the rest of the screen intact', async () => {
+    const client = renderAt('/trends/3', {
+      deleteTrendReport: vi.fn(async () => {
+        throw new Error('boom')
+      }),
+    })
+    await screen.findByRole('button', { name: /^delete$/i })
+    // Something already true on screen, independent of the delete outcome --
+    // this is what must still be there once the delete fails.
+    expect(await screen.findByDisplayValue('Report')).toBeInTheDocument()
+    await click(/^delete$/i)
+    await click(/^delete trend$/i)
+    expect(await screen.findByText(/could not delete this trend/i)).toBeInTheDocument()
+    expect(screen.queryByText('trends list')).toBeNull()
+    expect(screen.getByDisplayValue('Report')).toBeInTheDocument()
+  })
+
+  it('routes a 401 on delete to onUnauthorized rather than an error banner', async () => {
+    const onUnauthorized = vi.fn()
+    const client = {
+      stats: vi.fn(async () => PAGE),
+      schemaEvents: vi.fn(async () => ['checkout', 'signup']),
+      schemaProperties: vi.fn(async () => [{ name: 'plan', kind: 'string' as const }]),
+      trendReport: vi.fn(async (_projectId: number, id: number) => reportFixture({ id })),
+      deleteTrendReport: vi.fn(async () => {
+        throw new ApiError(401, 'unauthorized')
+      }),
+    } as unknown as ApiClient
+    render(
+      <MemoryRouter initialEntries={['/trends/3']}>
+        <ProjectProvider projects={PROJECTS} initialId={1}>
+          <Routes>
+            <Route
+              path="/trends/:id"
+              element={<Trends client={client} onUnauthorized={onUnauthorized} />}
+            />
+          </Routes>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    await screen.findByRole('button', { name: /^delete$/i })
+    await click(/^delete$/i)
+    await click(/^delete trend$/i)
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalled())
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  // The trap the brief calls out by name: a confirmation opened for one
+  // saved report must not survive a same-route navigation to a different
+  // one, or the second click -- the one this screen treats as explicit
+  // consent -- deletes whichever report is now in the URL.
+  it('a delete confirmation opened for one saved report does not survive navigating to another', async () => {
+    const client = renderWithNav(3, 8)
+    await waitFor(() => expect(screen.getByDisplayValue('Report 3')).toBeInTheDocument())
+    await click(/^delete$/i)
+    expect(screen.getByText(/delete this trend\?/i)).toBeInTheDocument()
+
+    await click(/^go$/i)
+    await waitFor(() => expect(screen.getByDisplayValue('Report 8')).toBeInTheDocument())
+    expect(screen.queryByText(/delete this trend\?/i)).toBeNull()
+    expect(screen.queryByRole('button', { name: /^delete trend$/i })).toBeNull()
+    expect(client.deleteTrendReport).not.toHaveBeenCalled()
   })
 })

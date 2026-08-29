@@ -4,7 +4,7 @@ import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import type { RetentionReportInput, RetentionResult } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
-import { retentionReportPath } from '../app/Router.js'
+import { ROUTES, retentionReportPath } from '../app/Router.js'
 import { EventCombobox } from '../components/EventCombobox.js'
 import { Button } from '../components/ui/button.js'
 import { Input } from '../components/ui/input.js'
@@ -122,6 +122,9 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
   const [reportError, setReportError] = useState<string | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
   // True once a fetched report comes back `stale: true` -- its stored
   // `start_where`/`return_where` no longer parse under core's grammar
   // (`RetentionReport`'s own docstring in `api/types.ts`). Kept as its own
@@ -167,7 +170,11 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
 
   // The (project, report) pair this screen is currently open on. Same
   // mechanism `Trends.tsx` uses and for the same reason -- see that
-  // screen's own comment on `identity`/`resetIdentityRef`.
+  // screen's own comment on `identity`/`resetIdentityRef`, including why
+  // `confirmingDelete`/`deleteError` are reset here too: this screen stays
+  // mounted across a same-route navigation from one saved report to
+  // another, and a confirmation left standing would simply re-aim at
+  // whichever report is now open.
   const identity = `${activeId ?? 'none'}:${reportId ?? 'new'}`
   const resetIdentityRef = useRef<string | null>(identity)
   // Guards the load-and-maybe-run effect below so its work happens at most
@@ -182,6 +189,8 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
     setSaveError(null)
     setStale(false)
     setSidesWithLostPredicates(new Set())
+    setConfirmingDelete(false)
+    setDeleteError(null)
   }, [identity])
 
   const update = useCallback(
@@ -469,6 +478,28 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
     onUnauthorized,
   ])
 
+  // Behind a confirmation, deliberately -- deletion is the one action on
+  // this screen with no undo, same reasoning as `FunnelDetail`'s own
+  // `handleDelete`. `deleteError` deliberately does NOT reuse `error` (the
+  // run banner) or `saveError`: a failed delete leaves everything else on
+  // the screen still true, so it gets its own line.
+  function handleDelete() {
+    if (activeId == null || reportId == null) return
+    setDeleting(true)
+    setDeleteError(null)
+    client
+      .deleteRetentionReport(activeId, reportId)
+      .then(() => navigate(ROUTES.retention))
+      .catch((err: unknown) => {
+        if (err instanceof ApiError && err.status === 401) {
+          onUnauthorized?.()
+          return
+        }
+        setDeleteError('Could not delete this retention report. Try again.')
+      })
+      .finally(() => setDeleting(false))
+  }
+
   return (
     <section className="flex flex-col gap-6">
       <header className="flex flex-col gap-1">
@@ -498,11 +529,58 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
         <Button type="button" onClick={handleSave} disabled={!canSave || saving}>
           {saving ? 'Saving…' : 'Save'}
         </Button>
+        {/* Only for a saved report -- there is nothing to delete at
+         * `/retention/new`, same reasoning `FunnelDetail` gates its own
+         * Delete on `funnel != null`. */}
+        {reportId != null && !confirmingDelete && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setConfirmingDelete(true)}
+          >
+            Delete
+          </Button>
+        )}
       </div>
 
       {saveError != null && (
         <p role="alert" className="text-sm text-destructive">
           {saveError}
+        </p>
+      )}
+
+      {/* A second, explicit click behind the first -- deletion has no undo,
+       * so this screen never treats one click on "Delete" as consent. */}
+      {confirmingDelete && (
+        <div className="flex flex-wrap items-center gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">
+          <p className="text-foreground">Delete this retention report? This cannot be undone.</p>
+          <div className="ml-auto flex gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setConfirmingDelete(false)}
+              disabled={deleting}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              size="sm"
+              onClick={handleDelete}
+              disabled={deleting}
+            >
+              Delete retention report
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {deleteError != null && (
+        <p role="alert" className="text-sm text-destructive">
+          {deleteError}
         </p>
       )}
 
