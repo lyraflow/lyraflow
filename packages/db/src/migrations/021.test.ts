@@ -40,7 +40,7 @@ beforeAll(async () => {
   // columns did on a database where 021 had already run once. All four
   // statements are no-ops on a database that was never migrated past 020,
   // and undo 021 on one that was.
-  await pg.query('DELETE FROM schema_migrations WHERE version >= 21')
+  await pg.query('DELETE FROM schema_migrations WHERE version = 21')
   await pg.query('ALTER TABLE trend_reports DROP CONSTRAINT IF EXISTS trend_reports_where_is_array')
   await pg.query('ALTER TABLE trend_reports DROP COLUMN IF EXISTS event_where')
   await pg.query('ALTER TABLE trend_reports DROP COLUMN IF EXISTS definition_version')
