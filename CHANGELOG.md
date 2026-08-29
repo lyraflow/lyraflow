@@ -123,7 +123,13 @@ one fix is contained in 0.3.0.
   already held to. A stale report — a saved trend or retention report whose
   stored filters no longer parse — skips its automatic run too, but leaves
   Run enabled, so the operator can still run the degraded version rather
-  than being locked out of it.
+  than being locked out of it. **Save is a different matter.** A saved
+  trend whose stored filter could not be fully reproduced on load also
+  disables Save, because pressing it would overwrite the stored predicates
+  with the narrower (possibly empty) list the screen could actually
+  rebuild — the block only lifts once the operator edits the filter
+  themselves, which is what turns a subsequent Save into a write they
+  actually asked for.
 
 ### Changed
 
