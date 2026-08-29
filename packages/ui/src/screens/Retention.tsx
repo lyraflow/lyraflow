@@ -543,16 +543,7 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
             onChange={(e) => setName(e.target.value)}
           />
         </div>
-        <Button type="button" onClick={handleSave} disabled={!canSave || saving}>
-          {saving ? 'Saving…' : 'Save'}
-        </Button>
       </div>
-
-      {saveError != null && (
-        <p role="alert" className="text-sm text-destructive">
-          {saveError}
-        </p>
-      )}
 
       {/* A second, explicit click behind the first -- deletion has no undo,
        * so this screen never treats one click on "Delete" as consent. */}
@@ -690,7 +681,16 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
         >
           {running ? 'Running…' : 'Run'}
         </Button>
+        <Button type="button" variant="outline" onClick={handleSave} disabled={!canSave || saving}>
+          {saving ? 'Saving…' : 'Save'}
+        </Button>
       </div>
+
+      {saveError != null && (
+        <p role="alert" className="text-sm text-destructive">
+          {saveError}
+        </p>
+      )}
 
       {!ready && (
         <p className="text-muted-foreground text-sm">
