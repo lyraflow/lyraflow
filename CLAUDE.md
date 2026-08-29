@@ -132,6 +132,32 @@ The lesson generalises: a package whose output is not produced by `tsc` cannot r
 `typecheck` to stand in for a build, and the failure surfaces only where that output is
 read.
 
+**While iterating, run the focused test files for what you touched — not the whole suite.**
+`pnpm test` takes about five minutes: roughly 200s for the server suites, which talk to real
+ClickHouse and Postgres containers rather than mocks, and 90s for the UI suite, about two
+thirds of which is jsdom construction rather than your tests. Running all of it after every
+commit mostly re-proves code you did not change.
+
+```sh
+pnpm --filter @lyraflow/ui exec vitest run src/screens/Trends.test.tsx
+```
+
+**Run the full gate before opening a pull request, in CI's order**, so that local red means
+CI red and there is no second round trip:
+
+```sh
+pnpm lint && pnpm typecheck && pnpm build && pnpm test
+```
+
+The cheap checks come first deliberately — a lint error should cost you seconds, not a
+multi-minute build. Re-run the gate after any later commit on the branch: a green result
+describes the exact tree it ran against and nothing else.
+
+That last run is not a formality. Focused tests never build the production bundle, so
+`build-output.test.ts` — which loads the real bundle and fails if it throws before the app
+mounts — can only fail there. A change that is correct in every file it touches can still
+put a Node-only module into the browser bundle, and nothing short of the full gate sees it.
+
 Most tests talk to those real containers rather than mocking the databases. Two suites
 under `test/` are deliberately excluded from `pnpm test` — they build an image, start the
 full stack, and take minutes:
