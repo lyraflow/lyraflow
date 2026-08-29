@@ -81,6 +81,42 @@ describe('TrendReports', () => {
     expect(screen.getByText(/signup · daily · by country/i)).toBeInTheDocument()
   })
 
+  it('names the filter in the summary, so a filtered report does not read as an unfiltered one', async () => {
+    renderList([
+      {
+        ...ROW,
+        id: 1,
+        name: 'registers',
+        event: '$page',
+        group_by: null,
+        where: [{ property: 'path', operator: '=', value: '/register' }],
+      },
+    ])
+    expect(await screen.findByText(/\$page · daily · 1 filter/)).toBeInTheDocument()
+  })
+
+  it('pluralises the filter count', async () => {
+    renderList([
+      {
+        ...ROW,
+        id: 2,
+        name: 'two',
+        event: '$page',
+        group_by: null,
+        where: [
+          { property: 'path', operator: '=', value: '/r' },
+          { property: 'plan', operator: '=', value: 'pro' },
+        ],
+      },
+    ])
+    expect(await screen.findByText(/2 filters/)).toBeInTheDocument()
+  })
+
+  it('badges a report whose stored predicates no longer parse', async () => {
+    renderList([{ ...ROW, id: 3, name: 'broken', event: '$page', group_by: null, stale: true }])
+    expect(await screen.findByTestId('report-stale-3')).toBeInTheDocument()
+  })
+
   it('says nothing is saved yet, and offers the way to make one', async () => {
     renderList([])
     expect(await screen.findByText(/no saved trends yet/i)).toBeInTheDocument()

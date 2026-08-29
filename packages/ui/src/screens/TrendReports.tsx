@@ -37,18 +37,36 @@ function groupBySummary(groupBy: string | null): string | null {
   return `by ${field}`
 }
 
+/** The count, not the predicates themselves: a rendered predicate is a
+ * sentence, and three of them beside an event name and a resolution is a
+ * list row nobody can scan. The count is enough to tell a filtered report
+ * from an unfiltered one, which is the whole job of this line. */
+function whereSummary(where: unknown[]): string | null {
+  if (where.length === 0) return null
+  return where.length === 1 ? '1 filter' : `${where.length} filters`
+}
+
 function trendSummary(r: TrendReport): string {
   const parts = [r.event, INTERVAL_SUMMARY_LABELS[r.interval]]
+  const w = whereSummary(r.where)
+  if (w !== null) parts.push(w)
   const gb = groupBySummary(r.group_by)
   if (gb !== null) parts.push(gb)
   return parts.join(' · ')
 }
 
 function toRow(r: TrendReport): SavedReportRow {
-  // No `stale`: a `TrendReport`'s definition is three scalar columns, never
-  // recorded as potentially unparseable -- see `TrendReport`'s own docstring
-  // in `api/types.ts`. Retention's mapping (Task 7) sets it.
-  return { id: r.id, name: r.name, summary: trendSummary(r), updatedAt: r.updated_at }
+  // `stale` IS set now. It was not, and the comment here said a trend's
+  // definition was three scalar columns that could never fail to parse --
+  // true until `021_trend_predicates.sql` gave it the same `where` grammar
+  // retention has.
+  return {
+    id: r.id,
+    name: r.name,
+    summary: trendSummary(r),
+    updatedAt: r.updated_at,
+    stale: r.stale,
+  }
 }
 
 /**
