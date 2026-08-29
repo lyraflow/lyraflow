@@ -2318,7 +2318,10 @@ stored fields as the query.
 
 A saved trend's `where` clauses are parsed against the same grammar the run endpoint uses.
 A row this build cannot parse comes back with `"stale": true` rather than failing the whole
-list — the same behaviour a saved retention report has.
+list — the same behaviour a saved retention report has. Every row also carries
+`definition_version`, bumped whenever its stored `where` is rewritten — the same field
+`retention_reports` already has, for the same reason: it is what a future grammar change
+could filter on to find every row still on the old one, without parsing each row's JSON.
 
 ```sh
 curl -X POST http://localhost:3000/v1/trends \
@@ -2621,7 +2624,7 @@ else would otherwise be an unconditional `400`:
 
 `401` for a missing or invalid server key, on both endpoints.
 
-### Filtering
+#### Filtering
 
 `where` narrows **which occurrences** of the event are counted. It carries the same
 predicate grammar a segment behaviour and a funnel step use, as a JSON array:
