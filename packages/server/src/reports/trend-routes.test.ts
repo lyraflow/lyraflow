@@ -277,11 +277,25 @@ describe('/v1/trends where predicates', () => {
   })
 
   it('carries stale on the list, on every row', async () => {
+    // Seeded first -- an unseeded `GET` here would leave `trends` empty and
+    // the loop below would never run, passing without ever checking
+    // anything. `toHaveLength(2)` before the loop pins that the loop body
+    // actually executes.
+    const withFilter = await call('POST', '/v1/trends', { ...filtered, name: 'list-filtered' })
+    const withoutFilter = await call('POST', '/v1/trends', { ...trend, name: 'list-unfiltered' })
+    expect(withFilter.statusCode).toBe(201)
+    expect(withoutFilter.statusCode).toBe(201)
+
     // `GET /v1/trends` answers `{ trends: [...] }` -- see the handler.
     const list = await call('GET', '/v1/trends')
-    for (const row of list.json().trends) {
+    const rows = list.json().trends
+    expect(rows).toHaveLength(2)
+    for (const row of rows) {
       expect(row).toHaveProperty('stale')
       expect(row).toHaveProperty('where')
     }
+    const filteredRow = rows.find((row: { name: string }) => row.name === 'list-filtered')
+    expect(filteredRow.where).toEqual(filtered.where)
+    expect(filteredRow.stale).toBe(false)
   })
 })
