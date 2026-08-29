@@ -117,6 +117,20 @@ describe('TrendReports', () => {
     expect(await screen.findByTestId('report-stale-3')).toBeInTheDocument()
   })
 
+  it('orders the filter clause before the breakdown clause when both are present', async () => {
+    renderList([
+      {
+        ...ROW,
+        id: 4,
+        name: 'both',
+        event: '$page',
+        group_by: 'attribute:country',
+        where: [{ property: 'path', operator: '=', value: '/register' }],
+      },
+    ])
+    expect(await screen.findByText('$page · daily · 1 filter · by country')).toBeInTheDocument()
+  })
+
   it('says nothing is saved yet, and offers the way to make one', async () => {
     renderList([])
     expect(await screen.findByText(/no saved trends yet/i)).toBeInTheDocument()
