@@ -21,7 +21,7 @@ here as it happened rather than tagged retroactively, for the same reason 0.1.0
 is: a tag created after the fact names a moment nobody could have fetched. Its
 one fix is contained in 0.3.0.
 
-## Unreleased
+## 0.12.0 — 2026-08-29
 
 ### Added
 
@@ -145,6 +145,23 @@ one fix is contained in 0.3.0.
   redirected to the `…/new` builder with its search string carried across
   unchanged. A bare `/trends` or `/retention` — no definition in the query
   string — opens the list.
+
+- **The sidebar's active destination now carries a background fill**, not
+  only a darker label (**#220**). Every entry is the same weight, so the
+  screen you were on differed from the other six by one colour step on one
+  axis. The fill is the same one an entry takes on hover, which keeps the
+  sidebar to two greys rather than inventing a third — with the consequence,
+  stated because it is real, that hovering an inactive entry makes it look
+  selected while the pointer is on it.
+
+### Fixed
+
+- **A superseded property lookup no longer answers for the query that
+  replaced it** (**#212**). Typing quickly in a segment's property field
+  could leave the list showing results for an earlier keystroke: a slower
+  request that started first could resolve last and overwrite the newer
+  answer. The result is now discarded unless it belongs to the query still
+  on screen.
 
 ## 0.11.0 — 2026-08-28
 
