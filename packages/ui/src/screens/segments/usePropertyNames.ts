@@ -59,15 +59,31 @@ export function usePropertyNames(opts: {
 
   useEffect(() => {
     const q = query.trim()
+    // Clearing the timer is not enough. Once a request is in flight the
+    // debounce can no longer stop it, and its `then` will still run after a
+    // NEWER query has already answered -- so the older, broader answer wins
+    // and the field shows suggestions for a prefix the operator has left.
+    // The symptom is a list that does not match what is typed, and it needs
+    // the first request to be slower than the second, which is why it showed
+    // up as a test that failed only on a loaded machine.
+    //
+    // The 401 route is guarded too, deliberately. A superseded lookup is one
+    // whose answer this field no longer wants, and its cleanup also runs on
+    // unmount, where routing away would act on a component that is gone.
+    // Nothing is lost by staying quiet: if the session really has expired,
+    // the lookup that supersedes this one gets the same 401 and routes.
+    let superseded = false
     const timer = window.setTimeout(() => {
       client
         .schemaProperties(projectId, event, q)
         .then((list) => {
+          if (superseded) return
           setProperties(list)
           setLoadError(false)
           setFetched(true)
         })
         .catch((err: unknown) => {
+          if (superseded) return
           if (err instanceof ApiError && err.status === 401) {
             unauthorizedRef.current?.()
             return
@@ -77,7 +93,10 @@ export function usePropertyNames(opts: {
           // Deliberately NOT `setFetched(true)`: see this hook's own doc.
         })
     }, DEBOUNCE_MS)
-    return () => window.clearTimeout(timer)
+    return () => {
+      superseded = true
+      window.clearTimeout(timer)
+    }
     // `event` is a real dependency, not an oversight: switching the chosen
     // event must re-scope the very next lookup, not keep serving
     // suggestions for whichever event was selected when this field first
