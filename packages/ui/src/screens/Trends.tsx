@@ -396,12 +396,29 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
 
   return (
     <section className="flex flex-col gap-6">
-      <header className="flex flex-col gap-1">
-        <h1 className="font-semibold text-xl">Trends</h1>
-        <p className="text-muted-foreground text-sm">
-          How many of an event over time, and how that splits by a property or a column.
-        </p>
-      </header>
+      <div className="flex items-center justify-between gap-2">
+        <header className="flex flex-col gap-1">
+          <h1 className="font-semibold text-xl">Trends</h1>
+          <p className="text-muted-foreground text-sm">
+            How many of an event over time, and how that splits by a property or a column.
+          </p>
+        </header>
+        <div className="flex items-center gap-3">
+          {/* Only for a saved report -- there is nothing to delete at
+           * `/trends/new`, same reasoning `FunnelDetail` gates its own Delete
+           * on `funnel != null`. */}
+          {reportId != null && !confirmingDelete && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setConfirmingDelete(true)}
+            >
+              Delete
+            </Button>
+          )}
+        </div>
+      </div>
 
       {reportError != null && (
         <p role="alert" className="text-sm text-destructive">
@@ -422,19 +439,6 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
         <Button type="button" onClick={handleSave} disabled={!canSave || saving}>
           {saving ? 'Saving…' : 'Save'}
         </Button>
-        {/* Only for a saved report -- there is nothing to delete at
-         * `/trends/new`, same reasoning `FunnelDetail` gates its own Delete
-         * on `funnel != null`. */}
-        {reportId != null && !confirmingDelete && (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => setConfirmingDelete(true)}
-          >
-            Delete
-          </Button>
-        )}
       </div>
 
       {saveError != null && (

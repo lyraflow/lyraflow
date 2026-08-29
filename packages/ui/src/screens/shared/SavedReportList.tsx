@@ -38,8 +38,11 @@ function SavedReportRowItem(props: { row: SavedReportRow; hrefFor(id: number): s
   const { row, hrefFor } = props
 
   return (
-    <li className="flex items-center justify-between gap-3 rounded-md border border-border bg-card px-4 py-3">
-      <Link to={hrefFor(row.id)} className="flex min-w-0 flex-1 flex-col gap-1 hover:bg-muted">
+    <li>
+      <Link
+        to={hrefFor(row.id)}
+        className="flex flex-col gap-1 rounded-md border border-border bg-card px-4 py-3 hover:bg-muted"
+      >
         {/* `break-words` for the SAME reason the summary below carries it,
          * and it is the name that actually needed it: a report name is
          * typed by an operator and often has no spaces at all
