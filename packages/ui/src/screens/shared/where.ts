@@ -36,7 +36,7 @@ import { WherePredicate } from '@lyraflow/core/segments/ast.js'
  * and was moved here rather than copied: two readers of one grammar drift at
  * the first operator added to either.
  */
-export function looksLikePredicate(v: unknown): v is WherePredicate {
+function looksLikePredicate(v: unknown): v is WherePredicate {
   if (typeof v !== 'object' || v === null) return false
   const o = v as Record<string, unknown>
   if (typeof o.operator !== 'string') return false

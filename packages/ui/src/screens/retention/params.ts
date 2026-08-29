@@ -8,9 +8,7 @@ import {
   resolveRange,
   writeRange,
 } from '../shared/range.js'
-import { countIncomplete, readWhere, whereFromStored } from '../shared/where.js'
-
-export { whereFromStored }
+import { countIncomplete, readWhere } from '../shared/where.js'
 
 export const GRANULARITIES = ['day', 'week', 'month'] as const
 export type Granularity = (typeof GRANULARITIES)[number]
