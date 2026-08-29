@@ -237,17 +237,23 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
 
   // Fetch the stored report, seed the URL from it if the URL is not
   // already carrying a definition of its own, and -- THE POINT OF THIS
-  // TASK -- auto-run exactly once, using the SAME gates the Run button's
-  // `disabled` prop already applies (the ceiling check, the range check,
-  // the unfinished-predicate count, and staleness), so a saved report born
-  // invalid (decision 5) -- including one whose stored predicate survives
-  // seeding as an unparseable row, or whose predicates could not be
-  // reproduced at all -- shows the warning instead of firing the doomed
-  // request. F2 from the whole-branch review: this used to check only the
-  // first two and the comment claimed all four: a stale report whose
-  // predicate survived seeding as an unfinished row (an unknown operator,
-  // say) fired the request anyway and showed a raw `invalid_where` under
-  // the chart.
+  // TASK -- auto-run exactly once, gated on every check the Run button's
+  // `disabled` prop applies (the ceiling check, the range check, the
+  // unfinished-predicate count) PLUS ONE THE BUTTON DOES NOT: staleness.
+  // The two are deliberately different. Run stays enabled on a stale
+  // report -- its predicates could not be faithfully reproduced, but the
+  // banner already says so, and the operator can still press Run to see
+  // what the current, possibly narrower, controls compute. The auto-run
+  // has no operator standing in front of it deciding to accept that
+  // narrower answer, so it does not fire one on their behalf.
+  //
+  // F2 from the whole-branch review: before that fix, this effect checked
+  // only the ceiling and the range -- the unfinished count and staleness
+  // were both missing, so a stale report whose predicate survived seeding
+  // as an unfinished row (an unknown operator, say) fired the request
+  // anyway and showed a raw `invalid_where` under the chart. The comment
+  // at the time claimed only the ceiling check was applied, which was
+  // itself already wrong about the range check the code already had.
   //
   // Deliberately ONE effect rather than two. An earlier version split
   // "load and seed" from "auto-run" behind a `readyToRun` flag, and that
