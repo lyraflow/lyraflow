@@ -262,12 +262,24 @@ describe('GET /v1/events/stats?where=', () => {
       table: 'events',
       format: 'JSONEachRow',
       values: [
-        ev(eventName, '2026-06-10', { path: '/probe' }, {}, {
-          user_id: 'stats-where-suppressed-user',
-        }),
-        ev(eventName, '2026-06-10', { path: '/probe' }, {}, {
-          user_id: 'stats-where-control-user',
-        }),
+        ev(
+          eventName,
+          '2026-06-10',
+          { path: '/probe' },
+          {},
+          {
+            user_id: 'stats-where-suppressed-user',
+          },
+        ),
+        ev(
+          eventName,
+          '2026-06-10',
+          { path: '/probe' },
+          {},
+          {
+            user_id: 'stats-where-control-user',
+          },
+        ),
       ],
     })
     // Strictly after the event above -- "all events before their boundary"
