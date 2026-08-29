@@ -234,6 +234,15 @@ const Query = z
  */
 const StatsWhere = z.array(WherePredicate).max(MAX_WHERE_PREDICATES)
 
+/**
+ * The ceiling on the raw `where` string, checked in the handler rather than
+ * on `StatsQuery` itself -- see that field's own docstring. A round number,
+ * not derived from anything: ten predicates' worth of realistic property
+ * keys and values comfortably fit inside it, and it exists only to keep one
+ * caller from handing the server an arbitrarily large string to parse.
+ */
+const WHERE_MAX_LENGTH = 4000
+
 const StatsQuery = z.object({
   since: z.string().datetime().optional(),
   until: z.string().datetime().optional(),
@@ -280,8 +289,14 @@ const StatsQuery = z.object({
    * and both sides of a retention grid carry -- so `contains` means one
    * thing in all four places and an operator added later arrives here for
    * free.
+   *
+   * No length bound here, deliberately -- `WHERE_MAX_LENGTH` is enforced in
+   * the handler instead, alongside the JSON-parse and schema checks, so an
+   * over-length string is refused as `invalid_where` rather than surfacing
+   * as this route's generic `invalid_query`, which would name the wrong
+   * control.
    */
-  where: z.string().max(4000).optional(),
+  where: z.string().optional(),
 })
 
 /**
@@ -750,6 +765,18 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
     // a correct answer.
     let predicates: WherePredicate[] = []
     if (where !== undefined) {
+      // Checked here, not on `StatsQuery`, so an over-length string is
+      // `invalid_where` -- naming the control that is wrong -- rather than
+      // `invalid_query` failing inside `StatsQuery.safeParse` before this
+      // block ever runs. Reachable: `AttributePredicate`'s value has no
+      // length bound of its own, so one long value or a long `in` list can
+      // cross this ceiling on its own.
+      if (where.length > WHERE_MAX_LENGTH) {
+        return reply.code(400).send({
+          error: 'invalid_where',
+          detail: `where must be at most ${WHERE_MAX_LENGTH} characters`,
+        })
+      }
       let parsed: unknown
       try {
         parsed = JSON.parse(where)
@@ -760,9 +787,16 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
       }
       const list = StatsWhere.safeParse(parsed)
       if (!list.success) {
+        // The cap clause names an actual over-cap array; every other
+        // rejection -- an unrecognised operator, a missing field, a value of
+        // the wrong type -- has nothing to do with the count, and naming a
+        // cap the caller did not approach points them at the wrong mistake.
+        const overCap = Array.isArray(parsed) && parsed.length > MAX_WHERE_PREDICATES
         return reply.code(400).send({
           error: 'invalid_where',
-          detail: `that filter is not a valid predicate list (at most ${MAX_WHERE_PREDICATES} predicates)`,
+          detail: overCap
+            ? `at most ${MAX_WHERE_PREDICATES} predicates are allowed`
+            : 'that filter is not a valid predicate list',
         })
       }
       predicates = list.data

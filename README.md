@@ -2588,30 +2588,8 @@ is present on a bucket **only** when grouping was requested:
 | `until` | ISO 8601 datetime, defaults to now |
 | `interval` | `1m`, `1h`, or `1d`; default `1h` |
 | `event` | one event name, at most 128 characters |
-| `group_by` | only `event_name` is accepted |
-
-### Filtering
-
-`where` narrows **which occurrences** of the event are counted. It carries the same
-predicate grammar a segment behaviour and a funnel step use, as a JSON array:
-
-```sh
-curl -sG -H "x-lyraflow-server-key: $KEY" \
-  --data-urlencode 'event=$page' \
-  --data-urlencode 'interval=1d' \
-  --data-urlencode 'where=[{"property":"path","operator":"=","value":"/register"}]' \
-  "http://localhost:3000/v1/events/stats"
-```
-
-Without it, a site whose every navigation is a `$page` can only chart "any page viewed",
-so `$page where path = /register` and `$page where path = /` are the same chart.
-
-At most **10** predicates, ANDed. `{"source":"attribute","attribute":"utm_source",…}`
-filters on a column of the event; the default reads the event's own `properties`, from
-both bags, so a numeric property filters by value rather than reading as unset. Anything
-that is not a valid predicate list is a `400 invalid_where` rather than a silently wider
-answer. `where` is independent of `event`: with no event name it asks the question of
-every event.
+| `group_by` | `event_name`, `attribute:<column>`, or `property:<key>` |
+| `where` | a JSON array of predicates, at most 10; see **Filtering** below |
 
 `event` narrows the aggregate to a single event name, exactly as it does on
 `GET /v1/events`, and works with or without `group_by`. It is applied before
@@ -2636,6 +2614,29 @@ else would otherwise be an unconditional `400`:
 | `1m` | 1 hour |
 | `1h` | 24 hours |
 | `1d` | 7 days |
+
+### Filtering
+
+`where` narrows **which occurrences** of the event are counted. It carries the same
+predicate grammar a segment behaviour and a funnel step use, as a JSON array:
+
+```sh
+curl -sG -H "x-lyraflow-server-key: $KEY" \
+  --data-urlencode 'event=$page' \
+  --data-urlencode 'interval=1d' \
+  --data-urlencode 'where=[{"property":"path","operator":"=","value":"/register"}]' \
+  "http://localhost:3000/v1/events/stats"
+```
+
+Without it, a site whose every navigation is a `$page` can only chart "any page viewed",
+so `$page where path = /register` and `$page where path = /` are the same chart.
+
+At most **10** predicates, ANDed. `{"source":"attribute","attribute":"utm_source",…}`
+filters on a column of the event; the default reads the event's own `properties`, from
+both bags, so a numeric property filters by value rather than reading as unset. Anything
+that is not a valid predicate list is a `400 invalid_where` rather than a silently wider
+answer. `where` is independent of `event`: with no event name it asks the question of
+every event.
 
 `401` for a missing or invalid server key, on both endpoints.
 
