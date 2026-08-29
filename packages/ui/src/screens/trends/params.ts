@@ -15,6 +15,7 @@
 // and core is now the single TypeScript source of truth.
 // `020_saved_reports.sql`'s CHECK constraint is the one copy that cannot be
 // removed, because SQL cannot import a TypeScript module.
+import type { WherePredicate } from '@lyraflow/core/segments/ast.js'
 import { INTERVALS, type Interval } from '@lyraflow/core/trends/ast.js'
 import {
   DEFAULT_RANGE,
@@ -23,6 +24,7 @@ import {
   readRange,
   writeRange,
 } from '../shared/range.js'
+import { countIncomplete, readWhere, writeWhere } from '../shared/where.js'
 
 export { INTERVALS }
 
@@ -52,6 +54,9 @@ export interface TrendParams {
   interval: Interval
   source: BreakdownSource
   field: string
+  /** Which occurrences of `event` are counted. The segment grammar verbatim,
+   * exactly as a retention side and a funnel step carry it. */
+  where: WherePredicate[]
   range: RangeChoice
 }
 
@@ -60,6 +65,7 @@ export const DEFAULTS: TrendParams = {
   interval: '1d',
   source: 'none',
   field: '',
+  where: [],
   range: DEFAULT_RANGE,
 }
 
@@ -99,6 +105,7 @@ export function readTrendParams(search: URLSearchParams): TrendParams {
     interval: oneOf(INTERVALS, search.get('interval'), DEFAULTS.interval),
     source: oneOf(BREAKDOWN_SOURCES, search.get('source'), DEFAULTS.source),
     field: search.get('field') ?? DEFAULTS.field,
+    where: readWhere(search.get('where')),
     range: readRange(search),
   }
 }
@@ -114,7 +121,16 @@ export function writeTrendParams(previous: URLSearchParams, next: TrendParams): 
   set('interval', next.interval, DEFAULTS.interval)
   set('source', next.source, DEFAULTS.source)
   set('field', next.field, DEFAULTS.field)
+  const w = writeWhere(next.where)
+  if (w === null) out.delete('where')
+  else out.set('where', w)
   return writeRange(out, next.range)
+}
+
+/** How many predicates the chart is still missing a field or value for.
+ * `Trends.tsx` blocks Run and Save on it and says the number. */
+export function incompletePredicates(p: TrendParams): number {
+  return countIncomplete(p.where)
 }
 
 /**
@@ -148,10 +164,11 @@ export function breakdownIncomplete(p: TrendParams): boolean {
  * A `group_by` this cannot parse falls back to `none` rather than throwing.
  * Decision 2 in the saved-reports spec is explicit that a trend's
  * definition cannot fail to parse -- `group_by` is free text the report
- * endpoint accepts or rejects on its own terms, not a grammar with its own
- * `stale` flag the way retention's `where` clauses have -- so this is a
- * defensive fallback for a row written by hand or by a future version of
- * this code, not a case the product is expected to reach.
+ * endpoint accepts or rejects on its own terms; the `where` list beside it
+ * is a grammar that CAN go stale, and does so through the same `stale` flag
+ * retention's does -- so this is a defensive fallback for a row written by
+ * hand or by a future version of this code, not a case the product is
+ * expected to reach.
  */
 export function sourceAndFieldFromGroupBy(groupBy: string | null): {
   source: BreakdownSource
@@ -174,21 +191,22 @@ export function sourceAndFieldFromGroupBy(groupBy: string | null): {
  * decision 1 in the saved-reports spec is that the range is never stored,
  * so it is not part of what "already carries a trend parameter" means here
  * -- a link that only pins a range (`?range=30d`) still seeds its event,
- * interval and breakdown from the stored definition, and a link that pins
- * an explicit interval keeps that interval rather than the stored one. */
-const DEFINITION_KEYS = ['event', 'interval', 'source', 'field'] as const
+ * interval, breakdown and filter from the stored definition, and a link
+ * that pins an explicit interval keeps that interval rather than the
+ * stored one. */
+const DEFINITION_KEYS = ['event', 'interval', 'source', 'field', 'where'] as const
 
 /**
  * True when the URL already carries some part of a trend's definition --
  * the gate `Trends.tsx` uses to decide whether opening a saved report may
  * seed the URL from the stored row at all.
  *
- * All-or-nothing over the four keys, not seeded field-by-field: a partial
+ * All-or-nothing over the five keys, not seeded field-by-field: a partial
  * seed would make the definition on screen a splice of two sources (the
  * URL for whichever fields happened to be present, storage for the rest),
  * which is exactly the second source of truth this screen is built to
- * avoid. A shared link that already names an event, interval or breakdown
- * is trusted whole; a link that names none of them is seeded whole.
+ * avoid. A shared link that already names an event, interval, breakdown or
+ * filter is trusted whole; a link that names none of them is seeded whole.
  */
 export function hasTrendDefinitionParams(search: URLSearchParams): boolean {
   return DEFINITION_KEYS.some((key) => search.has(key))

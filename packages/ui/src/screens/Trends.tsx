@@ -11,6 +11,7 @@ import { Input } from '../components/ui/input.js'
 import { Label } from '../components/ui/label.js'
 import { RangePicker } from './shared/RangePicker.js'
 import { rangeIncomplete, readRange, resolveRange } from './shared/range.js'
+import { whereFromStored } from './shared/where.js'
 import { BreakdownPicker } from './trends/BreakdownPicker.js'
 import { TrendPanels } from './trends/TrendPanels.js'
 import {
@@ -261,6 +262,13 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
               event: r.event,
               interval: r.interval,
               ...sourceAndFieldFromGroupBy(r.group_by),
+              // Minimal seed for a field `TrendParams` did not carry before
+              // this task: the full predicate editor and its `stale`
+              // handling are the next task's job, but a stored report's
+              // filter must still round-trip through a seeded URL rather
+              // than silently dropping to no filter the moment `where`
+              // became a required field.
+              where: whereFromStored(r.where),
               range: params.range,
             }
         if (!alreadyDefined) {
