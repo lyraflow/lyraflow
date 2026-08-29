@@ -1,4 +1,4 @@
-import { INTERVALS } from '@lyraflow/core'
+import { INTERVALS, MAX_WHERE_PREDICATES, WherePredicate } from '@lyraflow/core'
 import type { Pool } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
@@ -30,6 +30,15 @@ export interface TrendDeps {
  */
 const Interval = z.enum(INTERVALS)
 
+/**
+ * The `where` predicates' own schema -- the same `z.array(WherePredicate)
+ * .max(MAX_WHERE_PREDICATES)` `events/routes.ts` validates a RUN against, so
+ * a trend this endpoint will happily save is one that endpoint will happily
+ * run. `retention-routes.ts`'s `StoredWhereBody` is the same decision for
+ * the same reason.
+ */
+const StoredWhereBody = z.array(WherePredicate).max(MAX_WHERE_PREDICATES)
+
 const CreateBody = z.object({
   name: z.string().min(1).max(200),
   event: z.string().min(1).max(200),
@@ -39,6 +48,11 @@ const CreateBody = z.object({
   // and the table's own `group_by` column (nullable, no default) never sees
   // a distinction the domain does not have.
   group_by: z.string().min(1).max(200).nullable().optional(),
+  // Absent means "no filter" -- the same meaning `[]` carries once stored,
+  // and on CREATE there is no stored value to leave alone, so both are
+  // folded to `[]` before reaching `TrendStore.create`. `PatchBody` below
+  // keeps the distinction, because there it is real.
+  where: StoredWhereBody.optional(),
 })
 
 const PatchBody = z.object({
@@ -49,6 +63,10 @@ const PatchBody = z.object({
   // a string sets it. Passed straight through to `TrendStore.update`, which
   // draws exactly this distinction -- see that method's own docstring.
   group_by: z.string().min(1).max(200).nullable().optional(),
+  // `undefined` (key omitted) leaves the filter alone; `[]` clears it; a
+  // list sets it. Passed straight through to `TrendStore.update`, which
+  // draws exactly this distinction.
+  where: StoredWhereBody.optional(),
 })
 
 /** See `numeric-id.ts`'s `parseNumericId` for the shape this enforces and why. */
@@ -68,6 +86,11 @@ function toWire(t: StoredTrend) {
     event: t.event,
     interval: t.interval,
     group_by: t.group_by,
+    where: t.where,
+    definition_version: t.definition_version,
+    // Always present, never conditional: a client checks one field
+    // regardless of whether this row happens to be broken.
+    stale: t.stale,
     created_at: t.created_at,
     updated_at: t.updated_at,
   }
@@ -93,6 +116,7 @@ export function registerTrendRoutes(app: FastifyInstance, deps: TrendDeps): void
         event: body.data.event,
         interval: body.data.interval,
         group_by: body.data.group_by ?? null,
+        where: body.data.where ?? [],
       })
       return reply.code(201).send(toWire(created))
     } catch (err) {
@@ -138,6 +162,7 @@ export function registerTrendRoutes(app: FastifyInstance, deps: TrendDeps): void
         event: patch.data.event,
         interval: patch.data.interval,
         group_by: patch.data.group_by,
+        where: patch.data.where,
       })
       if (!updated) return reply.code(404).send({ error: 'trend_not_found' })
       return reply.code(200).send(toWire(updated))

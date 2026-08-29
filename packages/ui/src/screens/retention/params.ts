@@ -1,4 +1,4 @@
-import { WherePredicate } from '@lyraflow/core/segments/ast.js'
+import type { WherePredicate } from '@lyraflow/core/segments/ast.js'
 import type { RetentionRequest } from '../../api/types.js'
 import {
   DEFAULT_RANGE,
@@ -8,6 +8,7 @@ import {
   resolveRange,
   writeRange,
 } from '../shared/range.js'
+import { countIncomplete, readWhere } from '../shared/where.js'
 
 export const GRANULARITIES = ['day', 'week', 'month'] as const
 export type Granularity = (typeof GRANULARITIES)[number]
@@ -79,67 +80,6 @@ function granularityOf(raw: string | null): Granularity {
 }
 
 /**
- * Reads a `where` list out of one URL parameter.
- *
- * JSON in a query string is not pretty, and the alternative is worse: the
- * screen's whole persistence IS the URL, so leaving predicates out of it
- * would mean a link that silently reproduces a DIFFERENT grid from the one
- * whoever shared it was looking at.
- *
- * **Deliberately LENIENT about completeness.** This validated every element
- * against core's full `WherePredicate` and that was a real bug: the editor
- * adds a blank row (`{ property: '', operator: '=', value: '' }`) and
- * `property` is `z.string().min(1)`, so a newly-added row failed on the way
- * back out and "Add predicate" looked like a dead button. The control was
- * fine; this function ate its output.
- *
- * So the check is STRUCTURAL -- is this shaped like a predicate the editor
- * can render -- not "is this finished". Finishedness is a separate question,
- * answered by `incompletePredicates` and reported on the screen, because a
- * half-built row must block the run rather than be dropped from it: dropping
- * it would quietly widen the grid the operator thought they had built.
- *
- * Garbage is still refused. An array of numbers, strings or objects with no
- * operator degrades to no predicates, which is what a hand-edited or
- * truncated link should do.
- */
-function looksLikePredicate(v: unknown): v is WherePredicate {
-  if (typeof v !== 'object' || v === null) return false
-  const o = v as Record<string, unknown>
-  if (typeof o.operator !== 'string') return false
-  if (o.source === 'attribute') return typeof o.attribute === 'string'
-  return typeof o.property === 'string'
-}
-
-function readWhere(raw: string | null): WherePredicate[] {
-  if (!raw) return []
-  try {
-    const parsed: unknown = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
-    return parsed.filter(looksLikePredicate)
-  } catch {
-    return []
-  }
-}
-
-/**
- * Turns a stored report's raw `start_where`/`return_where` (`unknown[]` on
- * the wire -- see `RetentionReportInput`'s own docstring in `api/types.ts`)
- * into predicates the editor can render, with the SAME structural filter
- * `readWhere` applies to a URL-carried list rather than a second opinion
- * about what "shaped like a predicate" means.
- *
- * Used only when seeding a saved report's URL from its stored definition
- * (`Retention.tsx`). A row whose stored `where` clauses no longer parse
- * under core's grammar comes back `stale: true` on the list endpoint; this
- * function does not itself decide staleness, it just degrades whatever it
- * cannot render to no predicates, exactly as a hand-edited URL would.
- */
-export function whereFromStored(raw: unknown[]): WherePredicate[] {
-  return raw.filter(looksLikePredicate)
-}
-
-/**
  * M4 from the whole-branch review: a bare `Number()` coerces shapes a
  * numeric id must not accept -- `'0x10'` reads as 16, `'1e3'` as 1000.
  * `packages/server/src/numeric-id.ts`'s own docstring is the reason this
@@ -170,8 +110,7 @@ function readSegmentId(raw: string | null): number | null {
  * runs a wider grid than they built.
  */
 export function incompletePredicates(p: RetentionParams): number {
-  return [...p.startWhere, ...p.returnWhere].filter((w) => !WherePredicate.safeParse(w).success)
-    .length
+  return countIncomplete([...p.startWhere, ...p.returnWhere])
 }
 
 export function readRetentionParams(search: URLSearchParams): RetentionParams {

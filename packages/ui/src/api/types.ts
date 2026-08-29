@@ -16,6 +16,7 @@
 import type { FunnelDefinition, FunnelStep } from '@lyraflow/core/funnels/ast.js'
 import type { FunnelResult, StepResult } from '@lyraflow/core/funnels/levels.js'
 import type { Granularity } from '@lyraflow/core/retention/ast.js'
+import type { WherePredicate } from '@lyraflow/core/segments/ast.js'
 import type { Interval } from '@lyraflow/core/trends/ast.js'
 
 /**
@@ -296,6 +297,13 @@ export interface StatsQuery {
    * ignoring it.
    */
   group_by?: string
+  /**
+   * The predicate list as JSON -- `screens/trends/params.ts` builds it and
+   * `screens/Trends.tsx` stringifies it. A string rather than
+   * `WherePredicate[]` because this type describes the QUERY STRING, and
+   * `client.ts`'s `qs()` serialises whatever it is handed.
+   */
+  where?: string
 }
 export interface RejectionsQuery {
   limit?: number
@@ -572,11 +580,11 @@ export type TrendResult = StatsPage
  * WIRE, not a view model, and a second spelling here is exactly how the
  * client and the store it mirrors would drift.
  *
- * Deliberately has no `definition_version` and no `stale`, unlike
- * `RetentionReport` below: a trend's definition is three scalar columns, so
- * there is nothing that can fail to parse and nothing to version. Adding
- * either field here "for symmetry" with `RetentionReport` would be copying
- * a shape the wire does not have.
+ * Carries `definition_version` and `stale`, like `RetentionReport` below and
+ * for the same reason: a trend's definition now contains the segment `where`
+ * grammar, which is JSON parsed against a schema that can move. This type
+ * said the opposite until `021_trend_predicates.sql`; the shape the wire has
+ * is what it describes.
  */
 export interface TrendReport {
   id: number
@@ -584,6 +592,11 @@ export interface TrendReport {
   event: string
   interval: Interval
   group_by: string | null
+  /** `unknown[]`, not `WherePredicate[]`: a row a future build wrote can be
+   * read by this one, and `stale` is how a caller knows which it has. */
+  where: unknown[]
+  definition_version: number
+  stale: boolean
   created_at: string
   updated_at: string
 }
@@ -599,6 +612,9 @@ export interface TrendReportInput {
   event: string
   interval: Interval
   group_by: string | null
+  /** Absent and `[]` mean the same thing on CREATE; on PATCH, absent leaves
+   * the stored filter alone and `[]` clears it. */
+  where?: WherePredicate[]
 }
 
 /**
@@ -612,9 +628,9 @@ export interface TrendReportInput {
  * parse under the server's grammar -- ALWAYS present, `false` for an
  * ordinary row, same discipline as `Funnel.stale` and `Segment.stale`: one
  * field is checked regardless of whether the row it names happens to be
- * broken. `definition_version` exists here and NOT on `TrendReport` because
- * this report's `where` clauses are parsed JSON rather than three scalar
- * columns -- see `TrendReport`'s docstring for the asymmetry.
+ * broken. `definition_version` is the same idea `TrendReport` above now
+ * carries too, since `021_trend_predicates.sql` gave that table's `where`
+ * the same parsed-JSON shape this one already had.
  */
 export interface RetentionReport {
   id: number

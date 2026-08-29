@@ -9,8 +9,10 @@ import { EventCombobox } from '../components/EventCombobox.js'
 import { Button } from '../components/ui/button.js'
 import { Input } from '../components/ui/input.js'
 import { Label } from '../components/ui/label.js'
+import { WherePredicates } from './segments/WherePredicates.js'
 import { RangePicker } from './shared/RangePicker.js'
 import { rangeIncomplete, readRange, resolveRange } from './shared/range.js'
+import { whereFromStored } from './shared/where.js'
 import { BreakdownPicker } from './trends/BreakdownPicker.js'
 import { TrendPanels } from './trends/TrendPanels.js'
 import {
@@ -21,6 +23,7 @@ import {
   bucketCount,
   groupByOf,
   hasTrendDefinitionParams,
+  incompletePredicates,
   readTrendParams,
   sourceAndFieldFromGroupBy,
   tooManyBuckets,
@@ -41,7 +44,13 @@ const INTERVAL_LABELS: Record<string, string> = {
  * trend IS, and sending it here would be the first step toward storing it
  * despite the schema having nowhere to put it. */
 function reportBody(p: TrendParams, name: string): TrendReportInput {
-  return { name, event: p.event, interval: p.interval, group_by: groupByOf(p) ?? null }
+  return {
+    name,
+    event: p.event,
+    interval: p.interval,
+    group_by: groupByOf(p) ?? null,
+    where: p.where,
+  }
 }
 
 /**
@@ -109,6 +118,30 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  // True once a fetched report comes back `stale: true` -- its stored
+  // `where` no longer parses under core's grammar (`TrendReport`'s own
+  // docstring in `api/types.ts`). Kept as its own piece of state, same
+  // reasoning as `Retention.tsx`'s `stale`: it must survive past the seed
+  // effect that discovers it, for as long as this report stays open.
+  const [stale, setStale] = useState(false)
+  // F1 from the whole-branch review, the single-list version of
+  // `Retention.tsx`'s `sidesWithLostPredicates`: a trend has one `where`
+  // list rather than retention's two sides, so this is one flag rather than
+  // a set. A stale trend's predicates fail to reproduce in one of two ways
+  // -- an element that fails core's schema but still LOOKS like a predicate
+  // (`looksLikePredicate` in `shared/where.ts`) survives seeding as a real,
+  // editable row, and `unfinished` below already counts it and blocks Run
+  // and Save until it is fixed or removed. An element that fails
+  // `looksLikePredicate` itself is DROPPED by `whereFromStored` before it
+  // ever becomes a row -- nothing for `unfinished` to count, so without this
+  // flag `canSave` would be true with `where` silently narrower than what
+  // was actually stored, and Save would PATCH over the stored predicates
+  // with that narrower (possibly empty) list. Set at seed time by comparing
+  // the raw stored count against what survived seeding; cleared the moment
+  // the operator edits the filter (`update`, below) -- editing IS
+  // rebuilding, whether or not the edit happens to repair the exact element
+  // that failed to parse.
+  const [lostPredicates, setLostPredicates] = useState(false)
 
   // The (project, report) pair this screen is currently open on. Only
   // matters for navigating directly from one saved report to another
@@ -136,6 +169,8 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
     setName('')
     setReportError(null)
     setSaveError(null)
+    setStale(false)
+    setLostPredicates(false)
     setConfirmingDelete(false)
     setDeleteError(null)
   }, [identity])
@@ -147,6 +182,11 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
       })
       setResult(null)
       setError(null)
+      // F1: editing the filter is "rebuilding" it -- see `lostPredicates`'s
+      // own comment. The operator has taken ownership of what `where` now
+      // says, which is what makes a subsequent Save an intentional write
+      // rather than the load effect's own silent narrowing.
+      if ('where' in patch) setLostPredicates(false)
     },
     [setSearch],
   )
@@ -179,6 +219,10 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
             ...resolveRange(p.range, new Date()),
             ...(p.event === '' ? {} : { event: p.event }),
             ...(groupByOf(p) === undefined ? {} : { group_by: groupByOf(p) }),
+            // Omitted entirely when empty -- an empty list is a filter that
+            // matches everything, and saying so in every request URL is
+            // noise a reader has to discount.
+            ...(p.where.length === 0 ? {} : { where: JSON.stringify(p.where) }),
           }),
         )
       } catch (err) {
@@ -193,10 +237,23 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
 
   // Fetch the stored report, seed the URL from it if the URL is not
   // already carrying a definition of its own, and -- THE POINT OF THIS
-  // TASK -- auto-run exactly once, using the SAME ceiling check the Run
-  // button's `disabled` prop already applies, so a saved report born
-  // invalid (decision 5) shows the warning instead of firing the doomed
-  // request.
+  // TASK -- auto-run exactly once, gated on every check the Run button's
+  // `disabled` prop applies (the ceiling check, the range check, the
+  // unfinished-predicate count) PLUS ONE THE BUTTON DOES NOT: staleness.
+  // The two are deliberately different. Run stays enabled on a stale
+  // report -- its predicates could not be faithfully reproduced, but the
+  // banner already says so, and the operator can still press Run to see
+  // what the current, possibly narrower, controls compute. The auto-run
+  // has no operator standing in front of it deciding to accept that
+  // narrower answer, so it does not fire one on their behalf.
+  //
+  // F2 from the whole-branch review: before that fix, this effect checked
+  // only the ceiling and the range -- the unfinished count and staleness
+  // were both missing, so a stale report whose predicate survived seeding
+  // as an unfinished row (an unknown operator, say) fired the request
+  // anyway and showed a raw `invalid_where` under the chart. The comment
+  // at the time claimed only the ceiling check was applied, which was
+  // itself already wrong about the range check the code already had.
   //
   // Deliberately ONE effect rather than two. An earlier version split
   // "load and seed" from "auto-run" behind a `readyToRun` flag, and that
@@ -254,27 +311,43 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
       .then((r) => {
         if (cancelled) return
         setName(r.name)
+        setStale(r.stale)
         const alreadyDefined = hasTrendDefinitionParams(search)
-        const finalParams: TrendParams = alreadyDefined
-          ? params
-          : {
-              event: r.event,
-              interval: r.interval,
-              ...sourceAndFieldFromGroupBy(r.group_by),
-              range: params.range,
-            }
+        let finalParams: TrendParams
+        if (alreadyDefined) {
+          finalParams = params
+        } else {
+          const seededWhere = whereFromStored(r.where)
+          // F1: `whereFromStored` silently drops any stored element that
+          // does not even look like a predicate (see `lostPredicates`'s own
+          // comment) -- comparing the raw stored count against what
+          // survived is how this notices, without `whereFromStored` itself
+          // needing to change (it is also used to read a hand-edited URL,
+          // where silently degrading garbage is the correct behaviour).
+          if (seededWhere.length < r.where.length) setLostPredicates(true)
+          finalParams = {
+            event: r.event,
+            interval: r.interval,
+            ...sourceAndFieldFromGroupBy(r.group_by),
+            where: seededWhere,
+            range: params.range,
+          }
+        }
         if (!alreadyDefined) {
           setSearch((prev) => writeTrendParams(prev, { ...finalParams, range: readRange(prev) }), {
             replace: true,
           })
         }
+        const seededUnfinished = incompletePredicates(finalParams)
         // `justSaved` skips exactly the query this task exists to stop
         // repeating -- the results it protects are already in `result`,
         // seeded by this same render's lazy `useState` initializer above.
         if (
           !justSaved &&
           !tooManyBuckets(finalParams, new Date()) &&
-          !rangeIncomplete(finalParams.range)
+          !rangeIncomplete(finalParams.range) &&
+          seededUnfinished === 0 &&
+          !r.stale
         ) {
           run(finalParams)
         }
@@ -298,10 +371,19 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
   const buckets = bucketCount(params, new Date())
   const overCap = tooManyBuckets(params, new Date())
   const incompleteRange = rangeIncomplete(params.range)
+  const unfinished = incompletePredicates(params)
 
   const trimmedName = name.trim()
   const canSave =
-    activeId != null && trimmedName !== '' && params.event !== '' && !breakdownIncomplete(params)
+    activeId != null &&
+    trimmedName !== '' &&
+    params.event !== '' &&
+    !breakdownIncomplete(params) &&
+    unfinished === 0 &&
+    // F1: a saved report whose stored predicates were silently narrowed on
+    // load must not be saved as-is -- that would overwrite the stored
+    // `where` with the narrower list. See `lostPredicates`'s own comment.
+    !lostPredicates
 
   const handleSave = useCallback(() => {
     // Repeats the `canSave` gate the button's `disabled` prop already
@@ -528,7 +610,7 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
           // is what makes this call the zero-argument, default-`params`
           // form -- the same one this button always called.
           onClick={() => run()}
-          disabled={running || activeId == null || overCap || incompleteRange}
+          disabled={running || activeId == null || overCap || incompleteRange || unfinished > 0}
         >
           {running ? 'Running…' : 'Run'}
         </Button>
@@ -536,6 +618,19 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
           {saving ? 'Saving…' : 'Save'}
         </Button>
       </div>
+
+      <WherePredicates
+        id="trend-where"
+        // `undefined`, never `''`: the combobox reports an empty string when
+        // cleared, and `WherePredicates` reads `''` as an event named the
+        // empty string rather than as "no scoping".
+        event={params.event === '' ? undefined : params.event}
+        client={client}
+        projectId={activeId ?? 0}
+        value={params.where}
+        onChange={(next) => update({ where: next ?? [] })}
+        onUnauthorized={onUnauthorized}
+      />
 
       {saveError != null && (
         <p role="alert" className="text-sm text-destructive">
@@ -550,6 +645,13 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
         </p>
       )}
 
+      {stale && (
+        <p data-testid="trend-stale" className="text-muted-foreground text-sm">
+          The filters saved with this report no longer parse, so it cannot be reproduced as saved.
+          Run below to see what these controls ask for now, or fix the conditions and save over it.
+        </p>
+      )}
+
       {incompleteRange && (
         <p data-testid="trend-range-unfinished" className="text-muted-foreground text-sm">
           Pick both dates, or choose a preset range.
@@ -560,6 +662,13 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
         <p data-testid="trend-too-many-buckets" className="text-muted-foreground text-sm">
           That range at this resolution is {buckets?.toLocaleString()} points, above the limit of{' '}
           {MAX_BUCKETS.toLocaleString()}. Pick a coarser resolution or a shorter range.
+        </p>
+      )}
+
+      {unfinished > 0 && (
+        <p role="alert" className="text-sm text-destructive">
+          {unfinished === 1 ? '1 filter is' : `${unfinished} filters are`} unfinished — pick a field
+          and a value, or remove the row.
         </p>
       )}
 

@@ -63,13 +63,14 @@ export class DuplicateRetentionNameError extends Error {
 const UNIQUE_VIOLATION = '23505'
 
 /**
- * The shape version stamped on every row THIS build writes. `020_saved_reports.sql`'s
- * own comment explains why `retention_reports` carries `definition_version` and
- * `trend_reports` does not: a retention definition's `where` clauses are JSON
- * parsed against a grammar, and a future migration that needs to find every
- * row written under an earlier shape of THIS table (not the where-grammar,
- * which versions itself independently and is handled by `stale` instead)
- * filters on this column rather than parsing every row to find out.
+ * The shape version stamped on every row THIS build writes.
+ * `021_trend_predicates.sql` explains why BOTH tables now carry
+ * `definition_version`. They did not always: a trend's definition was three
+ * scalar columns until it gained the same `where` grammar this one has.
+ * A future migration that needs to find every row written under an earlier
+ * shape of THIS table (not the where-grammar, which versions itself
+ * independently and is handled by `stale` instead) filters on this column
+ * rather than parsing every row to find out.
  *
  * Not imported from `@lyraflow/core` the way `FUNNEL_DEFINITION_VERSION` is:
  * nothing about this table's own shape has needed a second value yet, so

@@ -22,12 +22,12 @@ import {
   readRetentionParams,
   toRequest,
   tooManyCohorts,
-  whereFromStored,
   writeRetentionParams,
 } from './retention/params.js'
 import { WherePredicates } from './segments/WherePredicates.js'
 import { RangePicker } from './shared/RangePicker.js'
 import { rangeIncomplete, readRange } from './shared/range.js'
+import { whereFromStored } from './shared/where.js'
 
 /** `POST /v1/retention-reports` and `PATCH /v1/retention-reports/:id`'s
  * body -- always these seven fields, never the range. The range is not a

@@ -1,4 +1,12 @@
-import { Params, chDateTime, notSuppressedExpr, resolvedPersonExpr } from '@lyraflow/core'
+import {
+  MAX_WHERE_PREDICATES,
+  Params,
+  WherePredicate,
+  chDateTime,
+  notSuppressedExpr,
+  resolvedPersonExpr,
+  wherePredicate,
+} from '@lyraflow/core'
 import type { ClickHouseClient } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
@@ -215,6 +223,26 @@ const Query = z
     path: ['before'],
   })
 
+/**
+ * The `where` predicates' own schema -- the SAME one `reports/routes.ts`
+ * validates a retention run's `start_where`/`return_where` against, not a
+ * second notion of a valid predicate. `MAX_WHERE_PREDICATES` is imported
+ * rather than restated for the reason its own docstring gives: an editor
+ * that disables its "add" control has to know the number the schema rejects
+ * on, and two literals a package apart drift into a form that builds a
+ * request the server refuses.
+ */
+const StatsWhere = z.array(WherePredicate).max(MAX_WHERE_PREDICATES)
+
+/**
+ * The ceiling on the raw `where` string, checked in the handler rather than
+ * on `StatsQuery` itself -- see that field's own docstring. A round number,
+ * not derived from anything: ten predicates' worth of realistic property
+ * keys and values comfortably fit inside it, and it exists only to keep one
+ * caller from handing the server an arbitrarily large string to parse.
+ */
+const WHERE_MAX_LENGTH = 4000
+
 const StatsQuery = z.object({
   since: z.string().datetime().optional(),
   until: z.string().datetime().optional(),
@@ -246,6 +274,29 @@ const StatsQuery = z.object({
    * had before trends and is what `cli/src/api/commands/snippet.ts` sends.
    */
   group_by: z.string().max(160).optional(),
+  /**
+   * The predicate list, as JSON, narrowing WHICH occurrences of the event
+   * are counted.
+   *
+   * A `z.string()` here and the real schema below, because a query string
+   * carries text while `WherePredicate` describes a value. JSON in a query
+   * parameter is not pretty and the alternative is worse: a chart is
+   * shareable as a link (`screens/trends/params.ts`), so a filter that could
+   * not live in the URL would make a shared link reproduce a DIFFERENT chart
+   * from the one the sender was looking at.
+   *
+   * The segment grammar verbatim -- the same `WherePredicate` a funnel step
+   * and both sides of a retention grid carry -- so `contains` means one
+   * thing in all four places and an operator added later arrives here for
+   * free.
+   *
+   * No length bound here, deliberately -- `WHERE_MAX_LENGTH` is enforced in
+   * the handler instead, alongside the JSON-parse and schema checks, so an
+   * over-length string is refused as `invalid_where` rather than surfacing
+   * as this route's generic `invalid_query`, which would name the wrong
+   * control.
+   */
+  where: z.string().optional(),
 })
 
 /**
@@ -697,7 +748,7 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
 
     const q = StatsQuery.safeParse(req.query)
     if (!q.success) return reply.code(400).send({ error: 'invalid_query' })
-    const { since, until, interval, event, group_by } = q.data
+    const { since, until, interval, event, group_by, where } = q.data
 
     let breakdown: Breakdown | undefined
     try {
@@ -706,6 +757,51 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
       if (!(err instanceof BreakdownError)) throw err
       return reply.code(400).send({ error: 'invalid_group_by', detail: err.message })
     }
+
+    // Two steps, and both failures are the SAME error code: from the
+    // caller's side "that is not JSON" and "that is not a predicate" are one
+    // mistake in one parameter. Refused rather than ignored -- a dropped
+    // filter answers a wider question than was asked and looks exactly like
+    // a correct answer.
+    let predicates: WherePredicate[] = []
+    if (where !== undefined) {
+      // Checked here, not on `StatsQuery`, so an over-length string is
+      // `invalid_where` -- naming the control that is wrong -- rather than
+      // `invalid_query` failing inside `StatsQuery.safeParse` before this
+      // block ever runs. Reachable: `AttributePredicate`'s value has no
+      // length bound of its own, so one long value or a long `in` list can
+      // cross this ceiling on its own.
+      if (where.length > WHERE_MAX_LENGTH) {
+        return reply.code(400).send({
+          error: 'invalid_where',
+          detail: `where must be at most ${WHERE_MAX_LENGTH} characters`,
+        })
+      }
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(where)
+      } catch {
+        return reply
+          .code(400)
+          .send({ error: 'invalid_where', detail: 'where must be a JSON array of predicates' })
+      }
+      const list = StatsWhere.safeParse(parsed)
+      if (!list.success) {
+        // The cap clause names an actual over-cap array; every other
+        // rejection -- an unrecognised operator, a missing field, a value of
+        // the wrong type -- has nothing to do with the count, and naming a
+        // cap the caller did not approach points them at the wrong mistake.
+        const overCap = Array.isArray(parsed) && parsed.length > MAX_WHERE_PREDICATES
+        return reply.code(400).send({
+          error: 'invalid_where',
+          detail: overCap
+            ? `at most ${MAX_WHERE_PREDICATES} predicates are allowed`
+            : 'that filter is not a valid predicate list',
+        })
+      }
+      predicates = list.data
+    }
+
     // Kept as its own flag: `group_by=event_name` must still put an
     // `event_name` field on every row, which is what the CLI's snippet
     // command reads. The generic `series` field is added alongside it rather
@@ -755,6 +851,23 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
     const eventClause =
       event === undefined ? '' : ` AND event_name = ${params.add(event, 'String')}`
 
+    // INSIDE the inner select, beside `eventClause`, for that clause's own
+    // reason: narrowing there makes the filter cut the scan, while narrowing
+    // outside would read every event in the window and throw most of them
+    // away.
+    //
+    // No column projection is needed, and that is the one real difference
+    // from `retention/compile.ts`, which has to call `attributeColumns` and
+    // re-project `properties`/`properties_num` because its predicates run
+    // against an outer CTE. Here they run against `events` itself, where
+    // every column `wherePredicate` can name is already in scope.
+    //
+    // Each compiled string is appended as-is. Retention's `clause()` drops a
+    // `'1'`, but that is its own base condition for an `ANY_EVENT` side --
+    // `wherePredicate` never returns it.
+    const now = new Date()
+    const whereClause = predicates.map((w) => ` AND ${wherePredicate(w, params, now)}`).join('')
+
     // Built BEFORE the SQL below so its bound property key takes its place in
     // the same positional parameter sequence. Only the columns a breakdown
     // actually names are projected out of the inner scan -- the same rule
@@ -803,7 +916,7 @@ export function registerEventsRoutes(app: FastifyInstance, deps: EventsDeps): vo
       FROM (
         SELECT project_id, event_id, timestamp, event_name, anonymous_id, user_id${extraSelect}
         FROM events
-        WHERE project_id = ${projectParam}${sinceClause}${untilClause}${eventClause}
+        WHERE project_id = ${projectParam}${sinceClause}${untilClause}${eventClause}${whereClause}
         LIMIT 1 BY project_id, event_id
       ) AS e
       WHERE ${notSuppressed}

@@ -3,6 +3,8 @@ import {
   DEFAULTS,
   breakdownIncomplete,
   groupByOf,
+  hasTrendDefinitionParams,
+  incompletePredicates,
   readTrendParams,
   writeTrendParams,
 } from './params.js'
@@ -65,5 +67,40 @@ describe('groupByOf', () => {
     expect(groupByOf({ ...DEFAULTS, source: 'property', field: '' })).toBeUndefined()
     expect(breakdownIncomplete({ ...DEFAULTS, source: 'property', field: '' })).toBe(true)
     expect(breakdownIncomplete({ ...DEFAULTS, source: 'event_name' })).toBe(false)
+  })
+})
+
+describe('trend where predicates', () => {
+  const ONE = { property: 'path', operator: '=' as const, value: '/register' }
+
+  it('reads a filter out of the URL', () => {
+    expect(read(`event=$page&where=${encodeURIComponent(JSON.stringify([ONE]))}`).where).toEqual([
+      ONE,
+    ])
+  })
+
+  it('defaults to no filter', () => {
+    expect(read('event=$page').where).toEqual([])
+  })
+
+  it('round-trips through write', () => {
+    const p = { ...DEFAULTS, event: '$page', where: [ONE] }
+    expect(readTrendParams(writeTrendParams(new URLSearchParams(), p))).toEqual(p)
+  })
+
+  it('writes no parameter when there is no filter', () => {
+    expect(writeTrendParams(new URLSearchParams(), DEFAULTS).toString()).toBe('')
+  })
+
+  it('counts an unfinished predicate', () => {
+    expect(
+      incompletePredicates({ ...DEFAULTS, where: [{ property: '', operator: '=', value: '' }] }),
+    ).toBe(1)
+  })
+
+  it('makes a link carrying only a filter count as a definition', () => {
+    // Otherwise opening a saved report through such a link would seed the
+    // stored definition OVER the filter the link was sent to show.
+    expect(hasTrendDefinitionParams(new URLSearchParams('where=%5B%5D'))).toBe(true)
   })
 })

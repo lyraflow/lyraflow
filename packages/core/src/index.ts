@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 20
+export const SCHEMA_VERSION = 21
 
 export { hashPassword, verifyPassword } from './auth/password.js'
 export { ProjectExistsError, createProject, slugify } from './projects/create.js'
@@ -28,6 +28,7 @@ export * from './segments/validate.js'
 export * from './segments/params.js'
 export * from './segments/base.js'
 export * from './segments/compile.js'
+export { wherePredicate } from './segments/predicates.js'
 export * from './segments/hash.js'
 export * from './segments/cursor.js'
 export * from './funnels/ast.js'

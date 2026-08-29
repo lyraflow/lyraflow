@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
@@ -61,6 +61,9 @@ function reportFixture(over: Partial<TrendReport> = {}): TrendReport {
     event: 'signup',
     interval: '1d',
     group_by: null,
+    where: [],
+    definition_version: 1,
+    stale: false,
     created_at: T,
     updated_at: T,
     ...over,
@@ -361,6 +364,7 @@ describe('Trends -- saving and reopening a saved report', () => {
       event: 'signup',
       interval: '1d',
       group_by: null,
+      where: [],
     })
   })
 
@@ -407,7 +411,7 @@ describe('Trends -- saving and reopening a saved report', () => {
     await click(/save/i)
     await waitFor(() => expect(client.createTrendReport).toHaveBeenCalled())
     const body = lastCallArg(client.createTrendReport, 1)
-    expect(Object.keys(body).sort()).toEqual(['event', 'group_by', 'interval', 'name'])
+    expect(Object.keys(body).sort()).toEqual(['event', 'group_by', 'interval', 'name', 'where'])
   })
 
   it('reports a duplicate name without losing what was typed', async () => {
@@ -568,5 +572,203 @@ describe('Trends -- delete', () => {
     expect(screen.queryByText(/delete this trend report\?/i)).toBeNull()
     expect(screen.queryByRole('button', { name: /^delete trend$/i })).toBeNull()
     expect(client.deleteTrendReport).not.toHaveBeenCalled()
+  })
+})
+
+describe('Trends where predicates', () => {
+  const ONE = { property: 'path', operator: '=', value: '/register' }
+  // `/trends/new`, not bare `/trends`: `renderAt`'s route table (unlike the
+  // real app's `TrendsEntry`) does not redirect a query-carrying `/trends`
+  // to the builder, so a bare `/trends` here would match the "trends list"
+  // placeholder route instead of mounting `Trends` at all -- a test that
+  // could never pass regardless of what this task implements, which is a
+  // sharper defect than the one this plan's caution names.
+  const FILTERED = `/trends/new?event=%24page&where=${encodeURIComponent(JSON.stringify([ONE]))}`
+
+  it('sends the filter with the run', async () => {
+    const client = renderAt(FILTERED)
+    await userEvent.click(runButton())
+    await waitFor(() => expect(client.stats).toHaveBeenCalled())
+    expect(vi.mocked(client.stats).mock.calls[0]?.[1]).toMatchObject({
+      event: '$page',
+      where: JSON.stringify([ONE]),
+    })
+  })
+
+  it('sends no where at all when there is no filter', async () => {
+    // Not `where: '[]'`. An empty parameter would be a filter that matches
+    // everything, said out loud in every request URL for no reason.
+    const client = renderAt('/trends/new?event=%24page')
+    await userEvent.click(runButton())
+    await waitFor(() => expect(client.stats).toHaveBeenCalled())
+    expect(vi.mocked(client.stats).mock.calls[0]?.[1]).not.toHaveProperty('where')
+  })
+
+  it('blocks Run and Save on an unfinished predicate, and says so', async () => {
+    const blank = [{ property: '', operator: '=', value: '' }]
+    const client = renderAt(
+      `/trends/new?event=%24page&where=${encodeURIComponent(JSON.stringify(blank))}`,
+    )
+    expect(runButton()).toBeDisabled()
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+    expect(screen.getByText(/1 filter/i)).toBeInTheDocument()
+    expect(client.stats).not.toHaveBeenCalled()
+  })
+
+  it('saves the filter with the report', async () => {
+    const createTrendReport = vi.fn(async (_p: number, body: TrendReportInput) => ({
+      id: 9,
+      name: body.name,
+      event: body.event,
+      interval: body.interval,
+      group_by: body.group_by,
+      where: body.where ?? [],
+      definition_version: 1,
+      stale: false,
+      created_at: T,
+      updated_at: T,
+    }))
+    renderAt(FILTERED, { createTrendReport } as Partial<ApiClient>)
+    await userEvent.type(screen.getByLabelText(/name/i), 'registers')
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    await waitFor(() => expect(createTrendReport).toHaveBeenCalled())
+    expect(createTrendReport.mock.calls[0]?.[1].where).toEqual([ONE])
+  })
+
+  it('seeds a saved report filter into the URL', async () => {
+    const stored: TrendReport = {
+      id: 4,
+      name: 'registers',
+      event: '$page',
+      interval: '1d',
+      group_by: null,
+      where: [ONE],
+      definition_version: 1,
+      stale: false,
+      created_at: T,
+      updated_at: T,
+    }
+    const client = renderAt('/trends/4', {
+      trendReport: vi.fn(async () => stored),
+    } as Partial<ApiClient>)
+    await waitFor(() => expect(client.stats).toHaveBeenCalled())
+    expect(vi.mocked(client.stats).mock.calls[0]?.[1]).toMatchObject({
+      where: JSON.stringify([ONE]),
+    })
+  })
+})
+
+describe('Trends -- a stale saved report', () => {
+  it('warns on load instead of auto-running its unparseable predicates', async () => {
+    // F2 from the whole-branch review: `Retention.tsx` already does this
+    // (its own test, `Retention.test.tsx`'s "warns on a stale report..."),
+    // and this screen's load effect had the same gap.
+    const client = renderAt('/trends/3', {
+      trendReport: vi.fn(async () => reportFixture({ stale: true })),
+    })
+    expect(await screen.findByTestId('trend-stale')).toBeInTheDocument()
+    expect(client.stats).not.toHaveBeenCalled()
+  })
+
+  // F2's own shape: a stale predicate that fails core's schema but still
+  // LOOKS like a predicate (`looksLikePredicate`) survives seeding as a
+  // real, editable row -- `unfinished` counts it, but before the fix the
+  // auto-run effect did not check `unfinished` at all, so it fired the
+  // request anyway and the screen showed a raw `invalid_where` under the
+  // chart instead of the warning it already had the data to show.
+  it('does not auto-run when a stale predicate survives seeding as an unfinished row', async () => {
+    const client = renderAt('/trends/3', {
+      trendReport: vi.fn(async () =>
+        reportFixture({
+          stale: true,
+          where: [{ property: 'plan', operator: 'not-a-real-op', value: 'x' }],
+        }),
+      ),
+    })
+    await screen.findByTestId('trend-stale')
+    expect(await screen.findByText(/1 filter is unfinished/i)).toBeInTheDocument()
+    expect(client.stats).not.toHaveBeenCalled()
+  })
+
+  // N2 from the second-round review: the test above reaches
+  // `seededUnfinished === 0` only through a `stale: true` fixture, where
+  // `!r.stale` already blocks the run on its own -- removing the
+  // unfinished-count term left the whole suite green. This pins it
+  // directly: a report that is NOT stale, with a predicate that survives
+  // `looksLikePredicate` (so it becomes a row) but fails core's full
+  // schema (so it counts as unfinished), must still not auto-run.
+  it('does not auto-run when a non-stale report seeds an unfinished predicate row', async () => {
+    const client = renderAt('/trends/3', {
+      trendReport: vi.fn(async () =>
+        reportFixture({
+          stale: false,
+          where: [{ property: 'plan', operator: 'not-a-real-op', value: 'x' }],
+        }),
+      ),
+    })
+    expect(await screen.findByText(/1 filter is unfinished/i)).toBeInTheDocument()
+    expect(client.stats).not.toHaveBeenCalled()
+    // Not relying on staleness at all -- confirms this fixture takes the
+    // unfinished-count path, not the staleness path the test above covers.
+    expect(screen.queryByTestId('trend-stale')).not.toBeInTheDocument()
+  })
+
+  // F1 -- THE ONE THAT MATTERS. An element that fails `looksLikePredicate`
+  // itself (no `operator` at all) is dropped by `whereFromStored` before it
+  // ever becomes a row -- nothing on screen looks unfinished, so `unfinished`
+  // stays 0. Before the fix, `canSave` was therefore true, and pressing Save
+  // would have PATCHed `where: []` over the report's actually-stored
+  // predicates -- the exact data loss this exists to prevent.
+  //
+  // No `patchTrendReport` assertion here: the button being disabled already
+  // means clicking it fires no handler at all (a disabled native button
+  // dispatches no click), so asserting the mock was never called would be
+  // vacuous on top of `toBeDisabled()` -- second-round review finding.
+  it('disables Save when a stale predicate is dropped entirely, not only when it survives as a row', async () => {
+    renderAt('/trends/3', {
+      trendReport: vi.fn(async () => reportFixture({ stale: true, where: [{ nonsense: true }] })),
+    })
+    await screen.findByTestId('trend-stale')
+    // The positive assertion first: Save is disabled by the same load
+    // effect that set the banner, so it is a real signal.
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+    // Nothing visibly incomplete -- the predicate never became a row.
+    expect(screen.queryByText(/unfinished/i)).not.toBeInTheDocument()
+  })
+
+  // The gate must not stick forever once the operator has actually rebuilt
+  // the filter -- editing IS rebuilding, whether or not the edit happens to
+  // repair the exact element that failed to parse. Add-then-Remove nets the
+  // same empty array the filter already held, but it is now a deliberate
+  // edit rather than the load effect's own silent narrowing.
+  it('re-enables Save once the operator edits the filter that lost a predicate', async () => {
+    renderAt('/trends/3', {
+      trendReport: vi.fn(async () => reportFixture({ stale: true, where: [{ nonsense: true }] })),
+    })
+    await screen.findByTestId('trend-stale')
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+    const whereBlock = await screen.findByTestId('trend-where-where')
+    await userEvent.click(within(whereBlock).getByRole('button', { name: /add predicate/i }))
+    await userEvent.click(within(whereBlock).getByRole('button', { name: /remove/i }))
+    expect(screen.queryByText(/unfinished/i)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeEnabled()
+  })
+
+  // N3 from the second-round review: `update`'s `if ('where' in patch)`
+  // guard was reachable only by tests that either never call `update` at
+  // all, or call it with `where` specifically -- nothing pinned that a
+  // DIFFERENT field left `lostPredicates` alone. That guard is the whole
+  // of this journey's guarantee after load time: an operator who changes
+  // the interval (or the range) on a stale report they never touched the
+  // filter on must not have Save quietly re-enabled underneath them.
+  it('does not lift the Save block when the operator changes the interval rather than the filter', async () => {
+    const client = renderAt('/trends/3', {
+      trendReport: vi.fn(async () => reportFixture({ stale: true, where: [{ nonsense: true }] })),
+    })
+    await screen.findByTestId('trend-stale')
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: /resolution/i }), '1h')
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+    expect(client.patchTrendReport).not.toHaveBeenCalled()
   })
 })

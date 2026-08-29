@@ -2309,12 +2309,20 @@ does not do; it is the obvious next step rather than a decision against it.
 
 ### Saved trends
 
-A saved trend is a named, stored definition — an event, an interval and an
-optional breakdown — that the Trends screen creates and reopens. There is no
-`/run` endpoint: saving one does not add a second way to answer it, only a
-place to keep the question. Running a saved trend, from the screen or by
-hand, is the same `GET /v1/events/stats` call above with its stored fields
-as the query.
+A saved trend is a named, stored definition — an event, an interval, an
+optional breakdown and a `where` filter — that the Trends screen creates and
+reopens. There is no `/run` endpoint: saving one does not add a second way to
+answer it, only a place to keep the question. Running a saved trend, from the
+screen or by hand, is the same `GET /v1/events/stats` call above with its
+stored fields as the query.
+
+A saved trend's `where` clauses are parsed against the same grammar the run endpoint uses.
+A row this build cannot parse comes back with `"stale": true` rather than failing the whole
+list — the same behaviour a saved retention report has. Every row also carries
+`definition_version`, re-stamped to the current version whenever its stored `where` is
+rewritten — the same field `retention_reports` already has, for the same reason: it is what
+a future grammar change could filter on to find every row still on the old one, without
+parsing each row's JSON.
 
 ```sh
 curl -X POST http://localhost:3000/v1/trends \
@@ -2588,7 +2596,8 @@ is present on a bucket **only** when grouping was requested:
 | `until` | ISO 8601 datetime, defaults to now |
 | `interval` | `1m`, `1h`, or `1d`; default `1h` |
 | `event` | one event name, at most 128 characters |
-| `group_by` | only `event_name` is accepted |
+| `group_by` | `event_name`, `attribute:<column>`, or `property:<key>` |
+| `where` | a JSON array of predicates, at most 10; see **Filtering** below |
 
 `event` narrows the aggregate to a single event name, exactly as it does on
 `GET /v1/events`, and works with or without `group_by`. It is applied before
@@ -2615,6 +2624,29 @@ else would otherwise be an unconditional `400`:
 | `1d` | 7 days |
 
 `401` for a missing or invalid server key, on both endpoints.
+
+#### Filtering
+
+`where` narrows **which occurrences** of the event are counted. It carries the same
+predicate grammar a segment behaviour and a funnel step use, as a JSON array:
+
+```sh
+curl -sG -H "x-lyraflow-server-key: $KEY" \
+  --data-urlencode 'event=$page' \
+  --data-urlencode 'interval=1d' \
+  --data-urlencode 'where=[{"property":"path","operator":"=","value":"/register"}]' \
+  "http://localhost:3000/v1/events/stats"
+```
+
+Without it, a site whose every navigation is a `$page` can only chart "any page viewed",
+so `$page where path = /register` and `$page where path = /` are the same chart.
+
+At most **10** predicates, ANDed. `{"source":"attribute","attribute":"utm_source",…}`
+filters on a column of the event; the default reads the event's own `properties`, from
+both bags, so a numeric property filters by value rather than reading as unset. Anything
+that is not a valid predicate list is a `400 invalid_where` rather than a silently wider
+answer. `where` is independent of `event`: with no event name it asks the question of
+every event.
 
 ## Privacy: deletion and export
 

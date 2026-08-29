@@ -20,13 +20,15 @@
 -- definition that no longer exists. These lists render the definition itself,
 -- which is derived from the row being displayed and cannot go stale.
 --
--- `trend_reports` HAS NO `definition_version` AND `retention_reports` DOES.
--- 012 justifies that column as "what a future migration filters on. Finding
--- every v1 definition must not require parsing every row" -- an argument that
--- holds only for a definition that must be PARSED. A trend's definition is
--- three scalar columns; a future change to it is an ALTER TABLE and finding
--- affected rows is a WHERE on a real column. A retention report's start_where
--- and return_where are JSON in the segment grammar, which does version.
+-- `trend_reports` HAD NO `definition_version` AND `retention_reports` DOES.
+-- The argument was that 012 justifies the column as "what a future migration
+-- filters on. Finding every v1 definition must not require parsing every
+-- row" -- which holds only for a definition that must be PARSED, and a
+-- trend's was three scalar columns. THAT IS NO LONGER TRUE: 021 adds
+-- `event_where` (the segment grammar, JSON, versioned) and with it
+-- `definition_version`. This paragraph is kept rather than deleted because
+-- the reasoning is still the right test to apply; it is the premise about
+-- trends that changed. See 021_trend_predicates.sql.
 --
 -- `segment_id` carries NO foreign key, for 012's reasons exactly. CASCADE
 -- would destroy every report built on a segment as a side effect of tidying
