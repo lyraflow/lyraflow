@@ -38,6 +38,18 @@ describe('readRetentionParams', () => {
     expect(read(`periods=${MAX_PERIODS + 1}`).periods).toBe(DEFAULTS.periods)
     expect(read(`periods=${MAX_PERIODS}`).periods).toBe(MAX_PERIODS)
   })
+
+  // M4 from the whole-branch review: a bare `Number()` coerces shapes that
+  // must not resolve to a segment id -- `0x10` to 16, `1e3` to 1000. Both
+  // are exactly as valid-looking to `Number.isSafeInteger` as any other
+  // digit string, which is why the fix checks the shape first.
+  it('refuses hex and exponent forms, matching numeric-id.ts’s strictness', () => {
+    expect(read('segment=0x10').segmentId).toBeNull()
+    expect(read('segment=1e3').segmentId).toBeNull()
+    // The plain digit string those two would otherwise have coerced from
+    // still works.
+    expect(read('segment=42').segmentId).toBe(42)
+  })
 })
 
 describe('writeRetentionParams', () => {

@@ -91,6 +91,38 @@ one fix is contained in 0.3.0.
   the icon says which of those links lands on a profile rather than on the
   page explaining that a "nothing to show" means one of four things.
 
+- **Trends and retention grids can be saved and reopened**, the same way a
+  funnel already could. `GET`/`POST /v1/trends` and `GET`/`PATCH`/`DELETE
+  /v1/trends/:id` store a name, an event, an interval and a breakdown; the
+  same four verbs on `/v1/retention-reports` store a name, the two events,
+  their conditions, a granularity, a period count and an optional segment.
+  Neither adds a `/run` endpoint — a saved trend is answered by the same
+  `GET /v1/events/stats` call the ad hoc chart already used, and a saved
+  retention report by the same `POST /v1/reports/retention`, with the
+  stored fields filled in. Both screens gain a list view and a Save
+  control, matching Funnels and Segments.
+
+  **The range is deliberately not part of what's saved.** A trend or a
+  retention report stores the question, not the window it was asked over,
+  so reopening one runs it over whatever range the screen currently has,
+  never the one it was created with. Reopening a retention report into a
+  range and granularity that would together exceed 60 cohorts disables Run
+  and computes nothing — the same ceiling and warning an ad hoc grid is
+  already held to. A stale report — one whose stored filters no longer
+  parse — skips its automatic run too, but leaves Run enabled, so the
+  operator can still run the degraded version rather than being locked out
+  of it.
+
+### Changed
+
+- **`/trends` and `/retention` are now the saved-report lists**; the
+  builders moved to `/trends/new` and `/retention/new`. A bookmark or shared
+  link built before this task — naming an event, a granularity, a `where`
+  clause and so on — still opens the exact chart or grid it used to: it is
+  redirected to the `…/new` builder with its search string carried across
+  unchanged. A bare `/trends` or `/retention` — no definition in the query
+  string — opens the list.
+
 ## 0.11.0 — 2026-08-28
 
 ### Added

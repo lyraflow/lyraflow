@@ -1,3 +1,21 @@
+// `INTERVALS`/`Interval` come off core's `trends/ast.js` DEEP path, not the
+// top-level barrel (`@lyraflow/core`). This is a VALUE import -- `INTERVALS`
+// is used at runtime, not just as a type -- and core's barrel re-exports
+// `auth/password.ts`, which does `import { promisify } from 'node:util'` and
+// uses `scrypt`. A value import from the barrel pulls that Node-only module
+// into this package's browser bundle, where `util.promisify` does not
+// exist; the bundle throws while evaluating and the admin app never renders
+// (`build-output.test.ts` catches exactly this). The deep path avoids the
+// barrel entirely, so it carries only `trends/ast.js` and nothing else core
+// exports. `packages/core/package.json`'s `exports` map lists this path
+// explicitly (`packages/ui/src/api/types.ts` carries the same note for
+// `Interval`/`Granularity`). This used to be a third, hand-written copy of
+// the same four strings -- Task 2's review found it restated a second time
+// in a server route and moved it into core; this was the copy left over,
+// and core is now the single TypeScript source of truth.
+// `020_saved_reports.sql`'s CHECK constraint is the one copy that cannot be
+// removed, because SQL cannot import a TypeScript module.
+import { INTERVALS, type Interval } from '@lyraflow/core/trends/ast.js'
 import {
   DEFAULT_RANGE,
   type RangeChoice,
@@ -6,11 +24,14 @@ import {
   writeRange,
 } from '../shared/range.js'
 
-export const INTERVALS = ['1m', '1h', '1d', '1w'] as const
+export { INTERVALS }
 
 /** Milliseconds per bucket, keyed like `INTERVALS`. The server's own ceiling
- * is on BUCKETS, so this is what turns a range into that number. */
-export const INTERVAL_MS: Record<(typeof INTERVALS)[number], number> = {
+ * is on BUCKETS, so this is what turns a range into that number. This stays
+ * here rather than moving to core alongside `INTERVALS` -- it is a UI
+ * concern (turning a range choice into a request-shape decision), and core
+ * has no business knowing how long a millisecond-scale bucket is. */
+export const INTERVAL_MS: Record<Interval, number> = {
   '1m': 60_000,
   '1h': 3_600_000,
   '1d': 86_400_000,
@@ -22,7 +43,6 @@ export const INTERVAL_MS: Record<(typeof INTERVALS)[number], number> = {
  * it is to refuse a combination here rather than send a request the server
  * will refuse anyway. */
 export const MAX_BUCKETS = 1000
-export type Interval = (typeof INTERVALS)[number]
 
 export const BREAKDOWN_SOURCES = ['none', 'event_name', 'attribute', 'property'] as const
 export type BreakdownSource = (typeof BREAKDOWN_SOURCES)[number]
@@ -115,4 +135,61 @@ export function groupByOf(p: TrendParams): string | undefined {
 /** True when a breakdown was chosen but its field is still empty. */
 export function breakdownIncomplete(p: TrendParams): boolean {
   return (p.source === 'attribute' || p.source === 'property') && p.field === ''
+}
+
+/**
+ * The inverse of `groupByOf`: turns a stored trend's `group_by` wire value
+ * back into the `source`/`field` pair the controls understand. Used only
+ * when seeding a saved trend's URL from its stored definition
+ * (`Trends.tsx`) -- `TrendReports.tsx`'s `groupBySummary` needed only the
+ * field half, for a one-line display, and stayed a narrower, one-way read
+ * rather than growing into this.
+ *
+ * A `group_by` this cannot parse falls back to `none` rather than throwing.
+ * Decision 2 in the saved-reports spec is explicit that a trend's
+ * definition cannot fail to parse -- `group_by` is free text the report
+ * endpoint accepts or rejects on its own terms, not a grammar with its own
+ * `stale` flag the way retention's `where` clauses have -- so this is a
+ * defensive fallback for a row written by hand or by a future version of
+ * this code, not a case the product is expected to reach.
+ */
+export function sourceAndFieldFromGroupBy(groupBy: string | null): {
+  source: BreakdownSource
+  field: string
+} {
+  if (groupBy === null) return { source: 'none', field: '' }
+  if (groupBy === 'event_name') return { source: 'event_name', field: '' }
+  const i = groupBy.indexOf(':')
+  if (i < 0) return { source: 'none', field: '' }
+  const source = groupBy.slice(0, i)
+  const field = groupBy.slice(i + 1)
+  if ((source === 'attribute' || source === 'property') && field !== '') {
+    return { source, field }
+  }
+  return { source: 'none', field: '' }
+}
+
+/** The URL keys that make up a trend's DEFINITION -- everything a saved
+ * trend seeds from storage. Deliberately excludes `range`/`from`/`to`:
+ * decision 1 in the saved-reports spec is that the range is never stored,
+ * so it is not part of what "already carries a trend parameter" means here
+ * -- a link that only pins a range (`?range=30d`) still seeds its event,
+ * interval and breakdown from the stored definition, and a link that pins
+ * an explicit interval keeps that interval rather than the stored one. */
+const DEFINITION_KEYS = ['event', 'interval', 'source', 'field'] as const
+
+/**
+ * True when the URL already carries some part of a trend's definition --
+ * the gate `Trends.tsx` uses to decide whether opening a saved report may
+ * seed the URL from the stored row at all.
+ *
+ * All-or-nothing over the four keys, not seeded field-by-field: a partial
+ * seed would make the definition on screen a splice of two sources (the
+ * URL for whichever fields happened to be present, storage for the rest),
+ * which is exactly the second source of truth this screen is built to
+ * avoid. A shared link that already names an event, interval or breakdown
+ * is trusted whole; a link that names none of them is seeded whole.
+ */
+export function hasTrendDefinitionParams(search: URLSearchParams): boolean {
+  return DEFINITION_KEYS.some((key) => search.has(key))
 }

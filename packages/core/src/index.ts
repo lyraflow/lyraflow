@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 19
+export const SCHEMA_VERSION = 20
 
 export { hashPassword, verifyPassword } from './auth/password.js'
 export { ProjectExistsError, createProject, slugify } from './projects/create.js'
@@ -35,6 +35,7 @@ export * from './funnels/validate.js'
 export * from './funnels/levels.js'
 export * from './funnels/compile.js'
 export * from './retention/ast.js'
+export * from './trends/ast.js'
 export * from './retention/compile.js'
 export { funnelSpine } from './funnels/spine.js'
 export type { FunnelSpine, StepPlacement } from './funnels/spine.js'

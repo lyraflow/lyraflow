@@ -34,7 +34,9 @@ import { ProjectDeletionStore } from './project/deletion-store.js'
 import { purgeProject } from './project/purge.js'
 import { registerProjectRoutes } from './project/routes.js'
 import { ProjectPurgeWorker } from './project/worker.js'
+import { registerRetentionReportRoutes } from './reports/retention-routes.js'
 import { registerReportRoutes } from './reports/routes.js'
+import { registerTrendRoutes } from './reports/trend-routes.js'
 import { logDroppedPartition } from './retention/logging.js'
 import { RetentionStore } from './retention/store.js'
 import { RetentionWorker } from './retention/worker.js'
@@ -400,6 +402,15 @@ export function buildApp(input: {
     pg,
     database: config.ch.database,
   })
+  // Stored, not ad hoc, and needs neither `ch` nor `database` -- a saved
+  // trend definition is three scalar Postgres columns with nothing to
+  // compile or run here (see `020_saved_reports.sql`'s own comment on why
+  // there is no cached snapshot to invalidate either).
+  registerTrendRoutes(app, { authenticate, pg })
+  // Stored, same as trends and for the same reason -- see
+  // `retention-store.ts`'s own docstring for why `segment_id` carries no
+  // foreign key and `stale` is computed on every read rather than thrown.
+  registerRetentionReportRoutes(app, { authenticate, pg })
   // Ad hoc, unstored, and sharing the funnel routes' dependencies exactly --
   // a retention grid scans the same table, resolves the same people and
   // applies the same suppression, so a second set of ceilings here would be

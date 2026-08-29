@@ -38,9 +38,12 @@ under Docker, and nothing leaves it.
 > condition has — comparison, text matching, presence, true/false, relative
 > date. What it will not do is combine conditions, look for a value across
 > every trait at once, or list **everyone** without naming a condition at all.
-> Journeys, dashboards and path analysis are still ahead, and neither report
-> can be saved — each lives in its URL. See [Web UI](#web-ui) for exactly what
-> exists and what does not.
+> Journeys, dashboards and path analysis are still ahead. Trends and
+> retention grids can now be saved and reopened, the same way a funnel
+> already could — but the range one ran over is not part of what gets
+> saved, so reopening a report runs the stored question over whatever
+> range is currently on screen, never the range it was created with. See
+> [Web UI](#web-ui) for exactly what exists and what does not.
 
 ## What it is good at
 
@@ -385,14 +388,18 @@ screens, reachable from the sidebar:
   chart above (see *Who reached a step, or stopped there* under Funnels below).
 
 - **Trends** — how many of an event over time, optionally split by an event
-  column or by a key from its own properties. Like Retention it holds its
-  definition in the URL and runs on demand rather than on render. A split is
-  drawn as **small multiples** — one panel per value, all on one shared scale,
-  which the screen states — rather than as overlaid coloured lines: Lyraflow's
-  palette is a single copper ramp built for *ordinal* data like funnel stages,
-  and a breakdown's values have no order, so there is no honest colour to give
-  them. Ten panels at most; everything smaller is summed into `(other)`, and
-  the screen says how many values that was so the panels still add up. Every
+  column or by a key from its own properties. It runs on demand rather than
+  on render, and it can be saved: create one, give it a name, and reopen it
+  later from the Trends list, the same as a funnel. What is saved is the
+  event, the interval and the breakdown — not the range, so reopening a
+  trend runs it over whatever range the screen currently has, never the one
+  it was saved with. A split is drawn as **small multiples** — one panel per
+  value, all on one shared scale, which the screen states — rather than as
+  overlaid coloured lines: Lyraflow's palette is a single copper ramp built
+  for *ordinal* data like funnel stages, and a breakdown's values have no
+  order, so there is no honest colour to give them. Ten panels at most;
+  everything smaller is summed into `(other)`, and the screen says how many
+  values that was so the panels still add up. Every
   point is marked, and hovering one reads out its bucket and its value in
   **every** panel at once — the pointer picks a moment and each series says
   what it was doing then.
@@ -408,9 +415,18 @@ screens, reachable from the sidebar:
   visible colour at all, so shades compare within one grid and never between
   two. A period that had not finished when the grid ran shows a dash
   rather than 0% — with a line underneath saying how many did, because a dash
-  read as a zero is the one way this chart misleads. The whole definition
-  lives in the URL, so a grid is shareable as a link and there is nothing to
-  save.
+  read as a zero is the one way this chart misleads.
+
+  It can be saved too: create one, name it, and reopen it later from the
+  Retention list. What is saved is the two events, their conditions, the
+  granularity, the period count and the segment — not the range, so
+  reopening a report runs it over whatever range the screen currently has.
+  Two things can stop that run before it starts. A range and granularity
+  that would together exceed 60 cohorts disables Run and computes nothing —
+  the same ceiling and warning a fresh grid gets. A report whose stored
+  filters no longer parse says so and skips the automatic run too, but
+  leaves Run enabled, so the operator can still run the degraded version
+  knowingly rather than being locked out of it.
 
 - **Segments** — build a filter tree in the browser: `and`/`or` groups, traits,
   context, lifecycle bounds, and behaviours with their own `where` predicates.
@@ -2233,6 +2249,12 @@ with a breakdown added rather than a second endpoint — so the bucket cap, the
 `event_id` deduplication and the deletion boundary are the ones that route
 already enforced.
 
+A trend can also be a **saved object**, named and reopened later the same
+way a funnel is — see [Saved trends](#saved-trends) below. Saving one does
+not change how it runs: a saved trend is still answered by this same
+`GET /v1/events/stats` call, with its stored `event`, `interval` and
+`group_by` filled in.
+
 ### Splitting
 
 `group_by` takes three forms:
@@ -2285,6 +2307,42 @@ There is **no breakdown by trait** — only by event column and event property.
 A trait lives on the person rather than the event and needs a join this route
 does not do; it is the obvious next step rather than a decision against it.
 
+### Saved trends
+
+A saved trend is a named, stored definition — an event, an interval and an
+optional breakdown — that the Trends screen creates and reopens. There is no
+`/run` endpoint: saving one does not add a second way to answer it, only a
+place to keep the question. Running a saved trend, from the screen or by
+hand, is the same `GET /v1/events/stats` call above with its stored fields
+as the query.
+
+```sh
+curl -X POST http://localhost:3000/v1/trends \
+  -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY" \
+  -H 'content-type: application/json' \
+  -d '{ "name": "Checkouts by plan", "event": "checkout", "interval": "1d",
+        "group_by": "property:plan" }'
+```
+
+| Method & path | Does |
+| --- | --- |
+| `GET /v1/trends` | List every saved trend in the project |
+| `POST /v1/trends` | Create one |
+| `GET /v1/trends/:id` | Read one |
+| `PATCH /v1/trends/:id` | Rename it, or change its event, interval or breakdown |
+| `DELETE /v1/trends/:id` | Delete it — `204` |
+
+A duplicate name within the same project is a `409`. A non-numeric `:id` is a
+`400` naming `invalid_trend_id`; an id that does not exist, or belongs to
+another project, is a `404` — never a `403`, which would confirm the id
+exists.
+
+**What is not stored is the range.** `since`, `until` and every relative
+preset live only in the Trends screen's own URL, the same way a funnel never
+stores `since`/`until` either — only its `window_seconds`, a duration rather
+than a range. Reopening a saved trend runs it over whatever range the screen
+currently has, not the one it was created with.
+
 ## Retention
 
 *Of the people who did one thing in a period, how many came back and did
@@ -2318,6 +2376,12 @@ reading one: a retention grid that reported unfinished periods as `0` would
 show a collapse in its newest cohorts, in exactly the corner a reader scans
 for a trend. `computed_at` says when "not yet" was decided; the same request
 run later fills those cells in.
+
+A grid can also be a **saved object**, named and reopened later the same
+way a funnel is — see [Saved retention reports](#saved-retention-reports)
+below. Saving one does not change how it runs: a saved report is still
+answered by this same `POST /v1/reports/retention` call, with its stored
+fields as the body.
 
 ### What you choose
 
@@ -2369,10 +2433,58 @@ A range wider than **60 cohorts** is refused rather than truncated — a grid
 silently missing its oldest rows is a chart with a trend that is not in the
 data. `periods` is capped at 26.
 
-There is **no breakdown** — you cannot split a grid by campaign or country —
-and **no saved retention reports**: a grid is two event names, a granularity
-and a range, so the Web UI keeps it in the URL and the screen is shareable as
-a link. Nothing is cached; every run is a real scan.
+There is **no breakdown** — you cannot split a grid by campaign or country.
+Nothing is cached; every run is a real scan, saved or not.
+
+### Saved retention reports
+
+A saved retention report is a named, stored definition — the two events,
+their conditions, the granularity, the period count and an optional segment
+— that the Retention screen creates and reopens. There is no `/run`
+endpoint here either: running a saved report, from the screen or by hand, is
+the same `POST /v1/reports/retention` call above with its stored fields as
+the body.
+
+```sh
+curl -X POST http://localhost:3000/v1/retention-reports \
+  -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY" \
+  -H 'content-type: application/json' \
+  -d '{ "name": "Signup to first project", "start_event": "signed_up",
+        "return_event": "project_created", "granularity": "week", "periods": 8 }'
+```
+
+| Method & path | Does |
+| --- | --- |
+| `GET /v1/retention-reports` | List every saved retention report in the project |
+| `POST /v1/retention-reports` | Create one |
+| `GET /v1/retention-reports/:id` | Read one |
+| `PATCH /v1/retention-reports/:id` | Rename it, or change any of the fields above |
+| `DELETE /v1/retention-reports/:id` | Delete it — `204` |
+
+A duplicate name within the same project is a `409`. A non-numeric `:id` is a
+`400` naming `invalid_retention_report_id`; an id that does not exist, or
+belongs to another project, is a `404`.
+
+**A stored `where` list that no longer parses is marked, not hidden.**
+`stale` is on every row — `true` when a report's `start_where` or
+`return_where` no longer parse under today's grammar, `false` otherwise —
+and no route fails a report out for it: a row written by an older build
+stays listed, readable, renameable and deletable even after the grammar
+around it has moved on. The Retention screen reads the same field: opening
+a stale report skips its automatic run and says *"The filters saved with
+this report no longer parse, so it cannot be reproduced as saved"* — but
+leaves Run enabled, so the operator can still run the degraded version
+rather than being locked out of it.
+
+**What is not stored is the range**, the same as a saved trend. Reopening a
+report runs it over whatever range the screen currently has, and that range
+— combined with the stored granularity — can land over the same 60-cohort
+ceiling an ad hoc grid is held to. When it does, nothing is computed: Run is
+disabled and the screen names the cohort count and the limit, the same
+warning a fresh grid gets for the same reason. That is a different case from
+the `null` cells above — those come from a grid that *did* run, on periods
+too recent to have closed yet; a report reopened over too wide a range, or
+too fine a granularity, never runs at all.
 
 ## Reading events
 

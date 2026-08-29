@@ -41,6 +41,13 @@ function renderAt(path: string) {
     meta: vi.fn(async () => ({ version: '0.10.0' })),
     funnels: vi.fn(async () => []),
     segments: vi.fn(async () => []),
+    trendReports: vi.fn(async () => []),
+    retentionReports: vi.fn(async () => []),
+    /* `Trends` (now reachable at /trends/new) renders `EventCombobox`
+     * unconditionally, which fetches event-name suggestions on mount --
+     * without this, the /trends/new test would hit an unstubbed method
+     * inside a timer callback and fail for a reason unrelated to routing. */
+    schemaEvents: vi.fn(async () => []),
   } as never
   return render(
     <ProjectProvider projects={PROJECTS} initialId={1}>
@@ -137,6 +144,100 @@ describe('AppRouter', () => {
     renderAt('/segments')
     const link = await screen.findByRole('link', { name: /segments/i })
     expect(link).toHaveAttribute('aria-current', 'page')
+  })
+
+  // Task 5: `/trends` used to render the URL-driven builder/viewer directly
+  // (`Trends`) -- it now renders the saved-trends list (`TrendReports`)
+  // instead, with `Trends` itself moved to `/trends/new` and `/trends/:id`.
+  // Both screens share the "Trends" heading, so the heading alone cannot
+  // tell them apart -- the list's own "New trend" link and the builder's
+  // "Run" control are what distinguish them, checked as a pair in each
+  // direction below (same shape as funnels' and segments' own resolution
+  // guards: a positive alongside a negative, so a component that renders
+  // *something* at both destinations can't pass by accident).
+  it('resolves /trends to the saved-trends list, not the builder', async () => {
+    renderAt('/trends')
+    expect(await screen.findByRole('heading', { name: /^trends$/i })).toBeInTheDocument()
+    expect(await screen.findByRole('link', { name: /new trend/i })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^run$/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: /accepted/i })).not.toBeInTheDocument()
+  })
+
+  it('marks Trends as current at /trends', async () => {
+    renderAt('/trends')
+    const link = await screen.findByRole('link', { name: /trends/i })
+    expect(link).toHaveAttribute('aria-current', 'page')
+  })
+
+  // `/trends/new` still resolves to the URL-driven screen -- proves the
+  // route was added and points at `Trends`, not left to fall through to the
+  // list or the catch-all.
+  it('resolves /trends/new to the trend builder, not the list', async () => {
+    renderAt('/trends/new')
+    expect(await screen.findByRole('heading', { name: /^trends$/i })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /^run$/i })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /new trend/i })).not.toBeInTheDocument()
+  })
+
+  // I1 from the whole-branch review: `/trends` used to BE the builder, so a
+  // bookmark or shared link built before this task names an event, an
+  // interval, a breakdown -- straight in the query string. Repointing
+  // `/trends` at the list without teaching it to read that string would
+  // open it empty, with no trace of what was asked. `TrendsEntry` forwards
+  // a definition-carrying URL to the builder instead, search intact, so
+  // the link still answers the question it used to.
+  it('forwards a definition-carrying /trends to the builder, search intact', async () => {
+    renderAt('/trends?event=signup&interval=1d')
+    expect(await screen.findByRole('button', { name: /^run$/i })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /new trend/i })).not.toBeInTheDocument()
+    expect(window.location.pathname).toBe('/trends/new')
+    expect(window.location.search).toBe('?event=signup&interval=1d')
+  })
+
+  // Task 7: `/retention` used to render the URL-driven builder/viewer
+  // directly (`Retention`) -- it now renders the saved-retention-reports
+  // list (`RetentionReports`) instead, with `Retention` itself moved to
+  // `/retention/new` and `/retention/:id`. Both screens share the
+  // "Retention" heading, so the heading alone cannot tell them apart -- the
+  // list's own "New retention report" link and the builder's "Run" control
+  // are what distinguish them, checked as a pair in each direction below,
+  // same shape as the trends guard above.
+  it('resolves /retention to the saved-retention-reports list, not the builder', async () => {
+    renderAt('/retention')
+    expect(await screen.findByRole('heading', { name: /^retention$/i })).toBeInTheDocument()
+    expect(await screen.findByRole('link', { name: /new retention report/i })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^run$/i })).not.toBeInTheDocument()
+  })
+
+  it('marks Retention as current at /retention', async () => {
+    renderAt('/retention')
+    // Anchored, unlike the other nav-current checks above: the page's own
+    // "New retention report" link also contains the substring "retention",
+    // so a bare /retention/i here matches two elements and
+    // `findByRole` throws rather than picking one.
+    const link = await screen.findByRole('link', { name: /^retention$/i })
+    expect(link).toHaveAttribute('aria-current', 'page')
+  })
+
+  // `/retention/new` still resolves to the URL-driven screen -- proves the
+  // route was added and points at `Retention`, not left to fall through to
+  // the list or the catch-all.
+  it('resolves /retention/new to the retention builder, not the list', async () => {
+    renderAt('/retention/new')
+    expect(await screen.findByRole('heading', { name: /^retention$/i })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /^run$/i })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /new retention report/i })).not.toBeInTheDocument()
+  })
+
+  // I1's counterpart for /retention -- see the matching /trends test above
+  // for why. A pre-existing bookmark like this one named the two events, the
+  // granularity and a `where` clause; the whole point is that it still does.
+  it('forwards a definition-carrying /retention to the builder, search intact', async () => {
+    renderAt('/retention?start=signed_up&return=project_created&granularity=day')
+    expect(await screen.findByRole('button', { name: /^run$/i })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /new retention report/i })).not.toBeInTheDocument()
+    expect(window.location.pathname).toBe('/retention/new')
+    expect(window.location.search).toBe('?start=signed_up&return=project_created&granularity=day')
   })
 
   // Same resolution guard as Funnels' and Segments' own pair above, for the

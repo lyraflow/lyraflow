@@ -1,8 +1,10 @@
-import { useCallback, useState } from 'react'
-import { useSearchParams } from 'react-router'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
+import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
-import type { RetentionResult } from '../api/types.js'
+import type { RetentionReportInput, RetentionResult } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
+import { ROUTES, retentionReportPath } from '../app/Router.js'
 import { EventCombobox } from '../components/EventCombobox.js'
 import { Button } from '../components/ui/button.js'
 import { Input } from '../components/ui/input.js'
@@ -15,15 +17,59 @@ import {
   MAX_PERIODS,
   type RetentionParams,
   cohortCount,
+  hasRetentionDefinitionParams,
   incompletePredicates,
   readRetentionParams,
   toRequest,
   tooManyCohorts,
+  whereFromStored,
   writeRetentionParams,
 } from './retention/params.js'
 import { WherePredicates } from './segments/WherePredicates.js'
 import { RangePicker } from './shared/RangePicker.js'
-import { rangeIncomplete } from './shared/range.js'
+import { rangeIncomplete, readRange } from './shared/range.js'
+
+/** `POST /v1/retention-reports` and `PATCH /v1/retention-reports/:id`'s
+ * body -- always these seven fields, never the range. The range is not a
+ * column (decision 1 in the saved-reports spec): it is this visit's
+ * question, not part of what a retention report IS, and sending it here
+ * would be the first step toward storing it despite the schema having
+ * nowhere to put it. `segment_id` is round-tripped whole -- this screen has
+ * no picker for it, so it is whatever the URL is currently carrying (either
+ * nothing, or a stored report's restriction seeded on load). */
+function reportBody(p: RetentionParams, name: string): RetentionReportInput {
+  return {
+    name,
+    start_event: p.start,
+    return_event: p.return,
+    start_where: p.startWhere,
+    return_where: p.returnWhere,
+    granularity: p.granularity,
+    periods: p.periods,
+    segment_id: p.segmentId,
+  }
+}
+
+/**
+ * What `handleSave` hands `navigate` on CREATE, and what the load effect
+ * below reads back on the far side of it.
+ *
+ * IMPORTANT from the whole-branch review: `/retention/new` and
+ * `/retention/:id` carry different `key`s in `Router.tsx`, so a
+ * create-then-navigate is a full remount -- `result` starts back at `null`,
+ * and the load effect (which fires whenever `reportId` newly names a
+ * report) would otherwise call `run()` again -- a full ClickHouse cohort
+ * scan -- for a grid already sitting on screen a moment before. This
+ * screen's own module docstring says "a grid is a real scan, so it runs
+ * when asked"; nobody asked for a second one just because Save happened to
+ * remount the screen. Carrying the just-computed result through router
+ * state -- rather than, say, skipping the load effect outright -- means the
+ * freshly-created report's own address renders with its numbers
+ * immediately, with no re-fetch and no flash of "nothing here yet".
+ */
+interface JustSavedState {
+  result: RetentionResult
+}
 
 /**
  * Retention: of the people who did X in one period, how many did Y in the
@@ -41,16 +87,111 @@ import { rangeIncomplete } from './shared/range.js'
  * definition sitting under the controls of another look entirely normal and
  * are a wrong answer given confidently. So the result is cleared the moment
  * the definition it was computed from stops matching the controls.
+ *
+ * Renders at both `/retention/new` and `/retention/:id` (`Router.tsx`) --
+ * the SAME component, still entirely URL-as-state. An `:id` adds exactly
+ * two things on top of what was already here: seeding the URL from the
+ * stored definition on arrival (this doesn't change the URL if it already
+ * carries one), and a Save control that creates or updates the stored row.
+ * Nothing about how the controls, the run, or the warnings work changes
+ * either way -- see the saved-reports spec, decision 6, "the screens change
+ * as little as possible."
  */
 export function Retention(props: { client: ApiClient; onUnauthorized?: () => void }) {
   const { client, onUnauthorized } = props
   const { activeId } = useProject()
+  const navigate = useNavigate()
+  const location = useLocation()
+  const routeParams = useParams<{ id: string }>()
+  const rawId = routeParams.id == null ? null : Number(routeParams.id)
+  const reportId = rawId != null && Number.isSafeInteger(rawId) ? rawId : null
+
   const [search, setSearch] = useSearchParams()
   const params = readRetentionParams(search)
 
-  const [result, setResult] = useState<RetentionResult | null>(null)
+  // Seeded from `JustSavedState` when this render is the remount a CREATE's
+  // `navigate` just produced -- see that type's own comment. `null` in
+  // every other case, exactly as before.
+  const [result, setResult] = useState<RetentionResult | null>(
+    () => (location.state as JustSavedState | null)?.result ?? null,
+  )
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  const [name, setName] = useState('')
+  const [reportError, setReportError] = useState<string | null>(null)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
+  // True once a fetched report comes back `stale: true` -- its stored
+  // `start_where`/`return_where` no longer parse under core's grammar
+  // (`RetentionReport`'s own docstring in `api/types.ts`). Kept as its own
+  // piece of state rather than read live off a `report` object this screen
+  // does not otherwise keep, because it must survive past the seed effect
+  // that discovers it -- the warning stays on screen for as long as this
+  // report is open, not just for the render that loaded it.
+  const [stale, setStale] = useState(false)
+  // M5 from the whole-branch review. A stale report's predicates fail to
+  // reproduce in one of two ways: an element that fails core's schema but
+  // still passes `looksLikePredicate` (say, an unknown `operator`) SURVIVES
+  // seeding and shows up as a real, editable row -- `incompletePredicates`
+  // counts it, and `unfinished === 0` below already blocks Run and Save
+  // until the operator fixes or removes it. An element that fails
+  // `looksLikePredicate` itself (no `operator` field at all, say) is
+  // DROPPED by `whereFromStored` before it ever reaches a row -- nothing
+  // visible, nothing for `unfinished` to count, so without a guard here
+  // Save would be enabled with `startWhere`/`returnWhere` silently
+  // narrower than what was actually stored, and would overwrite the
+  // stored predicates with that narrower list. This is what makes the
+  // second shape block Save the same way the first one already does. Run
+  // is deliberately NOT gated on this: the retention list's own
+  // seed-effect comment (and the 0.11.0 changelog entry it backs) already
+  // makes leaving Run available on a stale report a deliberate choice, so
+  // the operator can still see what the current controls ask for rather
+  // than being locked out of Run too.
+  //
+  // PER SIDE, not one flag for the report. Fix round 2's finding: a single
+  // shared boolean cleared by editing EITHER side let an edit to
+  // `startWhere` silently wave through a `returnWhere` that was never
+  // touched and still held a narrower list than what was stored -- the
+  // exact data loss this exists to prevent, reached from the side that
+  // was not the one edited. The set below names which sides still hold an
+  // unrebuilt drop; `canSave` requires it empty. Set at seed time (below)
+  // with whichever sides actually lost something; a side is removed from
+  // it only when `update` touches THAT side's predicates -- editing IS
+  // rebuilding, whether or not the edit happens to repair the exact
+  // element that failed to parse, but it only rebuilds the side it
+  // touches.
+  const [sidesWithLostPredicates, setSidesWithLostPredicates] = useState<
+    ReadonlySet<'start' | 'return'>
+  >(() => new Set())
+
+  // The (project, report) pair this screen is currently open on. Same
+  // mechanism `Trends.tsx` uses and for the same reason -- see that
+  // screen's own comment on `identity`/`resetIdentityRef`, including why
+  // `confirmingDelete`/`deleteError` are reset here too: this screen stays
+  // mounted across a same-route navigation from one saved report to
+  // another, and a confirmation left standing would simply re-aim at
+  // whichever report is now open.
+  const identity = `${activeId ?? 'none'}:${reportId ?? 'new'}`
+  const resetIdentityRef = useRef<string | null>(identity)
+  // Guards the load-and-maybe-run effect below so its work happens at most
+  // once per identity -- see that effect's own comment.
+  const loadedIdentityRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (resetIdentityRef.current === identity) return
+    resetIdentityRef.current = identity
+    setName('')
+    setReportError(null)
+    setSaveError(null)
+    setStale(false)
+    setSidesWithLostPredicates(new Set())
+    setConfirmingDelete(false)
+    setDeleteError(null)
+  }, [identity])
 
   const update = useCallback(
     (patch: Partial<RetentionParams>) => {
@@ -62,6 +203,21 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
       // clearing it is what makes "Run" mean something.
       setResult(null)
       setError(null)
+      // M5: editing a side's predicates is "rebuilding" THAT side -- see
+      // `sidesWithLostPredicates`'s own comment. Only the side the patch
+      // actually touches is cleared: the operator has taken ownership of
+      // what that side now says, which is what makes a subsequent Save an
+      // intentional write for it -- it says nothing about a side the
+      // patch never mentioned.
+      if ('startWhere' in patch || 'returnWhere' in patch) {
+        setSidesWithLostPredicates((prev) => {
+          if (prev.size === 0) return prev
+          const next = new Set(prev)
+          if ('startWhere' in patch) next.delete('start')
+          if ('returnWhere' in patch) next.delete('return')
+          return next
+        })
+      }
     },
     [setSearch],
   )
@@ -81,31 +237,347 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
     !overCap &&
     !incompleteRange
 
-  const run = useCallback(async () => {
-    if (activeId == null) return
-    setRunning(true)
-    setError(null)
-    try {
-      // Resolved at RUN time: a relative range read on mount drifts from
-      // "now" the longer the tab stays open.
-      setResult(await client.runRetention(activeId, toRequest(params, new Date())))
-    } catch (err) {
-      setResult(null)
-      setError(err instanceof Error ? err.message : 'That grid could not be computed.')
-    } finally {
-      setRunning(false)
+  // `p` defaults to the params currently on screen -- the button below calls
+  // this with no argument, exactly as before this task. The
+  // load-and-maybe-run effect passes an EXPLICIT `p` instead of relying on
+  // that default, for the reason `Trends.tsx`'s `run` states in its own
+  // comment: `setSearch` (seeding) and this component's own re-render are
+  // two independently-scheduled updates, so reading `params` implicitly
+  // from that effect would risk firing the very request decision 5 exists
+  // to prevent using the PRE-seed defaults. Passing the value computed
+  // alongside the seed sidesteps the race by construction.
+  const run = useCallback(
+    async (p: RetentionParams = params) => {
+      if (activeId == null) return
+      setRunning(true)
+      setError(null)
+      try {
+        // Resolved at RUN time: a relative range read on mount drifts from
+        // "now" the longer the tab stays open.
+        setResult(await client.runRetention(activeId, toRequest(p, new Date())))
+      } catch (err) {
+        setResult(null)
+        setError(err instanceof Error ? err.message : 'That grid could not be computed.')
+      } finally {
+        setRunning(false)
+      }
+    },
+    [client, activeId, params],
+  )
+
+  // Fetch the stored report, seed the URL from it if the URL is not already
+  // carrying a definition of its own, and -- THE POINT OF THIS TASK --
+  // auto-run exactly once, using the SAME readiness/ceiling checks `ready`
+  // above already applies, so a saved report born invalid (decision 5)
+  // shows the warning instead of firing the doomed request.
+  //
+  // Deliberately ONE effect rather than two, for the race `Trends.tsx`'s
+  // matching effect documents: splitting "load and seed" from "auto-run"
+  // behind a flag risks the auto-run firing on a render where `search` has
+  // not yet caught up to the seed this effect just wrote. This version
+  // never reads `params` for the run at all; it builds the exact
+  // `RetentionParams` the seed decided on and hands it to `run` directly.
+  //
+  // Guarded by `loadedIdentityRef`, not the dependency array: `run` is a
+  // new function every render (it closes over `params`), so listing it here
+  // would re-evaluate this effect on every keystroke. Deliberately NOT
+  // depending on `search` either -- this must run once per (project,
+  // report) pair, never refire because seeding just changed `search` (which
+  // would loop).
+  //
+  // Seeding itself is all-or-nothing, decided by `hasRetentionDefinitionParams`
+  // -- every part of the definition together, never one field at a time. A
+  // shared link is trusted whole or not at all; splicing the URL's fields
+  // with storage's would make the definition on screen come from two places
+  // at once. The range is excluded from that check on purpose (decision 1)
+  // and is never written here -- only `readRange(prev)` is round-tripped
+  // through, unchanged, so a range already in the URL is preserved exactly
+  // rather than merely left alone by omission.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: see comment above
+  useEffect(() => {
+    if (reportId == null || activeId == null) return
+    if (loadedIdentityRef.current === identity) return
+    loadedIdentityRef.current = identity
+    let cancelled = false
+    setReportError(null)
+    // I2 from the whole-branch review. A CREATE's `navigate` (in
+    // `handleSave` below) leaves THIS render's `location` carrying
+    // `JustSavedState` -- read fresh here rather than off a ref frozen at
+    // mount, so this is right whether or not this identity change happens
+    // to be a full remount. Consumed at most once: cleared from history
+    // right away so a later reload of this exact address (which keeps
+    // whatever `history.state` is current) runs the query for real rather
+    // than replaying these results forever.
+    const justSaved = (location.state as JustSavedState | null)?.result != null
+    if (justSaved) {
+      navigate(
+        { pathname: location.pathname, search: location.search },
+        { replace: true, state: null },
+      )
     }
-  }, [client, activeId, params])
+    client
+      .retentionReport(activeId, reportId)
+      .then((r) => {
+        if (cancelled) return
+        setName(r.name)
+        setStale(r.stale)
+        const alreadyDefined = hasRetentionDefinitionParams(search)
+        let finalParams: RetentionParams
+        if (alreadyDefined) {
+          finalParams = params
+        } else {
+          const startWhere = whereFromStored(r.start_where)
+          const returnWhere = whereFromStored(r.return_where)
+          // M5: `whereFromStored` silently drops any stored element that
+          // does not even look like a predicate (see
+          // `sidesWithLostPredicates`'s own comment) -- comparing the raw
+          // stored count against what survived is how this notices, per
+          // side, without `whereFromStored` itself needing to change (it is
+          // also used to read a hand-edited URL, where silently degrading
+          // garbage is the correct behaviour).
+          const lostSides = new Set<'start' | 'return'>()
+          if (startWhere.length < r.start_where.length) lostSides.add('start')
+          if (returnWhere.length < r.return_where.length) lostSides.add('return')
+          if (lostSides.size > 0) {
+            setSidesWithLostPredicates(lostSides)
+          }
+          finalParams = {
+            start: r.start_event,
+            return: r.return_event,
+            startWhere,
+            returnWhere,
+            granularity: r.granularity,
+            periods: r.periods,
+            segmentId: r.segment_id,
+            range: params.range,
+          }
+        }
+        if (!alreadyDefined) {
+          setSearch(
+            (prev) => writeRetentionParams(prev, { ...finalParams, range: readRange(prev) }),
+            { replace: true },
+          )
+        }
+        const seededUnfinished = incompletePredicates(finalParams)
+        const seededOverCap = tooManyCohorts(finalParams, new Date())
+        const seededIncompleteRange = rangeIncomplete(finalParams.range)
+        // A stale report's stored predicates do not parse under the
+        // server's grammar (`RetentionReport.stale`) -- the SAME "we cannot
+        // faithfully reproduce this, so we are not going to pretend"
+        // response the ceiling checks above already give, reached through
+        // a different cause. Not gated on `alreadyDefined`: staleness is a
+        // fact about the report that was opened, not about which fields
+        // happened to seed, and `overCap`/`incompleteRange` above apply
+        // unconditionally for the same reason. The operator still gets the
+        // Run button -- this only stops the AUTOMATIC run decision 5 exists
+        // to guard, exactly as it stops one for an over-cap report.
+        // `justSaved` skips exactly the scan this task exists to stop
+        // repeating -- the results it protects are already in `result`,
+        // seeded by this same render's lazy `useState` initializer above.
+        if (
+          !justSaved &&
+          finalParams.start !== '' &&
+          finalParams.return !== '' &&
+          seededUnfinished === 0 &&
+          !seededOverCap &&
+          !seededIncompleteRange &&
+          !r.stale
+        ) {
+          run(finalParams)
+        }
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return
+        if (err instanceof ApiError && err.status === 401) {
+          onUnauthorized?.()
+          return
+        }
+        setReportError('This retention report could not be loaded.')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [client, activeId, reportId, onUnauthorized])
+
+  const trimmedName = name.trim()
+  const canSave =
+    activeId != null &&
+    trimmedName !== '' &&
+    params.start !== '' &&
+    params.return !== '' &&
+    unfinished === 0 &&
+    // M5: a saved report whose stored predicates were silently narrowed on
+    // load must not be saved as-is -- that would overwrite the stored
+    // `start_where`/`return_where` with the narrower list. Any side still
+    // in this set blocks Save, not only the side the operator happens to
+    // be looking at. See `sidesWithLostPredicates`'s own comment.
+    sidesWithLostPredicates.size === 0
+
+  const handleSave = useCallback(() => {
+    // Repeats the `canSave` gate the button's `disabled` prop already
+    // reflects -- deliberately, so a mutation that only removes that
+    // attribute still finds no path to `createRetentionReport`/
+    // `patchRetentionReport` here.
+    if (!canSave || activeId == null) return
+    setSaving(true)
+    setSaveError(null)
+    const body = reportBody(params, trimmedName)
+    const request =
+      reportId != null
+        ? client.patchRetentionReport(activeId, reportId, body)
+        : client.createRetentionReport(activeId, body)
+    request
+      .then((saved) => {
+        setName(saved.name)
+        // CREATE only: this screen becomes that report's own address, the
+        // same way `Trends.tsx` does for a saved trend -- see that
+        // screen's own comment on why the current search is carried across
+        // rather than left to reset.
+        //
+        // I2 from the whole-branch review: `result` (whatever is on screen
+        // right now, possibly `null` if nothing was ever run) rides along
+        // as router state -- see `JustSavedState`'s own comment for why,
+        // and the load effect above for where it is read back. Only ever
+        // carries a REAL result: if nothing was run before Save, there is
+        // nothing "already on screen" to protect, and the remount's normal
+        // fetch-and-maybe-run is the first run, not a repeat of one.
+        if (reportId == null) {
+          navigate(
+            { pathname: retentionReportPath(saved.id), search: search.toString() },
+            {
+              replace: true,
+              state: result === null ? undefined : ({ result } satisfies JustSavedState),
+            },
+          )
+        }
+      })
+      .catch((err: unknown) => {
+        if (err instanceof ApiError && err.status === 401) {
+          onUnauthorized?.()
+          return
+        }
+        if (err instanceof ApiError && err.status === 409) {
+          setSaveError('A retention report with that name already exists.')
+          return
+        }
+        setSaveError(
+          err instanceof Error ? err.message : 'That retention report could not be saved.',
+        )
+      })
+      .finally(() => setSaving(false))
+  }, [
+    canSave,
+    activeId,
+    params,
+    trimmedName,
+    reportId,
+    client,
+    navigate,
+    search,
+    result,
+    onUnauthorized,
+  ])
+
+  // Behind a confirmation, deliberately -- deletion is the one action on
+  // this screen with no undo, same reasoning as `FunnelDetail`'s own
+  // `handleDelete`. `deleteError` deliberately does NOT reuse `error` (the
+  // run banner) or `saveError`: a failed delete leaves everything else on
+  // the screen still true, so it gets its own line.
+  function handleDelete() {
+    if (activeId == null || reportId == null) return
+    setDeleting(true)
+    setDeleteError(null)
+    client
+      .deleteRetentionReport(activeId, reportId)
+      .then(() => navigate(ROUTES.retention))
+      .catch((err: unknown) => {
+        if (err instanceof ApiError && err.status === 401) {
+          onUnauthorized?.()
+          return
+        }
+        setDeleteError('Could not delete this retention report. Try again.')
+      })
+      .finally(() => setDeleting(false))
+  }
 
   return (
     <section className="flex flex-col gap-6">
-      <header className="flex flex-col gap-1">
-        <h1 className="font-semibold text-xl">Retention</h1>
-        <p className="text-muted-foreground text-sm">
-          Of the people who did one thing in a period, how many came back and did another in the
-          periods after it.
+      <div className="flex items-center justify-between gap-2">
+        <header className="flex flex-col gap-1">
+          <h1 className="font-semibold text-xl">Retention</h1>
+          <p className="text-muted-foreground text-sm">
+            Of the people who did one thing in a period, how many came back and did another in the
+            periods after it.
+          </p>
+        </header>
+        <div className="flex items-center gap-3">
+          {/* Only for a saved report -- there is nothing to delete at
+           * `/retention/new`, same reasoning `FunnelDetail` gates its own
+           * Delete on `funnel != null`. */}
+          {reportId != null && !confirmingDelete && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setConfirmingDelete(true)}
+            >
+              Delete
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {reportError != null && (
+        <p role="alert" className="text-sm text-destructive">
+          {reportError}
         </p>
-      </header>
+      )}
+
+      <div className="flex flex-wrap items-end gap-3">
+        <div className="flex min-w-0 flex-col gap-1">
+          <Label htmlFor="retention-name">Name</Label>
+          <Input
+            id="retention-name"
+            className="w-56"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
+        </div>
+      </div>
+
+      {/* A second, explicit click behind the first -- deletion has no undo,
+       * so this screen never treats one click on "Delete" as consent. */}
+      {confirmingDelete && (
+        <div className="flex flex-wrap items-center gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">
+          <p className="text-foreground">Delete this retention report? This cannot be undone.</p>
+          <div className="ml-auto flex gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setConfirmingDelete(false)}
+              disabled={deleting}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              size="sm"
+              onClick={handleDelete}
+              disabled={deleting}
+            >
+              Delete retention report
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {deleteError != null && (
+        <p role="alert" className="text-sm text-destructive">
+          {deleteError}
+        </p>
+      )}
 
       {/* Each event is a CARD carrying its own predicates, rather than four
        * controls in one row. `$page where path = /` and `$page where path =
@@ -194,10 +666,31 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
           value={params.range}
           onChange={(range) => update({ range })}
         />
-        <Button type="button" onClick={run} disabled={!ready || running}>
+        <Button
+          type="button"
+          // NOT `onClick={run}` -- React hands the click's `SyntheticEvent`
+          // to whatever `onClick` is, and `run`'s first parameter is now a
+          // `RetentionParams` with a default rather than nothing, so passing
+          // the handler directly would hand that event to `p` and every
+          // read of `p.start`/`p.granularity` below would throw. The
+          // wrapper is what makes this call the zero-argument,
+          // default-`params` form -- the same one this button always
+          // called.
+          onClick={() => run()}
+          disabled={!ready || running}
+        >
           {running ? 'Running…' : 'Run'}
         </Button>
+        <Button type="button" variant="outline" onClick={handleSave} disabled={!canSave || saving}>
+          {saving ? 'Saving…' : 'Save'}
+        </Button>
       </div>
+
+      {saveError != null && (
+        <p role="alert" className="text-sm text-destructive">
+          {saveError}
+        </p>
+      )}
 
       {!ready && (
         <p className="text-muted-foreground text-sm">
@@ -206,6 +699,13 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
           when the same event name means several things: <code>$page</code> where <code>path</code>{' '}
           is <code>/</code>, then <code>$page</code> where <code>path</code> is{' '}
           <code>/register</code>.
+        </p>
+      )}
+
+      {stale && (
+        <p data-testid="retention-stale" className="text-muted-foreground text-sm">
+          The filters saved with this report no longer parse, so it cannot be reproduced as saved.
+          Run below to see what these controls ask for now, or fix the conditions and save over it.
         </p>
       )}
 
