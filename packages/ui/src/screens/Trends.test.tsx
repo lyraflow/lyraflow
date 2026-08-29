@@ -690,14 +690,42 @@ describe('Trends -- a stale saved report', () => {
     expect(client.stats).not.toHaveBeenCalled()
   })
 
+  // N2 from the second-round review: the test above reaches
+  // `seededUnfinished === 0` only through a `stale: true` fixture, where
+  // `!r.stale` already blocks the run on its own -- removing the
+  // unfinished-count term left the whole suite green. This pins it
+  // directly: a report that is NOT stale, with a predicate that survives
+  // `looksLikePredicate` (so it becomes a row) but fails core's full
+  // schema (so it counts as unfinished), must still not auto-run.
+  it('does not auto-run when a non-stale report seeds an unfinished predicate row', async () => {
+    const client = renderAt('/trends/3', {
+      trendReport: vi.fn(async () =>
+        reportFixture({
+          stale: false,
+          where: [{ property: 'plan', operator: 'not-a-real-op', value: 'x' }],
+        }),
+      ),
+    })
+    expect(await screen.findByText(/1 filter is unfinished/i)).toBeInTheDocument()
+    expect(client.stats).not.toHaveBeenCalled()
+    // Not relying on staleness at all -- confirms this fixture takes the
+    // unfinished-count path, not the staleness path the test above covers.
+    expect(screen.queryByTestId('trend-stale')).not.toBeInTheDocument()
+  })
+
   // F1 -- THE ONE THAT MATTERS. An element that fails `looksLikePredicate`
   // itself (no `operator` at all) is dropped by `whereFromStored` before it
   // ever becomes a row -- nothing on screen looks unfinished, so `unfinished`
   // stays 0. Before the fix, `canSave` was therefore true, and pressing Save
   // would have PATCHed `where: []` over the report's actually-stored
   // predicates -- the exact data loss this exists to prevent.
+  //
+  // No `patchTrendReport` assertion here: the button being disabled already
+  // means clicking it fires no handler at all (a disabled native button
+  // dispatches no click), so asserting the mock was never called would be
+  // vacuous on top of `toBeDisabled()` -- second-round review finding.
   it('disables Save when a stale predicate is dropped entirely, not only when it survives as a row', async () => {
-    const client = renderAt('/trends/3', {
+    renderAt('/trends/3', {
       trendReport: vi.fn(async () => reportFixture({ stale: true, where: [{ nonsense: true }] })),
     })
     await screen.findByTestId('trend-stale')
@@ -706,9 +734,6 @@ describe('Trends -- a stale saved report', () => {
     expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
     // Nothing visibly incomplete -- the predicate never became a row.
     expect(screen.queryByText(/unfinished/i)).not.toBeInTheDocument()
-    // And Save, if it were somehow reachable, must never have been asked to
-    // write over the stored predicates with the narrower (empty) list.
-    expect(client.patchTrendReport).not.toHaveBeenCalled()
   })
 
   // The gate must not stick forever once the operator has actually rebuilt
@@ -727,5 +752,23 @@ describe('Trends -- a stale saved report', () => {
     await userEvent.click(within(whereBlock).getByRole('button', { name: /remove/i }))
     expect(screen.queryByText(/unfinished/i)).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^save$/i })).toBeEnabled()
+  })
+
+  // N3 from the second-round review: `update`'s `if ('where' in patch)`
+  // guard was reachable only by tests that either never call `update` at
+  // all, or call it with `where` specifically -- nothing pinned that a
+  // DIFFERENT field left `lostPredicates` alone. That guard is the whole
+  // of this journey's guarantee after load time: an operator who changes
+  // the interval (or the range) on a stale report they never touched the
+  // filter on must not have Save quietly re-enabled underneath them.
+  it('does not lift the Save block when the operator changes the interval rather than the filter', async () => {
+    const client = renderAt('/trends/3', {
+      trendReport: vi.fn(async () => reportFixture({ stale: true, where: [{ nonsense: true }] })),
+    })
+    await screen.findByTestId('trend-stale')
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: /resolution/i }), '1h')
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+    expect(client.patchTrendReport).not.toHaveBeenCalled()
   })
 })
