@@ -27,6 +27,23 @@ beforeAll(async () => {
     ),
     appSchemaVersion: 999,
   })
+  // Migrations are never rolled back, and the local test database is shared
+  // across runs and branches, so a prior run of THIS SUITE can leave 021
+  // already applied even though the migrate() call above was filtered to
+  // exclude it -- the filter only controls which files THIS call considers,
+  // it does not touch what is on disk already. Force the pre-021 shape
+  // explicitly rather than assume the filter produced it. The ledger row
+  // matters as much as the columns: migrate() decides what to (re)run by
+  // checking `schema_migrations` for the version, not by inspecting live
+  // columns, so leaving version 21 recorded there would make the full
+  // migrate() below skip it -- which is exactly what dropping only the
+  // columns did on a database where 021 had already run once. All four
+  // statements are no-ops on a database that was never migrated past 020,
+  // and undo 021 on one that was.
+  await pg.query('DELETE FROM schema_migrations WHERE version >= 21')
+  await pg.query('ALTER TABLE trend_reports DROP CONSTRAINT IF EXISTS trend_reports_where_is_array')
+  await pg.query('ALTER TABLE trend_reports DROP COLUMN IF EXISTS event_where')
+  await pg.query('ALTER TABLE trend_reports DROP COLUMN IF EXISTS definition_version')
   const r = await pg.query<{ id: string }>(
     `INSERT INTO projects (name, slug, write_key, server_key_hash)
      VALUES ('Trend predicates', $1, 'wk_021', 'hash_021') RETURNING id`,
