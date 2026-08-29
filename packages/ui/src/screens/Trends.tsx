@@ -447,7 +447,7 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
        * so this screen never treats one click on "Delete" as consent. */}
       {confirmingDelete && (
         <div className="flex flex-wrap items-center gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">
-          <p className="text-foreground">Delete this trend? This cannot be undone.</p>
+          <p className="text-foreground">Delete this trend report? This cannot be undone.</p>
           <div className="ml-auto flex gap-2">
             <Button
               type="button"
