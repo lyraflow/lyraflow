@@ -93,14 +93,26 @@ one fix is contained in 0.3.0.
 
 - **Trends and retention grids can be saved and reopened**, the same way a
   funnel already could. `GET`/`POST /v1/trends` and `GET`/`PATCH`/`DELETE
-  /v1/trends/:id` store a name, an event, an interval and a breakdown; the
-  same four verbs on `/v1/retention-reports` store a name, the two events,
-  their conditions, a granularity, a period count and an optional segment.
-  Neither adds a `/run` endpoint — a saved trend is answered by the same
-  `GET /v1/events/stats` call the ad hoc chart already used, and a saved
-  retention report by the same `POST /v1/reports/retention`, with the
-  stored fields filled in. Both screens gain a list view and a Save
-  control, matching Funnels and Segments.
+  /v1/trends/:id` store a name, an event, an interval, a breakdown and a
+  filter; the same four verbs on `/v1/retention-reports` store a name, the
+  two events, their conditions, a granularity, a period count and an
+  optional segment. Neither adds a `/run` endpoint — a saved trend is
+  answered by the same `GET /v1/events/stats` call the ad hoc chart already
+  used, and a saved retention report by the same `POST
+  /v1/reports/retention`, with the stored fields filled in. Both screens
+  gain a list view and a Save control, matching Funnels and Segments.
+
+  **A saved trend's filter is a `where` list**, the same predicate grammar a
+  segment behaviour, a funnel step and a retention side already use —
+  `$page where path = /register` instead of every `$page`. It travels as a
+  `where` query parameter on `GET /v1/events/stats` (a JSON array, ANDed,
+  capped at 10 predicates, independent of `event`) and is compiled inside
+  the same inner scan as the event-name filter, so narrowing it cuts the
+  scan rather than throwing rows away after the fact. Migration
+  `021_trend_predicates.sql` adds `event_where` and `definition_version` to
+  `trend_reports` (`SCHEMA_VERSION` 20 → 21) — the column is `event_where`
+  because `where` is a reserved word in Postgres, but the run parameter, the
+  request/response bodies and the UI all call it `where`.
 
   **The range is deliberately not part of what's saved.** A trend or a
   retention report stores the question, not the window it was asked over,
@@ -108,12 +120,17 @@ one fix is contained in 0.3.0.
   never the one it was created with. Reopening a retention report into a
   range and granularity that would together exceed 60 cohorts disables Run
   and computes nothing — the same ceiling and warning an ad hoc grid is
-  already held to. A stale report — one whose stored filters no longer
-  parse — skips its automatic run too, but leaves Run enabled, so the
-  operator can still run the degraded version rather than being locked out
-  of it.
+  already held to. A stale report — a saved trend or retention report whose
+  stored filters no longer parse — skips its automatic run too, but leaves
+  Run enabled, so the operator can still run the degraded version rather
+  than being locked out of it.
 
 ### Changed
+
+- **Schema version 21.** Migration `021_trend_predicates.sql` adds
+  `event_where` (JSON, defaulted to `[]` for existing rows) and
+  `definition_version` to `trend_reports`. Additive: no existing row loses
+  data. Upgrading applies it automatically at app start.
 
 - **`/trends` and `/retention` are now the saved-report lists**; the
   builders moved to `/trends/new` and `/retention/new`. A bookmark or shared
