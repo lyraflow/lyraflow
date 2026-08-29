@@ -296,6 +296,13 @@ export interface StatsQuery {
    * ignoring it.
    */
   group_by?: string
+  /**
+   * The predicate list as JSON -- `screens/trends/params.ts` builds it and
+   * `screens/Trends.tsx` stringifies it. A string rather than
+   * `WherePredicate[]` because this type describes the QUERY STRING, and
+   * `client.ts`'s `qs()` serialises whatever it is handed.
+   */
+  where?: string
 }
 export interface RejectionsQuery {
   limit?: number
