@@ -30,7 +30,10 @@ function retentionSummary(r: RetentionReport): string {
 }
 
 function toRow(r: RetentionReport): SavedReportRow {
-  // Unlike `TrendReports`' `toRow`, this DOES set `stale`: a retention
+  // `TrendReports`' `toRow` sets `stale` too, now that a trend's `where` can
+  // go stale the same way -- this comment used to say retention was the odd
+  // one out, and that stopped being true when `021_trend_predicates.sql`
+  // gave a trend the same grammar. What is still true here: a retention
   // report's `start_where`/`return_where` are parsed JSON that can go stale
   // exactly like a funnel's or segment's steps/filter (see `RetentionReport`'s
   // own docstring in `api/types.ts`), and the server always sends the field.
