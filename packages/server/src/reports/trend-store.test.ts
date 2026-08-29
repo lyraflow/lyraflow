@@ -216,9 +216,15 @@ describe('TrendStore', () => {
   // test in this file, so deleting it outright made this test's position
   // load-bearing: appended after it, the next describe block would run
   // every test against a project that no longer exists. A throwaway project
-  // needs no `afterAll` cleanup (it is gone by the end of the test) and
-  // this test can now sit anywhere in the file.
+  // needs no `afterAll` cleanup ON SUCCESS (it is gone by the end of the
+  // test) and this test can now sit anywhere in the file -- but `slug` is
+  // UNIQUE, and a mid-test failure that happens before the `DELETE` below
+  // would otherwise leave the row behind, failing every later run on a
+  // unique violation instead of whatever assertion actually broke. The
+  // pre-cleanup `DELETE`, matching every other fixture in this file, is
+  // what makes this test idempotent across a failed run.
   it('a deleted project takes its trends with it', async () => {
+    await pg.query('DELETE FROM projects WHERE slug = $1', ['trendstore-doomed'])
     const doomed = await pg.query<{ id: string }>(
       `INSERT INTO projects (name, slug, write_key, server_key_hash)
        VALUES ('Doomed', 'trendstore-doomed', 'wk_trendstore_doomed', 'h') RETURNING id`,
