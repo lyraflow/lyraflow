@@ -27,6 +27,9 @@ const ROW = {
   event: 'signup',
   interval: '1d' as const,
   group_by: 'attribute:country',
+  where: [],
+  definition_version: 1,
+  stale: false,
   created_at: T,
   updated_at: T,
 }

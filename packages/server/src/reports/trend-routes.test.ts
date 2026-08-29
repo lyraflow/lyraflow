@@ -216,3 +216,72 @@ describe('trend routes', () => {
     expect(res.statusCode).toBe(200)
   })
 })
+
+describe('/v1/trends where predicates', () => {
+  const filtered = {
+    event: '$page',
+    interval: '1d' as const,
+    group_by: null,
+    where: [{ property: 'path', operator: '=', value: '/register' }],
+  }
+
+  it('creates and returns a filtered trend', async () => {
+    const res = await call('POST', '/v1/trends', { ...filtered, name: 'registers' })
+    expect(res.statusCode).toBe(201)
+    const body = res.json()
+    expect(body.where).toEqual(filtered.where)
+    expect(body.definition_version).toBe(1)
+    expect(body.stale).toBe(false)
+  })
+
+  it('defaults an omitted where to no predicates', async () => {
+    // Absent and `[]` mean one thing on CREATE -- there is no stored value to
+    // leave alone yet -- so both are folded before the store sees them, the
+    // same way `group_by` already folds absent into `null`.
+    const res = await call('POST', '/v1/trends', { ...trend, name: 'unfiltered' })
+    expect(res.statusCode).toBe(201)
+    expect(res.json().where).toEqual([])
+  })
+
+  it('refuses a predicate the grammar does not accept', async () => {
+    const res = await call('POST', '/v1/trends', {
+      ...trend,
+      name: 'bad',
+      where: [{ property: 'path', operator: 'matches', value: 'x' }],
+    })
+    expect(res.statusCode).toBe(400)
+  })
+
+  it('refuses eleven predicates', async () => {
+    const res = await call('POST', '/v1/trends', {
+      ...trend,
+      name: 'too-many',
+      where: Array.from({ length: 11 }, () => ({ property: 'p', operator: '=', value: 'x' })),
+    })
+    expect(res.statusCode).toBe(400)
+  })
+
+  it('clears the filter on PATCH with an empty list', async () => {
+    const made = await call('POST', '/v1/trends', { ...filtered, name: 'clearable' })
+    const id = made.json().id
+    const res = await call('PATCH', `/v1/trends/${id}`, { where: [] })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().where).toEqual([])
+  })
+
+  it('leaves the filter alone on a PATCH that omits it', async () => {
+    const made = await call('POST', '/v1/trends', { ...filtered, name: 'renameable' })
+    const id = made.json().id
+    const res = await call('PATCH', `/v1/trends/${id}`, { name: 'renamed-filtered' })
+    expect(res.json().where).toEqual(filtered.where)
+  })
+
+  it('carries stale on the list, on every row', async () => {
+    // `GET /v1/trends` answers `{ trends: [...] }` -- see the handler.
+    const list = await call('GET', '/v1/trends')
+    for (const row of list.json().trends) {
+      expect(row).toHaveProperty('stale')
+      expect(row).toHaveProperty('where')
+    }
+  })
+})

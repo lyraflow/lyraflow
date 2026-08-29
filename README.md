@@ -2309,12 +2309,16 @@ does not do; it is the obvious next step rather than a decision against it.
 
 ### Saved trends
 
-A saved trend is a named, stored definition — an event, an interval and an
-optional breakdown — that the Trends screen creates and reopens. There is no
-`/run` endpoint: saving one does not add a second way to answer it, only a
-place to keep the question. Running a saved trend, from the screen or by
-hand, is the same `GET /v1/events/stats` call above with its stored fields
-as the query.
+A saved trend is a named, stored definition — an event, an interval, an
+optional breakdown and a `where` filter — that the Trends screen creates and
+reopens. There is no `/run` endpoint: saving one does not add a second way to
+answer it, only a place to keep the question. Running a saved trend, from the
+screen or by hand, is the same `GET /v1/events/stats` call above with its
+stored fields as the query.
+
+A saved trend's `where` clauses are parsed against the same grammar the run endpoint uses.
+A row this build cannot parse comes back with `"stale": true` rather than failing the whole
+list — the same behaviour a saved retention report has.
 
 ```sh
 curl -X POST http://localhost:3000/v1/trends \
