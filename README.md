@@ -2615,6 +2615,8 @@ else would otherwise be an unconditional `400`:
 | `1h` | 24 hours |
 | `1d` | 7 days |
 
+`401` for a missing or invalid server key, on both endpoints.
+
 ### Filtering
 
 `where` narrows **which occurrences** of the event are counted. It carries the same
@@ -2637,8 +2639,6 @@ both bags, so a numeric property filters by value rather than reading as unset. 
 that is not a valid predicate list is a `400 invalid_where` rather than a silently wider
 answer. `where` is independent of `event`: with no event name it asks the question of
 every event.
-
-`401` for a missing or invalid server key, on both endpoints.
 
 ## Privacy: deletion and export
 
