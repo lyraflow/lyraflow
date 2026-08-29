@@ -53,6 +53,7 @@ describe('TrendStore', () => {
       event: 'signup',
       interval: '1d',
       group_by: 'attribute:country',
+      where: [],
     })
     const read = await store.get(projectA, made.id)
     expect(read).toMatchObject({
@@ -64,9 +65,21 @@ describe('TrendStore', () => {
   })
 
   it('refuses a duplicate name in the same project', async () => {
-    await store.create(projectA, { name: 'Dupe', event: 'signup', interval: '1d', group_by: null })
+    await store.create(projectA, {
+      name: 'Dupe',
+      event: 'signup',
+      interval: '1d',
+      group_by: null,
+      where: [],
+    })
     await expect(
-      store.create(projectA, { name: 'Dupe', event: 'login', interval: '1h', group_by: null }),
+      store.create(projectA, {
+        name: 'Dupe',
+        event: 'login',
+        interval: '1h',
+        group_by: null,
+        where: [],
+      }),
     ).rejects.toBeInstanceOf(DuplicateTrendNameError)
   })
 
@@ -78,9 +91,16 @@ describe('TrendStore', () => {
       event: 'signup',
       interval: '1d',
       group_by: null,
+      where: [],
     })
     await expect(
-      store.create(projectB, { name: 'Shared', event: 'signup', interval: '1d', group_by: null }),
+      store.create(projectB, {
+        name: 'Shared',
+        event: 'signup',
+        interval: '1d',
+        group_by: null,
+        where: [],
+      }),
     ).resolves.toMatchObject({ name: 'Shared' })
   })
 
@@ -90,17 +110,25 @@ describe('TrendStore', () => {
       event: 'e',
       interval: '1d',
       group_by: null,
+      where: [],
     })
     expect(await store.get(projectB, made.id)).toBeNull()
   })
 
   it('renaming to a taken name is a duplicate, not a 500', async () => {
-    await store.create(projectA, { name: 'One', event: 'e', interval: '1d', group_by: null })
+    await store.create(projectA, {
+      name: 'One',
+      event: 'e',
+      interval: '1d',
+      group_by: null,
+      where: [],
+    })
     const two = await store.create(projectA, {
       name: 'Two',
       event: 'e',
       interval: '1d',
       group_by: null,
+      where: [],
     })
     await expect(store.update(projectA, two.id, { name: 'One' })).rejects.toBeInstanceOf(
       DuplicateTrendNameError,
@@ -123,6 +151,7 @@ describe('TrendStore', () => {
         event: 'e',
         interval: '1d',
         group_by: null,
+        where: [],
       })
       await store.update(projectA, made.id, { group_by: 'attribute:country' })
       expect((await store.get(projectA, made.id))?.group_by).toBe('attribute:country')
@@ -134,6 +163,7 @@ describe('TrendStore', () => {
         event: 'e',
         interval: '1d',
         group_by: 'attribute:country',
+        where: [],
       })
       await store.update(projectA, made.id, { group_by: null })
       expect((await store.get(projectA, made.id))?.group_by).toBeNull()
@@ -145,6 +175,7 @@ describe('TrendStore', () => {
         event: 'e',
         interval: '1d',
         group_by: 'attribute:country',
+        where: [],
       })
       await store.update(projectA, made.id, { group_by: 'attribute:country' })
       expect((await store.get(projectA, made.id))?.group_by).toBe('attribute:country')
@@ -156,6 +187,7 @@ describe('TrendStore', () => {
         event: 'e',
         interval: '1d',
         group_by: null,
+        where: [],
       })
       await store.update(projectA, made.id, { group_by: null })
       expect((await store.get(projectA, made.id))?.group_by).toBeNull()
@@ -170,6 +202,7 @@ describe('TrendStore', () => {
         event: 'e',
         interval: '1d',
         group_by: 'attribute:country',
+        where: [],
       })
       await store.update(projectA, made.id, { name: 'Renamed, not re-grouped v2' })
       expect((await store.get(projectA, made.id))?.group_by).toBe('attribute:country')
@@ -177,18 +210,101 @@ describe('TrendStore', () => {
       expect((await store.get(projectA, made.id))?.group_by).toBeNull()
     })
   })
+})
 
-  // Last in the file: it deletes projectA outright, which every other test
-  // in this suite depends on still existing.
-  it('a deleted project takes its trends with it', async () => {
+describe('TrendStore where predicates', () => {
+  const base = { event: 'signup', interval: '1d' as const, group_by: null }
+
+  it('round-trips a predicate list', async () => {
     const made = await store.create(projectA, {
-      name: 'Doomed',
-      event: 'e',
-      interval: '1d',
-      group_by: null,
+      ...base,
+      name: 'filtered',
+      where: [{ property: 'path', operator: '=', value: '/register' }],
     })
-    await pg.query('DELETE FROM projects WHERE id = $1', [projectA])
-    const { rows } = await pg.query('SELECT 1 FROM trend_reports WHERE id = $1', [made.id])
-    expect(rows).toHaveLength(0)
+    expect(made.where).toEqual([{ property: 'path', operator: '=', value: '/register' }])
+    expect(made.definition_version).toBe(1)
+    expect(made.stale).toBe(false)
+    const read = await store.get(projectA, made.id)
+    expect(read?.where).toEqual(made.where)
   })
+
+  it('defaults to no predicates', async () => {
+    const made = await store.create(projectA, { ...base, name: 'plain', where: [] })
+    expect(made.where).toEqual([])
+    expect(made.stale).toBe(false)
+  })
+
+  it('clears the filter on an explicit empty list', async () => {
+    const made = await store.create(projectA, {
+      ...base,
+      name: 'to-clear',
+      where: [{ property: 'path', operator: '=', value: '/x' }],
+    })
+    const patched = await store.update(projectA, made.id, { where: [] })
+    expect(patched?.where).toEqual([])
+  })
+
+  it('leaves the filter alone when the key is absent', async () => {
+    // The three-way distinction `group_by` already draws. A rename must not
+    // silently widen the report.
+    const made = await store.create(projectA, {
+      ...base,
+      name: 'to-rename',
+      where: [{ property: 'path', operator: '=', value: '/keep' }],
+    })
+    const patched = await store.update(projectA, made.id, { name: 'renamed' })
+    expect(patched?.name).toBe('renamed')
+    expect(patched?.where).toEqual([{ property: 'path', operator: '=', value: '/keep' }])
+  })
+
+  it('reports a row it cannot parse as stale instead of throwing', async () => {
+    // One row a past build wrote, that a later grammar can no longer parse,
+    // must not take the whole LIST down with it. The healthy row alongside
+    // it is the proof: without it, the assertion below would pass just as
+    // well if `list` quietly dropped the broken row instead of flagging it.
+    await store.create(projectA, { ...base, name: 'healthy', where: [] })
+    const made = await store.create(projectA, { ...base, name: 'broken', where: [] })
+    await pg.query(
+      `UPDATE trend_reports SET event_where = '[{"property":"path","operator":"wat"}]'::jsonb
+       WHERE id = $1`,
+      [made.id],
+    )
+    const listed = await store.list(projectA)
+    expect(listed.find((t) => t.id === made.id)?.stale).toBe(true)
+    expect(listed.length).toBeGreaterThan(1)
+  })
+
+  it('re-stamps the version when the predicates are written', async () => {
+    // Whatever THIS build parsed and wrote is what the row now holds, so a
+    // future migration finding "every row written under the old shape" is
+    // not defeated by a PATCH that left an old stamp behind.
+    const made = await store.create(projectA, { ...base, name: 'stamped', where: [] })
+    await pg.query('UPDATE trend_reports SET definition_version = 0 WHERE id = $1', [made.id])
+    const patched = await store.update(projectA, made.id, {
+      where: [{ property: 'path', operator: '=', value: '/n' }],
+    })
+    expect(patched?.definition_version).toBe(1)
+  })
+
+  it('leaves the version alone on a patch that does not touch the predicates', async () => {
+    const made = await store.create(projectA, { ...base, name: 'unstamped', where: [] })
+    await pg.query('UPDATE trend_reports SET definition_version = 0 WHERE id = $1', [made.id])
+    const patched = await store.update(projectA, made.id, { name: 'unstamped-2' })
+    expect(patched?.definition_version).toBe(0)
+  })
+})
+
+// Last in the file: it deletes projectA outright, which every other test in
+// this suite depends on still existing.
+it('a deleted project takes its trends with it', async () => {
+  const made = await store.create(projectA, {
+    name: 'Doomed',
+    event: 'e',
+    interval: '1d',
+    group_by: null,
+    where: [],
+  })
+  await pg.query('DELETE FROM projects WHERE id = $1', [projectA])
+  const { rows } = await pg.query('SELECT 1 FROM trend_reports WHERE id = $1', [made.id])
+  expect(rows).toHaveLength(0)
 })
