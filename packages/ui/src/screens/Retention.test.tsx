@@ -515,7 +515,12 @@ describe('Retention -- saving and reopening a saved report', () => {
       ),
     })
     await screen.findByTestId('retention-stale')
-    expect(screen.getByTestId('retention-unfinished')).toBeInTheDocument()
+    // `findBy`, not `getBy`: the stale banner is set by the load effect, but
+    // the unfinished row is derived from `params` -- re-read after
+    // `setSearch`, a SEPARATE update. The two flush together on a fast machine
+    // and not on a slow one, which is how this passed every local run and
+    // failed in CI.
+    expect(await screen.findByTestId('retention-unfinished')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
   })
 
@@ -531,9 +536,13 @@ describe('Retention -- saving and reopening a saved report', () => {
       ),
     })
     await screen.findByTestId('retention-stale')
+    // The positive assertion first: Save is disabled by the same load effect
+    // that set the banner, so it is a real signal. Asserting the absence of an
+    // unfinished row before anything param-derived has rendered would pass
+    // whether or not that row was ever going to appear.
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
     // Nothing visibly incomplete -- the predicate never became a row.
     expect(screen.queryByTestId('retention-unfinished')).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
     // And Save, if it were somehow reachable, must never have been asked to
     // write over the stored predicates with the narrower list.
     expect(client.patchRetentionReport).not.toHaveBeenCalled()
@@ -553,7 +562,7 @@ describe('Retention -- saving and reopening a saved report', () => {
     })
     await screen.findByTestId('retention-stale')
     expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
-    const start = screen.getByTestId('retention-start-where-where')
+    const start = await screen.findByTestId('retention-start-where-where')
     await userEvent.click(within(start).getByRole('button', { name: /add predicate/i }))
     await userEvent.click(within(start).getByRole('button', { name: /remove/i }))
     expect(screen.queryByTestId('retention-unfinished')).not.toBeInTheDocument()
@@ -575,7 +584,7 @@ describe('Retention -- saving and reopening a saved report', () => {
     })
     await screen.findByTestId('retention-stale')
     expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
-    const start = screen.getByTestId('retention-start-where-where')
+    const start = await screen.findByTestId('retention-start-where-where')
     await userEvent.click(within(start).getByRole('button', { name: /add predicate/i }))
     await userEvent.click(within(start).getByRole('button', { name: /remove/i }))
     // start_where round-tripped back to empty and is not itself unfinished
@@ -596,7 +605,7 @@ describe('Retention -- saving and reopening a saved report', () => {
     })
     await screen.findByTestId('retention-stale')
     expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
-    const ret = screen.getByTestId('retention-return-where-where')
+    const ret = await screen.findByTestId('retention-return-where-where')
     await userEvent.click(within(ret).getByRole('button', { name: /add predicate/i }))
     await userEvent.click(within(ret).getByRole('button', { name: /remove/i }))
     expect(screen.queryByTestId('retention-unfinished')).not.toBeInTheDocument()
@@ -615,7 +624,7 @@ describe('Retention -- saving and reopening a saved report', () => {
     })
     await screen.findByTestId('retention-stale')
     expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
-    const ret = screen.getByTestId('retention-return-where-where')
+    const ret = await screen.findByTestId('retention-return-where-where')
     await userEvent.click(within(ret).getByRole('button', { name: /add predicate/i }))
     await userEvent.click(within(ret).getByRole('button', { name: /remove/i }))
     expect(screen.queryByTestId('retention-unfinished')).not.toBeInTheDocument()
@@ -640,12 +649,12 @@ describe('Retention -- saving and reopening a saved report', () => {
     await screen.findByTestId('retention-stale')
     expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
 
-    const start = screen.getByTestId('retention-start-where-where')
+    const start = await screen.findByTestId('retention-start-where-where')
     await userEvent.click(within(start).getByRole('button', { name: /add predicate/i }))
     await userEvent.click(within(start).getByRole('button', { name: /remove/i }))
     expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
 
-    const ret = screen.getByTestId('retention-return-where-where')
+    const ret = await screen.findByTestId('retention-return-where-where')
     await userEvent.click(within(ret).getByRole('button', { name: /add predicate/i }))
     await userEvent.click(within(ret).getByRole('button', { name: /remove/i }))
     expect(screen.getByRole('button', { name: /^save$/i })).toBeEnabled()
