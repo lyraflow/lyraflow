@@ -9,6 +9,7 @@ import { EventCombobox } from '../components/EventCombobox.js'
 import { Button } from '../components/ui/button.js'
 import { Input } from '../components/ui/input.js'
 import { Label } from '../components/ui/label.js'
+import { WherePredicates } from './segments/WherePredicates.js'
 import { RangePicker } from './shared/RangePicker.js'
 import { rangeIncomplete, readRange, resolveRange } from './shared/range.js'
 import { whereFromStored } from './shared/where.js'
@@ -22,6 +23,7 @@ import {
   bucketCount,
   groupByOf,
   hasTrendDefinitionParams,
+  incompletePredicates,
   readTrendParams,
   sourceAndFieldFromGroupBy,
   tooManyBuckets,
@@ -42,7 +44,13 @@ const INTERVAL_LABELS: Record<string, string> = {
  * trend IS, and sending it here would be the first step toward storing it
  * despite the schema having nowhere to put it. */
 function reportBody(p: TrendParams, name: string): TrendReportInput {
-  return { name, event: p.event, interval: p.interval, group_by: groupByOf(p) ?? null }
+  return {
+    name,
+    event: p.event,
+    interval: p.interval,
+    group_by: groupByOf(p) ?? null,
+    where: p.where,
+  }
 }
 
 /**
@@ -180,6 +188,10 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
             ...resolveRange(p.range, new Date()),
             ...(p.event === '' ? {} : { event: p.event }),
             ...(groupByOf(p) === undefined ? {} : { group_by: groupByOf(p) }),
+            // Omitted entirely when empty -- an empty list is a filter that
+            // matches everything, and saying so in every request URL is
+            // noise a reader has to discount.
+            ...(p.where.length === 0 ? {} : { where: JSON.stringify(p.where) }),
           }),
         )
       } catch (err) {
@@ -306,10 +318,15 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
   const buckets = bucketCount(params, new Date())
   const overCap = tooManyBuckets(params, new Date())
   const incompleteRange = rangeIncomplete(params.range)
+  const unfinished = incompletePredicates(params)
 
   const trimmedName = name.trim()
   const canSave =
-    activeId != null && trimmedName !== '' && params.event !== '' && !breakdownIncomplete(params)
+    activeId != null &&
+    trimmedName !== '' &&
+    params.event !== '' &&
+    !breakdownIncomplete(params) &&
+    unfinished === 0
 
   const handleSave = useCallback(() => {
     // Repeats the `canSave` gate the button's `disabled` prop already
@@ -536,7 +553,7 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
           // is what makes this call the zero-argument, default-`params`
           // form -- the same one this button always called.
           onClick={() => run()}
-          disabled={running || activeId == null || overCap || incompleteRange}
+          disabled={running || activeId == null || overCap || incompleteRange || unfinished > 0}
         >
           {running ? 'Running…' : 'Run'}
         </Button>
@@ -544,6 +561,19 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
           {saving ? 'Saving…' : 'Save'}
         </Button>
       </div>
+
+      <WherePredicates
+        id="trend-where"
+        // `undefined`, never `''`: the combobox reports an empty string when
+        // cleared, and `WherePredicates` reads `''` as an event named the
+        // empty string rather than as "no scoping".
+        event={params.event === '' ? undefined : params.event}
+        client={client}
+        projectId={activeId ?? 0}
+        value={params.where}
+        onChange={(next) => update({ where: next ?? [] })}
+        onUnauthorized={onUnauthorized}
+      />
 
       {saveError != null && (
         <p role="alert" className="text-sm text-destructive">
@@ -568,6 +598,13 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
         <p data-testid="trend-too-many-buckets" className="text-muted-foreground text-sm">
           That range at this resolution is {buckets?.toLocaleString()} points, above the limit of{' '}
           {MAX_BUCKETS.toLocaleString()}. Pick a coarser resolution or a shorter range.
+        </p>
+      )}
+
+      {unfinished > 0 && (
+        <p role="alert" className="text-sm text-destructive">
+          {unfinished === 1 ? '1 filter is' : `${unfinished} filters are`} unfinished — pick a field
+          and a value, or remove the row.
         </p>
       )}
 

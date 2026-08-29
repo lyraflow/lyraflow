@@ -364,6 +364,7 @@ describe('Trends -- saving and reopening a saved report', () => {
       event: 'signup',
       interval: '1d',
       group_by: null,
+      where: [],
     })
   })
 
@@ -410,7 +411,7 @@ describe('Trends -- saving and reopening a saved report', () => {
     await click(/save/i)
     await waitFor(() => expect(client.createTrendReport).toHaveBeenCalled())
     const body = lastCallArg(client.createTrendReport, 1)
-    expect(Object.keys(body).sort()).toEqual(['event', 'group_by', 'interval', 'name'])
+    expect(Object.keys(body).sort()).toEqual(['event', 'group_by', 'interval', 'name', 'where'])
   })
 
   it('reports a duplicate name without losing what was typed', async () => {
@@ -571,5 +572,88 @@ describe('Trends -- delete', () => {
     expect(screen.queryByText(/delete this trend report\?/i)).toBeNull()
     expect(screen.queryByRole('button', { name: /^delete trend$/i })).toBeNull()
     expect(client.deleteTrendReport).not.toHaveBeenCalled()
+  })
+})
+
+describe('Trends where predicates', () => {
+  const ONE = { property: 'path', operator: '=', value: '/register' }
+  // `/trends/new`, not bare `/trends`: `renderAt`'s route table (unlike the
+  // real app's `TrendsEntry`) does not redirect a query-carrying `/trends`
+  // to the builder, so a bare `/trends` here would match the "trends list"
+  // placeholder route instead of mounting `Trends` at all -- a test that
+  // could never pass regardless of what this task implements, which is a
+  // sharper defect than the one this plan's caution names.
+  const FILTERED = `/trends/new?event=%24page&where=${encodeURIComponent(JSON.stringify([ONE]))}`
+
+  it('sends the filter with the run', async () => {
+    const client = renderAt(FILTERED)
+    await userEvent.click(runButton())
+    await waitFor(() => expect(client.stats).toHaveBeenCalled())
+    expect(vi.mocked(client.stats).mock.calls[0]?.[1]).toMatchObject({
+      event: '$page',
+      where: JSON.stringify([ONE]),
+    })
+  })
+
+  it('sends no where at all when there is no filter', async () => {
+    // Not `where: '[]'`. An empty parameter would be a filter that matches
+    // everything, said out loud in every request URL for no reason.
+    const client = renderAt('/trends/new?event=%24page')
+    await userEvent.click(runButton())
+    await waitFor(() => expect(client.stats).toHaveBeenCalled())
+    expect(vi.mocked(client.stats).mock.calls[0]?.[1]).not.toHaveProperty('where')
+  })
+
+  it('blocks Run and Save on an unfinished predicate, and says so', async () => {
+    const blank = [{ property: '', operator: '=', value: '' }]
+    const client = renderAt(
+      `/trends/new?event=%24page&where=${encodeURIComponent(JSON.stringify(blank))}`,
+    )
+    expect(runButton()).toBeDisabled()
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+    expect(screen.getByText(/1 filter/i)).toBeInTheDocument()
+    expect(client.stats).not.toHaveBeenCalled()
+  })
+
+  it('saves the filter with the report', async () => {
+    const createTrendReport = vi.fn(async (_p: number, body: TrendReportInput) => ({
+      id: 9,
+      name: body.name,
+      event: body.event,
+      interval: body.interval,
+      group_by: body.group_by,
+      where: body.where ?? [],
+      definition_version: 1,
+      stale: false,
+      created_at: T,
+      updated_at: T,
+    }))
+    renderAt(FILTERED, { createTrendReport } as Partial<ApiClient>)
+    await userEvent.type(screen.getByLabelText(/name/i), 'registers')
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    await waitFor(() => expect(createTrendReport).toHaveBeenCalled())
+    expect(createTrendReport.mock.calls[0]?.[1].where).toEqual([ONE])
+  })
+
+  it('seeds a saved report filter into the URL', async () => {
+    const stored: TrendReport = {
+      id: 4,
+      name: 'registers',
+      event: '$page',
+      interval: '1d',
+      group_by: null,
+      where: [ONE],
+      definition_version: 1,
+      stale: false,
+      created_at: T,
+      updated_at: T,
+    }
+    const client = renderAt('/trends/4', {
+      trendReport: vi.fn(async () => stored),
+    } as Partial<ApiClient>)
+    await waitFor(() => expect(client.stats).toHaveBeenCalled())
+    expect(vi.mocked(client.stats).mock.calls[0]?.[1]).toMatchObject({
+      where: JSON.stringify([ONE]),
+    })
   })
 })
