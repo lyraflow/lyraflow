@@ -208,6 +208,36 @@ describe('Shell', () => {
     expect(screen.getByRole('link', { name: /funnels/i })).toHaveAttribute('aria-current', 'page')
   })
 
+  it('fills the active destination, so it is not distinguished by colour alone', () => {
+    // `aria-current` above is what a screen reader hears; this is what a
+    // sighted operator sees, and until now it was one colour step on one
+    // axis -- `text-foreground` against `text-muted-foreground`, every item
+    // the same weight. The fill is the same `bg-muted` the hover state
+    // uses.
+    //
+    // Asserted on the ACTIVE and an INACTIVE link together. The active
+    // half alone would still pass if every item were filled, which is the
+    // one way this could be wrong while looking right.
+    render(
+      <MemoryRouter initialEntries={['/funnels']}>
+        <ProjectProvider projects={PROJECTS} initialId={1}>
+          <Shell email="a@b.c" onLogout={vi.fn()} client={fakeClient()}>
+            {null}
+          </Shell>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    // `classList`, not a substring of `className`: the inactive link carries
+    // `hover:bg-muted`, which CONTAINS `bg-muted` as text. A substring
+    // assertion passes on the active link and fails on the inactive one for
+    // a reason that has nothing to do with the fill. `classList` tokenises
+    // on whitespace, so `bg-muted` and `hover:bg-muted` are distinct.
+    expect(screen.getByRole('link', { name: /funnels/i }).classList.contains('bg-muted')).toBe(true)
+    expect(screen.getByRole('link', { name: /settings/i }).classList.contains('bg-muted')).toBe(
+      false,
+    )
+  })
+
   // `Shell.tsx`'s own comment explains why Feed is a plain `Link` with
   // `aria-current` computed by hand: `Router.tsx` answers `/` with the same
   // element as `/feed`, and `NavLink`'s own `isActive` match (computed from

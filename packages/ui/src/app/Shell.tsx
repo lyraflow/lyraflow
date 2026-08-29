@@ -42,6 +42,39 @@ import { useVersion } from './useVersion.js'
 // appear next to the mark at a comparable size.
 const ICON_STROKE = 1.5
 
+/**
+ * One sidebar destination's classes, active or not.
+ *
+ * Written once and called seven times rather than spelled out at each link.
+ * The seven were identical ternaries, which is how the eighth destination
+ * gets added with the wrong ones -- or how six of seven pick up a change and
+ * the last is found later by an operator rather than by a diff.
+ *
+ * **The active state carries a background fill, not only a colour step.**
+ * Every item is `font-medium` and the active one differed from the rest by
+ * `text-foreground` against `text-muted-foreground` -- one step on one
+ * axis, which is not enough to answer "which screen am I on" at a glance.
+ * The fill is deliberately the SAME `bg-muted` the hover state uses: asked
+ * for by name, and it keeps the sidebar to two greys rather than inventing
+ * a third. The cost is that hovering an inactive item makes it look
+ * selected for as long as the pointer is on it. That ambiguity resolves
+ * itself -- the pointer is the thing that caused it and the thing that ends
+ * it -- which is why this is the fill rather than a second, louder one.
+ *
+ * `aria-current` is what actually announces the active destination to a
+ * screen reader, and it is set at each link rather than here: `NavLink`
+ * supplies its own, and the Feed link computes one by hand because it has a
+ * second path (`/`) that must also count as active. This function only
+ * dresses what those already decided.
+ */
+function navLinkClass(isActive: boolean): string {
+  return `flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium ${
+    isActive
+      ? 'bg-muted text-foreground'
+      : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+  }`
+}
+
 function Mark() {
   return (
     <svg viewBox="0 0 100 100" className="h-5 w-5 shrink-0 text-primary" aria-hidden="true">
@@ -290,11 +323,7 @@ export function Shell(props: {
           <Link
             to={ROUTES.feed}
             aria-current={feedActive ? 'page' : undefined}
-            className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium ${
-              feedActive
-                ? 'text-foreground'
-                : 'text-muted-foreground hover:bg-muted hover:text-foreground'
-            }`}
+            className={navLinkClass(feedActive)}
           >
             <LayoutList className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
             {/* Three destinations no longer fit as icon+label at 390px (see
@@ -308,81 +337,27 @@ export function Shell(props: {
           {/* `NavLink`, exactly as Settings uses it below -- it supplies
            * `aria-current="page"` itself, and unlike Feed there is no
            * second path (`/`) that also has to count as "on this screen". */}
-          <NavLink
-            to={ROUTES.funnels}
-            className={({ isActive }) =>
-              `flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium ${
-                isActive
-                  ? 'text-foreground'
-                  : 'text-muted-foreground hover:bg-muted hover:text-foreground'
-              }`
-            }
-          >
+          <NavLink to={ROUTES.funnels} className={({ isActive }) => navLinkClass(isActive)}>
             <Filter className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
             <span className="sr-only sm:not-sr-only">Funnels</span>
           </NavLink>
-          <NavLink
-            to={ROUTES.trends}
-            className={({ isActive }) =>
-              `flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium ${
-                isActive
-                  ? 'text-foreground'
-                  : 'text-muted-foreground hover:bg-muted hover:text-foreground'
-              }`
-            }
-          >
+          <NavLink to={ROUTES.trends} className={({ isActive }) => navLinkClass(isActive)}>
             <LineChart className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
             <span className="sr-only sm:not-sr-only">Trends</span>
           </NavLink>
-          <NavLink
-            to={ROUTES.retention}
-            className={({ isActive }) =>
-              `flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium ${
-                isActive
-                  ? 'text-foreground'
-                  : 'text-muted-foreground hover:bg-muted hover:text-foreground'
-              }`
-            }
-          >
+          <NavLink to={ROUTES.retention} className={({ isActive }) => navLinkClass(isActive)}>
             <Grid3x3 className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
             <span className="sr-only sm:not-sr-only">Retention</span>
           </NavLink>
-          <NavLink
-            to={ROUTES.segments}
-            className={({ isActive }) =>
-              `flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium ${
-                isActive
-                  ? 'text-foreground'
-                  : 'text-muted-foreground hover:bg-muted hover:text-foreground'
-              }`
-            }
-          >
+          <NavLink to={ROUTES.segments} className={({ isActive }) => navLinkClass(isActive)}>
             <Users className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
             <span className="sr-only sm:not-sr-only">Segments</span>
           </NavLink>
-          <NavLink
-            to={ROUTES.people}
-            className={({ isActive }) =>
-              `flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium ${
-                isActive
-                  ? 'text-foreground'
-                  : 'text-muted-foreground hover:bg-muted hover:text-foreground'
-              }`
-            }
-          >
+          <NavLink to={ROUTES.people} className={({ isActive }) => navLinkClass(isActive)}>
             <UserSearch className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
             <span className="sr-only sm:not-sr-only">People</span>
           </NavLink>
-          <NavLink
-            to={ROUTES.settings}
-            className={({ isActive }) =>
-              `flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium ${
-                isActive
-                  ? 'text-foreground'
-                  : 'text-muted-foreground hover:bg-muted hover:text-foreground'
-              }`
-            }
-          >
+          <NavLink to={ROUTES.settings} className={({ isActive }) => navLinkClass(isActive)}>
             <SettingsIcon className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
             <span className="sr-only sm:not-sr-only">Settings</span>
           </NavLink>
