@@ -1,7 +1,8 @@
 // `where` on the stats endpoint, against a real ClickHouse. `trends.test.ts`
 // pins the breakdown; this pins what a predicate MEANS -- that it cuts the
 // count rather than merely parsing, that it composes with a breakdown, that
-// it survives the retry dedup, and that a bad one is refused rather than
+// it survives the retry dedup, that a suppressed person stays out even
+// under a matching filter, and that a bad one is refused rather than
 // ignored.
 import { join } from 'node:path'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
@@ -11,6 +12,7 @@ import { buildApp } from '../app.js'
 import { hashServerKey } from '../auth/project-cache.js'
 import { loadConfig } from '../config.js'
 import { Readiness } from '../health.js'
+import { type PgDictionarySource, ensureIdentityDictionaries } from '../identity/dictionaries.js'
 
 const CH = {
   url: 'http://localhost:8123',
@@ -72,6 +74,26 @@ const totals = (body: { buckets: { series?: string; events: number }[] }) => {
 /** One predicate list, URL-encoded the way a caller sends it. */
 const where = (list: unknown[]) => `where=${encodeURIComponent(JSON.stringify(list))}`
 
+// Resolved by the ClickHouse *server* itself, inside the compose network --
+// same pattern `routes.test.ts` uses.
+const pgSource: PgDictionarySource = {
+  host: 'postgres',
+  port: 5432,
+  user: 'lyraflow',
+  password: 'lyraflow',
+  database: CH.database,
+}
+
+/** Mirrors `routes.test.ts`'s own `suppress` helper: the dictionary, not
+ * the table, is what the compiled query reads. */
+const suppress = async (projectId: number, personId: string, at: Date) => {
+  await pg.query(
+    'INSERT INTO suppressed_persons (project_id, person_id, suppressed_at) VALUES ($1, $2, $3)',
+    [projectId, personId, at],
+  )
+  await ch.command({ query: `SYSTEM RELOAD DICTIONARY ${CH.database}.suppressed_persons` })
+}
+
 beforeAll(async () => {
   await migrate({
     pg,
@@ -79,6 +101,7 @@ beforeAll(async () => {
     migrations: loadMigrations(join(import.meta.dirname, '../../../db/migrations')),
     appSchemaVersion: 999,
   })
+  await ensureIdentityDictionaries(ch, pgSource)
   await pg.query('DELETE FROM projects WHERE slug = $1', ['stats-where'])
   await pg.query(
     `INSERT INTO projects (id, name, slug, write_key, server_key_hash)
@@ -223,6 +246,41 @@ describe('GET /v1/events/stats?where=', () => {
     const { body } = await stats(
       `event=$page&interval=1d&${where([{ property: 'path', operator: '=', value: '/retry' }])}`,
     )
+    expect(total(body)).toBe(1)
+  })
+
+  it("keeps a suppressed person's events out even when they match the filter", async () => {
+    // `notSuppressedExpr` is ANDed into the SAME inner WHERE as `where`'s
+    // own predicates (decision 4) -- a filter naming exactly the erased
+    // person's events must still exclude them, rather than the two
+    // conditions somehow only applying to each other. A separate event name
+    // and its own fixture, self-contained the way `routes.test.ts`'s own
+    // suppression test is, so this does not disturb the fixed totals every
+    // other test in this file pins against the shared beforeAll fixture.
+    const eventName = 'stats_suppressed_probe'
+    await ch.insert({
+      table: 'events',
+      format: 'JSONEachRow',
+      values: [
+        ev(eventName, '2026-06-10', { path: '/probe' }, {}, {
+          user_id: 'stats-where-suppressed-user',
+        }),
+        ev(eventName, '2026-06-10', { path: '/probe' }, {}, {
+          user_id: 'stats-where-control-user',
+        }),
+      ],
+    })
+    // Strictly after the event above -- "all events before their boundary"
+    // is the shape `routes.test.ts`'s own suppression test exists to catch.
+    await suppress(PROJECT, 'stats-where-suppressed-user', new Date('2026-06-11T00:00:00Z'))
+
+    const { body } = await stats(
+      `event=${eventName}&interval=1d&${where([
+        { property: 'path', operator: '=', value: '/probe' },
+      ])}`,
+    )
+    // Only the control user's event survives -- if suppression were not
+    // applied inside the same inner scan as the filter, this would be 2.
     expect(total(body)).toBe(1)
   })
 
