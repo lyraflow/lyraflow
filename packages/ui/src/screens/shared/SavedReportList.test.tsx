@@ -99,4 +99,35 @@ describe('SavedReportList', () => {
     renderRows([ROW])
     expect(screen.queryByRole('button')).toBeNull()
   })
+
+  it('marks a stale row, and leaves an ordinary one unmarked', () => {
+    renderRows([ROW, { ...ROW, id: 4, stale: true }])
+    expect(screen.getByTestId('report-stale-4')).toHaveTextContent(/cannot be read/i)
+    expect(screen.queryByTestId('report-stale-3')).toBeNull()
+  })
+
+  // #213. This badge used to be `variant="secondary"` -- the low-contrast
+  // grey the design system uses for metadata -- so at a glance it read like
+  // the timestamp beside it rather than as a warning that the report cannot
+  // be reproduced as saved. The list is where an operator decides WHICH
+  // report to open, so understating it there is the one place it costs
+  // something.
+  //
+  // A deliberate exception, not a system-wide change. #213 assumed
+  // `Funnels.tsx`'s own secondary badge was the same kind of thing and that
+  // moving one alone traded one inconsistency for another. It is not: that
+  // badge reads "Segment filter", which is genuine metadata, and Funnels
+  // expresses staleness as TEXT in its step summary ("Steps cannot be
+  // read"), never as a badge. The two say different kinds of thing, so
+  // secondary stays correct there and is untouched.
+  //
+  // Asserted on the class, which is a tripwire and not a proof -- see #217
+  // for the same honest limit on the two assertions above. The real
+  // verification was rendering the list and looking at it.
+  it('gives the stale badge warning weight, not the grey used for metadata', () => {
+    renderRows([{ ...ROW, stale: true }])
+    const badge = screen.getByTestId('report-stale-3')
+    expect(badge.className).toContain('bg-destructive')
+    expect(badge.className).not.toContain('bg-secondary')
+  })
 })

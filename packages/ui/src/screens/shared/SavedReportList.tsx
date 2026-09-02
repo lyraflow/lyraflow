@@ -54,8 +54,21 @@ function SavedReportRowItem(props: { row: SavedReportRow; hrefFor(id: number): s
         <span className="min-w-0 break-words font-medium text-foreground">{row.name}</span>
         <span className="min-w-0 break-words text-sm text-muted-foreground">{row.summary}</span>
         <span className="flex items-center gap-2 text-sm text-muted-foreground">
+          {/* `destructive`, not the `secondary` grey this design system
+           * uses for metadata (#213): at a glance the low-contrast badge
+           * read like the "Updated ..." timestamp beside it rather than as
+           * a warning that the report cannot be reproduced as it was saved.
+           * The detail screen states the problem plainly once the report is
+           * open; the list is where an operator picks WHICH one to open,
+           * which is the one place understating it costs something.
+           *
+           * A deliberate exception rather than a system-wide move.
+           * `Funnels.tsx`'s own `secondary` badge reads "Segment filter" --
+           * genuine metadata -- and Funnels says "Steps cannot be read" as
+           * text in its step summary rather than as a badge at all. The two
+           * say different kinds of thing, so nothing there changes. */}
           {row.stale && (
-            <Badge variant="secondary" data-testid={`report-stale-${row.id}`}>
+            <Badge variant="destructive" data-testid={`report-stale-${row.id}`}>
               Cannot be read
             </Badge>
           )}
