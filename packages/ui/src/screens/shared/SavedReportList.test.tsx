@@ -63,11 +63,47 @@ describe('SavedReportList', () => {
     expect(screen.queryByRole('list')).toBeNull()
   })
 
-  // Both of these pin what a screenshot showed and no behavioural test
-  // could: a class name is invisible to every query in this file, so the
-  // list rendered "correctly" for a name that in fact ran out of its own
-  // card, and offered a link that looked like prose.
-  it('wraps a long report name with break-words, not break-all', () => {
+  /**
+   * WHAT THE NEXT TWO TESTS DO AND DO NOT COVER (#217).
+   *
+   * They assert class names. **That is a regression tripwire, not a proof of
+   * layout**, and the distinction is worth stating because the names make
+   * them sound like proofs. Each pins a real defect a screenshot found and no
+   * query in this file could see -- a name that ran out of its own card, and
+   * a link that read as prose -- but what they verify is that a string is
+   * still in an attribute, not that anything wraps or is distinguishable.
+   *
+   * Specifically, they cannot see:
+   *
+   *   - a Tailwind upgrade renaming the utility, which passes here and
+   *     silently drops the behaviour;
+   *   - the surrounding layout changing so that wrapping no longer prevents
+   *     the overflow it was added for;
+   *   - whether the link's colour actually contrasts against the card.
+   *
+   * They CAN now see one thing the original pair could not, which was #217's
+   * sharpest point: a second class arriving that neutralises the first.
+   * `break-words` is inert next to `whitespace-nowrap`, `truncate` or a fixed
+   * width, so the negative assertions below name every utility in this
+   * codebase that would defeat it. That closes the "another rule neutralised
+   * the wrapping" hole without pretending to measure anything.
+   *
+   * A real check needs a browser -- jsdom performs no layout, so
+   * `scrollWidth` and `getComputedStyle` are useless here. The existing
+   * Playwright suite is not the place: `playwright.config.ts` states it
+   * exists to prove the built assets, static serving, cookie and API work
+   * together, "not to cover behaviour", and it drives a full app on :3000.
+   * A component-screenshot harness is the missing piece, and it is
+   * infrastructure rather than a test -- left to #217 to decide rather than
+   * bolted on here.
+   *
+   * The real verification for both fixes was a rendered screenshot at 390px.
+   */
+
+  /** Every utility in this codebase that makes `break-words` inert. */
+  const WRAP_DEFEATING = ['whitespace-nowrap', 'truncate', 'text-nowrap', 'overflow-hidden']
+
+  it('keeps a long report name wrapping, with nothing that would defeat it', () => {
     // A report name is typed by an operator and frequently has no spaces.
     // Unwrapped, this one overflowed the row by ~180px at 390px wide and
     // put the whole list into horizontal scroll. `break-all` would fix the
@@ -78,11 +114,23 @@ describe('SavedReportList', () => {
     const label = screen.getByText(name)
     expect(label.className).toContain('break-words')
     expect(label.className).not.toContain('break-all')
+    // `min-w-0` is half the fix and was never asserted: inside a flex row a
+    // child will not shrink below its content without it, so the wrapping
+    // class alone does not stop the overflow.
+    expect(label.className).toContain('min-w-0')
+    for (const defeat of WRAP_DEFEATING) {
+      expect(label.className).not.toContain(defeat)
+    }
   })
 
   it('renders "Create one" as a link and not as the last two words of the message', () => {
     renderRows([])
-    expect(screen.getByRole('link', { name: /create one/i }).className).toContain('text-primary')
+    const link = screen.getByRole('link', { name: /create one/i })
+    // Distinguishable from the prose around it, and reachable -- the second
+    // is real behaviour rather than a class string, so it is asserted as
+    // behaviour.
+    expect(link.className).toContain('text-primary')
+    expect(link).toHaveAttribute('href', '/reports/new')
   })
 
   it('distinguishes a failed load from an empty list', () => {
