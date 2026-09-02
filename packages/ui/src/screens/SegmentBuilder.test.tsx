@@ -849,39 +849,62 @@ describe('SegmentBuilder -- the three server-side tree caps', () => {
     }
   }
 
-  // 60s, not 30s, and the reason is measured rather than guessed (#150).
+  // 180s, not 60s, and every number here is measured rather than guessed
+  // (#150, then #228).
   //
   // These two fixtures render MAX_TREE_NODES - 1 real trait forms, and that
-  // render is SUPERLINEAR in row count. Measured on one machine, same test,
-  // only the fixture size changed:
+  // render is SUPERLINEAR in row count. Same test, only the fixture size
+  // changed, measured on one machine at two points in the repo's history:
   //
-  //     99 rows   13687ms
-  //     49 rows    1612ms
-  //     24 rows     234ms
+  //                  at 7b379e0 (2026-08-22)   at main (2026-09-02)
+  //     99 rows                     13687ms                 31424ms
+  //     49 rows                      1612ms                  3933ms
+  //     24 rows                       234ms                   729ms
   //
-  // Halving the rows is roughly an 8x saving, which is cubic-ish -- so the
-  // cost is not "99 rows at 140ms each", it is the tree re-rendering as it
-  // mounts. That is why raising the number is the honest fix here and
-  // trimming the fixture is not: the test needs a tree AT the cap, and the
-  // cap is where the cost lives.
+  // Two things follow, and the second one corrects this comment's own
+  // earlier explanation.
   //
-  // Two cheaper explanations were tested and RULED OUT, so nobody re-tests
-  // them:
+  // FIRST: the cost roughly DOUBLED, and it is the code that changed, not
+  // the machine. `7b379e0` re-measured on the machine that produced the
+  // right-hand column gives 14827ms -- reproducing its own recorded 13687ms.
+  // Two commits account for it, found by `git bisect run` over the 269
+  // commits between them, and both add per-row DOM to the trait condition:
+  //   - `23ad892` (predicate operator families): 15148ms -> 22436ms. The
+  //     operator <select> went from 7 options to 19 in optgroups; forcing it
+  //     back to `['comparison']` today measures 31424ms -> 20353ms, so this
+  //     is about a third of the total.
+  //   - `05f9f2e` (trait field alignment and value label): 22638ms -> 30278ms.
+  // Neither is wrong as a change. They are per-row costs that were invisible
+  // at one row and are not at ninety-nine. Tracked in #228.
+  //
+  // SECOND, and this is a CORRECTION: the superlinearity is NOT "the tree
+  // re-rendering as it mounts", which is what this comment used to say.
+  // Counting renders directly (a counter in `ConditionRow`) gives exactly
+  // 99 for a 99-row fixture -- every row renders ONCE. So memoising the row,
+  // or stabilising the callbacks it receives, cannot help, and the plausible
+  // shape of that explanation is exactly what makes it worth writing down as
+  // ruled out. What actually grows is the cost of ONE row's render as the
+  // document gets bigger, which points at jsdom rather than at React.
+  //
+  // Also RULED OUT, from the earlier round, so nobody re-tests them:
   //   - the ~99 suggestion effects resolving and setting state. Making those
   //     promises never settle changed nothing (13.7s -> 13.9s).
   //   - Testing Library's `getByRole`/`getByText` computing accessible names
   //     across a large DOM on every poll. Replacing both with raw DOM queries
   //     changed nothing (13.7s -> 15.0s).
   //
-  // 30s was already a raised number and CI crossed it anyway -- a runner is
-  // slower than this machine, and 14s of a 30s budget is not margin. 60s is
-  // budgeting a cost we have measured, not hiding one we have not.
+  // Why raise the number rather than trim the fixture: the test needs a tree
+  // AT the cap, and the cap is where the cost lives. CI measured 61117ms and
+  // timed out at 60000ms, against ~31s on this machine -- a runner is about
+  // twice as slow, so 60s was budgeting for a cost that no longer fits.
+  // 180s restores roughly the headroom 60s bought when it was set.
   //
-  // What is NOT concluded: that the product is slow. jsdom is far slower than
-  // a browser and these numbers do not transfer; the cap bounds the worst
-  // case at 100 nodes, and nobody has reported a slow builder. The scaling
-  // EXPONENT would transfer, so it is worth a browser profile someday -- but
-  // that is a separate question from this file's runtime.
+  // What is NOT concluded: that the product is slow for a user. jsdom is far
+  // slower than a browser and these absolute numbers do not transfer; the cap
+  // bounds the worst case at 100 nodes and nobody has reported a slow builder.
+  // What DOES transfer is that the same tree now costs about twice the render
+  // work it did, which is why #228 exists and why the browser profile it asks
+  // for is the measurement that would settle it.
   it('disables add-condition at the node cap, says which cap, and never requests a preview or a save', async () => {
     const client = fakeClient({
       segment: vi.fn(async () => ({
@@ -900,7 +923,7 @@ describe('SegmentBuilder -- the three server-side tree caps', () => {
     expect(client.previewSegment).not.toHaveBeenCalled()
     expect(client.createSegment).not.toHaveBeenCalled()
     expect(client.updateSegmentTree).not.toHaveBeenCalled()
-  }, 60000)
+  }, 180000)
 
   it('disables add-condition at the depth cap, and says which cap', async () => {
     // A chain of MAX_TREE_DEPTH - 1 nested single-child groups, bottoming
@@ -960,7 +983,7 @@ describe('SegmentBuilder -- the three server-side tree caps', () => {
     renderBuilder(client, SEGMENT.id)
     const add = await screen.findByRole('button', { name: /^add condition$/i })
     expect(add).toBeEnabled()
-  }, 60000)
+  }, 180000)
 })
 
 // --- Live counts -- cheap automatically, costly on request. Fake
