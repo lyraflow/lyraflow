@@ -499,6 +499,36 @@ describe('Retention -- saving and reopening a saved report', () => {
     expect(client.runRetention).not.toHaveBeenCalled()
   })
 
+  // #214. The message used to read "Run below to see what these controls ask
+  // for now" while the Run button sits in the action row ABOVE it, so the
+  // copy pointed down at nothing. The instruction itself is worth keeping --
+  // running a stale report is legitimate, which is why Run stays enabled
+  // there while Save does not -- so the fix is to keep the instruction and
+  // drop the direction. Asserted as "names Run, carries no direction word"
+  // rather than as an exact string, because the button has already moved
+  // once and a wording that does not depend on layout cannot move with it.
+  it('tells the operator a stale report can still be run, without pointing anywhere', async () => {
+    renderAt('/retention/3', {
+      retentionReport: vi.fn(async () => reportFixture({ stale: true })),
+    })
+    const text = (await screen.findByTestId('retention-stale')).textContent ?? ''
+    expect(text).toMatch(/\brun\b/i)
+    expect(text).not.toMatch(/\b(above|below|beneath|underneath|to the (left|right))\b/i)
+  })
+
+  // The fact that makes the direction word wrong, pinned so that
+  // re-introducing one is a test failure rather than a reader's judgement
+  // call. If the action row ever genuinely moves below the message, this
+  // fails and the copy question is reopened deliberately.
+  it('renders the stale message after the Run button, not before it', async () => {
+    renderAt('/retention/3', {
+      retentionReport: vi.fn(async () => reportFixture({ stale: true })),
+    })
+    const message = await screen.findByTestId('retention-stale')
+    const position = runButton().compareDocumentPosition(message)
+    expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
   // M5 from the whole-branch review: a stale report's predicates fail to
   // reproduce in one of two ways, and they used to diverge. This is the
   // shape that already worked -- an element that fails core's schema but
