@@ -846,12 +846,34 @@ works on first paste with no configuration.
 | `message_id` | yes | Client-generated UUID. Becomes the event's id; see *Retries* below. |
 | `anonymous_id` | one of these two | Device/browser identifier, up to 128 characters. |
 | `user_id` | one of these two | Known-user identifier, up to 128 characters. `identify` always requires it. |
-| `event` | `track` only | Event name, up to 128 characters. |
+| `event` | `track` only | Event name, up to 128 characters. Control characters are escaped on write — see below. |
 | `name` | `page` only | Page name, up to 128 characters. Stored as the `$page_name` **property**, never as the event name. |
 | `properties` | no | Flat object. `track` and `page` only. |
 | `traits` | no | Flat object. `identify` only. |
 | `timestamp` | no | ISO-8601. Defaults to server time at receipt; see *Retries*. |
 | `context` | no | `url`, `path` and `referrer`, up to 2048 characters each; `user_agent`, up to 1024; `library` (`{name, version}`, both required when present, up to 128 characters each); and the five `utm_*` fields, up to 128 each. |
+
+**Control characters in an event name or a property key are escaped when the
+event is written**, not when it is displayed. A byte in the C0 range
+(`0x00`–`0x1f`), `DEL` (`0x7f`) or C1 (`0x80`–`0x9f`) is stored as a printable
+`\xNN` escape instead — so `signup` followed by an `ESC` is stored as
+`signup\x1b`, and what you read back can never itself be a terminal
+instruction, an HTML break or a log-line split.
+
+This matters because a write key is public by construction — it ships inside
+the browser bundle and is readable in devtools on any instrumented page — so
+anyone who visits an instrumented site can choose these bytes. Escaping once,
+at ingest, is what stops every consumer from having to remember: the terminal
+output of the CLI, the web UI, exports, and whatever you build next.
+
+**The consequence to know about: a stored name with a control character in it
+does not match the bytes that were sent.** The escape is chosen to be legible
+rather than lossy — `\x1b` tells you exactly which byte arrived, where dropping
+it would silently merge `sign`+newline+`up` and `signup` into one event — but if
+you are reconciling against your own logs, that is where a difference comes
+from. **Property *values* are never rewritten**, only names and keys: a value is
+your data, and a newline in a support message is content rather than a
+formatting accident.
 
 A payload that declares one of Lyraflow's server-side SDKs is never filtered as a
 bot. That matters because the HTTP clients those SDKs use announce themselves as
