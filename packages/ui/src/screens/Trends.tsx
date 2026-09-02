@@ -671,7 +671,7 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
       {stale && (
         <p data-testid="trend-stale" className="text-muted-foreground text-sm">
           The filters saved with this report no longer parse, so it cannot be reproduced as saved.
-          Run below to see what these controls ask for now, or fix the conditions and save over it.
+          Run it to see what these controls ask for now, or fix the conditions and save over it.
         </p>
       )}
 

@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import type { RetentionResult } from '../../api/types.js'
 import { RetentionGrid } from './RetentionGrid.js'
@@ -113,6 +113,71 @@ describe('RetentionGrid', () => {
       />,
     )
     expect(tintOf(0, 3)).toBe(0)
+  })
+
+  // #215. `overflow-x-auto` means the grid DOES scroll -- 26 periods is
+  // wider than a laptop by design -- but nothing said so. At 390px it was
+  // cut off mid-column with no fade, no shadow and no scrollbar until the
+  // reader happened to drag, so a table that continues looked like a table
+  // that had been truncated.
+  //
+  // jsdom does no layout, so every scroll metric on the container is 0 and
+  // an honest measurement is impossible here. These tests DEFINE the three
+  // metrics the component reads and then fire a scroll, which is what lets
+  // the decision be tested at all. What they cannot test is that the
+  // gradient is visible -- that was checked in a browser at 390px.
+  describe('the sideways-scroll affordance', () => {
+    function scroller(): HTMLElement {
+      return screen.getByTestId('retention-grid-scroller')
+    }
+
+    /** jsdom leaves scrollWidth/clientWidth/scrollLeft at 0 and read-only. */
+    function setMetrics(
+      el: HTMLElement,
+      m: { scrollWidth: number; clientWidth: number; scrollLeft: number },
+    ) {
+      for (const [key, value] of Object.entries(m)) {
+        Object.defineProperty(el, key, { value, configurable: true })
+      }
+      fireEvent.scroll(el)
+    }
+
+    it('marks the grid as continuing when it is wider than its container', () => {
+      render(<RetentionGrid result={result()} />)
+      setMetrics(scroller(), { scrollWidth: 900, clientWidth: 390, scrollLeft: 0 })
+      expect(screen.getByTestId('retention-grid-more')).toBeInTheDocument()
+    })
+
+    it('stops marking it once the last column is in view', () => {
+      render(<RetentionGrid result={result()} />)
+      const el = scroller()
+      setMetrics(el, { scrollWidth: 900, clientWidth: 390, scrollLeft: 0 })
+      expect(screen.getByTestId('retention-grid-more')).toBeInTheDocument()
+      setMetrics(el, { scrollWidth: 900, clientWidth: 390, scrollLeft: 510 })
+      expect(screen.queryByTestId('retention-grid-more')).toBeNull()
+    })
+
+    it('marks nothing when the whole grid already fits', () => {
+      render(<RetentionGrid result={result()} />)
+      setMetrics(scroller(), { scrollWidth: 390, clientWidth: 390, scrollLeft: 0 })
+      expect(screen.queryByTestId('retention-grid-more')).toBeNull()
+    })
+
+    // A fractional layout width leaves scrollLeft + clientWidth a hair under
+    // scrollWidth at the true end. Without slack the affordance would pin on
+    // forever at exactly the position it exists to say nothing about, which
+    // is worse than not having it -- it would always claim there is more.
+    it('treats a sub-pixel remainder at the end as the end', () => {
+      render(<RetentionGrid result={result()} />)
+      setMetrics(scroller(), { scrollWidth: 900.4, clientWidth: 390, scrollLeft: 510 })
+      expect(screen.queryByTestId('retention-grid-more')).toBeNull()
+    })
+
+    it('is hidden from assistive technology -- it is decoration, not content', () => {
+      render(<RetentionGrid result={result()} />)
+      setMetrics(scroller(), { scrollWidth: 900, clientWidth: 390, scrollLeft: 0 })
+      expect(screen.getByTestId('retention-grid-more')).toHaveAttribute('aria-hidden', 'true')
+    })
   })
 
   it('says the shading is relative, and to what', () => {

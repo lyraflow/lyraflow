@@ -670,6 +670,28 @@ describe('Trends -- a stale saved report', () => {
     expect(client.stats).not.toHaveBeenCalled()
   })
 
+  // #214, which was filed against Retention and is the same sentence here:
+  // "Run below" pointed down at a Run button that sits in the action row
+  // above the message on BOTH screens. Fixing one and leaving the other is
+  // how the two copies drift, so both carry this pair.
+  it('tells the operator a stale report can still be run, without pointing anywhere', async () => {
+    renderAt('/trends/3', {
+      trendReport: vi.fn(async () => reportFixture({ stale: true })),
+    })
+    const text = (await screen.findByTestId('trend-stale')).textContent ?? ''
+    expect(text).toMatch(/\brun\b/i)
+    expect(text).not.toMatch(/\b(above|below|beneath|underneath|to the (left|right))\b/i)
+  })
+
+  it('renders the stale message after the Run button, not before it', async () => {
+    renderAt('/trends/3', {
+      trendReport: vi.fn(async () => reportFixture({ stale: true })),
+    })
+    const message = await screen.findByTestId('trend-stale')
+    const position = runButton().compareDocumentPosition(message)
+    expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
   // F2's own shape: a stale predicate that fails core's schema but still
   // LOOKS like a predicate (`looksLikePredicate`) survives seeding as a
   // real, editable row -- `unfinished` counts it, but before the fix the
