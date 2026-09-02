@@ -1996,7 +1996,46 @@ describe('GET /v1/events/stats', () => {
 })
 
 describe('GET /v1/events/rejections', () => {
-  const AT = '2026-08-01 00:00:00.000'
+  /**
+   * Anchored to this run, never to an absolute date -- and the reason is
+   * specific to THIS table rather than to the ingest clamp the file header
+   * warns about. `events_dead_letter` carries
+   * `TTL toDateTime(received_at) + INTERVAL 30 DAY` (`002_events.sql`, the
+   * only TTL in the schema), so a hardcoded fixture date is inside the
+   * retention window on the day it is written and outside it thirty days
+   * later. Past that point the rows are expired, ClickHouse is entitled to
+   * drop them whenever it next touches the part, and every test in this
+   * block fails with an EMPTY result for reasons that have nothing to do
+   * with the route.
+   *
+   * That is not hypothetical: `AT` was `2026-08-01`, which expired on
+   * 2026-08-31. CI was green on 2026-08-29 and failed on every run from
+   * 2026-09-02, with `main` byte-identical in between (#226). It presented
+   * as a flake because the drop is not tied to anything the test does --
+   * forcing collection (`OPTIMIZE TABLE events_dead_letter FINAL` between
+   * the insert and the first query) turns it into a 100% failure, which is
+   * how it was pinned down.
+   *
+   * Floored to whole seconds so the `DateTime64(3)` literal and the exact
+   * ISO instant asserted below name the same moment with no sub-millisecond
+   * drift. Three hours back keeps every window that derives from it in the
+   * past, since `until` in the future is a different argument with the route.
+   */
+  const AT_MS = Math.floor((Date.now() - 3 * 60 * 60 * 1000) / 1000) * 1000
+  const chLiteral = (ms: number) => new Date(ms).toISOString().replace('T', ' ').replace('Z', '')
+  const AT = chLiteral(AT_MS)
+  const AT_ISO = new Date(AT_MS).toISOString()
+  /** A second, distinct instant. The original fixture put it a day after
+   * `AT`; only "different from AT, and inside every window below" ever
+   * mattered, so a minute serves and keeps the whole block inside one TTL
+   * horizon. */
+  const BOUNDARY_MS = AT_MS + 60_000
+  const BOUNDARY_AT = chLiteral(BOUNDARY_MS)
+  const BOUNDARY_ISO = new Date(BOUNDARY_MS).toISOString()
+  /** The wide window every non-boundary test uses: comfortably around both
+   * fixture instants, and comfortably inside the 30-day TTL. */
+  const SINCE = new Date(AT_MS - 60 * 60 * 1000).toISOString()
+  const UNTIL = new Date(BOUNDARY_MS + 60 * 60 * 1000).toISOString()
 
   beforeAll(async () => {
     await ch.insert({
@@ -2039,9 +2078,29 @@ describe('GET /v1/events/rejections', () => {
     })
   })
 
+  // Guards the CLASS, not the instance (#226). Every other test here reads
+  // the fixture through the route, so all of them fail together and
+  // identically -- with an empty result -- whenever these rows have expired,
+  // and none of them says why. Re-pinning `AT` to an absolute date would
+  // pass for thirty days and then start flaking, which is exactly the
+  // thirty-day fuse that was lit the first time.
+  //
+  // `DEAD_LETTER_TTL_DAYS` mirrors `002_events.sql`. Shortening the TTL
+  // there without revisiting this fixture fails here too, which is the other
+  // half of the same bug and the reason this asserts against the horizon
+  // rather than against a hardcoded age.
+  it('anchors its fixtures well inside the dead-letter TTL', () => {
+    const DEAD_LETTER_TTL_DAYS = 30
+    const oldestAgeDays = (Date.now() - AT_MS) / 86_400_000
+    expect(oldestAgeDays).toBeLessThan(DEAD_LETTER_TTL_DAYS / 2)
+    // And positive: a fixture in the future would be excluded by `until`
+    // rather than by the TTL, failing the same way for a different reason.
+    expect(oldestAgeDays).toBeGreaterThan(0)
+  })
+
   it('returns this project rejections only', async () => {
     const res = await get(
-      `/v1/events/rejections?since=${encodeURIComponent('2026-07-01T00:00:00.000Z')}&until=${encodeURIComponent('2026-09-01T00:00:00.000Z')}&limit=100`,
+      `/v1/events/rejections?since=${encodeURIComponent(SINCE)}&until=${encodeURIComponent(UNTIL)}&limit=100`,
     )
     expect(res.statusCode).toBe(200)
     const body = res.json() as { rejections: Array<{ detail: string }> }
@@ -2055,7 +2114,7 @@ describe('GET /v1/events/rejections', () => {
 
   it('returns byte-identical rejections at the same instant as separate rows', async () => {
     const res = await get(
-      `/v1/events/rejections?since=${encodeURIComponent('2026-07-01T00:00:00.000Z')}&until=${encodeURIComponent('2026-09-01T00:00:00.000Z')}&limit=100`,
+      `/v1/events/rejections?since=${encodeURIComponent(SINCE)}&until=${encodeURIComponent(UNTIL)}&limit=100`,
     )
     const body = res.json() as { rejections: Array<{ detail: string }> }
     expect(body.rejections.filter((r) => r.detail === 'd1')).toHaveLength(2)
@@ -2079,29 +2138,32 @@ describe('GET /v1/events/rejections', () => {
   // server. That produces a `Z`-suffixed string too, just the WRONG
   // instant, under any non-UTC `TZ`. `AT` above is a `DateTime64(3, 'UTC')`
   // literal every fixture row in this describe block shares, so the
-  // correct, fully-converted response is EXACTLY `2026-08-01T00:00:00.000Z`
-  // -- not merely ISO-shaped. This is the assertion that actually
+  // correct, fully-converted response is EXACTLY that instant re-expressed
+  // as ISO (`AT_ISO`) -- not merely ISO-shaped. This is the assertion that actually
   // distinguishes a correct UTC parse from a local-time one; the format
   // regex alone could not.
   it('returns received_at as ISO 8601 with a Z, not a space-separated ClickHouse string', async () => {
     const res = await get(
-      `/v1/events/rejections?since=${encodeURIComponent('2026-07-01T00:00:00.000Z')}&until=${encodeURIComponent('2026-09-01T00:00:00.000Z')}&limit=100`,
+      `/v1/events/rejections?since=${encodeURIComponent(SINCE)}&until=${encodeURIComponent(UNTIL)}&limit=100`,
     )
     expect(res.statusCode).toBe(200)
     const body = res.json() as { rejections: Array<{ received_at: string }> }
     expect(body.rejections.length).toBeGreaterThan(0)
     for (const r of body.rejections) {
       expect(r.received_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
-      // Every fixture row above was inserted with `received_at: AT`
-      // ('2026-08-01 00:00:00.000') against a `DateTime64(3, 'UTC')`
-      // column -- the exact instant, not just an ISO-shaped string.
-      expect(r.received_at).toBe('2026-08-01T00:00:00.000Z')
+      // Every fixture row above was inserted with `received_at: AT` against
+      // a `DateTime64(3, 'UTC')` column, and `AT_ISO` is that same instant
+      // formatted independently of the response -- so this still pins the
+      // exact moment rather than an ISO-shaped string, which is the whole
+      // point of the assertion. A local-time misparse shifts the result by
+      // the process TZ offset and still fails here.
+      expect(r.received_at).toBe(AT_ISO)
     }
   })
 
   it('filters by reason', async () => {
     const res = await get(
-      `/v1/events/rejections?reason=unknown_event&since=${encodeURIComponent('2026-07-01T00:00:00.000Z')}&until=${encodeURIComponent('2026-09-01T00:00:00.000Z')}&limit=100`,
+      `/v1/events/rejections?reason=unknown_event&since=${encodeURIComponent(SINCE)}&until=${encodeURIComponent(UNTIL)}&limit=100`,
     )
     const body = res.json() as { rejections: Array<{ reason: string }> }
     expect(body.rejections).toHaveLength(1)
@@ -2110,7 +2172,7 @@ describe('GET /v1/events/rejections', () => {
 
   it('pages by offset without repeating or losing a row', async () => {
     const url = (offset: number) =>
-      `/v1/events/rejections?since=${encodeURIComponent('2026-07-01T00:00:00.000Z')}&until=${encodeURIComponent('2026-09-01T00:00:00.000Z')}&limit=2&offset=${offset}`
+      `/v1/events/rejections?since=${encodeURIComponent(SINCE)}&until=${encodeURIComponent(UNTIL)}&limit=2&offset=${offset}`
     const first = await get(url(0))
     const second = await get(url(2))
     const a = (first.json() as { rejections: unknown[] }).rejections
@@ -2137,7 +2199,6 @@ describe('GET /v1/events/rejections', () => {
   // edge they pass. This row and these two queries pin the boundary itself:
   // `since` set to exactly this row's own `received_at` must still include
   // it, and likewise for `until`.
-  const BOUNDARY_AT = '2026-08-02 00:00:00.000'
 
   it('includes a row whose received_at exactly equals since', async () => {
     await ch.insert({
@@ -2154,7 +2215,7 @@ describe('GET /v1/events/rejections', () => {
       ],
     })
     const res = await get(
-      `/v1/events/rejections?reason=boundary_test&since=${encodeURIComponent('2026-08-02T00:00:00.000Z')}&until=${encodeURIComponent('2026-09-01T00:00:00.000Z')}&limit=100`,
+      `/v1/events/rejections?reason=boundary_test&since=${encodeURIComponent(BOUNDARY_ISO)}&until=${encodeURIComponent(UNTIL)}&limit=100`,
     )
     expect(res.statusCode).toBe(200)
     const body = res.json() as { rejections: unknown[] }
@@ -2163,7 +2224,7 @@ describe('GET /v1/events/rejections', () => {
 
   it('includes a row whose received_at exactly equals until', async () => {
     const res = await get(
-      `/v1/events/rejections?reason=boundary_test&since=${encodeURIComponent('2026-07-01T00:00:00.000Z')}&until=${encodeURIComponent('2026-08-02T00:00:00.000Z')}&limit=100`,
+      `/v1/events/rejections?reason=boundary_test&since=${encodeURIComponent(SINCE)}&until=${encodeURIComponent(BOUNDARY_ISO)}&limit=100`,
     )
     expect(res.statusCode).toBe(200)
     const body = res.json() as { rejections: unknown[] }
@@ -2179,7 +2240,7 @@ describe('GET /v1/events/rejections', () => {
   // inserted by the two tests just above), so offset=3 -- not 2 -- is what
   // leaves exactly one row for the partial-page case.
   it('reports has_more and next_offset correctly across a partial and a full page', async () => {
-    const windowQs = `since=${encodeURIComponent('2026-07-01T00:00:00.000Z')}&until=${encodeURIComponent('2026-09-01T00:00:00.000Z')}`
+    const windowQs = `since=${encodeURIComponent(SINCE)}&until=${encodeURIComponent(UNTIL)}`
 
     // limit=2 over 4 rows: a full page, more rows behind it.
     const full = await get(`/v1/events/rejections?${windowQs}&limit=2&offset=0`)
