@@ -1,6 +1,12 @@
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { createChClient, createPgPool, loadMigrations, migrate } from './index.js'
+import {
+  createChClient,
+  createPgPool,
+  loadMigrations,
+  migrate,
+  reserveProjectIdsPastClickHouse,
+} from './index.js'
 
 const pg = createPgPool('postgres://lyraflow:lyraflow@localhost:5433/lyraflow_test')
 const ch = createChClient({
@@ -26,6 +32,11 @@ beforeAll(async () => {
     migrations: loadMigrations(join(import.meta.dirname, '..', 'migrations')),
     appSchemaVersion: 999,
   })
+  // Recreating the schema restarts `projects_id_seq` at 1, while ClickHouse
+  // still holds rows under the ids the previous suites used. Without this the
+  // next project created anywhere in the run is handed a number ClickHouse
+  // already answers to -- lyraflow/lyraflow#201. See the helper's own comment.
+  await reserveProjectIdsPastClickHouse(pg, ch)
   const r = await pg.query<{ id: string }>(
     `INSERT INTO projects (name, slug, write_key, server_key_hash)
      VALUES ('Identity', 'identity-test', 'wk_identity', 'h') RETURNING id`,
