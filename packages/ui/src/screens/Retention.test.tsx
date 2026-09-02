@@ -594,6 +594,81 @@ describe('Retention -- saving and reopening a saved report', () => {
     expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
   })
 
+  // #221. Every test in this block opens the report at a bare
+  // `/retention/:id`, which is the FIRST visit and the only one that takes
+  // the seeding branch. Seeding then writes the surviving definition into
+  // the URL, so a reload -- or reopening that link -- arrives with
+  // `start=...` already set, `hasRetentionDefinitionParams` is true, and
+  // the screen skips seeding because it treats the URL as the operator's
+  // own. The Save block was set only inside that skipped branch, while the
+  // banner is read off the fetched report, so the screen warned that the
+  // report was stale and permitted the overwrite in the same breath.
+  it('blocks Save on a stale report reopened at a URL that already carries a definition', async () => {
+    renderAt('/retention/3?start=signed_up&return=project_created', {
+      retentionReport: vi.fn(async () =>
+        reportFixture({ stale: true, start_where: [{ nonsense: true }] }),
+      ),
+    })
+    await screen.findByTestId('retention-stale')
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+  })
+
+  // The per-side precision must survive the reload, not just the first
+  // visit. A fix that simply blocked BOTH sides whenever the report came
+  // back stale would pass the test above and fail this one -- it would
+  // demand the operator take ownership of a side that never lost anything,
+  // which is a different screen's behaviour on the second visit than on the
+  // first, and that inconsistency is the same class of defect as #221.
+  it('still blocks only the side that lost a predicate when reopened that way', async () => {
+    renderAt('/retention/3?start=signed_up&return=project_created', {
+      retentionReport: vi.fn(async () =>
+        reportFixture({ stale: true, start_where: [{ nonsense: true }] }),
+      ),
+    })
+    await screen.findByTestId('retention-stale')
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+    // Editing the side that actually lost something is enough. If the fix
+    // blocked both sides, this would still be disabled.
+    const start = await screen.findByTestId('retention-start-where-where')
+    await userEvent.click(within(start).getByRole('button', { name: /add predicate/i }))
+    await userEvent.click(within(start).getByRole('button', { name: /remove/i }))
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeEnabled()
+  })
+
+  // The conservative half. When the server calls a report stale but the
+  // client can reproduce both sides, nothing on this screen says WHICH side
+  // the server objected to -- so both are blocked rather than neither. A
+  // guard that trusted only the client's own length comparison would leave
+  // Save open here, which is the overwrite #221 is about.
+  it('blocks both sides when the server calls it stale and the client lost nothing', async () => {
+    renderAt('/retention/3?start=signed_up&return=project_created', {
+      retentionReport: vi.fn(async () =>
+        reportFixture({ stale: true, start_where: [], return_where: [] }),
+      ),
+    })
+    await screen.findByTestId('retention-stale')
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+    const start = await screen.findByTestId('retention-start-where-where')
+    await userEvent.click(within(start).getByRole('button', { name: /add predicate/i }))
+    await userEvent.click(within(start).getByRole('button', { name: /remove/i }))
+    // One side rebuilt, the other still unowned.
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+    const ret = await screen.findByTestId('retention-return-where-where')
+    await userEvent.click(within(ret).getByRole('button', { name: /add predicate/i }))
+    await userEvent.click(within(ret).getByRole('button', { name: /remove/i }))
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeEnabled()
+  })
+
+  it('does not block Save on a healthy report reopened at a definition-carrying URL', async () => {
+    renderAt('/retention/3?start=signed_up&return=project_created', {
+      retentionReport: vi.fn(async () =>
+        reportFixture({ stale: false, start_where: [], return_where: [] }),
+      ),
+    })
+    await waitFor(() => expect(screen.getByRole('button', { name: /^save$/i })).toBeEnabled())
+    expect(screen.queryByTestId('retention-stale')).not.toBeInTheDocument()
+  })
+
   // The mirror of the test above, so the fix cannot be one-directional: a
   // fix that only special-cases "start_where lost, start_where edited"
   // (or its inverse) would pass one of this pair and fail the other.

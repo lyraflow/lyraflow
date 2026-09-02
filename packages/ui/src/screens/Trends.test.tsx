@@ -761,6 +761,98 @@ describe('Trends -- a stale saved report', () => {
   // of this journey's guarantee after load time: an operator who changes
   // the interval (or the range) on a stale report they never touched the
   // filter on must not have Save quietly re-enabled underneath them.
+  // #221. Every test above reaches this screen through the seeding branch,
+  // because they all open a report at a bare `/trends/:id`. That is the
+  // FIRST visit. The second visit is the one an operator actually takes:
+  // seeding writes the surviving definition into the URL, so a reload -- or
+  // opening that same link again -- arrives with `event=...` already set.
+  // `hasTrendDefinitionParams` is then true, the screen treats the URL as
+  // the operator's own and skips seeding entirely, and the Save block was
+  // set only inside that skipped branch.
+  //
+  // The banner still appeared, because it is read off the fetched report
+  // rather than off the seeding step. So the screen said the report was
+  // stale and let you save over it in the same breath -- the exact
+  // overwrite the guard exists to prevent, reached by the more likely path.
+  it('blocks Save on a stale report reopened at a URL that already carries a definition', async () => {
+    renderAt('/trends/3?event=signed_up', {
+      trendReport: vi.fn(async () => reportFixture({ stale: true, where: [{ nonsense: true }] })),
+    })
+    await screen.findByTestId('trend-stale')
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+  })
+
+  // The same journey's other half: the block must still lift on a real
+  // edit, so the second visit is not a dead end. Without this, a fix that
+  // simply pinned Save off for every stale report would pass the test above
+  // and leave the operator no way to repair the report at all.
+  it('lifts that block once the operator edits the filter on the reopened report', async () => {
+    renderAt('/trends/3?event=signed_up', {
+      trendReport: vi.fn(async () => reportFixture({ stale: true, where: [{ nonsense: true }] })),
+    })
+    await screen.findByTestId('trend-stale')
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+    const whereBlock = await screen.findByTestId('trend-where-where')
+    await userEvent.click(within(whereBlock).getByRole('button', { name: /add predicate/i }))
+    await userEvent.click(within(whereBlock).getByRole('button', { name: /remove/i }))
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeEnabled()
+  })
+
+  // The SERVER's half of the guard, which nothing else pins. Every other
+  // stale fixture in this file stores an element `whereFromStored` drops, so
+  // the client's own length comparison catches it and the `r.stale` term
+  // could be deleted with the whole suite still green -- found by deleting
+  // it. Here the stored `where` is empty, so the client loses nothing and
+  // the two lengths agree; the only thing that knows this report cannot be
+  // reproduced is the server saying so.
+  it('blocks Save when the server calls the report stale and the client lost no predicate', async () => {
+    renderAt('/trends/3?event=signed_up', {
+      trendReport: vi.fn(async () => reportFixture({ stale: true, where: [] })),
+    })
+    await screen.findByTestId('trend-stale')
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+  })
+
+  // The CLIENT's half, and the mirror of the test above -- also found by
+  // deleting the term and watching the suite stay green. Every other
+  // droppable fixture in this file is ALSO `stale: true`, so `r.stale`
+  // covered them and the length comparison could have been removed unnoticed.
+  // Here the server does not call the report stale, but the stored element
+  // fails `looksLikePredicate` and `whereFromStored` drops it before it can
+  // become a row -- so nothing looks unfinished, and only the length
+  // comparison knows `where` on screen is narrower than what is stored.
+  //
+  // The two terms disagree in both directions and neither subsumes the
+  // other, which is why the guard is an OR and why both halves need a test.
+  it('blocks Save when the client drops a stored predicate the server did not call stale', async () => {
+    renderAt('/trends/3?event=signed_up', {
+      trendReport: vi.fn(async () => reportFixture({ stale: false, where: [{ nonsense: true }] })),
+    })
+    // Wait for the LOAD, not for the button. Save starts disabled on every
+    // render of this screen because `name` is empty until the report
+    // arrives, so a bare `waitFor(...toBeDisabled())` passes on the first
+    // tick and asserts nothing -- this test was written that way and stayed
+    // green while the guard it exists for was deleted. The loaded name is
+    // the signal that the guard has actually had its chance to run.
+    expect(await screen.findByDisplayValue('Report')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+    // Not reaching the block through staleness or through an unfinished row
+    // -- confirms this fixture exercises the length comparison alone.
+    expect(screen.queryByTestId('trend-stale')).not.toBeInTheDocument()
+    expect(screen.queryByText(/unfinished/i)).not.toBeInTheDocument()
+  })
+
+  // And the negative that stops the fix from being "block Save whenever a
+  // definition-carrying URL is open": a report that is NOT stale, reopened
+  // the same way, must save normally.
+  it('does not block Save on a healthy report reopened at a definition-carrying URL', async () => {
+    renderAt('/trends/3?event=signed_up', {
+      trendReport: vi.fn(async () => reportFixture({ stale: false, where: [] })),
+    })
+    await waitFor(() => expect(screen.getByRole('button', { name: /^save$/i })).toBeEnabled())
+    expect(screen.queryByTestId('trend-stale')).not.toBeInTheDocument()
+  })
+
   it('does not lift the Save block when the operator changes the interval rather than the filter', async () => {
     const client = renderAt('/trends/3', {
       trendReport: vi.fn(async () => reportFixture({ stale: true, where: [{ nonsense: true }] })),

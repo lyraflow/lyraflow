@@ -124,24 +124,35 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
   // reasoning as `Retention.tsx`'s `stale`: it must survive past the seed
   // effect that discovers it, for as long as this report stays open.
   const [stale, setStale] = useState(false)
-  // F1 from the whole-branch review, the single-list version of
-  // `Retention.tsx`'s `sidesWithLostPredicates`: a trend has one `where`
-  // list rather than retention's two sides, so this is one flag rather than
-  // a set. A stale trend's predicates fail to reproduce in one of two ways
-  // -- an element that fails core's schema but still LOOKS like a predicate
-  // (`looksLikePredicate` in `shared/where.ts`) survives seeding as a real,
-  // editable row, and `unfinished` below already counts it and blocks Run
-  // and Save until it is fixed or removed. An element that fails
-  // `looksLikePredicate` itself is DROPPED by `whereFromStored` before it
-  // ever becomes a row -- nothing for `unfinished` to count, so without this
-  // flag `canSave` would be true with `where` silently narrower than what
-  // was actually stored, and Save would PATCH over the stored predicates
-  // with that narrower (possibly empty) list. Set at seed time by comparing
-  // the raw stored count against what survived seeding; cleared the moment
-  // the operator edits the filter (`update`, below) -- editing IS
-  // rebuilding, whether or not the edit happens to repair the exact element
-  // that failed to parse.
-  const [lostPredicates, setLostPredicates] = useState(false)
+  // Saving now would write a definition over stored predicates this screen
+  // could not reproduce. A stale trend's predicates fail to reproduce in one
+  // of two ways -- an element that fails core's schema but still LOOKS like a
+  // predicate (`looksLikePredicate` in `shared/where.ts`) survives seeding as
+  // a real, editable row, and `unfinished` below already counts it and blocks
+  // Run and Save until it is fixed or removed. An element that fails
+  // `looksLikePredicate` itself is DROPPED by `whereFromStored` before it ever
+  // becomes a row -- nothing for `unfinished` to count, so without this flag
+  // `canSave` would be true with `where` silently narrower than what was
+  // actually stored, and Save would PATCH over the stored predicates with that
+  // narrower (possibly empty) list.
+  //
+  // Sourced from the FETCHED REPORT's own `stale`, not from the seeding step
+  // (#221). It used to be set only while seeding the URL from storage, which
+  // is the first visit. Seeding then writes the surviving definition into the
+  // URL, so a reload -- or reopening that same link -- arrives with the
+  // definition already set, `alreadyDefined` is true, seeding is skipped and
+  // the flag was never set. The banner still showed, because it reads
+  // `r.stale` off the response, so the screen said the report was stale and
+  // permitted the overwrite in the same breath. Reading both from `r.stale`
+  // is what stops the two diverging again: the banner and this flag now have
+  // one source, and differ only in that this one is clearable.
+  //
+  // Cleared the moment the operator edits the filter (`update`, below) --
+  // editing IS rebuilding, whether or not the edit happens to repair the exact
+  // element that failed to parse. `stale` above is NOT cleared with it: the
+  // stored report remains unreproducible until it is actually saved over, and
+  // the banner keeps saying so.
+  const [saveWouldNarrow, setSaveWouldNarrow] = useState(false)
 
   // The (project, report) pair this screen is currently open on. Only
   // matters for navigating directly from one saved report to another
@@ -170,7 +181,7 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
     setReportError(null)
     setSaveError(null)
     setStale(false)
-    setLostPredicates(false)
+    setSaveWouldNarrow(false)
     setConfirmingDelete(false)
     setDeleteError(null)
   }, [identity])
@@ -182,11 +193,11 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
       })
       setResult(null)
       setError(null)
-      // F1: editing the filter is "rebuilding" it -- see `lostPredicates`'s
+      // Editing the filter is "rebuilding" it -- see `saveWouldNarrow`'s
       // own comment. The operator has taken ownership of what `where` now
       // says, which is what makes a subsequent Save an intentional write
       // rather than the load effect's own silent narrowing.
-      if ('where' in patch) setLostPredicates(false)
+      if ('where' in patch) setSaveWouldNarrow(false)
     },
     [setSearch],
   )
@@ -312,19 +323,31 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
         if (cancelled) return
         setName(r.name)
         setStale(r.stale)
+        // BOTH terms, and both computed OUTSIDE the seeding branch below
+        // (#221). They are two independent accounts of the same danger and
+        // neither subsumes the other: `r.stale` is the SERVER's judgement,
+        // made against core's grammar, and the length comparison is the
+        // CLIENT's -- `whereFromStored` silently drops any stored element
+        // that does not even look like a predicate, which a server that
+        // accepted it would not report as stale. `whereFromStored` itself
+        // must not change, since it also reads a hand-edited URL where
+        // degrading garbage silently is the correct behaviour.
+        //
+        // Outside the branch is the actual fix. Both used to be set only
+        // while seeding, which happens on the FIRST visit; seeding then
+        // writes the definition into the URL, so a reload takes the
+        // `alreadyDefined` path, set nothing, and left Save open on exactly
+        // the report the banner was warning about. Neither term depends on
+        // the URL or on `params`, so neither belongs inside that branch --
+        // and computing them in one place is what makes the second visit
+        // behave identically to the first.
+        const seededWhere = whereFromStored(r.where)
+        setSaveWouldNarrow(r.stale || seededWhere.length < r.where.length)
         const alreadyDefined = hasTrendDefinitionParams(search)
         let finalParams: TrendParams
         if (alreadyDefined) {
           finalParams = params
         } else {
-          const seededWhere = whereFromStored(r.where)
-          // F1: `whereFromStored` silently drops any stored element that
-          // does not even look like a predicate (see `lostPredicates`'s own
-          // comment) -- comparing the raw stored count against what
-          // survived is how this notices, without `whereFromStored` itself
-          // needing to change (it is also used to read a hand-edited URL,
-          // where silently degrading garbage is the correct behaviour).
-          if (seededWhere.length < r.where.length) setLostPredicates(true)
           finalParams = {
             event: r.event,
             interval: r.interval,
@@ -380,10 +403,10 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
     params.event !== '' &&
     !breakdownIncomplete(params) &&
     unfinished === 0 &&
-    // F1: a saved report whose stored predicates were silently narrowed on
-    // load must not be saved as-is -- that would overwrite the stored
-    // `where` with the narrower list. See `lostPredicates`'s own comment.
-    !lostPredicates
+    // A saved report whose stored predicates this screen could not reproduce
+    // must not be saved as-is -- that would overwrite the stored `where` with
+    // the narrower list. See `saveWouldNarrow`'s own comment.
+    !saveWouldNarrow
 
   const handleSave = useCallback(() => {
     // Repeats the `canSave` gate the button's `disabled` prop already
