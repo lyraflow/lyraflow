@@ -183,17 +183,36 @@ describe('GroupCard -- the three server-side caps', () => {
   // in jsdom. A longer per-test timeout, not a smaller fixture: the fixture
   // size IS the thing under test (the exact boundary value), here and below.
   //
-  // The budget is 60s because 15s was not enough and the shortfall was not
+  // The budget was 60s because 15s was not enough and the shortfall was not
   // marginal: these three timed out in CI at 22.9s, 24.2s and 26.3s. The cost
   // per leaf roughly doubled when a condition gained its kind selector, two
   // schema-backed comboboxes (each mounting a debounced effect, so ~99 timers
-  // and ~99 lookups against the fake client) and a completeness check. Two
-  // separate reviewers measured the old margin as thinner than one background
-  // docker stack before it actually broke, so treat 60s as headroom that has
-  // already been spent once rather than as a number with room to spare: if a
+  // and ~99 lookups against the fake client) and a completeness check.
+  //
+  // It is now 180s, and this comment used to say not to do that -- "if a
   // future change makes a row heavier again, make the ROW cheaper rather than
-  // raising this further. A test that takes half a minute is already a cost
-  // paid on every CI run.
+  // raising this further". A row did get heavier again (#228: `23ad892`'s
+  // operator families and `05f9f2e`'s extra field, together roughly doubling
+  // the DOM per condition), so that instruction is being answered rather than
+  // ignored.
+  //
+  // What answers it is a measurement the instruction could not have had. The
+  // same tree was profiled in a real browser: at the 100-node cap the whole
+  // builder renders in 270ms including layout and paint, against 205ms before
+  // those two commits. Making the row cheaper would therefore buy a user
+  // somewhere under 65 milliseconds on the largest tree the product allows --
+  // which is not worth reworking the condition row for.
+  //
+  // The reason these tests are slow is jsdom, not the row. jsdom overstates
+  // this component by ~116x at the current DOM size (31.4s against 270ms) and
+  // by ~67x at the old one, and its cost is roughly cubic in row count where
+  // the browser's is close to linear. So the ratio these tests measure is not
+  // a ratio anything a user experiences.
+  //
+  // The instruction still holds in spirit, with its trigger corrected: raise
+  // the budget when the browser number stays fine, and make the row cheaper
+  // when the BROWSER number gets worse. Re-measure if `MAX_TREE_NODES` rises
+  // above 100 or another change adds DOM per row -- #228 has the method.
   it('disables Add condition and Add group at the node cap, and says the limit', () => {
     const root = flatRoot(MAX_TREE_NODES - 1) // countNodes === MAX_TREE_NODES exactly
     render(
@@ -204,7 +223,7 @@ describe('GroupCard -- the three server-side caps', () => {
     expect(add).toBeDisabled()
     expect(addGroup).toBeDisabled()
     expect(screen.getByText(new RegExp(String(MAX_TREE_NODES)))).toBeInTheDocument()
-  }, 60_000)
+  }, 180_000)
 
   it('one below the node cap: Add condition (costs 1 node) is enabled, Add group (costs 2) is not', () => {
     // The off-by-one this has to get right: at
@@ -218,7 +237,7 @@ describe('GroupCard -- the three server-side caps', () => {
     )
     expect(screen.getByRole('button', { name: /^add condition$/i })).toBeEnabled()
     expect(screen.getByRole('button', { name: /^add group$/i })).toBeDisabled()
-  }, 60_000)
+  }, 180_000)
 
   it('clicking a node-capped Add condition never calls onChange', async () => {
     const onChange = vi.fn()
@@ -228,7 +247,7 @@ describe('GroupCard -- the three server-side caps', () => {
     )
     await userEvent.click(screen.getByRole('button', { name: /^add condition$/i }))
     expect(onChange).not.toHaveBeenCalled()
-  }, 60_000)
+  }, 180_000)
 
   // --- MAX_TREE_DEPTH: local to the group's own position ----------------
 
