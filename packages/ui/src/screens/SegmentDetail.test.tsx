@@ -131,6 +131,29 @@ function GoToSegment(props: { id: number }) {
   )
 }
 
+// #218's shape, on the screen the issue did not name. Identical header
+// row, identical operator-supplied name, so identical overflow. See
+// `FunnelDetail.test.tsx` for why these are class-name tripwires (#217)
+// rather than a measurement: jsdom does no layout.
+describe('SegmentDetail — a long name does not push the controls off screen', () => {
+  const LONG = 'trialists_who_activated_but_never_invited_a_teammate_q3_v2'
+
+  it('lets the heading shrink and wrap', async () => {
+    renderDetail(fakeClient({ segment: vi.fn(async () => ({ ...SEGMENT, name: LONG })) }))
+    const heading = await screen.findByRole('heading', { name: LONG })
+    expect(heading.className).toContain('min-w-0')
+    expect(heading.className).toContain('break-words')
+    expect(heading.className).not.toContain('break-all')
+  })
+
+  it('keeps Edit and Delete in the document beside a long name', async () => {
+    renderDetail(fakeClient({ segment: vi.fn(async () => ({ ...SEGMENT, name: LONG })) }))
+    await screen.findByRole('heading', { name: LONG })
+    expect(screen.getByRole('link', { name: /^edit$/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^delete$/i })).toBeInTheDocument()
+  })
+})
+
 describe('SegmentDetail', () => {
   it('shows the segment name and filter summary', async () => {
     renderDetail()

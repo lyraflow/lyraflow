@@ -161,6 +161,41 @@ function renderDetail(client: ApiClient, onUnauthorized?: () => void) {
   )
 }
 
+// #218. A funnel name is operator-supplied and can be one long unbroken
+// token. The header is a `flex items-center justify-between` row, so
+// without `min-w-0` the heading refuses to shrink and without `break-words`
+// it refuses to wrap -- the row grows to fit the name and pushes Edit and
+// Delete outside the viewport. Measured at 390px before the fix:
+// scrollWidth 733px. The controls were not merely awkward to reach, they
+// were off screen, so a funnel with a long name could not be edited or
+// deleted from this screen at all.
+//
+// Class-name assertions, which are a tripwire and not a proof (#217): jsdom
+// does no layout, so `scrollWidth` is 0 here and the overflow itself cannot
+// be observed. The real verification was rendering the header at 390px in a
+// browser and measuring it. What these pin is that the two utilities do not
+// silently disappear in a refactor.
+describe('FunnelDetail — a long name does not push the controls off screen', () => {
+  const LONG = 'checkout_activation_funnel_weekly_by_utm_source_and_plan_tier_v2'
+
+  it('lets the heading shrink and wrap', async () => {
+    renderDetail(fakeClient({ funnel: vi.fn(async () => ({ ...FUNNEL, name: LONG })) }))
+    const heading = await screen.findByRole('heading', { name: LONG })
+    expect(heading.className).toContain('min-w-0')
+    // `break-words`, not `break-all` -- an ordinary multi-word name should
+    // still break at its spaces, the same distinction SavedReportList draws.
+    expect(heading.className).toContain('break-words')
+    expect(heading.className).not.toContain('break-all')
+  })
+
+  it('keeps Edit and Delete in the document beside a long name', async () => {
+    renderDetail(fakeClient({ funnel: vi.fn(async () => ({ ...FUNNEL, name: LONG })) }))
+    await screen.findByRole('heading', { name: LONG })
+    expect(screen.getByRole('link', { name: /^edit$/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^delete$/i })).toBeInTheDocument()
+  })
+})
+
 describe('FunnelDetail — a narrowed step says so', () => {
   it('hands the stored definition to the chart, so each step shows its OWN predicates', async () => {
     // Two narrowed steps, two predicates each, four operators. Without the

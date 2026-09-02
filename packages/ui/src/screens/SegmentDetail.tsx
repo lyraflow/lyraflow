@@ -208,8 +208,13 @@ export function SegmentDetail(props: { client: ApiClient; onUnauthorized?: () =>
   return (
     <div className="flex min-w-0 flex-col gap-6">
       <div className="flex items-center justify-between gap-2">
-        <h1 className="text-lg font-semibold">{segment?.name ?? 'Segment'}</h1>
-        <div className="flex items-center gap-3">
+        {/* Same header shape and same defect as `FunnelDetail` (#218,
+         * filed against funnels alone): a segment name is operator-supplied
+         * too, and this row is the identical `flex ... justify-between`
+         * with Edit and Delete on the right. See that file's comment for
+         * why `break-words` and not `break-all`. */}
+        <h1 className="min-w-0 break-words text-lg font-semibold">{segment?.name ?? 'Segment'}</h1>
+        <div className="flex shrink-0 items-center gap-3">
           {/* A stale segment's stored filter cannot be read -- SegmentBuilder
            * has nothing to show it, same reasoning FunnelDetail withholds
            * Edit for a stale funnel's steps. */}
