@@ -2182,6 +2182,21 @@ Each row is a segment member row plus `entered_at`, `identified` included —
 see *Retrieving members, not just the count* above for what that field means
 and why a caller wants it.
 
+**`traits` can be empty on a row that clearly has traits, and that is a known
+limitation rather than a bug in your data.** A funnel resolves each person at
+their own event's timestamp, because a funnel is a claim about what someone
+did and when — an event has to belong to whoever owned that device at the
+time. Traits are resolved at the current instant, because a trait carries no
+event time and "this person's traits today" is what a trait is. For a device
+that was rebound to a different person between the funnel event and your
+request, those two readings name different people and the row comes back with
+no traits.
+
+It cannot show you *someone else's* traits. Both sides derive the person the
+same way, so a disagreement drops the traits rather than attaching the wrong
+ones — a blank cell, never a wrong one, and never a privacy problem. Read a
+person's traits from `GET /v1/persons/:id` if you need them for certain.
+
 `person_count` is its own query, taken at the same `as_of` the page is —
 never the run's cached step number, because a run and a `/people` call can
 land at different instants, and a stale count printed beside a fresh page is
