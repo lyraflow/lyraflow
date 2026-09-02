@@ -1,6 +1,12 @@
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
-import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
+import {
+  createChClient,
+  createPgPool,
+  loadMigrations,
+  migrate,
+  reserveProjectIdsPastClickHouse,
+} from '@lyraflow/db'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { type PgDictionarySource, ensureIdentityDictionaries } from './dictionaries.js'
 import { RESOLVED_PERSON_ALIAS, resolvedPersonExpr } from './resolve.js'
@@ -78,6 +84,11 @@ describe('resolvedPersonExpr (live ClickHouse + Postgres)', () => {
       migrations: loadMigrations(join(import.meta.dirname, '../../../db/migrations')),
       appSchemaVersion: 999,
     })
+    // Recreating the schema restarts `projects_id_seq` at 1, while ClickHouse
+    // still holds rows under the ids the previous suites used. Without this the
+    // next project created anywhere in the run is handed a number ClickHouse
+    // already answers to -- lyraflow/lyraflow#201. See the helper's own comment.
+    await reserveProjectIdsPastClickHouse(pg, ch)
     await pg.query('DELETE FROM projects WHERE slug = $1', ['resolve-expr-test'])
     const r = await pg.query<{ id: string }>(
       `INSERT INTO projects (name, slug, write_key, server_key_hash)
