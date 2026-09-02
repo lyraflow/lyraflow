@@ -138,6 +138,20 @@ export function memberProjection(): string {
  * `now()` as the timestamp is deliberate and unchanged: traits carry no
  * meaningful event time, and resolving them at the current instant is the
  * correct reading of "this person's traits today".
+ *
+ * It is also the reason a funnel people row can come back with NO traits
+ * (#191). The funnel resolves each person at their own event's `timestamp`,
+ * this resolves at `now()`, and for a device rebound between the two the join
+ * key differs and the `LEFT JOIN` misses. The result is an empty trait map,
+ * never another person's — both sides build the key with the same
+ * `resolvedPersonExpr` over the same dictionaries, so a mismatch fails to
+ * join rather than matching the wrong row.
+ *
+ * Do not "fix" it by parameterising the instant here without deciding what a
+ * trait beside a funnel row is supposed to mean. This CTE also serves the
+ * segment members walk, where `now()` is unambiguously right, and the funnel
+ * has no single instant to pass in — its population spans many events at many
+ * times. See the join site in `funnels/compile.ts`.
  */
 export function traitsCte(opts: { database: string; projectId: number; params: Params }): string {
   const { database, projectId, params } = opts

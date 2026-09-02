@@ -423,6 +423,35 @@ WHERE ${levelPredicate}${segmentFilter}`)
       // produces. `base` and the funnel's per-person pass alias the join key
       // identically (RESOLVED_PERSON_ALIAS), which is what makes `USING`
       // valid here.
+      // The `LEFT JOIN traits` below can MISS, and when it does the row's
+      // trait map is empty rather than wrong (#191). The two sides resolve
+      // the same person at two different instants, both deliberately:
+      // `perPerson` resolves at each event's own `timestamp`, because a
+      // funnel is a claim about what someone did and when, so an event must
+      // belong to whoever owned that device at the time; `traitsCte` resolves
+      // at `now()`, because traits carry no event time and "this person's
+      // traits today" is the right reading for the segment members walk it
+      // also serves.
+      //
+      // For a device REBOUND between the funnel event and the request those
+      // two readings name different people, the join key differs, and the row
+      // comes back with no traits. It cannot show ANOTHER person's traits:
+      // both sides build the key with the same `resolvedPersonExpr` over the
+      // same dictionaries, so a mismatch fails the join rather than matching a
+      // different row. A blank trait cell, never a wrong one.
+      //
+      // Documented rather than repaired, because the fix is a product
+      // decision and not a code one: the funnel's population spans many
+      // events at many times and has no single instant to hand `traitsCte`,
+      // and `traitsCte` is shared with the segment members walk where `now()`
+      // is correct. What has to be settled first is what a trait shown beside
+      // a funnel row MEANS -- as of now, or as of the event that put them in
+      // the funnel. Both are defensible.
+      //
+      // Deliberately a TypeScript comment and not SQL: this is compiled into
+      // every people query, and #200 is about funnel queries approaching
+      // ClickHouse's `max_query_size`. An explanation is not worth bytes on
+      // the wire.
       const ctes = [
         baseCte({ database, projectId, params }),
         traitsCte({ database, projectId, params }),
