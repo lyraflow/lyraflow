@@ -321,26 +321,44 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
         if (cancelled) return
         setName(r.name)
         setStale(r.stale)
+        // Computed OUTSIDE the seeding branch below (#221), because none of
+        // it depends on the URL or on `params` -- only on the fetched
+        // report. It used to sit inside that branch, which runs on the FIRST
+        // visit only: seeding writes the surviving definition into the URL,
+        // so a reload takes the `alreadyDefined` path, set no sides at all,
+        // and left Save open on exactly the report the banner was warning
+        // about. Hoisting it is what makes the second visit behave like the
+        // first.
+        //
+        // `whereFromStored` silently drops any stored element that does not
+        // even look like a predicate (see `sidesWithLostPredicates`'s own
+        // comment), so comparing the raw stored count against what survived
+        // is how this notices, per side, without `whereFromStored` itself
+        // needing to change -- it also reads a hand-edited URL, where
+        // degrading garbage silently is the correct behaviour.
+        const startWhere = whereFromStored(r.start_where)
+        const returnWhere = whereFromStored(r.return_where)
+        const lostSides = new Set<'start' | 'return'>()
+        if (startWhere.length < r.start_where.length) lostSides.add('start')
+        if (returnWhere.length < r.return_where.length) lostSides.add('return')
+        // The server's own judgement, which is separate from the client's
+        // and does not name a side. `r.stale` means the stored definition
+        // does not parse under core's grammar; a stored element the server
+        // rejected but `looksLikePredicate` accepts leaves both comparisons
+        // above equal, so without this term Save would stay open on a report
+        // the banner calls unreproducible. With no side named, both are
+        // blocked -- conservative only where the screen genuinely cannot
+        // tell, so the per-side precision above is kept wherever it exists.
+        if (r.stale && lostSides.size === 0) {
+          lostSides.add('start')
+          lostSides.add('return')
+        }
+        setSidesWithLostPredicates(lostSides)
         const alreadyDefined = hasRetentionDefinitionParams(search)
         let finalParams: RetentionParams
         if (alreadyDefined) {
           finalParams = params
         } else {
-          const startWhere = whereFromStored(r.start_where)
-          const returnWhere = whereFromStored(r.return_where)
-          // M5: `whereFromStored` silently drops any stored element that
-          // does not even look like a predicate (see
-          // `sidesWithLostPredicates`'s own comment) -- comparing the raw
-          // stored count against what survived is how this notices, per
-          // side, without `whereFromStored` itself needing to change (it is
-          // also used to read a hand-edited URL, where silently degrading
-          // garbage is the correct behaviour).
-          const lostSides = new Set<'start' | 'return'>()
-          if (startWhere.length < r.start_where.length) lostSides.add('start')
-          if (returnWhere.length < r.return_where.length) lostSides.add('return')
-          if (lostSides.size > 0) {
-            setSidesWithLostPredicates(lostSides)
-          }
           finalParams = {
             start: r.start_event,
             return: r.return_event,
