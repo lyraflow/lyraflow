@@ -13,6 +13,7 @@
  * keeps the single implementation and drops the dependency.
  */
 import type { UserAgentInfo } from '../enrich/user-agent.js'
+import { escapeControlCharacters } from './control-chars.js'
 import type { IngestPayload } from './payloads.js'
 import { type PropertyValue, routeProperties } from './properties.js'
 import { clampTimestamp } from './timestamp.js'
@@ -110,7 +111,12 @@ export const PAGE_NAME_PROPERTY = '$page_name'
  * not history.
  */
 export function eventNameFor(payload: IngestPayload): string {
-  if (payload.type === 'track') return payload.event
+  // Escaped here rather than in each renderer (#35). Only the `track` branch
+  // can carry caller-chosen bytes -- the other two are our own literals -- but
+  // the escape wraps the whole return so a future branch cannot reintroduce
+  // the hole by forgetting it. `escapeControlCharacters` is identity on an
+  // ordinary name, so this costs nothing for every legitimate event.
+  if (payload.type === 'track') return escapeControlCharacters(payload.event)
   if (payload.type === 'page') return PAGE_EVENT_NAME
   return '$identify'
 }

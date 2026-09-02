@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { routeProperties } from './properties.js'
+import { MAX_ID_LENGTH, routeProperties } from './properties.js'
 
 describe('routeProperties', () => {
   it('routes finite numbers to properties_num', () => {
@@ -55,6 +55,48 @@ describe('routeProperties', () => {
     const key = 'k'.repeat(200)
     const out = routeProperties({ [key]: 'v' })
     expect(Object.keys(out.properties)[0]).toHaveLength(128)
+  })
+})
+
+describe('control characters in property KEYS (#35)', () => {
+  const ch = (code: number) => String.fromCharCode(code)
+
+  // A property key reaches `event_schema` and from there the autocomplete
+  // endpoints, so it is rendered in exactly the places an event name is.
+  it('escapes a control character in a key', () => {
+    const out = routeProperties({ [`pl${ch(0x1b)}an`]: 'pro' })
+    expect(Object.keys(out.properties)).toEqual(['pl\\x1ban'])
+    expect(out.properties['pl\\x1ban']).toBe('pro')
+  })
+
+  it('escapes keys on the numeric side too', () => {
+    const out = routeProperties({ [`se${ch(0x0a)}ats`]: 12 })
+    expect(Object.keys(out.properties_num)).toEqual(['se\\x0aats'])
+  })
+
+  // The half that must NOT change. A value is arbitrary customer data -- a
+  // support message, a page title -- where a newline can be genuine content,
+  // and rewriting it would corrupt the thing the operator asked to store.
+  it('leaves property VALUES untouched', () => {
+    const value = `line one${ch(0x0a)}line two`
+    const out = routeProperties({ note: value })
+    expect(out.properties.note).toBe(value)
+  })
+
+  it('leaves ordinary keys byte-for-byte alone', () => {
+    const out = routeProperties({ plan: 'pro', 'utm.source': 'x', 'a-b_c': 'y' })
+    expect(Object.keys(out.properties).sort()).toEqual(['a-b_c', 'plan', 'utm.source'])
+  })
+
+  // Escaping runs AFTER the MAX_ID_LENGTH truncation, deliberately: escaping
+  // first and truncating second can cut a `\xNN` sequence in half and leave a
+  // `\x1` that means nothing.
+  it('does not leave a half-written escape sequence at the truncation boundary', () => {
+    const key = `${'a'.repeat(MAX_ID_LENGTH - 1)}${ch(0x1b)}trailing`
+    const out = routeProperties({ [key]: 'v' })
+    const stored = Object.keys(out.properties)[0] ?? ''
+    expect(stored.endsWith('\\x1b')).toBe(true)
+    expect(stored).not.toMatch(/\\x1?$/)
   })
 })
 

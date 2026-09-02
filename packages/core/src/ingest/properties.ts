@@ -1,3 +1,4 @@
+import { escapeControlCharacters } from './control-chars.js'
 export const MAX_ID_LENGTH = 128
 /** Shared with the browser SDK, which warns before sending rather than after. */
 export const MAX_PROPERTIES_PER_EVENT = 250
@@ -69,7 +70,11 @@ export function routeProperties(input: Record<string, PropertyValue>): RoutedPro
 
   for (const [rawKey, value] of Object.entries(input)) {
     if (value === null || value === undefined) continue
-    const key = rawKey.slice(0, MAX_ID_LENGTH)
+    // Truncate FIRST, then escape (#35). The other order can cut a `\xNN`
+    // sequence in half and store a `\x1` that means nothing. Escaping can
+    // therefore push a hostile key past MAX_ID_LENGTH, which is accepted:
+    // an ordinary key is unchanged by it, and the column is unbounded.
+    const key = escapeControlCharacters(rawKey.slice(0, MAX_ID_LENGTH))
     if (key.length === 0) continue
     // Checked on the RAW key, before truncation: truncation can only shorten a
     // string, never remove its first character, so the two are equivalent --
