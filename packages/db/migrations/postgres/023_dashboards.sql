@@ -54,7 +54,5 @@ CREATE TABLE IF NOT EXISTS dashboards (
     jsonb_typeof(tiles) <> 'array' OR jsonb_array_length(tiles) <= 12)
 );
 
-CREATE INDEX IF NOT EXISTS dashboards_project_idx ON dashboards (project_id, name);
-
 CREATE UNIQUE INDEX IF NOT EXISTS dashboards_one_home_per_project
   ON dashboards (project_id) WHERE is_home;
