@@ -120,6 +120,13 @@ function violatesConstraint(err: unknown, constraint: string): boolean {
  * with one home -- the loser's second UPDATE fails at the index, the
  * transaction rolls back, and the caller retries once. A dashboard that
  * loses home is not `updated_at`-touched: its definition did not change.
+ *
+ * The clear runs before `#setHome` knows the target row exists (it must --
+ * setting the new home before clearing the old one would collide with
+ * itself on `dashboards_one_home_per_project`). So a `null` from
+ * `#updateRow` -- `id` does not exist, or exists in a different project --
+ * is answered with ROLLBACK, not COMMIT: a caller that gets 404 must see
+ * its previous home untouched, not silently cleared.
  */
 export class DashboardStore {
   constructor(private readonly pool: Pool) {}
@@ -230,6 +237,14 @@ export class DashboardStore {
           [projectId, id],
         )
         const updated = await this.#updateRow(client, projectId, id, patch)
+        if (updated === null) {
+          // `id` does not exist, or exists in a different project -- the
+          // clear above already ran against a row that isn't the one this
+          // call is about. ROLLBACK undoes it rather than committing it: a
+          // 404 must not silently move the caller's home.
+          releaseErr = await this.#rollback(client)
+          return null
+        }
         await client.query('COMMIT')
         return updated
       } catch (err) {
@@ -242,11 +257,7 @@ export class DashboardStore {
         // transaction is aborted" -- permanently. `client.release(err)`,
         // called with a truthy argument, is what makes the pool DESTROY
         // the connection instead of recycling it.
-        try {
-          await client.query('ROLLBACK')
-        } catch (rollbackErr) {
-          releaseErr = rollbackErr instanceof Error ? rollbackErr : new Error(String(rollbackErr))
-        }
+        releaseErr = await this.#rollback(client)
         if (attempt === 0 && violatesConstraint(err, HOME_UNIQUE_INDEX)) {
           continue
         }
@@ -254,6 +265,18 @@ export class DashboardStore {
       } finally {
         client.release(releaseErr)
       }
+    }
+  }
+
+  /** ROLLBACK, converted to the `client.release()` error argument if it
+   *  itself fails -- shared by `#setHome`'s error path and its null-result
+   *  path, which must destroy-not-recycle the connection the same way. */
+  async #rollback(client: PoolClient): Promise<Error | undefined> {
+    try {
+      await client.query('ROLLBACK')
+      return undefined
+    } catch (rollbackErr) {
+      return rollbackErr instanceof Error ? rollbackErr : new Error(String(rollbackErr))
     }
   }
 

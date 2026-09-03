@@ -217,6 +217,55 @@ describe('dashboard routes', () => {
     ).toBe(404)
   })
 
+  // I2 from the Task 4 review: the GET guards above were pinned, PATCH and
+  // DELETE were not. Each of the four tests below fails on exactly its own
+  // guard when that guard is removed -- see task-4-report.md for the
+  // mutation results.
+  it('400s a malformed id on PATCH and on DELETE', async () => {
+    expect((await call('PATCH', '/v1/dashboards/abc', { name: 'X' })).json()).toEqual({
+      error: 'invalid_dashboard_id',
+    })
+    expect((await call('DELETE', '/v1/dashboards/abc')).json()).toEqual({
+      error: 'invalid_dashboard_id',
+    })
+  })
+
+  it("404s a PATCH to another project's id, and the row is untouched", async () => {
+    const mine = await call('POST', '/v1/dashboards', { name: 'Mine' })
+    const id = mine.json().id
+    const res = await call('PATCH', `/v1/dashboards/${id}`, { name: 'Stolen' }, OTHER_SERVER_KEY)
+    expect(res.statusCode).toBe(404)
+    expect((await call('GET', `/v1/dashboards/${id}`)).json().name).toBe('Mine')
+  })
+
+  it("404s a DELETE to another project's id, and the row still exists", async () => {
+    const mine = await call('POST', '/v1/dashboards', { name: 'Mine' })
+    const id = mine.json().id
+    const res = await call('DELETE', `/v1/dashboards/${id}`, undefined, OTHER_SERVER_KEY)
+    expect(res.statusCode).toBe(404)
+    expect((await call('GET', `/v1/dashboards/${id}`)).statusCode).toBe(200)
+  })
+
+  // I1 from the Task 4 review: `PATCH { is_home: true }` on another
+  // project's id must not silently clear the caller's current home before
+  // answering 404 -- `DashboardStore.#setHome` clears first, since setting
+  // the new home before clearing would collide with itself on
+  // `dashboards_one_home_per_project`.
+  it("404s a PATCH { is_home: true } to another project's id, and the caller's home survives", async () => {
+    const home = await call('POST', '/v1/dashboards', { name: 'Home' })
+    const homed = await call('PATCH', `/v1/dashboards/${home.json().id}`, { is_home: true })
+    expect(homed.json().is_home).toBe(true)
+    const theirs = await call('POST', '/v1/dashboards', { name: 'Theirs' }, OTHER_SERVER_KEY)
+
+    // My server key, their id: the cross-project id that must not touch my
+    // home before this 404s.
+    const res = await call('PATCH', `/v1/dashboards/${theirs.json().id}`, { is_home: true })
+    expect(res.statusCode).toBe(404)
+
+    const list = (await call('GET', '/v1/dashboards')).json().dashboards
+    expect(list.find((d: { id: number }) => d.id === home.json().id)?.is_home).toBe(true)
+  })
+
   it('refuses a thirteenth tile with a field-level 400', async () => {
     const t = await makeTrend()
     const tiles = Array.from({ length: 13 }, () => ({ kind: 'trend', report_id: t, width: 'half' }))

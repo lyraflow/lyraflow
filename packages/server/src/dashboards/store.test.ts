@@ -149,6 +149,32 @@ describe('DashboardStore', () => {
     expect((await store.list(projectA)).some((d) => d.is_home)).toBe(false)
   })
 
+  // I1 from the Task 4 review: `#setHome` clears the caller's current home
+  // BEFORE it knows the target row exists, because setting the new home
+  // first would collide with itself on `dashboards_one_home_per_project`.
+  // A `null` result -- another project's id, or no such id at all -- must
+  // therefore roll the clear back rather than commit it: a 404 must not
+  // silently move the caller's home.
+  it("is_home: true on another project's id returns null and leaves the caller's home alone", async () => {
+    const home = await store.create(projectA, { name: 'Home', tiles: [] })
+    await store.update(projectA, home.id, { is_home: true })
+    const theirs = await store.create(projectB, { name: 'Theirs', tiles: [] })
+
+    expect(await store.update(projectA, theirs.id, { is_home: true })).toBeNull()
+
+    expect((await store.get(projectA, home.id))?.is_home).toBe(true)
+    expect((await store.get(projectB, theirs.id))?.is_home).toBe(false)
+  })
+
+  it("is_home: true on a nonexistent id returns null and leaves the caller's home alone", async () => {
+    const home = await store.create(projectA, { name: 'Home', tiles: [] })
+    await store.update(projectA, home.id, { is_home: true })
+
+    expect(await store.update(projectA, home.id + 999_999, { is_home: true })).toBeNull()
+
+    expect((await store.get(projectA, home.id))?.is_home).toBe(true)
+  })
+
   it('a row whose tiles no longer parse reads back stale, with no tiles, and does not fail the list', async () => {
     await pg.query(
       `INSERT INTO dashboards (project_id, name, definition_version, tiles)
