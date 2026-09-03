@@ -40,6 +40,24 @@ function renderAt(path: string) {
      * which says nothing about the router. */
     meta: vi.fn(async () => ({ version: '0.10.0' })),
     dashboards: vi.fn(async () => []),
+    /* `/dashboards/:id` fetches on mount and can rename, reorder or delete
+     * from the same screen; all three are stubbed so a resolution test never
+     * reaches an unstubbed method for a reason unrelated to routing. Tiles
+     * are empty because this file is asserting which screen the router
+     * picked, not what a tile renders. */
+    dashboard: vi.fn(async () => ({
+      id: 7,
+      name: 'Overview',
+      tile_count: 0,
+      is_home: false,
+      definition_version: 1,
+      stale: false,
+      created_at: '',
+      updated_at: '',
+      tiles: [],
+    })),
+    patchDashboard: vi.fn(async () => undefined),
+    deleteDashboard: vi.fn(async () => undefined),
     funnels: vi.fn(async () => []),
     segments: vi.fn(async () => []),
     trendReports: vi.fn(async () => []),
@@ -71,6 +89,14 @@ describe('AppRouter', () => {
   it('renders the dashboard create form at /dashboards/new', async () => {
     renderAt('/dashboards/new')
     expect(await screen.findByRole('heading', { name: /new dashboard/i })).toBeInTheDocument()
+  })
+
+  // Task 9: `/dashboards/:id`. `/dashboards/new` above must keep resolving to
+  // the create form rather than to this screen with an id of "new" -- the
+  // router ranks by specificity, and both tests here hold that.
+  it('renders the dashboard screen at /dashboards/7', async () => {
+    renderAt('/dashboards/7')
+    expect(await screen.findByRole('heading', { name: 'Overview' })).toBeInTheDocument()
   })
 
   it('renders the feed at the root', async () => {

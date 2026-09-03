@@ -1,5 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes, useSearchParams } from 'react-router'
 import type { ApiClient } from '../api/client.js'
+import { Dashboard } from '../screens/Dashboard.js'
 import { DashboardNew } from '../screens/DashboardNew.js'
 import { Dashboards } from '../screens/Dashboards.js'
 import { Feed } from '../screens/Feed.js'
@@ -115,6 +116,7 @@ export function AppRouter(props: {
 }) {
   const dashboards = <Dashboards client={props.client} onUnauthorized={props.onUnauthorized} />
   const dashboardNew = <DashboardNew client={props.client} onUnauthorized={props.onUnauthorized} />
+  const dashboard = <Dashboard client={props.client} onUnauthorized={props.onUnauthorized} />
   const feed = <Feed client={props.client} onUnauthorized={props.onUnauthorized} />
   // IMPORTANT 3 from the whole-branch review: `onUnauthorized` used to be
   // handed only to `Feed` here -- `Settings` has its own two fetches
@@ -228,13 +230,14 @@ export function AppRouter(props: {
           {/*
            * No `key`s on this pair, unlike the funnel/segment/trend/retention
            * new-vs-detail pairs above: `/dashboards/new` (`DashboardNew`) and
-           * `/dashboards/:id` (a later task's `Dashboard`) are different
+           * `/dashboards/:id` (`Dashboard`) are different
            * component TYPES, so `<Routes>` remounts on navigation between them
            * without help. Keys only earn their place where the same
            * component serves both destinations.
            */}
           <Route path={ROUTES.dashboards} element={dashboards} />
           <Route path={ROUTES.dashboardNew} element={dashboardNew} />
+          <Route path="/dashboards/:id" element={dashboard} />
           <Route path={ROUTES.settings} element={settings} />
           <Route path={ROUTES.profile} element={profile} />
           {/*

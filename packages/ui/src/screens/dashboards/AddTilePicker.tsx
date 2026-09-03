@@ -25,10 +25,28 @@ const GROUPS: { kind: TileKind; label: string }[] = [
   { kind: 'funnel', label: 'Funnels' },
 ]
 
-const NEW_HREF: Record<TileKind, string> = {
-  trend: ROUTES.trendNew,
-  retention: ROUTES.retentionNew,
-  funnel: ROUTES.funnelNew,
+/**
+ * Where "save one first" points, per kind -- read at RENDER time rather than
+ * at module scope, which is not a style choice. `Router.tsx` imports the
+ * dashboard screen, the screen imports this control, and this control
+ * imports `ROUTES` back out of `Router.tsx`: a cycle. A module-level
+ * `ROUTES.trendNew` is evaluated while `Router.tsx` is still running its own
+ * imports, so `ROUTES` is `undefined` and the whole app dies on load with a
+ * `Cannot read properties of undefined` naming a route constant -- which
+ * reads as a missing export rather than as an import order. Inside a
+ * function the read happens after every module in the cycle has finished.
+ * `Router.test.tsx`'s `/dashboards/7` case is what catches a regression: it
+ * fails at import, before any assertion.
+ */
+function newHrefOf(kind: TileKind): string {
+  switch (kind) {
+    case 'trend':
+      return ROUTES.trendNew
+    case 'retention':
+      return ROUTES.retentionNew
+    case 'funnel':
+      return ROUTES.funnelNew
+  }
 }
 
 /**
@@ -111,15 +129,15 @@ export function AddTilePicker(props: {
     return (
       <p className="text-sm text-muted-foreground">
         No saved reports to add yet. Save a{' '}
-        <Link className="underline" to={NEW_HREF.trend}>
+        <Link className="underline" to={newHrefOf('trend')}>
           trend
         </Link>
         , a{' '}
-        <Link className="underline" to={NEW_HREF.retention}>
+        <Link className="underline" to={newHrefOf('retention')}>
           retention report
         </Link>{' '}
         or a{' '}
-        <Link className="underline" to={NEW_HREF.funnel}>
+        <Link className="underline" to={newHrefOf('funnel')}>
           funnel
         </Link>{' '}
         first.
