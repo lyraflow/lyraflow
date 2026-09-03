@@ -1,5 +1,6 @@
+import { type ReactElement, useEffect, useState } from 'react'
 import { BrowserRouter, Navigate, Route, Routes, useSearchParams } from 'react-router'
-import type { ApiClient } from '../api/client.js'
+import { type ApiClient, ApiError } from '../api/client.js'
 import { Dashboard } from '../screens/Dashboard.js'
 import { DashboardNew } from '../screens/DashboardNew.js'
 import { Dashboards } from '../screens/Dashboards.js'
@@ -19,6 +20,7 @@ import { TrendReports } from '../screens/TrendReports.js'
 import { Trends } from '../screens/Trends.js'
 import { hasRetentionDefinitionParams } from '../screens/retention/params.js'
 import { hasTrendDefinitionParams } from '../screens/trends/params.js'
+import { useProject } from './ProjectContext.js'
 import { Shell } from './Shell.js'
 
 /**
@@ -56,6 +58,44 @@ export const segmentPath = (id: number) => `/segments/${id}`
 export const segmentEditPath = (id: number) => `/segments/${id}/edit`
 export const trendReportPath = (id: number) => `/trends/${id}`
 export const retentionReportPath = (id: number) => `/retention/${id}`
+
+/**
+ * `/` opens the project's home dashboard when one is marked, and the feed
+ * otherwise -- a redirect rather than rendering the dashboard in place, so
+ * the URL is truthful and the sidebar's active item is honest. Renders
+ * nothing while the list loads: rendering the feed first would fire its
+ * fetches for a screen about to be replaced. A failed list read falls
+ * through to the feed; the feed does not depend on dashboards existing.
+ * `/feed` never comes here.
+ */
+function HomeEntry(props: { client: ApiClient; feed: ReactElement; onUnauthorized?(): void }) {
+  const { activeId } = useProject()
+  const [home, setHome] = useState<number | null | 'loading'>('loading')
+  useEffect(() => {
+    if (activeId == null) return
+    let cancelled = false
+    setHome('loading')
+    props.client
+      .dashboards(activeId)
+      .then((list) => {
+        if (!cancelled) setHome(list.find((d) => d.is_home)?.id ?? null)
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return
+        if (err instanceof ApiError && err.status === 401) {
+          props.onUnauthorized?.()
+          return
+        }
+        setHome(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [props.client, activeId, props.onUnauthorized])
+  if (home === 'loading') return null
+  if (home === null) return props.feed
+  return <Navigate to={dashboardPath(home)} replace />
+}
 
 /**
  * `/trends` used to BE the builder; it is now the saved-trend list, and the
@@ -225,7 +265,12 @@ export function AppRouter(props: {
     <BrowserRouter>
       <Shell email={props.email} onLogout={props.onLogout} client={props.client}>
         <Routes>
-          <Route path="/" element={feed} />
+          <Route
+            path="/"
+            element={
+              <HomeEntry client={props.client} feed={feed} onUnauthorized={props.onUnauthorized} />
+            }
+          />
           <Route path={ROUTES.feed} element={feed} />
           {/*
            * No `key`s on this pair, unlike the funnel/segment/trend/retention

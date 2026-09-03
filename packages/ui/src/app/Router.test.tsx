@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import { userEvent } from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
-import { ApiError } from '../api/client.js'
+import { type ApiClient, ApiError } from '../api/client.js'
 import { ProjectProvider } from './ProjectContext.js'
 import { AppRouter } from './Router.js'
 
@@ -18,7 +18,7 @@ const PROJECTS = [
   },
 ]
 
-function renderAt(path: string) {
+function renderAt(path: string, overrides: Partial<ApiClient> = {}) {
   window.history.pushState({}, '', path)
   const client = {
     events: vi.fn(async () => ({ events: [], next_cursor: null })),
@@ -67,6 +67,7 @@ function renderAt(path: string) {
      * without this, the /trends/new test would hit an unstubbed method
      * inside a timer callback and fail for a reason unrelated to routing. */
     schemaEvents: vi.fn(async () => []),
+    ...overrides,
   } as never
   return render(
     <ProjectProvider projects={PROJECTS} initialId={1}>
@@ -99,9 +100,61 @@ describe('AppRouter', () => {
     expect(await screen.findByRole('heading', { name: 'Overview' })).toBeInTheDocument()
   })
 
-  it('renders the feed at the root', async () => {
+  it('renders the feed at / when no dashboard is home', async () => {
     renderAt('/')
     expect(await screen.findByRole('tab', { name: /accepted/i })).toBeInTheDocument()
+  })
+
+  it('redirects / to the home dashboard when one is set, with replace', async () => {
+    const historyLengthBefore = window.history.length
+    renderAt('/', {
+      dashboards: vi.fn(async () => [
+        {
+          id: 7,
+          name: 'Overview',
+          tile_count: 0,
+          is_home: true,
+          definition_version: 1,
+          stale: false,
+          created_at: '',
+          updated_at: '',
+        },
+      ]),
+    })
+    expect(await screen.findByRole('heading', { name: /overview/i })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/dashboards/7')
+    // +1, not +0: `renderAt` itself pushes the entry for `/` -- the redirect
+    // to `/dashboards/7` must add none on top of that. A push instead of a
+    // replace here would land on +2.
+    expect(window.history.length).toBe(historyLengthBefore + 1)
+  })
+
+  it('renders the feed at / when the dashboard list fails to load', async () => {
+    renderAt('/', {
+      dashboards: vi.fn(async () => {
+        throw new Error('network error')
+      }),
+    })
+    expect(await screen.findByRole('tab', { name: /accepted/i })).toBeInTheDocument()
+  })
+
+  it('/feed is always the feed, even with a home dashboard', async () => {
+    renderAt('/feed', {
+      dashboards: vi.fn(async () => [
+        {
+          id: 7,
+          name: 'Overview',
+          tile_count: 0,
+          is_home: true,
+          definition_version: 1,
+          stale: false,
+          created_at: '',
+          updated_at: '',
+        },
+      ]),
+    })
+    expect(await screen.findByRole('tab', { name: /accepted/i })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/feed')
   })
 
   // Task 3 replaced the placeholder `Settings` with the real screen (the
