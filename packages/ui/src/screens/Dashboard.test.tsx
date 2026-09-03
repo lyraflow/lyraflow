@@ -19,6 +19,7 @@ import type {
 import { ProjectProvider } from '../app/ProjectContext.js'
 import { ROUTES } from '../app/Router.js'
 import { Dashboard } from './Dashboard.js'
+import { MAX_TILES } from './dashboards/tileRequest.js'
 
 const T = '2026-08-01T00:00:00.000Z'
 
@@ -153,6 +154,28 @@ function applied(patch: DashboardPatch): DashboardWire {
       ? {}
       : { tiles: patch.tiles.map(resolveTile), tile_count: patch.tiles.length }),
   }
+}
+
+/**
+ * A `patchDashboard` whose response carries a FRESH tiles array and fresh
+ * tile objects -- what a real one does, since the response is parsed JSON.
+ * `applied()` above deliberately returns `DASH.tiles` unchanged for a
+ * name-only patch, which is the shape that hid I1: identical references make
+ * a screen that re-runs every tile on rename look correct.
+ */
+function freshTiles(patch: DashboardPatch): DashboardWire {
+  const d = applied(patch)
+  return { ...d, tiles: d.tiles.map((t) => ({ ...t })) }
+}
+
+/** `n` trend tiles with distinct report ids, so a test can sit at the cap. */
+function manyTiles(n: number): ResolvedTile[] {
+  return Array.from({ length: n }, (_, i) => ({
+    kind: 'trend' as const,
+    report_id: i + 1,
+    width: 'half' as const,
+    report: { ...TREND, id: i + 1 },
+  }))
 }
 
 function fakeClient(over: Record<string, unknown> = {}): ApiClient {
@@ -489,6 +512,83 @@ describe('Dashboard', () => {
         tiles: [funnelInput, trendInput],
       }),
     )
+  })
+
+  // I1 (review): `patch()` replaces `dash` with the response, and a real
+  // response is parsed JSON -- so `tiles` and every tile in it are fresh
+  // references even when the layout is byte-identical. `DashboardTile`'s
+  // effect fires on `tile` identity, so a rename dropped every tile to a
+  // skeleton and re-queried the page. These two stub a response that behaves
+  // the way the server's does.
+  it('a rename does not re-run any tile', async () => {
+    const client = fakeClient({
+      patchDashboard: vi.fn(async (_p: number, _id: number, patch: DashboardPatch) =>
+        freshTiles(patch),
+      ),
+    })
+    renderScreen({ client, at: '/dashboards/7?edit=1' })
+    await screen.findByTestId('tile-trend-1')
+    await waitFor(() => expect(client.stats).toHaveBeenCalledTimes(1))
+    expect(client.runFunnel).toHaveBeenCalledTimes(1)
+
+    const input = screen.getByLabelText('Dashboard name')
+    await userEvent.clear(input)
+    await userEvent.type(input, 'Weekly view{Enter}')
+    await waitFor(() =>
+      expect(client.patchDashboard).toHaveBeenCalledWith(1, 7, { name: 'Weekly view' }),
+    )
+    await screen.findByDisplayValue('Weekly view')
+
+    expect(client.stats).toHaveBeenCalledTimes(1)
+    expect(client.runFunnel).toHaveBeenCalledTimes(1)
+  })
+
+  it('set as home does not re-run any tile', async () => {
+    const client = fakeClient({
+      patchDashboard: vi.fn(async (_p: number, _id: number, patch: DashboardPatch) =>
+        freshTiles(patch),
+      ),
+    })
+    renderScreen({ client, at: '/dashboards/7?edit=1' })
+    await screen.findByTestId('tile-trend-1')
+    await waitFor(() => expect(client.stats).toHaveBeenCalledTimes(1))
+    expect(client.runFunnel).toHaveBeenCalledTimes(1)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Set as home' }))
+    await screen.findByRole('button', { name: 'Home' })
+
+    expect(client.stats).toHaveBeenCalledTimes(1)
+    expect(client.runFunnel).toHaveBeenCalledTimes(1)
+  })
+
+  // M2 (review): the server refuses a thirteenth tile with a field-level 400,
+  // which reaches an operator as "This dashboard could not be read: …" for an
+  // add. The cap is mirrored in `tileRequest.ts` and said here instead.
+  it('at the tile cap the picker is replaced by the reason', async () => {
+    const client = fakeClient({
+      dashboard: vi.fn(async () => ({
+        ...DASH,
+        tile_count: MAX_TILES,
+        tiles: manyTiles(MAX_TILES),
+      })),
+    })
+    renderScreen({ client, at: '/dashboards/7?edit=1' })
+    expect(await screen.findByText(/holds at most 12 tiles/i)).toBeInTheDocument()
+    expect(screen.queryByLabelText('Report to add')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Add tile' })).toBeNull()
+  })
+
+  it('one below the cap still offers the picker', async () => {
+    const client = fakeClient({
+      dashboard: vi.fn(async () => ({
+        ...DASH,
+        tile_count: MAX_TILES - 1,
+        tiles: manyTiles(MAX_TILES - 1),
+      })),
+    })
+    renderScreen({ client, at: '/dashboards/7?edit=1' })
+    expect(await screen.findByLabelText('Report to add')).toBeInTheDocument()
+    expect(screen.queryByText(/holds at most/i)).toBeNull()
   })
 
   // Task 8's review: the tile's run effect depends on the IDENTITY of `tile`,

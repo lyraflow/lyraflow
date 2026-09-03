@@ -9,6 +9,7 @@ import { Input } from '../components/ui/input.js'
 import { AddTilePicker } from './dashboards/AddTilePicker.js'
 import { DashboardTile } from './dashboards/DashboardTile.js'
 import { createRunQueue } from './dashboards/runQueue.js'
+import { MAX_TILES } from './dashboards/tileRequest.js'
 import { describeError } from './funnels/errors.js'
 import { RangePicker } from './shared/RangePicker.js'
 import { rangeIncomplete, readRange, writeRange } from './shared/range.js'
@@ -125,7 +126,19 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
       client
         .patchDashboard(activeId, id, body)
         .then((d) => {
-          setDash(d)
+          // A `PATCH` that carried no `tiles` keeps the PREVIOUS tiles
+          // reference. The response is parsed JSON, so `d.tiles` and every
+          // tile object in it are fresh references even when the layout came
+          // back byte-identical -- and `DashboardTile`'s effect fires on
+          // `tile` IDENTITY. Without this, renaming a dashboard or setting it
+          // as home drops every tile to a skeleton and re-queries the whole
+          // page, for an edit that changed no tile at all.
+          //
+          // Safe because the server cannot change a dashboard's layout in
+          // response to a body that did not mention it: `tiles` is
+          // "omit means unchanged", the same contract every other patch field
+          // in `api/types.ts` keeps.
+          setDash((prev) => (body.tiles === undefined && prev ? { ...d, tiles: prev.tiles } : d))
           setNameDraft(d.name)
         })
         .catch((err: unknown) => {
@@ -353,7 +366,19 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
         </p>
       )}
 
-      {dash && editing && activeId != null && (
+      {/* The picker is REPLACED at the cap rather than left on screen
+       * disabled: the server refuses a thirteenth tile with a field-level
+       * 400, which reaches an operator as "This dashboard could not be
+       * read: tiles -- …" for an add they had every reason to think was
+       * allowed. Saying the number here is the only place it can be acted
+       * on. */}
+      {dash && editing && activeId != null && tiles.length >= MAX_TILES && (
+        <p className="text-muted-foreground text-sm">
+          A dashboard holds at most {MAX_TILES} tiles. Remove one to add another.
+        </p>
+      )}
+
+      {dash && editing && activeId != null && tiles.length < MAX_TILES && (
         <AddTilePicker
           client={client}
           projectId={activeId}

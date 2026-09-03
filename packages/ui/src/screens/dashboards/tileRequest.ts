@@ -27,6 +27,11 @@ import {
  *  send a run the server refuses. */
 export const FUNNEL_MAX_RANGE_DAYS = 90
 
+/** `MAX_TILES` in `server/src/dashboards/store.ts`, restated for the same
+ *  reason as the three ceilings above: the screen must say so before sending
+ *  an add the server refuses with a field-level 400 an operator cannot act on. */
+export const MAX_TILES = 12
+
 const MS_PER_DAY = 86_400_000
 
 export type TileCeiling =
