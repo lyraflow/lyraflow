@@ -172,10 +172,8 @@ export function registerAdminProjectRoutes(app: FastifyInstance, deps: AdminProj
    * **Archiving is not deleting.** It stops ingest and nothing else: every
    * read keeps working, retention keeps sweeping (archived data still ages,
    * and skipping it would turn an archive into unbounded storage growth),
-   * and restoring is one more call. Deleting a project would have to clean
-   * ClickHouse as well as Postgres -- three partition drops and two
-   * asynchronous mutations, in an order that cannot orphan data -- which is
-   * what #39 and #60 park on and is not this route.
+   * and restoring is one more call. Deleting is its own route below, and it
+   * cleans ClickHouse before Postgres for the reason migration 019 gives.
    */
   app.patch<{ Params: { id: string } }>('/v1/projects/:id', async (req, reply) => {
     if (!(await requireSession(req, reply))) return

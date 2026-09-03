@@ -756,25 +756,36 @@ reported apart from `events_rejected` (malformed input), because a large
 rejection count means the integration is broken and a large bot count does
 not. This is what the Settings screen's usage card reads.
 
-### `GET /v1/projects` and `POST /v1/projects`
+### The project list: GET, POST, PATCH and DELETE /v1/projects
 
 **Session-cookie authenticated, not server-key** — these are instance-scoped
 ("which projects exist", "create one") rather than project-scoped, so a
 server key (which names one project) cannot answer them, and accepting one
 would let a single project's credential enumerate every other project on the
-install. In practice this means: the CLI's `create-project` and these two
+install. In practice this means: the CLI's `create-project` and these
 routes are the only ways to create a project, and only an admin signed into
 the [Web UI](#web-ui) (or holding its session cookie) can list every project
 or create a new one over HTTP. `GET /v1/projects` returns
 `{"projects": [...]}`, wrapped rather than a bare array, with each entry
 shaped `{"id", "name", "slug", "created_at", "retention_months",
-"monthly_event_quota"}` and **no key of either kind** — the one response in
-this API that names every project at once, so a key leaking here would leak
-the whole install rather than one project. `POST /v1/projects` takes
-`{"name"}`, slugifies it the same way `create-project` does, and returns
-`{"name", "slug", "write_key", "server_key"}` — the server key shown once,
-exactly as `create-project` prints it once, and never served again by
-anything.
+"monthly_event_quota", "disabled_at", "deleting_at"}` and **no key of either
+kind** — the one response in this API that names every project at once, so a
+key leaking here would leak the whole install rather than one project.
+`POST /v1/projects` takes `{"name"}`, slugifies it the same way
+`create-project` does, and returns `{"name", "slug", "write_key",
+"server_key"}` — the server key shown once, exactly as `create-project`
+prints it once, and never served again by anything.
+
+`PATCH /v1/projects/:id` takes any of `{"name"}` and `{"archived": true|false}`
+and returns the updated entry; it never changes the slug. `DELETE
+/v1/projects/:id` takes `{"slug"}` in the body as the confirmation — a
+mismatch is `409 slug_mismatch`, a project already being deleted is `409
+already_deleting` — and answers `202 {"id", "project_id", "status": "pending"}`.
+The teardown runs in the background; `GET /v1/project-deletions/:id` reports
+`pending`, `in_progress`, `completed` or `failed` (with the last error). All
+four are session-cookie routes for the reason above. Retention and quota are
+per-project settings and live on `PATCH /v1/project`, the server-key route,
+not here.
 
 ### `GET /v1/meta`
 
@@ -3205,14 +3216,18 @@ Two `/metrics` series exist to alert on:
   actually dropped since process start. A dry run or a run that found
   nothing expired does not advance it.
 
-**A project deleted from Postgres is never pruned again.** The worker builds
-its list of projects to sweep from the Postgres `projects` table, so a
-project row that no longer exists takes its ClickHouse data out of
-retention's reach entirely: those `events` and `device_index` partitions stay
-on disk indefinitely, and neither metric above can report it — the counter
-cannot move for a project the worker cannot see. There is no API for deleting
-a project today; if you remove a row by hand, drop that project's partitions
-in ClickHouse yourself at the same time.
+**Retention trusts Postgres for its list of projects, and deletion is what keeps
+the two stores in step.** The worker sweeps the projects in the Postgres
+`projects` table, so a project row removed *by hand* — `DELETE FROM projects`,
+a partial restore — would leave its ClickHouse partitions out of retention's
+reach and out of both metrics above. That is why project deletion is a real
+operation rather than a row delete: `lyraflow projects delete` and
+`DELETE /v1/projects/:id` tear ClickHouse down first, confirm nothing is left,
+and only then remove the row (see [Deleting a project](#web-ui)). A deletion
+that keeps failing stays in the projects table with `deleting_at` set, and the
+worker keeps sweeping it, so a half-finished delete is never invisible. If you
+do remove a row by hand, drop that project's partitions in ClickHouse yourself
+at the same time.
 
 ### Quotas
 
