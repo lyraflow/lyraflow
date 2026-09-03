@@ -992,6 +992,41 @@ describe('runSnippet', () => {
       expect(calls).toHaveLength(0)
     })
 
+    it('a rejected prompt is treated as a safe failure, not an unhandled rejection', async () => {
+      // Copies `persons delete`'s own "confirmation mechanism itself
+      // failed" case: a non-EPIPE prompt rejection must not escape as a
+      // raw stack trace, and must not rotate anything.
+      const { ctx, errOut, calls } = makeCtx(fakeClient, {
+        stdinIsTty: true,
+        prompt: () => Promise.reject(new Error('readline exploded')),
+      })
+      const code = await runSnippet(['--rotate'], ctx)
+      expect(code).toBe(1)
+      expect(calls).toHaveLength(0)
+      expect(errOut.join('')).toContain(
+        'the confirmation prompt failed; the write key was not rotated',
+      )
+    })
+
+    it('an EPIPE while writing the declined message still exits 1, not 0', async () => {
+      // `persons delete`'s decline branch swallows a write-side EPIPE and
+      // still reports 1 -- unlike the prompt-itself-failing branch above,
+      // where EPIPE means 0. The operation the caller asked for did not
+      // happen either way; a failed write of the message that says so must
+      // not change that.
+      const epipe = Object.assign(new Error('EPIPE'), { code: 'EPIPE' })
+      const { ctx, calls } = makeCtx(fakeClient, {
+        stdinIsTty: true,
+        prompt: async () => false,
+        writeErr: () => {
+          throw epipe
+        },
+      })
+      const code = await runSnippet(['--rotate'], ctx)
+      expect(code).toBe(1)
+      expect(calls).toHaveLength(0)
+    })
+
     it('without --yes on a non-tty stdin exits 2 and posts nothing', async () => {
       const { ctx, calls } = makeCtx(fakeClient, { stdinIsTty: false })
       const code = await runSnippet(['--rotate'], ctx)

@@ -112,12 +112,13 @@ import { SNIPPET_METHODS, VERSION } from '@lyraflow/sdk-browser'
 import { UsageError, parseCommandArgs, resolveInstant } from '../args.js'
 import { ApiError } from '../client.js'
 import type { CommandContext } from '../context.js'
-import { type Mode, emitObject, resolveMode, sanitizeForLine } from '../output.js'
+import { type Mode, emitError, emitObject, resolveMode, sanitizeForLine } from '../output.js'
 import { SCHEMA_MAX_LIMIT } from './catalog.js'
 import {
   UNIVERSAL_FLAGS,
   checkNoPositionals,
   checkStrayFlags,
+  isEpipe,
   reportCommandFailure,
   reportParseFailure,
   reportUsageError,
@@ -673,13 +674,48 @@ export async function runSnippet(argv: string[], ctx: CommandContext): Promise<n
             ctx,
           )
         }
-        const confirmed = await ctx.prompt(
-          grace === 0
-            ? 'This replaces the write key and retires the current one immediately. Pages still serving the old snippet stop collecting now. Continue?'
-            : 'This replaces the write key. The current one keeps working for the grace period, then pages still serving it stop collecting. Continue?',
-        )
+        // Both branches below copy `persons delete`'s `runDelete`
+        // (persons.ts:238-274) exactly, rather than letting either failure
+        // fall through to this command's own outer `reportCommandFailure`:
+        // that catch cannot tell "the pipe closed while writing a decline"
+        // (still exit 1 — nothing was rotated, the write failing does not
+        // change that) from "the pipe closed while writing a real request
+        // failure" (exit 0), and it has no way to report a non-EPIPE prompt
+        // rejection as anything other than an unhandled stack trace.
+        let confirmed: boolean
+        try {
+          confirmed = await ctx.prompt(
+            grace === 0
+              ? 'This replaces the write key and retires the current one immediately. Pages still serving the old snippet stop collecting now. Continue?'
+              : 'This replaces the write key. The current one keeps working for the grace period, then pages still serving it stop collecting. Continue?',
+          )
+        } catch (err) {
+          // A REJECTED prompt is the confirmation mechanism itself
+          // failing — not an answer. EPIPE-shaped is a clean stop, the
+          // same as everywhere else in this CLI; anything else is
+          // reported and treated as "nothing was rotated" rather than
+          // escaping as an unhandled rejection with a raw stack trace.
+          if (isEpipe(err)) return 0
+          try {
+            emitError(
+              new Error('the confirmation prompt failed; the write key was not rotated'),
+              mode,
+              ctx.writeErr,
+            )
+          } catch (writeErr) {
+            if (!isEpipe(writeErr)) throw writeErr
+          }
+          return 1
+        }
+
         if (confirmed !== true) {
-          ctx.writeErr('nothing was rotated\n')
+          try {
+            ctx.writeErr('nothing was rotated\n')
+          } catch (writeErr) {
+            if (!isEpipe(writeErr)) throw writeErr
+          }
+          // The operation the caller asked for did not happen — 1, not 0,
+          // even when the message above could not be written (EPIPE).
           return 1
         }
       }
