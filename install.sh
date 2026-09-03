@@ -216,6 +216,7 @@ if [ -n "$ADMIN_PASSWORD" ]; then
   echo "Admin login, at $HOST:"
   echo "  email:    $ADMIN_EMAIL"
   echo "  password: $ADMIN_PASSWORD"
+  echo "This is printed once. Change it with:"
   echo "  read -rsp 'password: ' P; echo"
   echo "  printf '%s' \"\$P\" | docker compose exec -T lyraflow \\"
   echo "    node packages/cli/dist/index.js reset-admin-login $ADMIN_EMAIL"
