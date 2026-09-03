@@ -30,12 +30,12 @@ export function readStoredProjectId(): number | null {
  *
  * The membership check is the whole point of resolving rather than simply
  * restoring. A stored id outlives the thing it names -- a project deleted by
- * hand in Postgres (there is no UI for it yet, #60), a different install
- * reached at the same origin, a different operator signing in on this
- * browser -- and an `activeId` naming a project the session does not carry
- * scopes every request on every screen to something the server will refuse,
- * with a switcher showing no selection and no way back except clearing site
- * data.
+ * hand in Postgres (or destroyed through Settings while this tab was closed),
+ * a different install reached at the same origin, a different operator
+ * signing in on this browser -- and an `activeId` naming a project the
+ * session does not carry scopes every request on every screen to something
+ * the server will refuse, with a switcher showing no selection and no way
+ * back except clearing site data.
  */
 function resolveInitialId(projects: Project[], initialId: number | null): number | null {
   const remembered = readStoredProjectId()

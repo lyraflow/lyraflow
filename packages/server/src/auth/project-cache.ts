@@ -233,10 +233,10 @@ export class ProjectCache {
             // The only reason that throw is unreachable from stored data is
             // `projects_quota_positive CHECK (monthly_event_quota > 0)` in
             // 001_core.sql — the column can hold NULL or a positive integer
-            // and nothing else. There is still no API for setting a quota,
-            // so the README tells operators to UPDATE this column directly;
-            // whoever relaxes that constraint owns making this parse and
-            // isOverQuota agree with whatever it then admits.
+            // and nothing else. `PATCH /v1/project` bounds writes to this
+            // column with the same positive-integer rule; whoever relaxes
+            // the CHECK owns making this parse and isOverQuota agree with
+            // whatever it then admits.
             monthlyEventQuota:
               row.monthly_event_quota === null ? null : Number(row.monthly_event_quota),
             serverKeyHash: row.server_key_hash,
