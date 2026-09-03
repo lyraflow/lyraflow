@@ -11,7 +11,9 @@
  * closing quote — the quoted-form match below then misses it. The
  * alternative (matching the bare substring) reintroduces the `bob`-inside-
  * `bobby` collision this quoting exists to prevent, which is the worse
- * failure mode of the two.
+ * failure mode of the two. A second known gap, same shape: an id containing
+ * `"` or `\` is stored JSON-escaped in the payload (`\"`, `\\`), so the
+ * literal quoted form built here never matches it either.
  *
  * The purge (purge.ts step 4) and the export (export.ts) both bind this to
  * `{ids:Array(String)}` against `scope.ids` — the SAME predicate, so what

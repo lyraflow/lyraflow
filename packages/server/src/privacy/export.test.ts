@@ -751,11 +751,22 @@ describe('GET /v1/persons/:id/export', () => {
  * Forces a genuine mid-stream ClickHouse failure, rather than assuming the
  * try/catch inside the generator behaves as intended. A fake ClickHouse
  * client answers the summary query normally (so the 404 decision passes)
- * and a non-null boundary (so the traits query is skipped entirely, which
- * keeps this fake to exactly the two calls the route actually makes), then
- * has the events query's `stream()` yield one row and throw on the next
- * pull — the shape a real connection drop or a ClickHouse-side timeout
- * mid-transfer produces.
+ * and a non-null boundary (so the traits query is skipped entirely) — under
+ * a boundary the route's successful path makes three query calls, not two:
+ * summary, events, then the dead-letter (`rejection`) query.
+ *
+ * Two cases, one per query that streams after the response has committed:
+ * the first fails inside the EVENTS query's own `stream()` (one row, then a
+ * throw on the next pull — the shape a real connection drop or a
+ * ClickHouse-side timeout mid-transfer produces) and never reaches the
+ * dead-letter query at all, so its fake never dispatches on
+ * `FROM events_dead_letter`. The second is the mirror image: the events
+ * query streams empty and the dead-letter query's own `stream()` throws
+ * instead — pinning that the SAME discard behaviour (no HTTP error, no
+ * `end` line) applies to a failure there too, not only to the events query.
+ * Without this second case, moving the dead-letter block out of the
+ * generator's `try` entirely leaves all of this file's other tests green —
+ * see the report for the mutation that proved it.
  */
 describe('GET /v1/persons/:id/export (mocked ClickHouse): mid-stream failure', () => {
   it('ends the stream without the end line, and without turning into an HTTP error, on a mid-stream failure', async () => {
@@ -863,6 +874,98 @@ describe('GET /v1/persons/:id/export (mocked ClickHouse): mid-stream failure', (
     const lines = parseLines(res.body)
     expect(lines[0]?.type).toBe('person')
     expect(lines.filter((l) => l.type === 'event')).toHaveLength(1)
+    // The terminator is the caller's signal that the export is complete —
+    // its absence here is the entire point of this test.
+    expect(lines.some((l) => l.type === 'end')).toBe(false)
+
+    await mockedApp.close()
+  })
+
+  // The mirror image of the test above: the events query streams cleanly
+  // (empty), and the FAILURE happens in the dead-letter query's own
+  // `stream()` instead. Pins that the try/catch guards that query too — see
+  // the block docstring for why this case exists.
+  it('ends the stream without the end line on a mid-stream failure in the rejection query', async () => {
+    const fakeCh = {
+      query: async (opts: { query: string }) => {
+        if (opts.query.includes('FROM events_dead_letter')) {
+          return {
+            // No generator here: an `async function*` with no `yield` is
+            // pointless as a generator (and biome flags it as such) — an
+            // async iterator whose very first `next()` rejects is the
+            // direct way to fail before a single row is ever produced.
+            stream: () => ({
+              [Symbol.asyncIterator]: () => ({
+                next: () =>
+                  Promise.reject(
+                    new Error('deliberate mid-stream ClickHouse failure injected for this test'),
+                  ),
+              }),
+            }),
+          }
+        }
+        if (opts.query.includes('ORDER BY timestamp ASC')) {
+          return {
+            stream: () => {
+              async function* rows() {}
+              return rows()
+            },
+          }
+        }
+        // The summary query personEventSummary issues.
+        return {
+          json: async () => [
+            {
+              first_seen: '2026-08-07 00:00:00.000',
+              last_seen: '2026-08-07 00:00:00.000',
+              events: '1',
+            },
+          ],
+        }
+      },
+    } as unknown as ClickHouseClient
+
+    const fakeAuthenticate: Authenticate = async (req) =>
+      req.headers['x-lyraflow-server-key'] === 'sk_fake_export_dl'
+        ? ({ id: 1, slug: 'fake', retentionMonths: 1, monthlyEventQuota: 1 } as Project)
+        : null
+    const fakeBindings = {
+      devicesForAny: async () => [],
+      mostRecentPersonFor: async () => null,
+      bindEventsForDevices: async () => new Map(),
+    } as unknown as PrivacyDeps['bindings']
+    const fakeAliases = {
+      canonicalFor: async (_p: number, id: string) => id,
+      mergedFrom: async () => [],
+    } as unknown as PrivacyDeps['aliases']
+    // Non-null: skips the traits query, and is what makes the dead-letter
+    // query run at all on the successful path (see the block docstring).
+    const fakeSuppression = {
+      boundaryFor: async () => new Date('2026-01-01T00:00:00.000Z'),
+    } as unknown as PrivacyDeps['suppression']
+
+    const mockedApp = Fastify()
+    registerExportRoute(mockedApp, {
+      authenticate: fakeAuthenticate,
+      ch: fakeCh,
+      bindings: fakeBindings,
+      aliases: fakeAliases,
+      suppression: fakeSuppression,
+    } as unknown as PrivacyDeps)
+
+    const res = await mockedApp.inject({
+      method: 'GET',
+      url: '/v1/persons/fail-user-dl/export',
+      headers: { 'x-lyraflow-server-key': 'sk_fake_export_dl' },
+    })
+
+    // Same status-line reasoning as the events-query case above: 200 was
+    // already committed before the dead-letter query ever ran.
+    expect(res.statusCode).toBe(200)
+    const lines = parseLines(res.body)
+    expect(lines[0]?.type).toBe('person')
+    expect(lines.filter((l) => l.type === 'event')).toHaveLength(0)
+    expect(lines.filter((l) => l.type === 'rejection')).toHaveLength(0)
     // The terminator is the caller's signal that the export is complete —
     // its absence here is the entire point of this test.
     expect(lines.some((l) => l.type === 'end')).toBe(false)

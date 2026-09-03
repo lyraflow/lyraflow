@@ -2904,9 +2904,10 @@ be committed to `200`. Instead, on a mid-stream failure the response simply
 ends without ever writing the final `end` line. **A response without a
 final `{"type":"end","events":N}` line is incomplete and must be discarded.**
 Always check for that line, and check that its `events` count matches the
-number of `event` lines you actually received — a truncated response that
-happens to look complete is exactly the failure a subject-access export
-cannot afford to miss.
+number of `event` lines you actually received, and its `rejections` count
+matches the number of `rejection` lines you actually received — a truncated
+response that happens to look complete is exactly the failure a
+subject-access export cannot afford to miss.
 
 The export honours deletion the same way the person read does: a person who
 has been deleted exports only the events recorded after the deletion
@@ -2939,11 +2940,11 @@ a different, distinguishable symptom, and it matters which:
   ceiling, the export never starts: you get a `503` — the same generic
   failure response every other endpoint gives an internal error, with
   `retry-after` set.
-- The **per-event** query streams *after* the response has already started.
-  If it hits a ceiling partway through, the export cannot become an HTTP
-  error any more — the stream simply ends, without its final `end` line,
-  exactly like any other mid-stream failure above. This is the only one of
-  the three the discard rule was written for.
+- The **per-event** and **rejection** queries both stream *after* the
+  response has already started. If either hits a ceiling partway through,
+  the export cannot become an HTTP error any more — the stream simply ends,
+  without its final `end` line, exactly like any other mid-stream failure
+  above. This is what the discard rule was written for.
 
 If you self-host and an export is being cut short for one particular
 person, an unusually large history hitting one of these ceilings is the
