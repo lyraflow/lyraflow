@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import type { ApiClient } from './api/client.js'
 import { ApiError, createClient } from './api/client.js'
 import type { Project } from './api/types.js'
@@ -250,9 +250,21 @@ export default function App(props: { client?: ApiClient; sessionPollIntervalMs?:
   // above: any of the feed's own polled endpoints coming back 401. No
   // `client.logout()` call here -- unlike `handleLogout`, the session is
   // already gone server-side; there is nothing left to ask it to end.
-  function handleSessionExpired() {
+  //
+  // `useCallback` with NO dependencies, and it is not a micro-optimisation.
+  // This is handed down as `onUnauthorized`, and `HomeEntry`, `Dashboard`
+  // and `Feed` all list that callback in their load effects. As a plain
+  // function declaration it was a new identity on every render of App, so
+  // any state change up here re-fired all three -- dropping a dashboard's
+  // tiles to skeletons and re-running the page. Both `DashboardTile` and
+  // `AddTilePicker` leave `onUnauthorized` out of their own dependencies
+  // precisely to survive a parent like that; the screens above them do not,
+  // and this is the end of the chain that can actually be fixed.
+  // `setPhase` is a state setter, so the identity is stable with no
+  // dependencies at all.
+  const handleSessionExpired = useCallback(() => {
     setPhase({ kind: 'anonymous' })
-  }
+  }, [])
 
   function handleRetry() {
     setPhase({ kind: 'checking' })
