@@ -10,6 +10,7 @@ import {
 import { mergeTraits, readPersonTraitRows } from '../identity/traits.js'
 import { parseChDateTime } from '../ingest/row.js'
 import { SEGMENT_MAX_MEMORY_BYTES } from '../segments/execute.js'
+import { DEAD_LETTER_MATCH, DEAD_LETTER_OWNED_BY_IDS } from './dead-letter.js'
 import type { PrivacyDeps } from './routes.js'
 
 interface ExportParams {
@@ -26,8 +27,9 @@ export const EXPORT_MAX_EXECUTION_SECONDS = 300
 
 /**
  * GET /v1/persons/:id/export — a subject-access request, streamed as
- * NDJSON: one `person` line, then one `event` line per surviving event,
- * then a terminating `end` line carrying the count actually emitted.
+ * NDJSON: one `person` line, the `event` lines, then any `rejection`
+ * lines, then a terminating `end` line carrying the counts actually
+ * emitted.
  *
  * Streamed, not buffered into one in-memory or on-disk document, because a
  * second copy of one person's complete personal data is exactly the new
@@ -128,6 +130,7 @@ export function registerExportRoute(app: FastifyInstance, deps: PrivacyDeps): vo
     async function* lines(): AsyncGenerator<string> {
       yield `${JSON.stringify(person)}\n`
       let emitted = 0
+      let rejections = 0
       try {
         const rs = await ch.query({
           // Column list is a compile-time allowlist; no request data ever
@@ -179,6 +182,49 @@ export function registerExportRoute(app: FastifyInstance, deps: PrivacyDeps): vo
             })}\n`
           }
         }
+
+        // Rejected payloads are matched by the SAME predicate the purge
+        // deletes them with (dead-letter.ts), so what deletion treats as
+        // this person's data, the export shows as this person's data. It is
+        // a substring match over text that failed to parse, which the
+        // `match` field says on every line.
+        const dl = await ch.query({
+          query: `SELECT received_at, reason, detail, payload
+                    FROM events_dead_letter
+                   WHERE project_id = {projectId:UInt32}
+                     AND ${DEAD_LETTER_OWNED_BY_IDS}${boundary ? ' AND received_at > {boundary:DateTime64(3)}' : ''}
+                   ORDER BY received_at ASC`,
+          query_params: {
+            projectId: params.projectId,
+            ids: scope.ids,
+            ...(boundary ? { boundary: chDateTime(boundary) } : {}),
+          },
+          format: 'JSONEachRow',
+          clickhouse_settings: {
+            max_execution_time: EXPORT_MAX_EXECUTION_SECONDS,
+            max_memory_usage: String(SEGMENT_MAX_MEMORY_BYTES),
+            timeout_overflow_mode: 'throw',
+          },
+        })
+        for await (const rows of dl.stream()) {
+          for (const row of rows) {
+            const r = row.json<{
+              received_at: string
+              reason: string
+              detail: string
+              payload: string
+            }>()
+            rejections += 1
+            yield `${JSON.stringify({
+              type: 'rejection',
+              received_at: parseChDateTime(r.received_at).toISOString(),
+              reason: r.reason,
+              detail: r.detail,
+              payload: r.payload,
+              match: DEAD_LETTER_MATCH,
+            })}\n`
+          }
+        }
       } catch (err) {
         // The status line is long gone, so this cannot become an HTTP
         // error. The stream ends WITHOUT the `end` line, which is exactly
@@ -193,7 +239,7 @@ export function registerExportRoute(app: FastifyInstance, deps: PrivacyDeps): vo
         req.log.error({ err }, 'person export failed mid-stream')
         return
       }
-      yield `${JSON.stringify({ type: 'end', events: emitted })}\n`
+      yield `${JSON.stringify({ type: 'end', events: emitted, rejections })}\n`
     }
 
     reply.header('content-type', 'application/x-ndjson')

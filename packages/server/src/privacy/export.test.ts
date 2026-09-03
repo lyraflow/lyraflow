@@ -198,6 +198,34 @@ async function insertEvent(opts: {
   })
 }
 
+/**
+ * `events_dead_letter` has no identity columns — only the raw payload text —
+ * so every fixture below identifies its row purely by what string the
+ * payload contains. `receivedAt` defaults to `chAt(0)`, never a literal
+ * date: this table's own 30-day TTL expires a hardcoded fixture instant on
+ * a wall-clock schedule (see events/routes.test.ts:1999-2023's own
+ * docstring for the exact failure this bit already, on 2026-08-31).
+ */
+async function insertDeadLetter(opts: {
+  projectId: number
+  payload: string
+  receivedAt?: string
+}): Promise<void> {
+  await ch.insert({
+    table: 'events_dead_letter',
+    format: 'JSONEachRow',
+    values: [
+      {
+        project_id: opts.projectId,
+        received_at: opts.receivedAt ?? chAt(0),
+        reason: 'validation_failed',
+        detail: 'export test fixture',
+        payload: opts.payload,
+      },
+    ],
+  })
+}
+
 function exportReq(id: string, headers: Record<string, string>) {
   return app.inject({
     method: 'GET',
@@ -309,7 +337,7 @@ describe('GET /v1/persons/:id/export', () => {
     // 1, not 2: the event stamped EXACTLY at the boundary instant is hidden
     // along with the two before it, strictly greater-than.
     expect(afterEvents).toHaveLength(1)
-    expect(lines.at(-1)).toEqual({ type: 'end', events: 1 })
+    expect(lines.at(-1)).toEqual({ type: 'end', events: 1, rejections: 0 })
     expect(new Date(afterEvents[0]?.timestamp as string).getTime()).toBe(base + 3 * 3_600_000)
   })
 
@@ -531,7 +559,7 @@ describe('GET /v1/persons/:id/export', () => {
       // cannot change out from under a caller depending on whether that
       // merge has run yet.
       expect(survivors[0]?.received_at).toBe(isoAt(35))
-      expect(lines.at(-1)).toEqual({ type: 'end', events: 2 })
+      expect(lines.at(-1)).toEqual({ type: 'end', events: 2, rejections: 0 })
     } finally {
       await ch.command({ query: `SYSTEM START MERGES ${CH_DB}.events` })
     }
@@ -598,6 +626,124 @@ describe('GET /v1/persons/:id/export', () => {
         [projectA],
       )
     }
+  })
+
+  // The predicate is the SAME one the purge deletes dead-letter rows with
+  // (dead-letter.ts) — a device id (reachable only through scope.devices,
+  // never scope.group alone) must match, and a payload merely SHARING a
+  // prefix with the person's id (bob/bobby) must not.
+  it("includes a rejected payload naming any of the person's ids, after the events and before end", async () => {
+    const userId = `exp-dl-${randomUUID()}`
+    const identifyRes = await identifyWithDevice(WRITE_KEY_A, userId)
+    expect(identifyRes.statusCode).toBe(202)
+
+    const matchingPayload = JSON.stringify({ anonymous_id: `anon-${userId}`, event: '' })
+    await insertDeadLetter({ projectId: projectA, payload: matchingPayload })
+    // Not the person's id, only a prefix of it — must not match.
+    await insertDeadLetter({
+      projectId: projectA,
+      payload: JSON.stringify({ user_id: `${userId}x` }),
+    })
+
+    const res = await exportAs(userId, SERVER_KEY_A)
+    expect(res.statusCode).toBe(200)
+    const lines = parseLines(res.body)
+
+    const rejections = lines.filter((l) => l.type === 'rejection')
+    expect(rejections).toHaveLength(1)
+    expect(rejections[0]).toMatchObject({
+      type: 'rejection',
+      reason: 'validation_failed',
+      detail: 'export test fixture',
+      payload: matchingPayload,
+      match: 'quoted-id-substring',
+    })
+    expect(typeof rejections[0]?.received_at).toBe('string')
+
+    const rejectionIndex = lines.findIndex((l) => l.type === 'rejection')
+    const eventIndices = lines.flatMap((l, i) => (l.type === 'event' ? [i] : []))
+    const endIndex = lines.length - 1
+    expect(eventIndices.every((i) => i < rejectionIndex)).toBe(true)
+    expect(rejectionIndex).toBeLessThan(endIndex)
+
+    expect(lines.at(-1)).toEqual({ type: 'end', events: 1, rejections: 1 })
+  })
+
+  // Same boundary-instant discrimination as 'omits events at or before the
+  // deletion boundary' above, applied to dead-letter rows: one rejection
+  // landing EXACTLY on the boundary, one strictly after it.
+  it('omits a rejection at or before the deletion boundary', async () => {
+    const userId = `exp-dl-boundary-${randomUUID()}`
+    const base = Date.now() - 4 * 3_600_000
+    const boundaryOffsetMs = 2 * 3_600_000
+    const boundaryAt = new Date(base + boundaryOffsetMs)
+    const afterBoundary = new Date(base + 3 * 3_600_000)
+
+    // A surviving event past the boundary, so this exercises "rejection
+    // hidden, person still has data" rather than degenerating into 404.
+    await insertEvent({
+      projectId: projectA,
+      userId,
+      timestamp: chStamp(afterBoundary),
+      eventName: 'exp_dl_boundary_event',
+    })
+
+    const payload = JSON.stringify({ user_id: userId })
+    await insertDeadLetter({ projectId: projectA, payload, receivedAt: chStamp(boundaryAt) })
+    await insertDeadLetter({ projectId: projectA, payload, receivedAt: chStamp(afterBoundary) })
+
+    await pg.query(
+      'INSERT INTO suppressed_persons (project_id, person_id, suppressed_at) VALUES ($1,$2,$3)',
+      [projectA, userId, boundaryAt],
+    )
+
+    const res = await exportAs(userId, SERVER_KEY_A)
+    expect(res.statusCode).toBe(200)
+    const lines = parseLines(res.body)
+    const rejections = lines.filter((l) => l.type === 'rejection')
+    // 1, not 2: the rejection stamped EXACTLY at the boundary instant is
+    // hidden along with anything before it, strictly greater-than.
+    expect(rejections).toHaveLength(1)
+    expect(rejections[0]?.received_at).toBe(afterBoundary.toISOString())
+    expect(lines.at(-1)).toMatchObject({ type: 'end', rejections: 1 })
+  })
+
+  it("does not export another project's rejection for a colliding id", async () => {
+    const sharedId = `exp-dl-shared-${randomUUID()}`
+    await insertEvent({
+      projectId: projectA,
+      userId: sharedId,
+      timestamp: chAt(100),
+      eventName: 'exp_dl_scope_a',
+    })
+    await insertEvent({
+      projectId: projectB,
+      userId: sharedId,
+      timestamp: chAt(100),
+      eventName: 'exp_dl_scope_b',
+    })
+    await insertDeadLetter({ projectId: projectA, payload: JSON.stringify({ user_id: sharedId }) })
+    await insertDeadLetter({ projectId: projectB, payload: JSON.stringify({ user_id: sharedId }) })
+
+    const resA = await exportAs(sharedId, SERVER_KEY_A)
+    expect(resA.statusCode).toBe(200)
+    expect(parseLines(resA.body).filter((l) => l.type === 'rejection')).toHaveLength(1)
+
+    const resB = await exportAs(sharedId, SERVER_KEY_B)
+    expect(resB.statusCode).toBe(200)
+    expect(parseLines(resB.body).filter((l) => l.type === 'rejection')).toHaveLength(1)
+  })
+
+  it('end.rejections is 0 and the end line still carries the field when there are none', async () => {
+    const userId = `exp-dl-none-${randomUUID()}`
+    const identifyRes = await identifyWithDevice(WRITE_KEY_A, userId)
+    expect(identifyRes.statusCode).toBe(202)
+
+    const res = await exportAs(userId, SERVER_KEY_A)
+    expect(res.statusCode).toBe(200)
+    const lines = parseLines(res.body)
+    expect(lines.filter((l) => l.type === 'rejection')).toHaveLength(0)
+    expect(lines.at(-1)).toEqual({ type: 'end', events: 1, rejections: 0 })
   })
 })
 
