@@ -75,8 +75,13 @@ function HomeEntry(props: { client: ApiClient; feed: ReactElement; onUnauthorize
     if (activeId == null) return
     let cancelled = false
     setHome('loading')
-    props.client
-      .dashboards(activeId)
+    // `Promise.resolve().then(...)` rather than calling `dashboards`
+    // directly: a stub (or a real client's own bug) that throws
+    // synchronously instead of returning a rejected promise must land in
+    // this same `.catch` rather than escaping the effect and unmounting
+    // the tree.
+    Promise.resolve()
+      .then(() => props.client.dashboards(activeId))
       .then((list) => {
         if (!cancelled) setHome(list.find((d) => d.is_home)?.id ?? null)
       })

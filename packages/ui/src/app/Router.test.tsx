@@ -138,6 +138,18 @@ describe('AppRouter', () => {
     expect(await screen.findByRole('tab', { name: /accepted/i })).toBeInTheDocument()
   })
 
+  // A client whose `dashboards` throws synchronously (rather than
+  // returning a rejected promise) must not crash `HomeEntry`'s effect --
+  // same fall-through as the rejected-promise case above.
+  it('renders the feed at / when the dashboard list throws synchronously', async () => {
+    renderAt('/', {
+      dashboards: vi.fn(() => {
+        throw new Error('boom')
+      }),
+    })
+    expect(await screen.findByRole('tab', { name: /accepted/i })).toBeInTheDocument()
+  })
+
   it('/feed is always the feed, even with a home dashboard', async () => {
     renderAt('/feed', {
       dashboards: vi.fn(async () => [

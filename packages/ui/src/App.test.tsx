@@ -33,6 +33,8 @@ function client(over: Partial<Record<string, unknown>> = {}) {
      * Without this every App test that lands on the feed dies inside
      * `EventCombobox`, which says nothing about the App. */
     schemaEvents: vi.fn(async () => []),
+    /* `/` now asks for the home dashboard before showing the feed. */
+    dashboards: vi.fn(async () => []),
     project: vi.fn(async () => ({
       name: PLACEHOLDER_PROJECT.name,
       slug: PLACEHOLDER_PROJECT.slug,
