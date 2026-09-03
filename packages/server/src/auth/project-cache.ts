@@ -128,8 +128,19 @@ export class ProjectCache {
     this.#negative.clear()
   }
 
+  /**
+   * The previous key (migration 022) is honoured until its expiry, judged
+   * by Postgres's clock so every process agrees. The entry this stores is
+   * keyed by the PRESENTED key, so a retired previous key can stay accepted
+   * for up to one positive TTL after it lapses in Postgres -- the same
+   * horizon `projects delete` documents, and stated in the README.
+   */
   byWriteKey(key: string): Promise<Project | null> {
-    return this.#lookup(`w:${key}`, 'write_key = $1', key)
+    return this.#lookup(
+      `w:${key}`,
+      '(write_key = $1 OR (previous_write_key = $1 AND previous_write_key_expires_at > now()))',
+      key,
+    )
   }
 
   byServerKey(key: string): Promise<Project | null> {

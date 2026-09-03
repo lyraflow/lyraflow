@@ -1,5 +1,5 @@
 import { createPgPool } from '@lyraflow/db'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { isOverQuota } from '../ingest/quota.js'
 import { MAX_NEGATIVE_ENTRIES, ProjectCache, hashServerKey } from './project-cache.js'
 
@@ -89,6 +89,74 @@ describe('ProjectCache', () => {
     await c.byWriteKey('wk_cache')
     await c.byWriteKey('wk_cache')
     expect(c.stats.queries).toBe(2)
+  })
+})
+
+describe("ProjectCache honours a project's previous write key (migration 022)", () => {
+  let projectId = 0
+
+  beforeAll(async () => {
+    // `id` is bigint, which node-postgres returns as a string -- Number()
+    // it here so this matches the numeric `id` byWriteKey resolves to.
+    const res = await pg.query<{ id: string }>('SELECT id FROM projects WHERE slug = $1', [
+      'cache-test',
+    ])
+    const row = res.rows[0]
+    if (!row) throw new Error('fixture project cache-test is missing')
+    projectId = Number(row.id)
+  })
+
+  // Both columns are null or both set (022's CHECK constraint), so clearing
+  // one clears the other -- leaving the fixture project as every other test
+  // in this file expects to find it.
+  afterEach(async () => {
+    await pg.query(
+      'UPDATE projects SET previous_write_key = NULL, previous_write_key_expires_at = NULL WHERE id = $1',
+      [projectId],
+    )
+  })
+
+  it('accepts the previous write key until its expiry', async () => {
+    await pg.query(
+      `UPDATE projects SET previous_write_key = 'wk_prev_1', previous_write_key_expires_at = now() + interval '1 hour' WHERE id = $1`,
+      [projectId],
+    )
+    const cache = new ProjectCache(pg, 60_000)
+    expect((await cache.byWriteKey('wk_prev_1'))?.id).toBe(projectId)
+  })
+
+  it('refuses the previous write key once it has expired', async () => {
+    await pg.query(
+      `UPDATE projects SET previous_write_key = 'wk_prev_2', previous_write_key_expires_at = now() - interval '1 second' WHERE id = $1`,
+      [projectId],
+    )
+    const cache = new ProjectCache(pg, 60_000)
+    expect(await cache.byWriteKey('wk_prev_2')).toBeNull()
+  })
+
+  it('caches the previous key under its own entry, so retiring it is bounded by the TTL, not forever', async () => {
+    await pg.query(
+      `UPDATE projects SET previous_write_key = 'wk_prev_3', previous_write_key_expires_at = now() + interval '1 hour' WHERE id = $1`,
+      [projectId],
+    )
+    const cache = new ProjectCache(pg, 60_000)
+    expect((await cache.byWriteKey('wk_prev_3'))?.id).toBe(projectId)
+
+    await pg.query(
+      'UPDATE projects SET previous_write_key = NULL, previous_write_key_expires_at = NULL WHERE id = $1',
+      [projectId],
+    )
+
+    // Same instance: the earlier lookup is cached under `w:wk_prev_3`, keyed
+    // by the presented key rather than by the row -- so clearing the column
+    // in Postgres does not retroactively invalidate an entry already stored.
+    expect((await cache.byWriteKey('wk_prev_3'))?.id).toBe(projectId)
+
+    // A fresh instance has no such entry, so it re-reads Postgres -- which
+    // now shows no previous key at all. Retiring the key is bounded by the
+    // TTL a process already had cached, never forever.
+    const fresh = new ProjectCache(pg, 60_000)
+    expect(await fresh.byWriteKey('wk_prev_3')).toBeNull()
   })
 })
 
