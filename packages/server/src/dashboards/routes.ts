@@ -61,8 +61,16 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: DashboardDep
     funnels: new FunnelStore(pg),
   }
 
-  /** Resolves, and returns the first dangling reference if any -- the write
-   *  is refused on it. A tile can only dangle by a LATER deletion. */
+  /** Resolves, and returns the first dangling reference if any. What the
+   *  callers below refuse on it is narrow and deliberate: a tile a write
+   *  INTRODUCES must name a report in THIS project. A tile already stored
+   *  here is never re-checked, because deleting a report is allowed and
+   *  leaves every dashboard that pointed at it holding a reference that no
+   *  longer resolves -- the read path renders that as `report: null` and
+   *  the screen says which report is gone. Re-checking it on write would
+   *  make one deleted report freeze the whole layout: the screen sends the
+   *  entire tile array on every edit, so the dangling tile rides along with
+   *  every move, resize, add and remove, and all of them would 400. */
   async function resolveOrMissing(projectId: number, tiles: z.infer<typeof Tiles>) {
     const resolved = await resolveTiles(stores, projectId, tiles)
     const missing = resolved.find((t) => t.report === null)
@@ -127,8 +135,16 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: DashboardDep
         detail: patch.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
       })
     }
+    const existing = await store.get(project.id, id)
+    if (!existing) return reply.code(404).send({ error: 'dashboard_not_found' })
     if (patch.data.tiles) {
-      const { missing } = await resolveOrMissing(project.id, patch.data.tiles)
+      // Only the tiles this write introduces. A stale row hydrates with
+      // `tiles: []`, so nothing is known and every tile in the patch is
+      // checked -- which is right: rewriting an unreadable layout is
+      // introducing all of it.
+      const known = new Set(existing.tiles.map((t) => `${t.kind}:${t.report_id}`))
+      const added = patch.data.tiles.filter((t) => !known.has(`${t.kind}:${t.report_id}`))
+      const { missing } = await resolveOrMissing(project.id, added)
       if (missing) {
         return reply
           .code(400)

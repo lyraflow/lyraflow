@@ -315,6 +315,90 @@ describe('dashboard routes', () => {
     expect((await call('GET', '/v1/dashboards')).json().dashboards[0].tile_count).toBe(1)
   })
 
+  // C1 from the final whole-branch review. The screen sends the WHOLE tile
+  // array on every edit, so refusing a write because ANY tile dangles makes
+  // one deleted report freeze the entire layout: every move, resize, add and
+  // remove resends the dangling tile and comes back 400. What the check is
+  // actually for is a caller naming a report it does not own, so it applies
+  // to the tiles a write INTRODUCES -- the ones not already stored here.
+  describe('a dangling tile does not freeze the layout', () => {
+    let id: number
+    let gone: number
+    let live: number
+
+    beforeEach(async () => {
+      live = await makeTrend()
+      gone = await makeTrend()
+      const d = await call('POST', '/v1/dashboards', {
+        name: 'Layout',
+        tiles: [
+          { kind: 'trend', report_id: live, width: 'half' },
+          { kind: 'trend', report_id: gone, width: 'half' },
+        ],
+      })
+      expect(d.statusCode).toBe(201)
+      id = d.json().id
+      expect((await call('DELETE', `/v1/trends/${gone}`)).statusCode).toBe(204)
+    })
+
+    it('reorders around it, and reads it back as null', async () => {
+      const res = await call('PATCH', `/v1/dashboards/${id}`, {
+        tiles: [
+          { kind: 'trend', report_id: gone, width: 'half' },
+          { kind: 'trend', report_id: live, width: 'half' },
+        ],
+      })
+      expect(res.statusCode).toBe(200)
+      expect(res.json().tiles).toEqual([
+        { kind: 'trend', report_id: gone, width: 'half', report: null },
+        {
+          kind: 'trend',
+          report_id: live,
+          width: 'half',
+          report: expect.objectContaining({ id: live }),
+        },
+      ])
+    })
+
+    it("still refuses the same write when the missing id is another project's report", async () => {
+      const theirs = await makeTrend(OTHER_SERVER_KEY)
+      const res = await call('PATCH', `/v1/dashboards/${id}`, {
+        tiles: [
+          { kind: 'trend', report_id: theirs, width: 'half' },
+          { kind: 'trend', report_id: live, width: 'half' },
+        ],
+      })
+      expect(res.statusCode).toBe(400)
+      expect(res.json()).toEqual({
+        error: 'report_not_found',
+        kind: 'trend',
+        report_id: theirs,
+      })
+    })
+
+    it('removes the live tile and keeps only the dangling one', async () => {
+      const res = await call('PATCH', `/v1/dashboards/${id}`, {
+        tiles: [{ kind: 'trend', report_id: gone, width: 'full' }],
+      })
+      expect(res.statusCode).toBe(200)
+      expect(res.json().tiles).toEqual([
+        { kind: 'trend', report_id: gone, width: 'full', report: null },
+      ])
+    })
+
+    it('names the tile the write ADDS, not the one already dangling', async () => {
+      const res = await call('PATCH', `/v1/dashboards/${id}`, {
+        tiles: [
+          { kind: 'trend', report_id: live, width: 'half' },
+          { kind: 'trend', report_id: gone, width: 'half' },
+          { kind: 'funnel', report_id: 424242, width: 'half' },
+        ],
+      })
+      expect(res.statusCode).toBe(400)
+      expect(res.json()).toEqual({ error: 'report_not_found', kind: 'funnel', report_id: 424242 })
+    })
+  })
+
   it('is_home: true moves home; is_home: false clears it', async () => {
     const a = (await call('POST', '/v1/dashboards', { name: 'A' })).json().id
     const b = (await call('POST', '/v1/dashboards', { name: 'B' })).json().id
