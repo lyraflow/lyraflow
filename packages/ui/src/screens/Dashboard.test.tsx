@@ -1,6 +1,6 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router'
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
@@ -178,6 +178,18 @@ function LocationEcho() {
   return <span data-testid="loc">{`${loc.pathname}${loc.search}`}</span>
 }
 
+/** Drops `?edit=1` by NAVIGATING rather than through the screen's own Done
+ *  button -- the browser Back case, which reaches edit mode's exit without
+ *  passing through any handler the screen owns. */
+function DropEditFlag() {
+  const navigate = useNavigate()
+  return (
+    <button type="button" onClick={() => navigate('/dashboards/7')}>
+      drop the edit flag
+    </button>
+  )
+}
+
 function renderScreen(opts: { client?: ApiClient; at?: string; onUnauthorized?: () => void } = {}) {
   const client = opts.client ?? fakeClient()
   const view = render(
@@ -190,6 +202,7 @@ function renderScreen(opts: { client?: ApiClient; at?: string; onUnauthorized?: 
               <>
                 <Dashboard client={client} onUnauthorized={opts.onUnauthorized} />
                 <LocationEcho />
+                <DropEditFlag />
               </>
             }
           />
@@ -397,6 +410,32 @@ describe('Dashboard', () => {
     await userEvent.click(screen.getByRole('button', { name: /^delete dashboard$/i }))
     await waitFor(() => expect(client.deleteDashboard).toHaveBeenCalledWith(1, 7))
     expect(await screen.findByText('dashboards list')).toBeInTheDocument()
+  })
+
+  // Self-review: the confirmation panel used to render on `confirmingDelete`
+  // alone, so `Done` left a `Delete dashboard` button on a screen with no
+  // other edit control on it.
+  it('Done withdraws an open delete confirmation', async () => {
+    const { client } = renderScreen({ at: '/dashboards/7?edit=1' })
+    await userEvent.click(await screen.findByRole('button', { name: /^delete$/i }))
+    expect(screen.getByRole('button', { name: /^delete dashboard$/i })).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Done' }))
+    expect(screen.queryByRole('button', { name: /^delete dashboard$/i })).toBeNull()
+    expect(client.deleteDashboard).not.toHaveBeenCalled()
+    // And re-entering edit mode opens on the ordinary controls, not back
+    // inside the confirmation.
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    expect(screen.getByRole('button', { name: /^delete$/i })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^delete dashboard$/i })).toBeNull()
+  })
+
+  it('an edit flag dropped from the URL withdraws the confirmation too', async () => {
+    renderScreen({ at: '/dashboards/7?edit=1' })
+    await userEvent.click(await screen.findByRole('button', { name: /^delete$/i }))
+    expect(screen.getByRole('button', { name: /^delete dashboard$/i })).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'drop the edit flag' }))
+    expect(screen.getByTestId('loc').textContent).not.toContain('edit')
+    expect(screen.queryByRole('button', { name: /^delete dashboard$/i })).toBeNull()
   })
 
   it('a 404 on load says the dashboard no longer exists and links back to the list', async () => {

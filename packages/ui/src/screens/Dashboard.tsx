@@ -148,6 +148,12 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
   const sendTiles = (next: ResolvedTile[]) => patch({ tiles: next.map(toInput) })
 
   function setEditing(on: boolean) {
+    // Leaving edit mode withdraws an open delete confirmation. Without this
+    // the panel -- and its `Delete dashboard` button -- outlives the mode
+    // that raised it: `Done` would leave a destructive prompt on a screen
+    // that no longer shows any other edit control, and the operator who
+    // pressed Done has already said they are finished editing.
+    if (!on) setConfirmingDelete(false)
     setSearch(
       (prev) => {
         const next = new URLSearchParams(prev)
@@ -247,7 +253,7 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
         </div>
       </div>
 
-      {confirmingDelete && (
+      {editing && confirmingDelete && (
         <div className="flex flex-wrap items-center gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">
           <p className="text-foreground">
             Delete this dashboard? Its reports are kept. This cannot be undone.
