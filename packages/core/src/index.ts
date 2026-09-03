@@ -1,7 +1,13 @@
-export const SCHEMA_VERSION = 21
+export const SCHEMA_VERSION = 22
 
 export { hashPassword, verifyPassword } from './auth/password.js'
 export { ProjectExistsError, createProject, slugify } from './projects/create.js'
+export {
+  DEFAULT_GRACE_HOURS,
+  MAX_GRACE_HOURS,
+  type RotatedWriteKey,
+  rotateWriteKey,
+} from './projects/rotate.js'
 export * from './ingest/payloads.js'
 export * from './ingest/properties.js'
 export * from './ingest/timestamp.js'

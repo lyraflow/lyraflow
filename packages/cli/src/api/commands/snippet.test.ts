@@ -1,5 +1,5 @@
 import { SNIPPET_METHODS, VERSION } from '@lyraflow/sdk-browser'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { ApiError, Client } from '../client.js'
 import type { CommandContext } from '../context.js'
 import { SCHEMA_MAX_LIMIT } from './catalog.js'
@@ -9,21 +9,26 @@ const NOW = new Date('2026-08-08T12:00:00.000Z')
 const HOST = 'https://analytics.example.test'
 
 interface FakeCall {
-  method: 'get'
+  method: 'get' | 'post'
   path: string
-  arg?: Record<string, string | number | undefined>
+  arg?: Record<string, string | number | undefined> | unknown
 }
 
 interface Responses {
   project?: unknown | Error
   schemaEvents?: unknown | Error
   stats?: unknown | Error
+  /** `POST /v1/project/rotate-write-key`'s response — only read by tests
+   * that pass `--rotate`; every other test never triggers a `post` call at
+   * all. */
+  rotate?: unknown | Error
 }
 
 /**
  * Builds a fake `Client` that answers this command's three GET requests by
  * path — an `Error` value for any of them is thrown instead of returned,
- * the same convention `catalog.test.ts`'s own `makeClient` uses.
+ * the same convention `catalog.test.ts`'s own `makeClient` uses. `post` is
+ * only ever asked for the one rotate route this command calls.
  */
 function fakeGetClient(responses: Responses): Client {
   const client = {
@@ -36,6 +41,11 @@ function fakeGetClient(responses: Responses): Client {
             : path === '/v1/events/stats'
               ? responses.stats
               : undefined
+      if (value instanceof Error) throw value
+      return value
+    },
+    post: async (path: string) => {
+      const value = path === '/v1/project/rotate-write-key' ? responses.rotate : undefined
       if (value instanceof Error) throw value
       return value
     },
@@ -71,6 +81,13 @@ function makeCtx(
     get: async (path: string, query?: Record<string, string | number | undefined>) => {
       calls.push({ method: 'get', path, arg: query })
       return client.get(path, query)
+    },
+    post: async (path: string, body?: unknown) => {
+      calls.push({ method: 'post', path, arg: body })
+      return (client as unknown as { post: (p: string, b?: unknown) => Promise<unknown> }).post(
+        path,
+        body,
+      )
     },
   } as unknown as Client
   return {
@@ -909,5 +926,196 @@ describe('runSnippet', () => {
       await runSnippet(argv, ctx)
       expect(out.join('') + errOut.join('')).not.toContain(secret)
     }
+  })
+
+  // --- --rotate ------------------------------------------------------
+  //
+  // `POST /v1/project/rotate-write-key`, run immediately BEFORE the
+  // existing `GET /v1/project` — so the snippet printed afterwards already
+  // carries the new key, with no other change to the print path. The
+  // confirmation shape (prompt, `--yes`, exit codes) is copied from
+  // `persons delete`.
+
+  describe('--rotate', () => {
+    it('posts to the rotate route, then prints the snippet with the new key', async () => {
+      const client = fakeGetClient({
+        project: { ...PROJECT, write_key: 'wk_rotated' },
+        schemaEvents: { events: [] },
+        stats: { buckets: [] },
+        rotate: {
+          write_key: 'wk_rotated',
+          previous_write_key_expires_at: '2026-09-04T12:00:00.000Z',
+        },
+      })
+      const { ctx, out, errOut, calls } = makeCtx(client, {
+        stdinIsTty: true,
+        prompt: async () => true,
+      })
+      const code = await runSnippet(['--rotate'], ctx)
+      expect(code).toBe(0)
+      expect(out.join('')).toContain('wk_rotated')
+      expect(errOut.join('')).toContain('previous key valid until 2026-09-04T12:00:00.000Z')
+
+      // Order-check: the rotation happens BEFORE the project GET that
+      // prints the snippet, and no `grace_hours` is sent absent --grace so
+      // the server's own default applies.
+      expect(calls[0]).toMatchObject({ method: 'post', path: '/v1/project/rotate-write-key' })
+      expect(calls[0]?.arg).toEqual({})
+      expect(calls[1]).toMatchObject({ method: 'get', path: '/v1/project' })
+    })
+
+    it('--grace 0 sends grace_hours 0 and says the old key is dead now', async () => {
+      const client = fakeGetClient({
+        project: { ...PROJECT, write_key: 'wk_rotated2' },
+        schemaEvents: { events: [] },
+        stats: { buckets: [] },
+        rotate: { write_key: 'wk_rotated2', previous_write_key_expires_at: null },
+      })
+      const { ctx, errOut, calls } = makeCtx(client, {
+        stdinIsTty: true,
+        prompt: async () => true,
+      })
+      const code = await runSnippet(['--rotate', '--grace', '0'], ctx)
+      expect(code).toBe(0)
+      expect(errOut.join('')).toContain('previous key retired immediately')
+      expect(calls[0]?.arg).toEqual({ grace_hours: 0 })
+    })
+
+    it('declined at the prompt does nothing and exits 1', async () => {
+      const { ctx, calls } = makeCtx(fakeClient, {
+        stdinIsTty: true,
+        prompt: async () => false,
+      })
+      const code = await runSnippet(['--rotate'], ctx)
+      expect(code).toBe(1)
+      // Nothing was ever sent -- not the rotate POST, not the project GET.
+      expect(calls).toHaveLength(0)
+    })
+
+    it('a rejected prompt is treated as a safe failure, not an unhandled rejection', async () => {
+      // Copies `persons delete`'s own "confirmation mechanism itself
+      // failed" case: a non-EPIPE prompt rejection must not escape as a
+      // raw stack trace, and must not rotate anything.
+      const { ctx, errOut, calls } = makeCtx(fakeClient, {
+        stdinIsTty: true,
+        prompt: () => Promise.reject(new Error('readline exploded')),
+      })
+      const code = await runSnippet(['--rotate'], ctx)
+      expect(code).toBe(1)
+      expect(calls).toHaveLength(0)
+      expect(errOut.join('')).toContain(
+        'the confirmation prompt failed; the write key was not rotated',
+      )
+    })
+
+    it('an EPIPE while writing the declined message still exits 1, not 0', async () => {
+      // `persons delete`'s decline branch swallows a write-side EPIPE and
+      // still reports 1 -- unlike the prompt-itself-failing branch above,
+      // where EPIPE means 0. The operation the caller asked for did not
+      // happen either way; a failed write of the message that says so must
+      // not change that.
+      const epipe = Object.assign(new Error('EPIPE'), { code: 'EPIPE' })
+      const { ctx, calls } = makeCtx(fakeClient, {
+        stdinIsTty: true,
+        prompt: async () => false,
+        writeErr: () => {
+          throw epipe
+        },
+      })
+      const code = await runSnippet(['--rotate'], ctx)
+      expect(code).toBe(1)
+      expect(calls).toHaveLength(0)
+    })
+
+    it('without --yes on a non-tty stdin exits 2 and posts nothing', async () => {
+      const { ctx, calls } = makeCtx(fakeClient, { stdinIsTty: false })
+      const code = await runSnippet(['--rotate'], ctx)
+      expect(code).toBe(2)
+      expect(calls).toHaveLength(0)
+    })
+
+    it('--yes skips the prompt', async () => {
+      const client = fakeGetClient({
+        project: { ...PROJECT, write_key: 'wk_rotated3' },
+        schemaEvents: { events: [] },
+        stats: { buckets: [] },
+        rotate: { write_key: 'wk_rotated3', previous_write_key_expires_at: null },
+      })
+      const promptSpy = vi.fn(async () => false)
+      const { ctx, calls } = makeCtx(client, { stdinIsTty: true, prompt: promptSpy })
+      const code = await runSnippet(['--rotate', '--yes'], ctx)
+      expect(code).toBe(0)
+      expect(promptSpy).not.toHaveBeenCalled()
+      expect(calls[0]).toMatchObject({ method: 'post', path: '/v1/project/rotate-write-key' })
+    })
+
+    it('--yes rotates on a non-tty stdin without prompting', async () => {
+      const client = fakeGetClient({
+        project: { ...PROJECT, write_key: 'wk_rotated3' },
+        schemaEvents: { events: [] },
+        stats: { buckets: [] },
+        rotate: { write_key: 'wk_rotated3', previous_write_key_expires_at: null },
+      })
+      const promptSpy = vi.fn(async () => false)
+      const { ctx, calls } = makeCtx(client, { stdinIsTty: false, prompt: promptSpy })
+      const code = await runSnippet(['--rotate', '--yes'], ctx)
+      expect(code).toBe(0)
+      expect(promptSpy).not.toHaveBeenCalled()
+      expect(calls[0]).toMatchObject({ method: 'post', path: '/v1/project/rotate-write-key' })
+    })
+
+    it('--grace without --rotate is a usage error', async () => {
+      const { ctx, calls } = makeCtx(fakeClient)
+      const code = await runSnippet(['--grace', '5'], ctx)
+      expect(code).toBe(2)
+      expect(calls).toHaveLength(0)
+    })
+
+    for (const bad of ['abc', '-1', '721']) {
+      it(`--grace must be an integer 0..720 (rejects "${bad}")`, async () => {
+        const { ctx, calls } = makeCtx(fakeClient)
+        const code = await runSnippet(['--rotate', '--grace', bad], ctx)
+        expect(code).toBe(2)
+        expect(calls).toHaveLength(0)
+      })
+    }
+
+    it('--json output carries previous_write_key_expires_at beside the snippet fields', async () => {
+      const client = fakeGetClient({
+        project: { ...PROJECT, write_key: 'wk_rotated4' },
+        schemaEvents: { events: [] },
+        stats: { buckets: [] },
+        rotate: {
+          write_key: 'wk_rotated4',
+          previous_write_key_expires_at: '2026-09-04T12:00:00.000Z',
+        },
+      })
+      const { ctx, out } = makeCtx(client, { stdinIsTty: true, prompt: async () => true })
+      const code = await runSnippet(['--rotate', '--json'], ctx)
+      expect(code).toBe(0)
+      const parsed = JSON.parse(out.join(''))
+      expect(parsed.write_key).toBe('wk_rotated4')
+      expect(parsed.previous_write_key_expires_at).toBe('2026-09-04T12:00:00.000Z')
+      expect(Object.keys(parsed).sort()).toEqual(
+        [
+          'events',
+          'host',
+          'methods',
+          'previous_write_key_expires_at',
+          'sdk_version',
+          'snippet',
+          'write_key',
+        ].sort(),
+      )
+    })
+
+    it('does not add previous_write_key_expires_at to --json when --rotate was not used', async () => {
+      const { ctx, out } = makeCtx(fakeClient)
+      await runSnippet(['--json'], ctx)
+      const parsed = JSON.parse(out.join(''))
+      expect(Object.keys(parsed).sort()).toEqual(
+        ['events', 'host', 'methods', 'sdk_version', 'snippet', 'write_key'].sort(),
+      )
+    })
   })
 })

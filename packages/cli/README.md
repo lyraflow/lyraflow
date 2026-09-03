@@ -209,9 +209,9 @@ which includes:
 - for `persons export` specifically, a stream that ended without its
   terminating `{"type":"end",…}` line — the data received is real but
   incomplete, `code` is `export_incomplete`;
-- for `persons delete` specifically, a declined or failed confirmation
-  prompt — the deletion did not happen, which is a different fact from
-  success.
+- for `persons delete` and `snippet --rotate` specifically, a declined or
+  failed confirmation prompt — the deletion or rotation did not happen,
+  which is a different fact from success.
 
 ```sh
 lyraflow events --limit 99999 --json
@@ -692,7 +692,7 @@ ignored.
 ## `lyraflow snippet`
 
 ```
-lyraflow snippet [--since <duration>] [--json|--human]
+lyraflow snippet [--since <duration>] [--rotate [--grace <hours>] [--yes]] [--json|--human]
 ```
 
 **The only command with a third source for `--host`.** Every other command
@@ -864,6 +864,65 @@ only holds within each arm:
 — the exact list the printed stub's own method array is built from, not a
 second, hand-maintained copy, so it cannot silently drop a method the SDK
 actually exports.
+
+### `--rotate` — replace the write key without a new project
+
+A leaked write key (checked into a public repo, pasted somewhere it
+shouldn't have been) does not have to become a new project: `--rotate` calls
+`POST /v1/project/rotate-write-key` first, then prints the ordinary snippet
+above — so the block you get back already carries the new key. The exit-code
+shape (prompt, `--yes`, non-TTY behaviour) is the same as `persons delete`
+above:
+
+- **At a real terminal (stdin is a TTY), it prompts** before rotating — the
+  question names what happens to pages still serving the old snippet. A
+  declined confirmation exits `1`: nothing was rotated.
+- **When stdin is not a terminal, `--yes` is required**, or the command
+  refuses outright with a usage error (exit `2`) and never calls the API.
+
+```sh
+lyraflow snippet --rotate </dev/null --json
+```
+```json
+{"error":"refusing to rotate without --yes when stdin is not a terminal (nothing to prompt)","code":"usage_error"}
+```
+exit `2`.
+
+`--grace <hours>` sets how long the OLD write key keeps working after
+rotation — an integer from `0` to `720` (30 days), default `24`. `0` is a
+hard swap: the old key stops working immediately, and the confirmation
+prompt's wording changes to say so. `--grace` only applies alongside
+`--rotate`; given alone it is a usage error. Omit it to leave the server's
+own default (24) in effect rather than restating it on the command line.
+
+Once confirmed, the command writes what happened to stderr before printing
+the snippet:
+
+```sh
+lyraflow snippet --rotate --yes
+```
+```
+write key rotated; previous key valid until 2026-09-04T12:00:00.000Z
+```
+
+or, with `--grace 0`:
+
+```
+write key rotated; previous key retired immediately
+```
+
+Under `--json`, the rotated project's `previous_write_key_expires_at`
+(an ISO string, or `null` for a `--grace 0` hard swap) appears as an extra
+top-level field alongside the ordinary snippet fields — present only when
+`--rotate` was used, so a caller not rotating sees the same field set this
+command has always printed:
+
+```sh
+lyraflow snippet --rotate --yes --json
+```
+```json
+{"host":"https://analytics.example.com","write_key":"wk_live_…","previous_write_key_expires_at":"2026-09-04T12:00:00.000Z","methods":["init","track","page","identify","consent","reset","flush"],"events":{…},"sdk_version":"0.1.0","snippet":"…"}
+```
 
 ## `lyraflow --version`
 

@@ -4,6 +4,7 @@ import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow
 import type { FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { buildApp } from '../app.js'
+import { ensureAdminUser } from '../auth/bootstrap.js'
 import { hashServerKey } from '../auth/project-cache.js'
 import { loadConfig } from '../config.js'
 import { Readiness } from '../health.js'
@@ -27,24 +28,44 @@ const SLUG_B = 'proj-route-b'
 // deletes this project's row mid-suite, so it must never be a slug any
 // other test in this file depends on still existing.
 const SLUG_C = 'proj-route-c'
+// Its own project, used only by the rotate-write-key describe block below:
+// those tests mutate the project's write key repeatedly and must not
+// disturb WRITE_KEY_A/B, which the GET and PATCH describes above assert
+// against directly.
+const SLUG_D = 'proj-route-d'
 const PROJECT_NAME_A = 'ProjectRoutesA'
 const PROJECT_NAME_B = 'ProjectRoutesB'
 const PROJECT_NAME_C = 'ProjectRoutesC'
+const PROJECT_NAME_D = 'ProjectRoutesD'
 const WRITE_KEY_A = 'wk_proj_route_a'
 const SERVER_KEY_A = 'sk_proj_route_a'
 const WRITE_KEY_B = 'wk_proj_route_b'
 const SERVER_KEY_B = 'sk_proj_route_b'
 const WRITE_KEY_C = 'wk_proj_route_c'
 const SERVER_KEY_C = 'sk_proj_route_c'
+const WRITE_KEY_D = 'wk_proj_route_d'
+const SERVER_KEY_D = 'sk_proj_route_d'
 // A real browser UA, not a bare token -- isBot (ingest/routes.ts) would
 // reject anything else before the event ever reaches the counters this
 // suite's Step 6 test depends on.
 const TRACK_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/131.0 Safari/537.36'
 
+// Admin session, for the rotate-write-key describe block's "works over an
+// admin session too" test -- the only test in this file that authenticates
+// as a session rather than a server key. Single-tenant, same as
+// admin-routes.test.ts and auth/wiring.test.ts: cleared in both beforeAll
+// and afterAll rather than assumed empty, since admin_user holds at most
+// one row and another suite's leftover row (a different email/password)
+// would otherwise make this file's own login fail.
+const ADMIN_EMAIL = 'proj-route-admin@example.test'
+const ADMIN_PASSWORD = 'proj-route-admin-password'
+
 let app: FastifyInstance
 let PROJECT_ID_A = 0
 let PROJECT_ID_B = 0
+let PROJECT_ID_D = 0
+let sessionHeaders: Record<string, string>
 
 async function makeProject(slug: string, name: string, writeKey: string, serverKey: string) {
   await pg.query('DELETE FROM projects WHERE slug = $1', [slug])
@@ -56,8 +77,13 @@ async function makeProject(slug: string, name: string, writeKey: string, serverK
   return Number(r.rows[0]?.id)
 }
 
+/** The cookie value only, from a Set-Cookie header -- same helper as admin-routes.test.ts. */
+function cookieValue(setCookie: string): string {
+  return (setCookie.split(';')[0] ?? '').split('=')[1] ?? ''
+}
+
 async function cleanup(): Promise<void> {
-  await pg.query('DELETE FROM projects WHERE slug = ANY($1)', [[SLUG_A, SLUG_B, SLUG_C]])
+  await pg.query('DELETE FROM projects WHERE slug = ANY($1)', [[SLUG_A, SLUG_B, SLUG_C, SLUG_D]])
 }
 
 beforeAll(async () => {
@@ -76,6 +102,10 @@ beforeAll(async () => {
   PROJECT_ID_A = await makeProject(SLUG_A, PROJECT_NAME_A, WRITE_KEY_A, SERVER_KEY_A)
   PROJECT_ID_B = await makeProject(SLUG_B, PROJECT_NAME_B, WRITE_KEY_B, SERVER_KEY_B)
   await makeProject(SLUG_C, PROJECT_NAME_C, WRITE_KEY_C, SERVER_KEY_C)
+  PROJECT_ID_D = await makeProject(SLUG_D, PROJECT_NAME_D, WRITE_KEY_D, SERVER_KEY_D)
+
+  await pg.query('DELETE FROM admin_user')
+  await ensureAdminUser(pg, { email: ADMIN_EMAIL, password: ADMIN_PASSWORD })
 
   const config = loadConfig({
     LYRAFLOW_POSTGRES_URL: 'postgres://lyraflow:lyraflow@localhost:5433/lyraflow_test',
@@ -89,12 +119,23 @@ beforeAll(async () => {
   readiness.markReady()
   app = buildApp({ config, pg, ch, readiness })
   await app.ready()
+
+  const login = await app.inject({
+    method: 'POST',
+    url: '/v1/auth/login',
+    headers: { 'x-lyraflow-ui': '1' },
+    payload: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD },
+  })
+  const setCookie = login.headers['set-cookie']
+  const cookie = `lf_session=${cookieValue(Array.isArray(setCookie) ? (setCookie[0] ?? '') : (setCookie ?? ''))}`
+  sessionHeaders = { cookie, 'x-lyraflow-ui': '1', 'x-lyraflow-project': String(PROJECT_ID_D) }
 })
 
 afterAll(async () => {
   await app.deps.buffer.flush()
   await app.close()
   await cleanup()
+  await pg.query('DELETE FROM admin_user')
   await pg.end()
   await ch.close()
 })
@@ -566,5 +607,268 @@ describe('GET /v1/project/usage', () => {
       headers: { 'x-lyraflow-server-key': SERVER_KEY_A },
     })
     expect((after.json() as { events_accepted: number }).events_accepted).toBe(beforeAccepted + 1)
+  })
+})
+
+describe('POST /v1/project/rotate-write-key', () => {
+  it('returns a fresh key and keeps the old one for the default grace', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/project/rotate-write-key',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_D },
+      payload: {},
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['cache-control']).toBe('no-store')
+    const body = res.json()
+    expect(body.write_key).toMatch(/^wk_[0-9a-f]{32}$/)
+    expect(body.write_key).not.toBe(WRITE_KEY_D)
+    const expires = Date.parse(body.previous_write_key_expires_at)
+    expect(expires - Date.now()).toBeGreaterThan(23 * 3600_000)
+    expect(expires - Date.now()).toBeLessThan(25 * 3600_000)
+    expect(Object.keys(body).sort()).toEqual(['previous_write_key_expires_at', 'write_key'])
+  })
+
+  it('ingest accepts both keys during the grace, and only the new one after a hard swap', async () => {
+    const before = await pg.query<{ write_key: string }>(
+      'SELECT write_key FROM projects WHERE slug = $1',
+      [SLUG_D],
+    )
+    const oldKey = before.rows[0]?.write_key as string
+
+    const rotate1 = await app.inject({
+      method: 'POST',
+      url: '/v1/project/rotate-write-key',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_D },
+      payload: { grace_hours: 1 },
+    })
+    expect(rotate1.statusCode).toBe(200)
+    const key1 = rotate1.json().write_key as string
+
+    const trackOld = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': oldKey, 'user-agent': TRACK_UA },
+      payload: { message_id: randomUUID(), anonymous_id: 'rotate-grace', event: 'rotate_probe' },
+    })
+    expect(trackOld.statusCode).toBe(202)
+
+    const trackNew = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': key1, 'user-agent': TRACK_UA },
+      payload: { message_id: randomUUID(), anonymous_id: 'rotate-grace', event: 'rotate_probe' },
+    })
+    expect(trackNew.statusCode).toBe(202)
+
+    const rotate2 = await app.inject({
+      method: 'POST',
+      url: '/v1/project/rotate-write-key',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_D },
+      payload: { grace_hours: 0 },
+    })
+    expect(rotate2.statusCode).toBe(200)
+    expect(rotate2.json().previous_write_key_expires_at).toBeNull()
+    const key2 = rotate2.json().write_key as string
+
+    // key1 was live a moment ago, but the hard swap (grace 0) leaves no
+    // previous key at all -- so it must be refused now, not merely expired.
+    const trackKey1AfterHardSwap = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': key1, 'user-agent': TRACK_UA },
+      payload: { message_id: randomUUID(), anonymous_id: 'rotate-grace', event: 'rotate_probe' },
+    })
+    expect(trackKey1AfterHardSwap.statusCode).toBe(401)
+    expect(trackKey1AfterHardSwap.json().error).toBe('invalid_write_key')
+
+    const trackKey2 = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': key2, 'user-agent': TRACK_UA },
+      payload: { message_id: randomUUID(), anonymous_id: 'rotate-grace', event: 'rotate_probe' },
+    })
+    expect(trackKey2.statusCode).toBe(202)
+
+    // GET /v1/project must reflect the rotated key, not the one it started
+    // with -- the second rotation's write_key (key2), not oldKey or key1.
+    const getProject = await app.inject({
+      method: 'GET',
+      url: '/v1/project',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_D },
+    })
+    expect(getProject.statusCode).toBe(200)
+    expect(getProject.json().write_key).toBe(key2)
+    expect(getProject.json().write_key).not.toBe(oldKey)
+  })
+
+  // There is only ever ONE previous key (migration 022). A rotation inside
+  // an existing grace must overwrite that slot with the key it is retiring
+  // NOW, not extend or stack onto the grace an earlier rotation already
+  // granted -- so the key from the first rotation stops working immediately
+  // once the second rotation lands, even though its own 24h grace has not
+  // elapsed.
+  it('a second rotation inside the grace retires the first key at once', async () => {
+    const before = await pg.query<{ write_key: string }>(
+      'SELECT write_key FROM projects WHERE slug = $1',
+      [SLUG_D],
+    )
+    const keyBefore = before.rows[0]?.write_key as string
+
+    const rotate1 = await app.inject({
+      method: 'POST',
+      url: '/v1/project/rotate-write-key',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_D },
+      payload: { grace_hours: 24 },
+    })
+    const key1 = rotate1.json().write_key as string
+
+    const rotate2 = await app.inject({
+      method: 'POST',
+      url: '/v1/project/rotate-write-key',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_D },
+      payload: { grace_hours: 24 },
+    })
+    const key2 = rotate2.json().write_key as string
+
+    const trackKeyBefore = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': keyBefore, 'user-agent': TRACK_UA },
+      payload: {
+        message_id: randomUUID(),
+        anonymous_id: 'rotate-single-prev',
+        event: 'rotate_probe',
+      },
+    })
+    expect(trackKeyBefore.statusCode).toBe(401)
+
+    const trackKey1 = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': key1, 'user-agent': TRACK_UA },
+      payload: {
+        message_id: randomUUID(),
+        anonymous_id: 'rotate-single-prev',
+        event: 'rotate_probe',
+      },
+    })
+    expect(trackKey1.statusCode).toBe(202)
+
+    const trackKey2 = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': key2, 'user-agent': TRACK_UA },
+      payload: {
+        message_id: randomUUID(),
+        anonymous_id: 'rotate-single-prev',
+        event: 'rotate_probe',
+      },
+    })
+    expect(trackKey2.statusCode).toBe(202)
+  })
+
+  it.each([
+    ['negative', -1],
+    ['above the max', 721],
+    ['a non-integer', 1.5],
+    ['a numeric string', '24'],
+  ])('rejects grace_hours: %s', async (_name, grace_hours) => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/project/rotate-write-key',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_D },
+      payload: { grace_hours },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toBe('invalid_body')
+  })
+
+  // Invented, beyond the brief's mutation table: every other test in this
+  // block sends 0, 1, or 24 -- none proves 720 itself, the top of the
+  // range, is actually admitted. A schema mutated to `.max(719)` would pass
+  // every other test here.
+  it('accepts grace_hours at the maximum boundary', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/project/rotate-write-key',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_D },
+      payload: { grace_hours: 720 },
+    })
+    expect(res.statusCode).toBe(200)
+    const expires = Date.parse(res.json().previous_write_key_expires_at)
+    expect(expires - Date.now()).toBeGreaterThan(719 * 3600_000)
+    expect(expires - Date.now()).toBeLessThan(721 * 3600_000)
+  })
+
+  it('rejects the write key, which must not reach a server-key route', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/project/rotate-write-key',
+      headers: { 'x-lyraflow-server-key': WRITE_KEY_D },
+      payload: {},
+    })
+    expect(res.statusCode).toBe(401)
+    expect(res.json().error).toBe('invalid_server_key')
+  })
+
+  // This route's authenticate is makeServerOrSessionAuthenticator, the SAME
+  // function admin-routes.test.ts's GET/POST /v1/projects tests drive over a
+  // session -- so this reuses that file's helper shape (login, take the
+  // cookie off Set-Cookie, resend it) rather than inventing a second one.
+  // The session path additionally needs x-lyraflow-ui (bridge.ts's
+  // missing_ui_header guard) and x-lyraflow-project (a session names no
+  // project on its own; PROJECT_HEADER is how the caller picks one).
+  it('works over an admin session too', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/project/rotate-write-key',
+      headers: sessionHeaders,
+      payload: {},
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['cache-control']).toBe('no-store')
+    expect(res.json().write_key).toMatch(/^wk_[0-9a-f]{32}$/)
+  })
+
+  // THE test for the `req.body ?? {}` fallback in routes.ts. A request with
+  // no payload and no content-type leaves req.body undefined -- unlike every
+  // other test in this block, which sends an explicit `{}`. Confirms the
+  // fallback lands on RotateBody's own default (24h) rather than throwing
+  // (which app.ts's catch-all would render as a 503) or being rejected.
+  it('accepts a bodyless request (no payload, no content-type) with the default grace', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/project/rotate-write-key',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_D },
+    })
+    expect(res.statusCode).toBe(200)
+    const expires = Date.parse(res.json().previous_write_key_expires_at)
+    expect(expires - Date.now()).toBeGreaterThan(23 * 3600_000)
+    expect(expires - Date.now()).toBeLessThan(25 * 3600_000)
+  })
+
+  // RotateBody is `.strict()` -- an unrecognised field must be refused
+  // rather than silently ignored, which is the difference between a caller
+  // finding out their payload has a typo and a caller assuming a field took
+  // effect when Zod quietly dropped it.
+  it('rejects an unknown field with 400 invalid_body', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/project/rotate-write-key',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_D },
+      payload: { grace_hours: 1, foo: 'bar' },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toBe('invalid_body')
+  })
+
+  it('rejects a missing key', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/project/rotate-write-key',
+      payload: {},
+    })
+    expect(res.statusCode).toBe(401)
   })
 })
