@@ -120,6 +120,14 @@ export function DashboardTile(props: {
   // The alternative shapes (a callback held in a ref, or `start()` called
   // from both the effect and the handler) move the cancellation bookkeeping
   // out of the effect that owns it, for no behavioural gain.
+  //
+  // `onUnauthorized` is DELIBERATELY absent. A dashboard renders many of
+  // these against one shared queue, so any dependency whose identity changes
+  // per render re-issues EVERY tile's query -- and a parent passing an inline
+  // `onUnauthorized={() => …}` (the ordinary way to write it) would do
+  // exactly that, turning one page view into a query storm that no test in
+  // the parent's own file would look wrong. It is only ever a logout route,
+  // so the closure being one render old costs nothing.
   // biome-ignore lint/correctness/useExhaustiveDependencies: see comment above
   useEffect(() => {
     if (!shouldRun) return
@@ -167,7 +175,7 @@ export function DashboardTile(props: {
     return () => {
       cancelled = true
     }
-  }, [client, projectId, queue, tile, range, attempt, shouldRun, onUnauthorized])
+  }, [client, projectId, queue, tile, range, attempt, shouldRun])
 
   const title = tile.report?.name ?? `${KIND_LABEL[tile.kind]} ${tile.report_id}`
 

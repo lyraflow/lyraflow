@@ -208,6 +208,9 @@ describe('DashboardTile', () => {
     )
     expect(client.stats).not.toHaveBeenCalled()
     expect(screen.queryByTestId('tile-loading')).not.toBeInTheDocument()
+    // No link: the report's own screen is a 404 now, and offering it is a
+    // dead end presented as a way forward.
+    expect(screen.queryByRole('link')).not.toBeInTheDocument()
   })
 
   it('deleted: offers Remove only in edit mode', async () => {
@@ -276,6 +279,20 @@ describe('DashboardTile', () => {
     renderTile({ tile: funnelTile(), range: preset('180d'), client })
     expect(await screen.findByTestId('tile-ceiling')).toHaveTextContent(/at most 90 days/i)
     expect(client.runFunnel).not.toHaveBeenCalled()
+  })
+
+  it('ceiling: a retention grid over more cohorts than the server allows warns and sends nothing', async () => {
+    // The third ceiling. Daily cohorts over a year is 365 against a limit of
+    // 60 -- the same refusal the Retention screen makes before sending.
+    const client = stubClient()
+    renderTile({
+      tile: retentionTile({ report: { ...RETENTION, granularity: 'day' } }),
+      range: preset('365d'),
+      client,
+    })
+    expect(await screen.findByTestId('tile-ceiling')).toHaveTextContent(/cohorts/i)
+    expect(screen.getByTestId('tile-ceiling')).toHaveTextContent('day')
+    expect(client.runRetention).not.toHaveBeenCalled()
   })
 
   it('ceiling: the stored interval is still displayed, never substituted', async () => {
@@ -422,6 +439,36 @@ describe('DashboardTile', () => {
           range={range}
           queue={queue}
           editing={false}
+        />
+      </MemoryRouter>
+    )
+    const { rerender } = render(tree())
+    await waitFor(() => expect(client.stats).toHaveBeenCalledTimes(1))
+    rerender(tree())
+    rerender(tree())
+    await Promise.resolve()
+    expect(client.stats).toHaveBeenCalledTimes(1)
+  })
+
+  it('a new onUnauthorized identity alone does not re-run the query', async () => {
+    // A dashboard renders many tiles against one queue. If the effect
+    // depended on this callback, a parent writing the ordinary
+    // `onUnauthorized={() => navigate('/login')}` would re-issue every
+    // tile's query on every render of the dashboard.
+    const client = stubClient()
+    const tile = trendTile()
+    const range = preset('7d')
+    const queue = createRunQueue()
+    const tree = () => (
+      <MemoryRouter>
+        <DashboardTile
+          client={client}
+          projectId={1}
+          tile={tile}
+          range={range}
+          queue={queue}
+          editing={false}
+          onUnauthorized={() => {}}
         />
       </MemoryRouter>
     )
