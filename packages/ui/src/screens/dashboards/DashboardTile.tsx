@@ -7,6 +7,7 @@ import { Button } from '../../components/ui/button.js'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card.js'
 import { Skeleton } from '../../components/ui/skeleton.js'
 import { FunnelFlowOrBars } from '../funnels/FunnelFlowOrBars.js'
+import { StepBars } from '../funnels/StepBars.js'
 import { describeError } from '../funnels/errors.js'
 import { RetentionGrid } from '../retention/RetentionGrid.js'
 import { toRequest } from '../retention/params.js'
@@ -274,7 +275,20 @@ export function DashboardTile(props: {
             {/* No `onSelectStep`: a dashboard tile is a picture, not a drill-in.
              * `StepBars`/`FunnelFlow` render no step control at all without it,
              * which is what keeps the step-people call unreachable from here. */}
-            {result.kind === 'funnel' && (
+            {result.kind === 'funnel' && tile.width === 'half' && (
+              // `FunnelFlowOrBars` picks its rendering from the VIEWPORT
+              // (`useIsWide`), but a half-width tile is sized by its grid
+              // column, not the viewport -- at a normal viewport it is under
+              // 400px wide, the width `StepBars` was built for. Going through
+              // `FunnelFlowOrBars` here would show the flow whenever the
+              // viewport itself is wide, clipping a long funnel inside a card
+              // half that size. `StepBars` directly, unconditionally.
+              <StepBars
+                result={result.result}
+                definition={tile.kind === 'funnel' && tile.report ? tile.report.steps : null}
+              />
+            )}
+            {result.kind === 'funnel' && tile.width === 'full' && (
               <FunnelFlowOrBars
                 result={result.result}
                 definition={tile.kind === 'funnel' && tile.report ? tile.report.steps : null}

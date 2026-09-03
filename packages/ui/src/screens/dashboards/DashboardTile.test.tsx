@@ -1,7 +1,7 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import { ApiError } from '../../api/client.js'
 import type { ApiClient } from '../../api/client.js'
@@ -199,6 +199,51 @@ describe('DashboardTile', () => {
     await userEvent.click(step)
     expect(client.funnelPeople).not.toHaveBeenCalled()
     expect(screen.queryByRole('button', { name: /Show people at step/ })).not.toBeInTheDocument()
+  })
+
+  // A half-width tile is sized by its grid column, not the viewport: at a
+  // normal viewport width it is well under the 768px `FunnelFlowOrBars`
+  // treats as room for the flow, but a media query has no way to know that.
+  // `matchMedia` here reports wide on purpose, so a failure to special-case
+  // `tile.width` shows up even though the viewport itself would pass.
+  function stubWideMatchMedia() {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => ({
+        matches: true,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    )
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('result: a half-width funnel tile shows the bars even when the viewport reports wide', async () => {
+    stubWideMatchMedia()
+    const client = stubClient({ runFunnel: vi.fn(async () => FUNNEL_RUN) })
+    renderTile({ tile: funnelTile({ width: 'half' }), client })
+    await screen.findByTestId('tile-result')
+    // `StepBars` renders on FIRST paint regardless (it is what `FunnelFlowOrBars`
+    // shows before its own `useIsWide` effect has run), so seeing it there is
+    // not yet proof of anything -- an extra flush lets that effect (if this
+    // went through `FunnelFlowOrBars` at all) settle to its final rendering
+    // before either assertion below is taken as the answer.
+    await act(async () => {})
+    expect(screen.getByTestId('funnel-step-1')).toBeInTheDocument()
+    expect(screen.queryByTestId('funnel-flow')).not.toBeInTheDocument()
+  })
+
+  it('result: a full-width funnel tile shows the flow when the viewport reports wide', async () => {
+    stubWideMatchMedia()
+    const client = stubClient({ runFunnel: vi.fn(async () => FUNNEL_RUN) })
+    renderTile({ tile: funnelTile({ width: 'full' }), client })
+    await screen.findByTestId('tile-result')
+    await act(async () => {})
+    expect(screen.getByTestId('funnel-flow')).toBeInTheDocument()
+    expect(screen.queryByTestId('funnel-step-1')).not.toBeInTheDocument()
   })
 
   it('deleted: says the report is gone, names kind and id, sends nothing', async () => {
