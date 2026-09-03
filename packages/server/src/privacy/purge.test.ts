@@ -438,6 +438,16 @@ describe('purgePerson', () => {
           detail: 'test fixture',
           payload: JSON.stringify({ user_id: other, event: 'broken' }),
         },
+        // A prefix collision, not the person's id — `bob` must not match
+        // inside `bobby`. Pins the quoted-form match on the purge side, the
+        // same guarantee export.test.ts pins on the export side.
+        {
+          project_id: projectA,
+          received_at: chAt(13),
+          reason: 'invalid_payload',
+          detail: 'test fixture',
+          payload: JSON.stringify({ user_id: `${person}x`, event: 'broken' }),
+        },
       ],
     })
 
@@ -465,6 +475,13 @@ describe('purgePerson', () => {
       { p: other },
     )
     expect(othersLeft).toBe(1)
+    const prefixCollisionLeft = await rowCount(
+      'events_dead_letter',
+      projectA,
+      "position(payload, concat('\"', {p:String}, '\"')) > 0",
+      { p: `${person}x` },
+    )
+    expect(prefixCollisionLeft).toBe(1)
   })
 
   it("leaves another project's identical ids untouched", async () => {

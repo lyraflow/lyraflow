@@ -2859,7 +2859,9 @@ usually already deleted some of the person's data. Treat `failed` as "partly
 erased, stopped", never as "no change". The recovery is to send the same
 `DELETE /v1/persons/:id` again: it picks the unfinished request back up and
 returns `202` with **the same `request_id`**, rather than `404`-ing a person
-whose events are already gone. Keep polling that id.
+whose events are already gone. Keep polling that id. Rejected payloads that
+name any of the person's ids are erased in the same purge, matched the way
+the [export](#exporting-a-person) finds them.
 
 `:id` belonging to another project, or to no request at all, is `404` with
 `{ "error": "deletion_not_found" }` — never `403`, which would confirm the id
@@ -2881,17 +2883,30 @@ curl -s http://localhost:3000/v1/persons/user-42/export \
 {"type":"person","person_id":"user-42","ids":["user-42","visitor-1"],"traits":{"plan":"pro"},"first_seen":"2026-08-01T12:00:00.000Z","last_seen":"2026-08-06T09:30:00.000Z"}
 {"type":"event","event_id":"…","timestamp":"2026-08-01T12:00:00.000Z","event_name":"page","properties":{…},…}
 {"type":"event","event_id":"…","timestamp":"2026-08-06T09:30:00.000Z","event_name":"import_started","properties":{…},…}
-{"type":"end","events":2}
+{"type":"rejection","received_at":"2026-08-03T04:00:00.000Z","reason":"validation_failed","detail":"…","payload":"…","match":"quoted-id-substring"}
+{"type":"end","events":2,"rejections":1}
 ```
 
-Three line shapes. The first line is always `type: "person"` — the same
+Four line shapes. The first line is always `type: "person"` — the same
 identity `GET /v1/persons/:id` returns (`person_id`, `ids`, `first_seen`,
 `last_seen`), plus `traits`, and *without* that read's `events` count: the
 count moved to the terminator below, where it can be checked against what
 was actually received. Then one `type: "event"` line per event, oldest
-first, carrying every field recorded for it. The last line is always `type:
-"end"`, and `events` is the number of `event` lines that actually preceded
-it.
+first, carrying every field recorded for it. Then any `type: "rejection"`
+lines. The last line is always `type: "end"`, and `events` is the number of
+`event` lines that actually preceded it.
+
+`type: "rejection"` lines are payloads that were refused at ingest
+(`validation_failed`, `too_many_properties` and the other reasons the
+[Feed](#web-ui)'s Rejected tab shows) and never became events. A refused
+payload has no identity — it is stored as the raw text that failed to parse —
+so these are found by searching that text for each of the person's ids in
+quoted form, exactly as a deletion finds them to erase. That is a heuristic
+and `match` says so; a rejected payload that mentions this person's id inside
+someone else's data would be included too. Rejected payloads are kept for 30
+days and then dropped by the table's own TTL, so an export taken later shows
+none. `rejections` on the `end` line counts them the way `events` counts the
+event lines.
 
 **The export is a stream, and it terminates itself.** The response status and
 headers are sent before the first line, which means a failure part-way
@@ -2900,9 +2915,10 @@ be committed to `200`. Instead, on a mid-stream failure the response simply
 ends without ever writing the final `end` line. **A response without a
 final `{"type":"end","events":N}` line is incomplete and must be discarded.**
 Always check for that line, and check that its `events` count matches the
-number of `event` lines you actually received — a truncated response that
-happens to look complete is exactly the failure a subject-access export
-cannot afford to miss.
+number of `event` lines you actually received, and its `rejections` count
+matches the number of `rejection` lines you actually received — a truncated
+response that happens to look complete is exactly the failure a
+subject-access export cannot afford to miss.
 
 The export honours deletion the same way the person read does: a person who
 has been deleted exports only the events recorded after the deletion
@@ -2935,11 +2951,11 @@ a different, distinguishable symptom, and it matters which:
   ceiling, the export never starts: you get a `503` — the same generic
   failure response every other endpoint gives an internal error, with
   `retry-after` set.
-- The **per-event** query streams *after* the response has already started.
-  If it hits a ceiling partway through, the export cannot become an HTTP
-  error any more — the stream simply ends, without its final `end` line,
-  exactly like any other mid-stream failure above. This is the only one of
-  the three the discard rule was written for.
+- The **per-event** and **rejection** queries both stream *after* the
+  response has already started. If either hits a ceiling partway through,
+  the export cannot become an HTTP error any more — the stream simply ends,
+  without its final `end` line, exactly like any other mid-stream failure
+  above. This is what the discard rule was written for.
 
 If you self-host and an export is being cut short for one particular
 person, an unusually large history hitting one of these ceilings is the

@@ -5,6 +5,7 @@ import {
   chunkWindows,
   personEventsPredicate,
 } from '../identity/scope.js'
+import { DEAD_LETTER_OWNED_BY_IDS } from './dead-letter.js'
 
 /** `event_schema`'s key, joined with a separator no identifier can contain. */
 function triple(eventName: string, propertyKey: string, kind: string): string {
@@ -136,23 +137,13 @@ export async function purgePerson(opts: {
   await mutate(ch, `ALTER TABLE device_index DELETE WHERE ${rawIdentity}`, idParams)
   await mutate(ch, `ALTER TABLE person_traits DELETE WHERE ${rawIdentity}`, idParams)
 
-  // 4. events_dead_letter holds REJECTED payloads verbatim, with no identity
-  // columns to match on — only the raw JSON. Matching the quoted form of
-  // each id (`"alice"`) rather than the bare substring keeps `bob` from
-  // matching inside `bobby`; it is still a substring match over unparsed
-  // text, which is the most that can be said about a payload that failed to
-  // parse. Erring toward deleting a diagnostic row is the right direction
-  // here. One known gap, not worth code against: buildDeadLetterRow
-  // (ingest/routes.ts) truncates the stored payload at 8000 characters, so a
-  // cut that lands mid-token can leave e.g. `…"user_id":"alice` with no
-  // closing quote — the quoted-form match below then misses it. The
-  // alternative (matching the bare substring) reintroduces the `bob`-inside-
-  // `bobby` collision this quoting exists to prevent, which is the worse
-  // failure mode of the two.
+  // 4. events_dead_letter — see dead-letter.ts's own docstring for why the
+  // predicate is a quoted-substring match, and why it lives there rather
+  // than here.
   await mutate(
     ch,
     `ALTER TABLE events_dead_letter DELETE WHERE project_id = {projectId:UInt32}
-       AND arrayExists(x -> position(payload, concat('"', x, '"')) > 0, {ids:Array(String)})`,
+       AND ${DEAD_LETTER_OWNED_BY_IDS}`,
     { projectId, ids: scope.ids },
   )
 
