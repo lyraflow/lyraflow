@@ -131,6 +131,12 @@ interface ProjectResponse {
   write_key: string
 }
 
+/** POST /v1/project/rotate-write-key's 200 response shape (project/routes.ts). */
+interface RotateResponse {
+  write_key: string
+  previous_write_key_expires_at: string | null
+}
+
 /** GET /v1/schema/events' response shape (schema/routes.ts). */
 interface SchemaEventsResponse {
   events: { event_name: string }[]
@@ -216,7 +222,32 @@ interface EventsSectionError {
 
 type EventsSection = EventsSectionOk | EventsSectionError
 
-const SNIPPET_ALLOWED_FLAGS = new Set([...UNIVERSAL_FLAGS, 'since'])
+const SNIPPET_ALLOWED_FLAGS = new Set([...UNIVERSAL_FLAGS, 'since', 'rotate', 'grace', 'yes'])
+
+/**
+ * `--grace`'s value, validated as an integer 0..720 (the same bound
+ * `POST /v1/project/rotate-write-key` itself enforces server-side — see the
+ * brief's ambiguity resolution) — or `undefined` when the flag was not
+ * given at all, so the request below sends `{}` and the server's own
+ * default (24) applies rather than this CLI restating it.
+ *
+ * Returns a `UsageError` rather than throwing one, so the caller can decide
+ * the exit path the same way every other validated flag in this command
+ * does. Never echoes the raw value: same rule `resolveInstant` (args.ts)
+ * follows for `--since`, for the same reason — a flag value is whatever the
+ * caller typed or an agent templated.
+ */
+function parseGrace(value: string | boolean | undefined): number | undefined | UsageError {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) {
+    return new UsageError('--grace must be an integer between 0 and 720')
+  }
+  const hours = Number(value)
+  if (hours > 720) {
+    return new UsageError('--grace must be an integer between 0 and 720')
+  }
+  return hours
+}
 
 /**
  * `snippet`-local narrowing of `CommandContext` — makes `host` REQUIRED
@@ -547,7 +578,7 @@ function renderHuman(snippet: string, events: EventsSection): string {
 }
 
 /**
- * `lyraflow snippet [--since <duration>] [--json|--human]`
+ * `lyraflow snippet [--since <duration>] [--rotate [--grace <hours>] [--yes]] [--json|--human]`
  *
  * `ctx.host` (and the `Client` in `ctx`) is resolved by `main()`'s dispatch
  * (index.ts) before this function ever runs — `--host` > `LYRAFLOW_HOST` >,
@@ -555,8 +586,14 @@ function renderHuman(snippet: string, events: EventsSection): string {
  * `hostFromDomain` there, and issue #61). Nothing below needs to know that
  * fallback happened; it only ever sees the one resolved value.
  *
- * Returns the process exit code: 0 success, 1 the request failed, 2 usage
- * error.
+ * `--rotate` calls `POST /v1/project/rotate-write-key` BEFORE the ordinary
+ * `GET /v1/project` below, so the snippet this command goes on to print
+ * already carries the new key — the confirmation shape (prompt, `--yes`,
+ * exit codes) is copied from `persons delete` (persons.ts:217-274).
+ *
+ * Returns the process exit code: 0 success, 1 the request failed (or, with
+ * `--rotate`, the confirmation prompt was declined), 2 usage error (nothing
+ * was ever sent).
  */
 export async function runSnippet(argv: string[], ctx: CommandContext): Promise<number> {
   let flags: Record<string, string | boolean>
@@ -565,8 +602,8 @@ export async function runSnippet(argv: string[], ctx: CommandContext): Promise<n
   let positionalContext: (string | undefined)[]
   try {
     ;({ flags, positionals, positionalIndexes, positionalContext } = parseCommandArgs(argv, {
-      strings: ['since', 'host', 'server-key'],
-      booleans: ['json', 'human'],
+      strings: ['since', 'host', 'server-key', 'grace'],
+      booleans: ['json', 'human', 'rotate', 'yes'],
     }))
   } catch (err) {
     if (!(err instanceof UsageError)) throw err
@@ -584,6 +621,10 @@ export async function runSnippet(argv: string[], ctx: CommandContext): Promise<n
 
   const strayFlagsCode = checkStrayFlags(flags, SNIPPET_ALLOWED_FLAGS, mode, ctx)
   if (strayFlagsCode !== undefined) return strayFlagsCode
+
+  if (flags.grace !== undefined && flags.rotate !== true) {
+    return reportUsageError(new UsageError('--grace only applies with --rotate'), mode, ctx)
+  }
 
   const sinceRaw = typeof flags.since === 'string' ? flags.since : '7d'
   let since: Date
@@ -612,6 +653,49 @@ export async function runSnippet(argv: string[], ctx: CommandContext): Promise<n
   }
 
   try {
+    // Carried into the `--json` output below only when `--rotate` ran —
+    // `undefined` otherwise, which `emitObject`'s `JSON.stringify` drops
+    // from the serialised object entirely, leaving the non-`--rotate`
+    // shape byte-for-byte unchanged.
+    let rotatedExpiry: string | null | undefined
+
+    if (flags.rotate === true) {
+      const grace = parseGrace(flags.grace)
+      if (grace instanceof UsageError) return reportUsageError(grace, mode, ctx)
+
+      if (flags.yes !== true) {
+        if (!ctx.stdinIsTty) {
+          return reportUsageError(
+            new UsageError(
+              'refusing to rotate without --yes when stdin is not a terminal (nothing to prompt)',
+            ),
+            mode,
+            ctx,
+          )
+        }
+        const confirmed = await ctx.prompt(
+          grace === 0
+            ? 'This replaces the write key and retires the current one immediately. Pages still serving the old snippet stop collecting now. Continue?'
+            : 'This replaces the write key. The current one keeps working for the grace period, then pages still serving it stop collecting. Continue?',
+        )
+        if (confirmed !== true) {
+          ctx.writeErr('nothing was rotated\n')
+          return 1
+        }
+      }
+
+      const rotated = await ctx.client.post<RotateResponse>(
+        '/v1/project/rotate-write-key',
+        grace === undefined ? {} : { grace_hours: grace },
+      )
+      ctx.writeErr(
+        rotated.previous_write_key_expires_at === null
+          ? 'write key rotated; previous key retired immediately\n'
+          : `write key rotated; previous key valid until ${rotated.previous_write_key_expires_at}\n`,
+      )
+      rotatedExpiry = rotated.previous_write_key_expires_at
+    }
+
     const project = await ctx.client.get<ProjectResponse>('/v1/project')
 
     // `normalizeHost` runs AFTER the first request has already succeeded,
@@ -642,6 +726,7 @@ export async function runSnippet(argv: string[], ctx: CommandContext): Promise<n
         {
           host,
           write_key: project.write_key,
+          previous_write_key_expires_at: rotatedExpiry,
           methods: [...SNIPPET_METHODS],
           events: eventsSection,
           sdk_version: VERSION,

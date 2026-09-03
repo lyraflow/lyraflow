@@ -725,6 +725,8 @@ nothing about what that caller can reach. `lyraflow snippet` (see
 [`packages/cli/README.md`](packages/cli/README.md)) is the intended way to
 use this endpoint: it prints a paste-ready install snippet with the write key
 already filled in, rather than a caller reading this response by hand.
+`lyraflow snippet --rotate` rotates the key first and prints the snippet that
+carries the new one.
 
 ### `POST /v1/project/rotate-write-key`
 
