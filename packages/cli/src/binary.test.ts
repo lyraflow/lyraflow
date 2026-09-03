@@ -751,7 +751,7 @@ describe('the built CLI against a real, in-process server', () => {
     expect(person.person_id).toBe(EXPORT_USER)
 
     const last = JSON.parse(lines[lines.length - 1] as string)
-    expect(last).toEqual({ type: 'end', events: 2 })
+    expect(last).toEqual({ type: 'end', events: 2, rejections: 0 })
 
     const eventLines = lines.slice(1, -1).map((l) => JSON.parse(l))
     for (const e of eventLines) expect(e.type).toBe('event')

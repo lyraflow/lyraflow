@@ -454,7 +454,7 @@ lyraflow persons export user-99
 ```json
 {"type":"person","person_id":"user-99","ids":["user-99","visitor-9"],"traits":{"plan":"trial"},"first_seen":"2026-08-09T03:22:46.441Z","last_seen":"2026-08-09T03:22:46.441Z"}
 {"type":"event","event_id":"44444444-4444-4444-4444-444444444441","timestamp":"2026-08-09T03:22:46.441Z","received_at":"2026-08-09T03:22:46.441Z","event_name":"$identify","anonymous_id":"visitor-9","user_id":"user-99","properties":{"plan":"trial"},"properties_num":{},"url":"","path":"","referrer":"","utm_source":"","utm_medium":"","utm_campaign":"","utm_term":"","utm_content":"","device_type":"desktop","os":"macos","browser":"chrome","country":"","region":"","city":""}
-{"type":"end","events":1}
+{"type":"end","events":1,"rejections":0}
 ```
 
 If the stream ends without that final `{"type":"end",…}` line, the data
