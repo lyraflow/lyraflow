@@ -1,4 +1,5 @@
 import { join } from 'node:path'
+import { rotateWriteKey } from '@lyraflow/core'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createChClient, createPgPool } from '../clients.js'
 import { loadMigrations, migrate } from '../migrator.js'
@@ -102,5 +103,101 @@ describe('022_write_key_rotation', () => {
         [projectId2],
       ),
     ).rejects.toThrow(/duplicate key/i)
+  })
+})
+
+// `rotateWriteKey` (packages/core) is exercised elsewhere only against a
+// fake `ProjectStore` that echoes back a canned row -- a fake that cannot
+// tell a correct UPDATE from one that always keeps the OLD row's own
+// previous_write_key regardless of grace, because it never runs the SQL.
+// This block runs the real function against the real, migrated table and
+// reads the row back with a plain SELECT, so the SQL itself is pinned, not
+// just the shape of whatever the store happens to hand back.
+describe('rotateWriteKey against the migrated table', () => {
+  // Full migrate() again, not a dependency on describe-block order: the
+  // 022_write_key_rotation.sql block above already leaves the ledger
+  // recording version 22, so this is a no-op re-check rather than a second
+  // real migration -- it just means this block does not silently depend on
+  // running after the other one within the same file.
+  beforeAll(async () => {
+    await migrate({
+      pg,
+      ch,
+      migrations: loadMigrations(join(import.meta.dirname, '..', '..', 'migrations')),
+      appSchemaVersion: 999,
+    })
+  })
+
+  afterAll(async () => {
+    await pg.query("DELETE FROM projects WHERE slug LIKE 'wk-rotation-022-rt-%'")
+  })
+
+  async function freshProject(slug: string, writeKey: string): Promise<number> {
+    await pg.query('DELETE FROM projects WHERE slug = $1', [slug])
+    const r = await pg.query<{ id: string }>(
+      `INSERT INTO projects (name, slug, write_key, server_key_hash)
+       VALUES ('WK rotation live', $1, $2, 'hash_rt') RETURNING id`,
+      [slug, writeKey],
+    )
+    const id = Number(r.rows[0]?.id)
+    if (!id) throw new Error(`freshProject: INSERT for slug ${slug} produced no row`)
+    return id
+  }
+
+  async function readRow(id: number) {
+    const r = await pg.query<{
+      write_key: string
+      previous_write_key: string | null
+      previous_write_key_expires_at: Date | null
+    }>(
+      'SELECT write_key, previous_write_key, previous_write_key_expires_at FROM projects WHERE id = $1',
+      [id],
+    )
+    const row = r.rows[0]
+    if (!row) throw new Error(`readRow: no project with id ${id}`)
+    return row
+  }
+
+  it('grace > 0 retires the old key with an expiry computed from `now`', async () => {
+    const id = await freshProject('wk-rotation-022-rt-1', 'wk_rt_original_1')
+    const now = new Date('2026-09-03T00:00:00.000Z')
+    const graceMs = 3_600_000
+
+    const rotated = await rotateWriteKey(pg, id, graceMs, now)
+    expect(rotated?.writeKey).toMatch(/^wk_[0-9a-f]{32}$/)
+
+    const row = await readRow(id)
+    expect(row.write_key).toBe(rotated?.writeKey)
+    expect(row.previous_write_key).toBe('wk_rt_original_1')
+    expect(row.previous_write_key_expires_at).toEqual(new Date(now.getTime() + graceMs))
+  })
+
+  it('grace 0 is a hard swap: the row itself has no previous key or expiry', async () => {
+    const id = await freshProject('wk-rotation-022-rt-2', 'wk_rt_original_2')
+    const now = new Date('2026-09-03T00:00:00.000Z')
+
+    const rotated = await rotateWriteKey(pg, id, 0, now)
+
+    const row = await readRow(id)
+    expect(row.write_key).toBe(rotated?.writeKey)
+    expect(row.previous_write_key).toBeNull()
+    expect(row.previous_write_key_expires_at).toBeNull()
+  })
+
+  it('rotating twice retires only the most recently replaced key', async () => {
+    const id = await freshProject('wk-rotation-022-rt-3', 'wk_rt_original_3')
+    const now = new Date('2026-09-03T00:00:00.000Z')
+    const graceMs = 3_600_000
+
+    const first = await rotateWriteKey(pg, id, graceMs, now)
+    const second = await rotateWriteKey(pg, id, graceMs, now)
+
+    const row = await readRow(id)
+    expect(row.write_key).toBe(second?.writeKey)
+    expect(row.previous_write_key).toBe(first?.writeKey)
+    // The key the row started with must be retired all the way out --
+    // present in neither column once a second rotation has happened.
+    expect(row.write_key).not.toBe('wk_rt_original_3')
+    expect(row.previous_write_key).not.toBe('wk_rt_original_3')
   })
 })
