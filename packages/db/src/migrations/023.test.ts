@@ -26,13 +26,25 @@ async function insert(name: string, tiles: unknown, isHome = false): Promise<num
 }
 
 beforeAll(async () => {
+  await pg.query('DELETE FROM projects WHERE slug = $1', [SLUG])
+  // Migrations are never rolled back, and the local test database is shared
+  // across runs and branches, so 023 is already applied here from an
+  // earlier run -- and migrate() decides what to run by reading
+  // `schema_migrations`, not by inspecting live tables. Left alone, this
+  // suite would assert against whatever shape the FIRST run of it created
+  // and never exercise the file on disk again, which is exactly how an
+  // edit to the CHECK expressions below could go untested. Force the
+  // pre-023 state -- the ledger row as well as the table -- so migrate()
+  // re-runs the current text of `023_dashboards.sql`. Same pattern, same
+  // reason as `022.test.ts`.
+  await pg.query('DELETE FROM schema_migrations WHERE version = 23')
+  await pg.query('DROP TABLE IF EXISTS dashboards')
   await migrate({
     pg,
     ch,
     migrations: loadMigrations(join(import.meta.dirname, '..', '..', 'migrations')),
     appSchemaVersion: 999,
   })
-  await pg.query('DELETE FROM projects WHERE slug = $1', [SLUG])
   const r = await pg.query<{ id: string }>(
     `INSERT INTO projects (name, slug, write_key, server_key_hash)
      VALUES ('Dashboards 023', $1, 'wk_023', 'hash_023') RETURNING id`,
@@ -64,6 +76,33 @@ describe('023_dashboards', () => {
 
   it('refuses tiles that are not an array', async () => {
     await expect(insert('Object', { kind: 'trend' })).rejects.toThrow(/dashboards_tiles_is_array/)
+  })
+
+  it('names the array CHECK for a scalar, never an array-length error', async () => {
+    // Both CHECKs are evaluated for this row, and Postgres does not promise
+    // the order of an expression's operands -- so the cap CHECK must not
+    // call `jsonb_array_length` on a non-array at all. It raises there
+    // ("cannot get array length of a scalar"), and that error is neither a
+    // constraint violation the store can classify nor a message that names
+    // what is actually wrong with the row.
+    await expect(insert('Scalar', 5)).rejects.toThrow(/dashboards_tiles_is_array/)
+    await expect(insert('String', 'twelve')).rejects.toThrow(/dashboards_tiles_is_array/)
+  })
+
+  it('guards the length CHECK structurally, not by an OR that happens to short-circuit', async () => {
+    // The test above passes today under an `OR` too, because this server's
+    // planner evaluated the type test first -- which is luck, not a
+    // promise, and it is the whole reason this assertion reads the
+    // constraint itself rather than trusting the behaviour.
+    const r = await pg.query<{ def: string }>(
+      `SELECT pg_get_constraintdef(oid) AS def
+         FROM pg_constraint
+        WHERE conrelid = 'dashboards'::regclass
+          AND conname = 'dashboards_tiles_at_most_12'`,
+    )
+    const def = r.rows[0]?.def ?? ''
+    expect(def).toMatch(/CASE\s+WHEN/i)
+    expect(def).not.toMatch(/\bOR\b/i)
   })
 
   it('refuses a duplicate name within a project', async () => {

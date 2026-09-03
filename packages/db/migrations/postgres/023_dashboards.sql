@@ -32,7 +32,13 @@
 -- The 12-tile cap is a CHECK as well as validation, for 012's reason: the
 -- real cap runs before a write, and the CHECK is the ceiling that must hold
 -- for any row however it arrived. Twelve is also the most a dashboard may
--- ask ClickHouse to do when opened.
+-- ask ClickHouse to do when opened. It is a CASE and not
+-- `jsonb_typeof(tiles) <> 'array' OR jsonb_array_length(tiles) <= 12`:
+-- `jsonb_array_length` RAISES on a scalar, and Postgres does not promise
+-- the operands of an OR are evaluated left to right, so that spelling
+-- relies on a short-circuit it is not owed. When it does not happen, a
+-- non-array row fails with "cannot get array length of a scalar" instead
+-- of naming `dashboards_tiles_is_array` -- an error no caller can classify.
 --
 -- ONE HOME PER PROJECT is a partial unique index, not application logic:
 -- two concurrent PATCHes cannot both win at the database. The route sets a
@@ -51,7 +57,9 @@ CREATE TABLE IF NOT EXISTS dashboards (
   UNIQUE (project_id, name),
   CONSTRAINT dashboards_tiles_is_array   CHECK (jsonb_typeof(tiles) = 'array'),
   CONSTRAINT dashboards_tiles_at_most_12 CHECK (
-    jsonb_typeof(tiles) <> 'array' OR jsonb_array_length(tiles) <= 12)
+    CASE WHEN jsonb_typeof(tiles) = 'array'
+         THEN jsonb_array_length(tiles) <= 12
+         ELSE true END)
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS dashboards_one_home_per_project
