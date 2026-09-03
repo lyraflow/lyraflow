@@ -170,7 +170,11 @@ export function DashboardTile(props: {
           onUnauthorized?.()
           return
         }
-        setError(describeError(err))
+        // The tile's OWN noun. `describeError` is the funnel screen's, and
+        // its 400/404/409 branches name what went wrong -- unqualified, a
+        // trend tile reports "This funnel no longer exists.", which is a
+        // message about a report that is not on the screen.
+        setError(describeError(err, KIND_LABEL[tile.kind]))
       })
     return () => {
       cancelled = true

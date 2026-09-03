@@ -320,6 +320,49 @@ describe('DashboardTile', () => {
     expect(stats).toHaveBeenCalledTimes(2)
   })
 
+  it("failed: a 404 names the tile's OWN report kind, never a funnel", async () => {
+    // `describeError` is the funnel screen's, and its 400/404 branches name a
+    // funnel in as many words. A trend tile rendering "This funnel no longer
+    // exists." tells the operator about a report that is not on the screen.
+    const client = stubClient({
+      stats: vi.fn(async () => {
+        throw new ApiError(404, 'not_found')
+      }),
+    })
+    renderTile({ tile: trendTile(), client })
+    const box = await screen.findByTestId('tile-error')
+    expect(box).toHaveTextContent('This trend report no longer exists.')
+    expect(box).not.toHaveTextContent(/funnel/i)
+  })
+
+  it('failed: a 400 on a retention tile names the offending field and the right kind', async () => {
+    const client = stubClient({
+      runRetention: vi.fn(async () => {
+        throw new ApiError(400, 'bad_definition', [
+          { path: 'granularity', message: 'Expected day, week or month' },
+        ])
+      }),
+    })
+    renderTile({ tile: retentionTile(), client })
+    const box = await screen.findByTestId('tile-error')
+    expect(box).toHaveTextContent('This retention report could not be read:')
+    expect(box).toHaveTextContent('granularity')
+    expect(box).toHaveTextContent('Expected day, week or month')
+    expect(box).not.toHaveTextContent(/funnel/i)
+  })
+
+  it('failed: a 404 on a funnel tile still says funnel', async () => {
+    const client = stubClient({
+      runFunnel: vi.fn(async () => {
+        throw new ApiError(404, 'not_found')
+      }),
+    })
+    renderTile({ tile: funnelTile(), client })
+    expect(await screen.findByTestId('tile-error')).toHaveTextContent(
+      'This funnel no longer exists.',
+    )
+  })
+
   it("header links to the report's own screen", async () => {
     const { unmount } = renderTile({ tile: trendTile() })
     expect(screen.getByRole('link', { name: 'Signups by country' })).toHaveAttribute(

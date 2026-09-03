@@ -60,6 +60,14 @@ export function AddTilePicker(props: {
   const [failed, setFailed] = useState(false)
   const [chosen, setChosen] = useState('')
 
+  // `onUnauthorized` is DELIBERATELY absent, the same decision `DashboardTile`
+  // makes and for a sharper reason: this effect calls `setChosen('')`, so
+  // depending on a callback whose identity changes per render would refetch
+  // the three lists AND throw away the operator's half-made choice every time
+  // the parent re-rendered. `App.tsx`'s handler is a plain function, so that
+  // is the ordinary case, not a corner. It is only ever a logout route, so the
+  // closure being one render old costs nothing.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: see comment above
   useEffect(() => {
     let cancelled = false
     setLoaded(null)
@@ -89,7 +97,7 @@ export function AddTilePicker(props: {
     return () => {
       cancelled = true
     }
-  }, [client, projectId, onUnauthorized])
+  }, [client, projectId])
 
   if (failed) {
     return <p className="text-sm text-destructive">Could not load saved reports.</p>

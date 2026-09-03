@@ -116,6 +116,32 @@ describe('AddTilePicker', () => {
     expect(onAdd).toHaveBeenCalledWith({ kind: 'retention', report_id: 2, width: 'half' })
   })
 
+  it('a new onUnauthorized identity neither refetches nor discards the choice', async () => {
+    // The effect resets `chosen`, so depending on this callback would wipe the
+    // operator's selection mid-edit every time the parent re-rendered --
+    // `App.tsx`'s handler is a plain function, so its identity changes.
+    const client = {
+      trendReports: vi.fn(async () => [TREND]),
+      retentionReports: vi.fn(async () => [RETENTION]),
+      funnels: vi.fn(async () => [FUNNEL]),
+    } as unknown as ApiClient
+    const onAdd = vi.fn()
+    const tree = () => (
+      <MemoryRouter>
+        <AddTilePicker client={client} projectId={1} onAdd={onAdd} onUnauthorized={() => {}} />
+      </MemoryRouter>
+    )
+    const { rerender } = render(tree())
+    await waitFor(() => expect(select()).toBeInTheDocument())
+    await userEvent.selectOptions(select(), 'retention:2')
+    rerender(tree())
+    rerender(tree())
+    expect(client.trendReports).toHaveBeenCalledTimes(1)
+    expect(select()).toHaveValue('retention:2')
+    await userEvent.click(screen.getByRole('button', { name: 'Add tile' }))
+    expect(onAdd).toHaveBeenCalledWith({ kind: 'retention', report_id: 2, width: 'half' })
+  })
+
   it('lists a stale report too, rather than hiding it', async () => {
     // The TILE says a stale definition cannot be reproduced. Filtering the
     // row out here instead would make a saved report simply disappear, with
