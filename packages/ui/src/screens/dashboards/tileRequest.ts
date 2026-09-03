@@ -101,9 +101,10 @@ function funnelSpanDays(range: RangeChoice, now: Date): number | null {
   return Math.round((presetById(range.preset)?.spanMs ?? 0) / MS_PER_DAY)
 }
 
-/** Decision 5 of the spec, on load: the ceiling the report's own screen
- *  would refuse to send past, computed for the stored definition under the
- *  dashboard's range. `null` means "send it". */
+/** The ceiling the report's own screen refuses to send past, computed for
+ *  the stored definition under the dashboard's range. `null` means "send
+ *  it". A tile asks exactly what that screen would ask, so it must decline
+ *  exactly what that screen would decline. */
 export function ceilingFor(tile: ResolvedTile, range: RangeChoice, now: Date): TileCeiling | null {
   if (tile.report === null) return null
   switch (tile.kind) {

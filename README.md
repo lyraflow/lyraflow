@@ -346,7 +346,10 @@ screens, reachable from the sidebar:
   grid of tiles, each a saved trend, a saved retention report or a funnel,
   half or full width. One range picker applies to every tile and lives in
   the URL, not in the dashboard, for the same reason a saved report never
-  stores its range. A project can have many dashboards; one can be marked
+  stores its range. Its default setting is the exception, and the screen
+  says so: at *Default for this resolution* no range is sent at all, so each
+  tile falls back to its own report's default window and the tiles are not
+  on one period. Pick a preset to put them on the same range. A project can have many dashboards; one can be marked
   as **home**, and it is then what `/` opens after login (the feed stays at
   `/feed`). Editing happens in place — rename, reorder, resize, add, remove
   — and every change saves as it is made. A tile whose report has since
@@ -2615,10 +2618,13 @@ curl -X POST http://localhost:3000/v1/dashboards \
 
 A duplicate name within the same project is a `409`. A non-numeric `:id` is a
 `400` naming `invalid_dashboard_id`; an id that does not exist, or belongs to
-another project, is a `404`. A tile naming a report that does not exist in
-this project is refused with `400` and `{"error": "report_not_found", "kind",
-"report_id"}` — a tile can only come to point at nothing by a later deletion,
-and then the read returns it with `"report": null` rather than dropping it.
+another project, is a `404`. A tile a write INTRODUCES that names a report
+which does not exist in this project is refused with `400` and
+`{"error": "report_not_found", "kind", "report_id"}`. Tiles already stored on
+the dashboard are not re-checked: deleting a report is allowed, the read
+returns that tile with `"report": null` rather than dropping it, and a
+`PATCH` carrying the whole layout — which is what an edit sends — must still
+be able to reorder, resize and remove around it.
 At most twelve tiles; the thirteenth is a `400`.
 
 `is_home: true` makes this dashboard the project's home and clears the
@@ -2628,7 +2634,10 @@ leaves the project with none, and the web UI opens the feed again.
 
 **What is not stored is the range**, for the same reason a saved trend or
 funnel never stores one. A dashboard reopens over whatever range the viewer
-has, never the one it was last looked at with.
+has, never the one it was last looked at with. When the viewer picks no
+range, none is sent, and each of these endpoints applies its own default
+window — so the tiles on one dashboard are then showing different periods,
+which the web UI states under the picker.
 
 Every row carries `definition_version`, and a stored layout this build
 cannot parse comes back `"stale": true` with `"tiles": []` rather than
