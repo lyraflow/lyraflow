@@ -12,7 +12,7 @@ import { createRunQueue } from './dashboards/runQueue.js'
 import { MAX_TILES } from './dashboards/tileRequest.js'
 import { describeError } from './funnels/errors.js'
 import { RangePicker } from './shared/RangePicker.js'
-import { rangeIncomplete, readRange, writeRange } from './shared/range.js'
+import { AUTO, rangeIncomplete, readRange, writeRange } from './shared/range.js'
 
 const EDIT_KEY = 'edit'
 
@@ -91,12 +91,32 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
 
+  // What the screen is currently ASKING ABOUT, as one value. A response is
+  // applied only if this still matches what the request was made for.
+  //
+  // The load effect has a `cancelled` flag and needs nothing else -- its
+  // cleanup runs when `activeId` or `id` changes. `patch()` cannot use that
+  // shape: it is a handler, not an effect, so there is no cleanup to hang
+  // the flag on and the request outlives the render that started it. A
+  // `PATCH` still in flight when the project switches used to call
+  // `setDash(theOldProjectsDashboard)` on top of the new project's load,
+  // and every tile then ran the old project's questions scoped to the NEW
+  // project's id. `id` is in the key as well as `activeId`: navigating
+  // between two dashboards is the same race with the same consequence.
+  const asking = useRef<string | null>(null)
+  useEffect(() => {
+    asking.current = activeId == null || id === null ? null : `${activeId}:${id}`
+  }, [activeId, id])
+
   useEffect(() => {
     if (activeId == null || id === null) return
     let cancelled = false
     setDash(null)
     setNotFound(false)
     setLoadError(null)
+    // A save failure belongs to the dashboard it was reported for. Left
+    // standing, it reads as a failure of the one now on screen.
+    setSaveError(null)
     client
       .dashboard(activeId, id)
       .then((d) => {
@@ -121,11 +141,13 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
   const patch = useCallback(
     (body: { name?: string; tiles?: DashboardTileInput[]; is_home?: boolean }) => {
       if (activeId == null || id === null) return
+      const askedFor = `${activeId}:${id}`
       setSaving(true)
       setSaveError(null)
       client
         .patchDashboard(activeId, id, body)
         .then((d) => {
+          if (asking.current !== askedFor) return
           // A `PATCH` that carried no `tiles` keeps the PREVIOUS tiles
           // reference. The response is parsed JSON, so `d.tiles` and every
           // tile object in it are fresh references even when the layout came
@@ -142,6 +164,9 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
           setNameDraft(d.name)
         })
         .catch((err: unknown) => {
+          // Same check as the success path, and for the same reason: this
+          // failure is about a dashboard that is no longer on screen.
+          if (asking.current !== askedFor) return
           if (err instanceof ApiError && err.status === 401) {
             onUnauthorized?.()
             return
@@ -152,6 +177,10 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
           // `describeError`'s 409 branch already names this screen's noun.
           setSaveError(describeError(err, NOUN))
         })
+        // UNCONDITIONAL, unlike the two handlers above: `saving` is what
+        // holds the edit controls shut, and skipping it for a response that
+        // arrived late would leave the screen frozen for the dashboard that
+        // is now on it.
         .finally(() => setSaving(false))
     },
     [client, activeId, id, onUnauthorized],
@@ -322,6 +351,21 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
       {incomplete && (
         <p className="text-muted-foreground text-sm">Pick both dates, or choose a preset range.</p>
       )}
+      {/* `auto` sends NO range, so each endpoint applies its own default
+       * window -- a stats query defaults by the report's interval, retention
+       * and funnels each have their own. Tiles under `auto` are therefore
+       * showing different periods side by side, which the picker's own
+       * label ("Default for this resolution") reads as one shared setting.
+       * Saying so is the fix rather than making `auto` resolve to some
+       * concrete span here: that would answer a question no report's own
+       * screen answers that way, and every tile would silently stop matching
+       * the report it links to. */}
+      {range.preset === AUTO && (
+        <p className="text-muted-foreground text-sm">
+          At this setting each tile uses its own report's default window. Pick a preset to give
+          every tile the same range.
+        </p>
+      )}
 
       {/* No ternary on the range: while a custom range is unfinished the grid
        * is not rendered at all, so no tile mounts and nothing runs. Falling
@@ -352,6 +396,10 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
                           ),
                         ),
                       onRemove: () => sendTiles(tiles.filter((_, j) => j !== i)),
+                      // Every action above sends the whole array as it
+                      // stands on screen, and that array is the pre-edit one
+                      // until the response lands.
+                      disabled: saving,
                     }
                   : undefined
               }
@@ -383,6 +431,7 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
           client={client}
           projectId={activeId}
           onUnauthorized={onUnauthorized}
+          disabled={saving}
           onAdd={(t) => patch({ tiles: [...tiles.map(toInput), t] })}
         />
       )}

@@ -71,9 +71,17 @@ export function AddTilePicker(props: {
   client: ApiClient
   projectId: number
   onAdd(tile: DashboardTileInput): void
+  /** Held shut while the dashboard has a `PATCH` in flight, for the reason
+   *  `TileEditActions.disabled` gives: `onAdd` sends the whole tile array as
+   *  it stands on screen plus the new tile, and until the response lands
+   *  that array is the pre-edit one. The SELECT stays live -- a half-made
+   *  choice is the operator's, not the screen's, and throwing it away for
+   *  the duration of a request is the failure this control's own load effect
+   *  is written to avoid. */
+  disabled?: boolean
   onUnauthorized?(): void
 }) {
-  const { client, projectId, onAdd, onUnauthorized } = props
+  const { client, projectId, onAdd, disabled, onUnauthorized } = props
   const [loaded, setLoaded] = useState<Loaded | null>(null)
   const [failed, setFailed] = useState(false)
   const [chosen, setChosen] = useState('')
@@ -173,7 +181,7 @@ export function AddTilePicker(props: {
       <Button
         type="button"
         size="sm"
-        disabled={chosen === ''}
+        disabled={chosen === '' || disabled === true}
         onClick={() => {
           const [kind, id] = chosen.split(':')
           if (!kind || !id) return

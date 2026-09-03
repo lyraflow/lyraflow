@@ -116,6 +116,33 @@ describe('AddTilePicker', () => {
     expect(onAdd).toHaveBeenCalledWith({ kind: 'retention', report_id: 2, width: 'half' })
   })
 
+  // I1 from the final whole-branch review: `Add tile` sends the WHOLE tile
+  // array plus the new one, built from the layout on screen when it was
+  // clicked. While a PATCH is in flight the array on screen is the pre-edit
+  // one, so a second write would replace the first.
+  it('shuts the Add button while the dashboard is saving, choice intact', async () => {
+    render(
+      <MemoryRouter>
+        <AddTilePicker
+          client={
+            {
+              trendReports: vi.fn(async () => [TREND]),
+              retentionReports: vi.fn(async () => [RETENTION]),
+              funnels: vi.fn(async () => [FUNNEL]),
+            } as unknown as ApiClient
+          }
+          projectId={1}
+          onAdd={vi.fn()}
+          disabled
+        />
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(select()).toBeInTheDocument())
+    await userEvent.selectOptions(select(), 'retention:2')
+    expect(select()).toHaveValue('retention:2')
+    expect(screen.getByRole('button', { name: 'Add tile' })).toBeDisabled()
+  })
+
   it('a new onUnauthorized identity neither refetches nor discards the choice', async () => {
     // The effect resets `chosen`, so depending on this callback would wipe the
     // operator's selection mid-edit every time the parent re-rendered --

@@ -29,6 +29,14 @@ export interface TileEditActions {
   onMoveDown?(): void
   onToggleWidth(): void
   onRemove(): void
+  /** Held shut while the dashboard has a `PATCH` in flight. Every one of
+   *  these sends the WHOLE tile array as it stands on screen, and the array
+   *  on screen is the pre-edit one until the response lands -- so a second
+   *  click before then carries the same starting layout and its write
+   *  silently replaces the first edit. A disabled button says the screen is
+   *  busy; the alternative, queueing, would need an optimistic layout this
+   *  screen deliberately does not keep. */
+  disabled?: boolean
 }
 
 type Result =
@@ -206,7 +214,7 @@ export function DashboardTile(props: {
               variant="outline"
               size="sm"
               onClick={actions.onMoveUp}
-              disabled={!actions.onMoveUp}
+              disabled={!actions.onMoveUp || actions.disabled}
             >
               Move up
             </Button>
@@ -215,14 +223,26 @@ export function DashboardTile(props: {
               variant="outline"
               size="sm"
               onClick={actions.onMoveDown}
-              disabled={!actions.onMoveDown}
+              disabled={!actions.onMoveDown || actions.disabled}
             >
               Move down
             </Button>
-            <Button type="button" variant="outline" size="sm" onClick={actions.onToggleWidth}>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={actions.onToggleWidth}
+              disabled={actions.disabled}
+            >
               {tile.width === 'half' ? 'Full width' : 'Half width'}
             </Button>
-            <Button type="button" variant="outline" size="sm" onClick={actions.onRemove}>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={actions.onRemove}
+              disabled={actions.disabled}
+            >
               Remove
             </Button>
           </div>

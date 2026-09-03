@@ -296,6 +296,26 @@ describe('DashboardTile', () => {
     expect(actions.onMoveUp).toHaveBeenCalledTimes(1)
   })
 
+  // I1 from the final whole-branch review: every one of these buttons sends
+  // the WHOLE tile array, built from the layout on screen when it was
+  // clicked. Two clicks before the first response lands both carry the
+  // pre-edit array, and the second write replaces the first -- so the screen
+  // holds them shut while a PATCH is in flight, and says so here.
+  it('edit mode: `disabled` shuts every action, including the moves it could make', async () => {
+    const actions: TileEditActions = {
+      onMoveUp: vi.fn(),
+      onMoveDown: vi.fn(),
+      onToggleWidth: vi.fn(),
+      onRemove: vi.fn(),
+      disabled: true,
+    }
+    renderTile({ tile: trendTile({ width: 'half' }), editing: true, actions })
+    expect(screen.getByRole('button', { name: 'Move up' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Move down' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Full width' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Remove' })).toBeDisabled()
+  })
+
   it('stale: says the definition cannot be reproduced, links to the report, sends nothing', async () => {
     const client = stubClient()
     renderTile({ tile: trendTile({ report: { ...TREND, stale: true } }), client })

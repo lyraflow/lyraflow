@@ -16,7 +16,7 @@ import type {
   RetentionResult,
   TrendReport,
 } from '../api/types.js'
-import { ProjectProvider } from '../app/ProjectContext.js'
+import { ProjectProvider, useProject } from '../app/ProjectContext.js'
 import { ROUTES } from '../app/Router.js'
 import { Dashboard } from './Dashboard.js'
 import { MAX_TILES } from './dashboards/tileRequest.js'
@@ -246,6 +246,64 @@ function tileOrder(container: HTMLElement): string[] {
     '[data-testid="tile-trend-1"], [data-testid="tile-funnel-3"], [data-testid="tile-retention-2"]',
   )
   return [...cards].map((c) => c.getAttribute('data-testid') ?? '')
+}
+
+/** A promise this test resolves by hand, so a PATCH can be left in flight
+ *  while the screen is driven further. */
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((r) => {
+    resolve = r
+  })
+  return { promise, resolve }
+}
+
+const PROJECTS_TWO: Project[] = [
+  ...PROJECTS,
+  {
+    id: 2,
+    name: 'Beta',
+    slug: 'beta',
+    created_at: T,
+    retention_months: 24,
+    monthly_event_quota: null,
+    disabled_at: null,
+    deleting_at: null,
+  },
+]
+
+/** Project 2's dashboard 7 -- a different name and a different tile, so a
+ *  response belonging to project 1 arriving late is visible rather than
+ *  indistinguishable from what is already on screen. */
+const BETA: DashboardWire = {
+  ...DASH,
+  name: 'Beta board',
+  tile_count: 1,
+  tiles: [{ kind: 'retention', report_id: 2, width: 'half', report: RETENTION }],
+}
+
+function SwitchProject(props: { to: number; label: string }) {
+  const { setActiveId } = useProject()
+  return (
+    <button type="button" onClick={() => setActiveId(props.to)}>
+      {props.label}
+    </button>
+  )
+}
+
+/** Like `renderScreen`, but the project can change while the screen stays
+ *  mounted. */
+function renderTwoProjectScreen(client: ApiClient, at: string) {
+  return render(
+    <MemoryRouter initialEntries={[at]}>
+      <ProjectProvider projects={PROJECTS_TWO} initialId={1}>
+        <SwitchProject to={2} label="switch project" />
+        <Routes>
+          <Route path="/dashboards/:id" element={<Dashboard client={client} />} />
+        </Routes>
+      </ProjectProvider>
+    </MemoryRouter>,
+  )
 }
 
 describe('Dashboard', () => {
@@ -610,5 +668,116 @@ describe('Dashboard', () => {
 
     expect(client.stats).toHaveBeenCalledTimes(1)
     expect(client.runFunnel).toHaveBeenCalledTimes(1)
+  })
+
+  // C1 from the final whole-branch review, from this side: the screen sends
+  // the WHOLE tile array on every edit, dangling tiles included. This pins
+  // that it keeps doing so -- routing the edit around a deleted report
+  // instead would silently drop the tile that is the only thing telling the
+  // operator a report they relied on is gone.
+  it('reorders a layout carrying a deleted report, and sends the dangling tile too', async () => {
+    const dangling: ResolvedTile = { ...funnelTile, report: null }
+    const withDangling: DashboardWire = { ...DASH, tiles: [trendTile, dangling] }
+    const client = fakeClient({
+      dashboard: vi.fn(async () => withDangling),
+      patchDashboard: vi.fn(async () => ({ ...withDangling, tiles: [dangling, trendTile] })),
+    })
+    const { container } = renderScreen({ client, at: '/dashboards/7?edit=1' })
+    const funnel = await screen.findByTestId('tile-funnel-3')
+    expect(within(funnel).getByTestId('tile-deleted')).toBeInTheDocument()
+
+    await userEvent.click(within(funnel).getByRole('button', { name: 'Move up' }))
+    await waitFor(() =>
+      expect(client.patchDashboard).toHaveBeenCalledWith(1, 7, {
+        tiles: [funnelInput, trendInput],
+      }),
+    )
+    await waitFor(() => expect(tileOrder(container)).toEqual(['tile-funnel-3', 'tile-trend-1']))
+  })
+
+  // I1 from the final whole-branch review: every layout control sends the
+  // whole array as it stands on screen, so two clicks before the first
+  // response lands both carry the PRE-EDIT array and the second write
+  // silently replaces the first.
+  it('shuts every layout control while a PATCH is in flight, and sends exactly one', async () => {
+    const gate = deferred<DashboardWire>()
+    const client = fakeClient({
+      patchDashboard: vi.fn(() => gate.promise),
+    })
+    renderScreen({ client, at: '/dashboards/7?edit=1' })
+    const trend = await screen.findByTestId('tile-trend-1')
+    const funnel = screen.getByTestId('tile-funnel-3')
+
+    // A chosen report, so `Add tile` is enabled on its own terms and the
+    // assertion below is about `saving` rather than about an empty select.
+    await userEvent.selectOptions(await screen.findByLabelText('Report to add'), 'retention:2')
+    expect(screen.getByRole('button', { name: 'Add tile' })).toBeEnabled()
+
+    await userEvent.click(within(trend).getByRole('button', { name: 'Move down' }))
+
+    await waitFor(() =>
+      expect(within(funnel).getByRole('button', { name: 'Move up' })).toBeDisabled(),
+    )
+    expect(within(trend).getByRole('button', { name: 'Move down' })).toBeDisabled()
+    expect(within(trend).getByRole('button', { name: 'Full width' })).toBeDisabled()
+    expect(within(trend).getByRole('button', { name: 'Remove' })).toBeDisabled()
+    expect(within(funnel).getByRole('button', { name: 'Remove' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Add tile' })).toBeDisabled()
+
+    // The second click a disabled button is there to refuse.
+    await userEvent.click(within(funnel).getByRole('button', { name: 'Move up' }))
+    expect(client.patchDashboard).toHaveBeenCalledTimes(1)
+
+    gate.resolve(applied({ tiles: [funnelInput, trendInput] }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add tile' })).toBeEnabled())
+    expect(
+      within(screen.getByTestId('tile-trend-1')).getByRole('button', { name: 'Remove' }),
+    ).toBeEnabled()
+    expect(client.patchDashboard).toHaveBeenCalledTimes(1)
+  })
+
+  // I2 from the final whole-branch review: the load effect has a `cancelled`
+  // flag and `patch()` had none, so a PATCH still in flight when the project
+  // changed applied the OLD project's dashboard over the new project's --
+  // and every tile then ran the old project's questions scoped to the new
+  // project's id.
+  it('drops a PATCH response that lands after the project changed', async () => {
+    const gate = deferred<DashboardWire>()
+    const client = fakeClient({
+      dashboard: vi.fn(async (projectId: number) => (projectId === 1 ? DASH : BETA)),
+      patchDashboard: vi.fn(() => gate.promise),
+    })
+    renderTwoProjectScreen(client, '/dashboards/7?edit=1')
+    const trend = await screen.findByTestId('tile-trend-1')
+    await userEvent.click(within(trend).getByRole('button', { name: 'Move down' }))
+
+    await userEvent.click(screen.getByRole('button', { name: 'switch project' }))
+    expect(await screen.findByTestId('tile-retention-2')).toBeInTheDocument()
+    expect(await screen.findByDisplayValue('Beta board')).toBeInTheDocument()
+
+    gate.resolve(applied({ tiles: [funnelInput, trendInput] }))
+
+    await waitFor(() => expect(client.dashboard).toHaveBeenCalledWith(2, 7))
+    expect(screen.getByTestId('tile-retention-2')).toBeInTheDocument()
+    expect(screen.queryByTestId('tile-trend-1')).toBeNull()
+    expect(screen.queryByTestId('tile-funnel-3')).toBeNull()
+    expect(screen.getByDisplayValue('Beta board')).toBeInTheDocument()
+    expect(screen.queryByDisplayValue('Overview')).toBeNull()
+  })
+
+  // I4 from the final whole-branch review: `auto` sends no range at all, so
+  // each endpoint applies its OWN default window and the tiles on one
+  // dashboard show different periods side by side. The screen says so rather
+  // than letting the picker's "Default for this resolution" imply one shared
+  // window.
+  it('says the tiles do not share a window under auto, and stops saying it under a preset', async () => {
+    const { unmount } = renderScreen()
+    await screen.findByTestId('tile-trend-1')
+    expect(screen.getByText(/each tile uses its own report's default window/i)).toBeInTheDocument()
+    unmount()
+
+    renderScreen({ at: '/dashboards/7?range=7d' })
+    await screen.findByTestId('tile-trend-1')
+    expect(screen.queryByText(/each tile uses its own report's default window/i)).toBeNull()
   })
 })
