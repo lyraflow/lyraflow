@@ -27,15 +27,23 @@ const SLUG_B = 'proj-route-b'
 // deletes this project's row mid-suite, so it must never be a slug any
 // other test in this file depends on still existing.
 const SLUG_C = 'proj-route-c'
+// Its own project, used only by the rotate-write-key describe block below:
+// those tests mutate the project's write key repeatedly and must not
+// disturb WRITE_KEY_A/B, which the GET and PATCH describes above assert
+// against directly.
+const SLUG_D = 'proj-route-d'
 const PROJECT_NAME_A = 'ProjectRoutesA'
 const PROJECT_NAME_B = 'ProjectRoutesB'
 const PROJECT_NAME_C = 'ProjectRoutesC'
+const PROJECT_NAME_D = 'ProjectRoutesD'
 const WRITE_KEY_A = 'wk_proj_route_a'
 const SERVER_KEY_A = 'sk_proj_route_a'
 const WRITE_KEY_B = 'wk_proj_route_b'
 const SERVER_KEY_B = 'sk_proj_route_b'
 const WRITE_KEY_C = 'wk_proj_route_c'
 const SERVER_KEY_C = 'sk_proj_route_c'
+const WRITE_KEY_D = 'wk_proj_route_d'
+const SERVER_KEY_D = 'sk_proj_route_d'
 // A real browser UA, not a bare token -- isBot (ingest/routes.ts) would
 // reject anything else before the event ever reaches the counters this
 // suite's Step 6 test depends on.
@@ -57,7 +65,7 @@ async function makeProject(slug: string, name: string, writeKey: string, serverK
 }
 
 async function cleanup(): Promise<void> {
-  await pg.query('DELETE FROM projects WHERE slug = ANY($1)', [[SLUG_A, SLUG_B, SLUG_C]])
+  await pg.query('DELETE FROM projects WHERE slug = ANY($1)', [[SLUG_A, SLUG_B, SLUG_C, SLUG_D]])
 }
 
 beforeAll(async () => {
@@ -76,6 +84,7 @@ beforeAll(async () => {
   PROJECT_ID_A = await makeProject(SLUG_A, PROJECT_NAME_A, WRITE_KEY_A, SERVER_KEY_A)
   PROJECT_ID_B = await makeProject(SLUG_B, PROJECT_NAME_B, WRITE_KEY_B, SERVER_KEY_B)
   await makeProject(SLUG_C, PROJECT_NAME_C, WRITE_KEY_C, SERVER_KEY_C)
+  await makeProject(SLUG_D, PROJECT_NAME_D, WRITE_KEY_D, SERVER_KEY_D)
 
   const config = loadConfig({
     LYRAFLOW_POSTGRES_URL: 'postgres://lyraflow:lyraflow@localhost:5433/lyraflow_test',
@@ -566,5 +575,214 @@ describe('GET /v1/project/usage', () => {
       headers: { 'x-lyraflow-server-key': SERVER_KEY_A },
     })
     expect((after.json() as { events_accepted: number }).events_accepted).toBe(beforeAccepted + 1)
+  })
+})
+
+describe('POST /v1/project/rotate-write-key', () => {
+  it('returns a fresh key and keeps the old one for the default grace', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/project/rotate-write-key',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_D },
+      payload: {},
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['cache-control']).toBe('no-store')
+    const body = res.json()
+    expect(body.write_key).toMatch(/^wk_[0-9a-f]{32}$/)
+    expect(body.write_key).not.toBe(WRITE_KEY_D)
+    const expires = Date.parse(body.previous_write_key_expires_at)
+    expect(expires - Date.now()).toBeGreaterThan(23 * 3600_000)
+    expect(expires - Date.now()).toBeLessThan(25 * 3600_000)
+    expect(Object.keys(body).sort()).toEqual(['previous_write_key_expires_at', 'write_key'])
+  })
+
+  it('ingest accepts both keys during the grace, and only the new one after a hard swap', async () => {
+    const before = await pg.query<{ write_key: string }>(
+      'SELECT write_key FROM projects WHERE slug = $1',
+      [SLUG_D],
+    )
+    const oldKey = before.rows[0]?.write_key as string
+
+    const rotate1 = await app.inject({
+      method: 'POST',
+      url: '/v1/project/rotate-write-key',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_D },
+      payload: { grace_hours: 1 },
+    })
+    expect(rotate1.statusCode).toBe(200)
+    const key1 = rotate1.json().write_key as string
+
+    const trackOld = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': oldKey, 'user-agent': TRACK_UA },
+      payload: { message_id: randomUUID(), anonymous_id: 'rotate-grace', event: 'rotate_probe' },
+    })
+    expect(trackOld.statusCode).toBe(202)
+
+    const trackNew = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': key1, 'user-agent': TRACK_UA },
+      payload: { message_id: randomUUID(), anonymous_id: 'rotate-grace', event: 'rotate_probe' },
+    })
+    expect(trackNew.statusCode).toBe(202)
+
+    const rotate2 = await app.inject({
+      method: 'POST',
+      url: '/v1/project/rotate-write-key',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_D },
+      payload: { grace_hours: 0 },
+    })
+    expect(rotate2.statusCode).toBe(200)
+    expect(rotate2.json().previous_write_key_expires_at).toBeNull()
+    const key2 = rotate2.json().write_key as string
+
+    // key1 was live a moment ago, but the hard swap (grace 0) leaves no
+    // previous key at all -- so it must be refused now, not merely expired.
+    const trackKey1AfterHardSwap = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': key1, 'user-agent': TRACK_UA },
+      payload: { message_id: randomUUID(), anonymous_id: 'rotate-grace', event: 'rotate_probe' },
+    })
+    expect(trackKey1AfterHardSwap.statusCode).toBe(401)
+    expect(trackKey1AfterHardSwap.json().error).toBe('invalid_write_key')
+
+    const trackKey2 = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': key2, 'user-agent': TRACK_UA },
+      payload: { message_id: randomUUID(), anonymous_id: 'rotate-grace', event: 'rotate_probe' },
+    })
+    expect(trackKey2.statusCode).toBe(202)
+  })
+
+  // There is only ever ONE previous key (migration 022). A rotation inside
+  // an existing grace must overwrite that slot with the key it is retiring
+  // NOW, not extend or stack onto the grace an earlier rotation already
+  // granted -- so the key from the first rotation stops working immediately
+  // once the second rotation lands, even though its own 24h grace has not
+  // elapsed.
+  it('a second rotation inside the grace retires the first key at once', async () => {
+    const before = await pg.query<{ write_key: string }>(
+      'SELECT write_key FROM projects WHERE slug = $1',
+      [SLUG_D],
+    )
+    const keyBefore = before.rows[0]?.write_key as string
+
+    const rotate1 = await app.inject({
+      method: 'POST',
+      url: '/v1/project/rotate-write-key',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_D },
+      payload: { grace_hours: 24 },
+    })
+    const key1 = rotate1.json().write_key as string
+
+    const rotate2 = await app.inject({
+      method: 'POST',
+      url: '/v1/project/rotate-write-key',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_D },
+      payload: { grace_hours: 24 },
+    })
+    const key2 = rotate2.json().write_key as string
+
+    const trackKeyBefore = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': keyBefore, 'user-agent': TRACK_UA },
+      payload: {
+        message_id: randomUUID(),
+        anonymous_id: 'rotate-single-prev',
+        event: 'rotate_probe',
+      },
+    })
+    expect(trackKeyBefore.statusCode).toBe(401)
+
+    const trackKey1 = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': key1, 'user-agent': TRACK_UA },
+      payload: {
+        message_id: randomUUID(),
+        anonymous_id: 'rotate-single-prev',
+        event: 'rotate_probe',
+      },
+    })
+    expect(trackKey1.statusCode).toBe(202)
+
+    const trackKey2 = await app.inject({
+      method: 'POST',
+      url: '/v1/track',
+      headers: { 'x-lyraflow-write-key': key2, 'user-agent': TRACK_UA },
+      payload: {
+        message_id: randomUUID(),
+        anonymous_id: 'rotate-single-prev',
+        event: 'rotate_probe',
+      },
+    })
+    expect(trackKey2.statusCode).toBe(202)
+  })
+
+  it.each([
+    ['negative', -1],
+    ['above the max', 721],
+    ['a non-integer', 1.5],
+    ['a numeric string', '24'],
+  ])('rejects grace_hours: %s', async (_name, grace_hours) => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/project/rotate-write-key',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_D },
+      payload: { grace_hours },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toBe('invalid_body')
+  })
+
+  // Invented, beyond the brief's mutation table: every other test in this
+  // block sends 0, 1, or 24 -- none proves 720 itself, the top of the
+  // range, is actually admitted. A schema mutated to `.max(719)` would pass
+  // every other test here.
+  it('accepts grace_hours at the maximum boundary', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/project/rotate-write-key',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_D },
+      payload: { grace_hours: 720 },
+    })
+    expect(res.statusCode).toBe(200)
+    const expires = Date.parse(res.json().previous_write_key_expires_at)
+    expect(expires - Date.now()).toBeGreaterThan(719 * 3600_000)
+    expect(expires - Date.now()).toBeLessThan(721 * 3600_000)
+  })
+
+  it('rejects the write key, which must not reach a server-key route', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/project/rotate-write-key',
+      headers: { 'x-lyraflow-server-key': WRITE_KEY_D },
+      payload: {},
+    })
+    expect(res.statusCode).toBe(401)
+    expect(res.json().error).toBe('invalid_server_key')
+  })
+
+  // No test file in this codebase drives the session-cookie path of
+  // makeServerOrSessionAuthenticator (grep confirms no other *.test.ts uses
+  // SESSION_COOKIE or creates a session) -- so there is no helper here to
+  // copy, and this route reuses that authenticator unmodified rather than
+  // adding a second one. Skipped per this task's brief rather than adding
+  // new session-test infrastructure out of scope for this task.
+  it.todo('works over an admin session too')
+
+  it('rejects a missing key', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/project/rotate-write-key',
+      payload: {},
+    })
+    expect(res.statusCode).toBe(401)
   })
 })

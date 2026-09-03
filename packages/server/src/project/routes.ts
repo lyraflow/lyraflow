@@ -1,3 +1,4 @@
+import { DEFAULT_GRACE_HOURS, MAX_GRACE_HOURS, rotateWriteKey } from '@lyraflow/core'
 import type { Pool } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
@@ -57,6 +58,12 @@ const PatchBody = z
   .refine((b) => b.retention_months !== undefined || b.monthly_event_quota !== undefined, {
     message: 'empty patch',
   })
+
+const RotateBody = z
+  .object({
+    grace_hours: z.number().int().min(0).max(MAX_GRACE_HOURS).default(DEFAULT_GRACE_HOURS),
+  })
+  .strict()
 
 /**
  * The project's own identity, including the write key.
@@ -151,6 +158,37 @@ export function registerProjectRoutes(app: FastifyInstance, deps: ProjectDeps): 
       retention_months: row.retention_months,
       monthly_event_quota:
         row.monthly_event_quota === null ? null : Number(row.monthly_event_quota),
+    })
+  })
+
+  /**
+   * Replace the project's write key. The old key stays valid for
+   * `grace_hours` (default 24, 0 for a hard swap) so pages still serving
+   * the previous snippet keep collecting while caches turn over; after
+   * that they get `401 invalid_write_key`, which the browser SDK treats as
+   * final. Server key OR session: a server-key holder can already read the
+   * write key (GET /v1/project) and delete every person in the project, so
+   * this widens nothing.
+   */
+  app.post('/v1/project/rotate-write-key', async (req, reply) => {
+    const project = await authenticate(req, reply)
+    if (!project) return
+
+    const body = RotateBody.safeParse(req.body ?? {})
+    if (!body.success) return reply.code(400).send({ error: 'invalid_body' })
+
+    const rotated = await rotateWriteKey(pg, project.id, body.data.grace_hours * 3_600_000)
+    if (!rotated) return reply.code(404).send({ error: 'project_not_found' })
+
+    // Same reason PATCH gives: the old key is cached positive for up to a
+    // minute in this process. With a grace that is harmless; with a hard
+    // swap it is exactly the window the caller asked to close.
+    projects.invalidate()
+
+    reply.header('cache-control', 'no-store')
+    return reply.code(200).send({
+      write_key: rotated.writeKey,
+      previous_write_key_expires_at: rotated.previousWriteKeyExpiresAt?.toISOString() ?? null,
     })
   })
 

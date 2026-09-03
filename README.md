@@ -128,7 +128,7 @@ It prints two keys, and the difference between them matters:
 
 | | |
 | --- | --- |
-| **Write key** `wk_…` | **Public.** It can only write events. Ship it in your page source — that is what it is for. |
+| **Write key** `wk_…` | **Public.** It can only write events. Ship it in your page source — that is what it is for. Leaked? Rotate it — see [`POST /v1/project/rotate-write-key`](#post-v1projectrotate-write-key). |
 | **Server key** `sk_…` | **Secret, shown once.** Reads people, merges them, deletes and exports them. Write it down; only its hash is stored, so nothing can recover it for you. |
 
 Run `create-project` again for each additional website you want to track
@@ -725,6 +725,28 @@ nothing about what that caller can reach. `lyraflow snippet` (see
 [`packages/cli/README.md`](packages/cli/README.md)) is the intended way to
 use this endpoint: it prints a paste-ready install snippet with the write key
 already filled in, rather than a caller reading this response by hand.
+
+### `POST /v1/project/rotate-write-key`
+
+Server-key authenticated. Replaces the project's write key and returns the
+new one: `{"write_key", "previous_write_key_expires_at"}`. The body is
+optional and takes `{"grace_hours"}`, an integer from `0` to `720`
+(default `24`): for that long the key being replaced keeps working, so pages
+still serving the old snippet keep collecting while their caches turn over.
+`0` is a hard swap. There is only ever one previous key — rotating again
+inside the grace retires the older one immediately.
+
+Once the grace ends, a page still carrying the old key gets
+`401 invalid_write_key` on its next flush and the SDK stops sending for the
+life of that page, silently apart from one console warning; that is the
+browser SDK's own rule for `401`, documented under [Responses](#responses).
+Lyraflow caches each key's project for a minute, so a retired key can be
+accepted for up to a minute past its expiry by a server that looked it up
+just before — the same window `lyraflow projects delete` waits out.
+
+Rotation is the remedy for a leaked write key. It is not a remedy for a leaked
+**server** key, which is hashed at rest and cannot be rotated in place; that
+remains a new project.
 
 ### `PATCH /v1/project`
 
