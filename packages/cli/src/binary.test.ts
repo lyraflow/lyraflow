@@ -1511,3 +1511,63 @@ describe('the built CLI against a real, in-process server', () => {
     }, 10_000)
   }
 })
+
+/** Sibling of `runCli` above, for the one command in this file that reads
+ * its secret from stdin rather than an argument — `runCli` closes stdin
+ * immediately (`stdio: ['ignore', …]`), which would make this command block
+ * forever waiting for input that will never arrive. */
+function runCliWithStdin(
+  argv: string[],
+  stdin: string,
+  env: NodeJS.ProcessEnv,
+): Promise<RunResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [CLI_ENTRY, ...argv], {
+      env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString()
+    })
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString()
+    })
+    child.on('error', reject)
+    child.on('close', (code) => resolve({ stdout, stderr, code }))
+    child.stdin.end(stdin)
+  })
+}
+
+describe('reset-admin-login', () => {
+  const DB_ENV = {
+    ...process.env,
+    LYRAFLOW_POSTGRES_URL: PG_URL,
+    LYRAFLOW_CLICKHOUSE_URL: CH_CONFIG.url,
+    LYRAFLOW_CLICKHOUSE_USER: CH_CONFIG.username,
+    LYRAFLOW_CLICKHOUSE_PASSWORD: CH_CONFIG.password,
+    LYRAFLOW_CLICKHOUSE_DB: CH_CONFIG.database,
+  }
+
+  it('is set-admin-password under another name: it replaces the email and the password', async () => {
+    await pg.query('DELETE FROM admin_user')
+    await pg.query("INSERT INTO admin_user (email, password_hash) VALUES ('old@example.com', 'x')")
+
+    const res = await runCliWithStdin(
+      ['reset-admin-login', 'new@example.com', '--json'],
+      'a-new-password\n',
+      DB_ENV,
+    )
+
+    expect(res.code).toBe(0)
+    expect(JSON.parse(res.stdout)).toEqual({
+      command: 'set-admin-password',
+      email: 'new@example.com',
+      outcome: 'updated',
+    })
+    const rows = await pg.query<{ email: string }>('SELECT email FROM admin_user')
+    expect(rows.rows.map((r) => r.email)).toEqual(['new@example.com'])
+    await pg.query('DELETE FROM admin_user')
+  })
+})

@@ -11,16 +11,18 @@ from a terminal, not for browsing. It wraps `GET /v1/events`,
 [README](../../README.md) for what each of those endpoints actually does;
 this document is about the CLI's own surface on top of them.
 
-`create-project`, `migrate`, `seed-demo`, `healthcheck`, and `projects` are
-separate, operational commands this binary also ships — `migrate` and
-`healthcheck` once per install, `create-project` once per *project*,
-`seed-demo` only when you want a project full of synthetic data to look at,
-`projects` to list what exists and to destroy one, and none of them per query.
+`create-project`, `migrate`, `seed-demo`, `healthcheck`, `projects` and
+`reset-admin-login` are separate, operational commands this binary also ships
+— `migrate` and `healthcheck` once per install, `create-project` once per
+*project*, `seed-demo` only when you want a project full of synthetic data to
+look at, `projects` to list what exists and to destroy one,
+`reset-admin-login <email>` (also spelled `set-admin-password`, its original
+name) when the admin address or password is lost, and none of them per query.
 See *Running Lyraflow* in the main README for those, *Tracking more than one
 site* for why you might run `create-project` more than once, *Demo data* for
-`seed-demo`, and `lyraflow projects` for the delete and its recovery. Unlike
-everything below, those five talk to Postgres and ClickHouse directly rather
-than over HTTP, so they read the database environment variables and not
+`seed-demo`, `lyraflow projects` for the delete and its recovery, and *Admin
+login* for the reset. Unlike everything below, those six talk to Postgres and
+ClickHouse directly rather than over HTTP, so they read the database environment variables and not
 `LYRAFLOW_HOST`/`LYRAFLOW_SERVER_KEY` — which is also what lets `projects
 delete` work on an install whose server is stopped.
 `healthcheck` reads its own

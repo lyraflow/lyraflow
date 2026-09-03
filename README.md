@@ -3073,18 +3073,27 @@ the section about the screen that uses it.
 
 `./install.sh` generates the admin account the same way it generates the
 database passwords: a random one, written into `.env`, and **printed once at
-the end of a successful install** — the only time you will see it. Losing it
-after that is not a special case; it is the same situation as forgetting any
-other password, and the fix is the same one:
+the end of a successful install** — the only time you will see it.
+
+**Resetting the login.** There is one admin account, and one command that
+resets it. It takes the email address as its argument and the new password on
+stdin, and it sets *both*: whatever address you pass becomes the login, whether
+or not it matches the current one, and every signed-in browser is signed out.
+Forgetting the password and forgetting the address are therefore the same
+situation with the same fix, and neither needs the other to recover:
 
 ```sh
 read -rsp 'password: ' P; echo
 printf '%s' "$P" | docker compose exec -T lyraflow \
-  node packages/cli/dist/index.js set-admin-password admin@localhost
+  node packages/cli/dist/index.js reset-admin-login you@example.com
 unset P
 ```
 
-`set-admin-password` takes the password on stdin, never as an argument — an
+`reset-admin-login` and `set-admin-password` are the same command under two
+names; the second is the original and is what the UI's first-run screen and
+older docs print.
+
+The command takes the password on stdin, never as an argument — an
 argument lands in shell history and in `ps` output for every user on the
 box. `read -rs` is there for the same reason and is not merely tidier: an
 `echo 'a new password' | ...` keeps the argument off `ps` but writes the

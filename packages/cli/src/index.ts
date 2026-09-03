@@ -640,7 +640,14 @@ async function main(): Promise<void> {
       break
     }
 
+    case 'reset-admin-login':
     case 'set-admin-password': {
+      // Two names, one command. `reset-admin-login` exists because the
+      // original name reads as "change the password" when the command in
+      // fact replaces BOTH the email and the password of the single admin
+      // row (set-admin-password.ts). The JSON `command` field below stays
+      // `set-admin-password` under either spelling, so a documented output
+      // shape does not depend on which alias was typed.
       const isTty = process.stdout.isTTY ?? false
       const write = (s: string) => process.stdout.write(s)
       const writeErr = (s: string) => process.stderr.write(s)
@@ -667,7 +674,8 @@ async function main(): Promise<void> {
         break
       }
 
-      const USAGE = 'usage: lyraflow set-admin-password <email>  (password on stdin)'
+      const USAGE =
+        'usage: lyraflow reset-admin-login <email>  (password on stdin; alias of set-admin-password)'
       const [email] = positionals
       if (email === undefined) {
         process.exitCode = reportUsageError(new UsageError(USAGE), mode, { writeErr })
@@ -899,7 +907,7 @@ async function main(): Promise<void> {
 
     default:
       console.error(
-        'Usage: lyraflow <--version|migrate|create-project|set-admin-password|seed-demo|healthcheck|events|stats|persons|deletions|projects|segments|funnels|schema|usage|snippet>',
+        'Usage: lyraflow <--version|migrate|create-project|set-admin-password|reset-admin-login|seed-demo|healthcheck|events|stats|persons|deletions|projects|segments|funnels|schema|usage|snippet>',
       )
       process.exit(2)
   }
