@@ -39,6 +39,7 @@ function renderAt(path: string) {
      * this every test that lands on /settings dies inside `AboutSection`,
      * which says nothing about the router. */
     meta: vi.fn(async () => ({ version: '0.10.0' })),
+    dashboards: vi.fn(async () => []),
     funnels: vi.fn(async () => []),
     segments: vi.fn(async () => []),
     trendReports: vi.fn(async () => []),
@@ -57,6 +58,21 @@ function renderAt(path: string) {
 }
 
 describe('AppRouter', () => {
+  // Task 6: the dashboards list and its create form. Split into two tests
+  // rather than the brief's single one -- this file renders once per test
+  // (see every other resolution guard below), and a second `renderAt` in
+  // the same test would mount a second tree beside the first instead of
+  // replacing it.
+  it('renders the dashboards list at /dashboards', async () => {
+    renderAt('/dashboards')
+    expect(await screen.findByRole('heading', { name: /^dashboards$/i })).toBeInTheDocument()
+  })
+
+  it('renders the dashboard create form at /dashboards/new', async () => {
+    renderAt('/dashboards/new')
+    expect(await screen.findByRole('heading', { name: /new dashboard/i })).toBeInTheDocument()
+  })
+
   it('renders the feed at the root', async () => {
     renderAt('/')
     expect(await screen.findByRole('tab', { name: /accepted/i })).toBeInTheDocument()

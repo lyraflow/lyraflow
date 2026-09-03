@@ -2,6 +2,7 @@ import {
   ChevronDown,
   Filter,
   Grid3x3,
+  LayoutDashboard,
   LayoutList,
   LineChart,
   LogOut,
@@ -304,6 +305,10 @@ export function Shell(props: {
           Lyraflow
         </div>
         <nav className="flex items-center gap-1 sm:flex-col sm:items-stretch sm:gap-0.5 sm:p-2">
+          <NavLink to={ROUTES.dashboards} className={({ isActive }) => navLinkClass(isActive)}>
+            <LayoutDashboard className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
+            <span className="sr-only sm:not-sr-only">Dashboards</span>
+          </NavLink>
           {/*
            * Real links now that `Router.tsx` gives this app somewhere to
            * route to -- Important 10 previously ruled out a plain anchor

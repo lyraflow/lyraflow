@@ -111,6 +111,27 @@ describe('Shell', () => {
     expect(screen.getByRole('link', { name: /feed/i })).toHaveAttribute('aria-current', 'page')
   })
 
+  // Task 6: Dashboards is the first nav entry, above Feed. Same
+  // aria-current shape as the other resolution guards in this file --
+  // rendered AT /dashboards, its own link carries aria-current and Feed's
+  // does not, so this can't pass from the link merely existing.
+  it('renders Dashboards as a navigation link, current at /dashboards', () => {
+    render(
+      <MemoryRouter initialEntries={['/dashboards']}>
+        <ProjectProvider projects={PROJECTS} initialId={1}>
+          <Shell email="a@b.c" onLogout={vi.fn()} client={fakeClient()}>
+            {null}
+          </Shell>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    expect(screen.getByRole('link', { name: /dashboards/i })).toHaveAttribute(
+      'aria-current',
+      'page',
+    )
+    expect(screen.getByRole('link', { name: /^feed$/i })).not.toHaveAttribute('aria-current')
+  })
+
   it('shows the active project in the switcher', () => {
     // initialId is deliberately projects[1], not projects[0]: with the
     // fixture's original initialId={1} (== PROJECTS[0].id), a switcher that

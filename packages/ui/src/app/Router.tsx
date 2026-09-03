@@ -1,5 +1,7 @@
 import { BrowserRouter, Navigate, Route, Routes, useSearchParams } from 'react-router'
 import type { ApiClient } from '../api/client.js'
+import { DashboardNew } from '../screens/DashboardNew.js'
+import { Dashboards } from '../screens/Dashboards.js'
 import { Feed } from '../screens/Feed.js'
 import { FunnelBuilder } from '../screens/FunnelBuilder.js'
 import { FunnelDetail } from '../screens/FunnelDetail.js'
@@ -28,6 +30,8 @@ import { Shell } from './Shell.js'
  * here must keep that property too.
  */
 export const ROUTES = {
+  dashboards: '/dashboards',
+  dashboardNew: '/dashboards/new',
   feed: '/feed',
   settings: '/settings',
   profile: '/profile',
@@ -44,6 +48,7 @@ export const ROUTES = {
 
 /** Path builders for the parameterised routes. Numeric ids only, so no final
  * segment can ever acquire a dot. */
+export const dashboardPath = (id: number) => `/dashboards/${id}`
 export const funnelPath = (id: number) => `/funnels/${id}`
 export const funnelEditPath = (id: number) => `/funnels/${id}/edit`
 export const segmentPath = (id: number) => `/segments/${id}`
@@ -108,6 +113,8 @@ export function AppRouter(props: {
    * matching `onUnauthorized`'s own shape. */
   onSessionStale?(): void
 }) {
+  const dashboards = <Dashboards client={props.client} onUnauthorized={props.onUnauthorized} />
+  const dashboardNew = <DashboardNew client={props.client} onUnauthorized={props.onUnauthorized} />
   const feed = <Feed client={props.client} onUnauthorized={props.onUnauthorized} />
   // IMPORTANT 3 from the whole-branch review: `onUnauthorized` used to be
   // handed only to `Feed` here -- `Settings` has its own two fetches
@@ -218,6 +225,16 @@ export function AppRouter(props: {
         <Routes>
           <Route path="/" element={feed} />
           <Route path={ROUTES.feed} element={feed} />
+          {/*
+           * No `key`s on this pair, unlike the funnel/segment/trend/retention
+           * new-vs-detail pairs above: `/dashboards/new` (`DashboardNew`) and
+           * `/dashboards/:id` (a later task's `Dashboard`) are different
+           * component TYPES, so `<Routes>` remounts on navigation between them
+           * without help. Keys only earn their place where the same
+           * component serves both destinations.
+           */}
+          <Route path={ROUTES.dashboards} element={dashboards} />
+          <Route path={ROUTES.dashboardNew} element={dashboardNew} />
           <Route path={ROUTES.settings} element={settings} />
           <Route path={ROUTES.profile} element={profile} />
           {/*
