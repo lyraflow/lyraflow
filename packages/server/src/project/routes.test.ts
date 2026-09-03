@@ -4,6 +4,7 @@ import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow
 import type { FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { buildApp } from '../app.js'
+import { ensureAdminUser } from '../auth/bootstrap.js'
 import { hashServerKey } from '../auth/project-cache.js'
 import { loadConfig } from '../config.js'
 import { Readiness } from '../health.js'
@@ -50,9 +51,21 @@ const SERVER_KEY_D = 'sk_proj_route_d'
 const TRACK_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/131.0 Safari/537.36'
 
+// Admin session, for the rotate-write-key describe block's "works over an
+// admin session too" test -- the only test in this file that authenticates
+// as a session rather than a server key. Single-tenant, same as
+// admin-routes.test.ts and auth/wiring.test.ts: cleared in both beforeAll
+// and afterAll rather than assumed empty, since admin_user holds at most
+// one row and another suite's leftover row (a different email/password)
+// would otherwise make this file's own login fail.
+const ADMIN_EMAIL = 'proj-route-admin@example.test'
+const ADMIN_PASSWORD = 'proj-route-admin-password'
+
 let app: FastifyInstance
 let PROJECT_ID_A = 0
 let PROJECT_ID_B = 0
+let PROJECT_ID_D = 0
+let sessionHeaders: Record<string, string>
 
 async function makeProject(slug: string, name: string, writeKey: string, serverKey: string) {
   await pg.query('DELETE FROM projects WHERE slug = $1', [slug])
@@ -62,6 +75,11 @@ async function makeProject(slug: string, name: string, writeKey: string, serverK
     [name, slug, writeKey, hashServerKey(serverKey)],
   )
   return Number(r.rows[0]?.id)
+}
+
+/** The cookie value only, from a Set-Cookie header -- same helper as admin-routes.test.ts. */
+function cookieValue(setCookie: string): string {
+  return (setCookie.split(';')[0] ?? '').split('=')[1] ?? ''
 }
 
 async function cleanup(): Promise<void> {
@@ -84,7 +102,10 @@ beforeAll(async () => {
   PROJECT_ID_A = await makeProject(SLUG_A, PROJECT_NAME_A, WRITE_KEY_A, SERVER_KEY_A)
   PROJECT_ID_B = await makeProject(SLUG_B, PROJECT_NAME_B, WRITE_KEY_B, SERVER_KEY_B)
   await makeProject(SLUG_C, PROJECT_NAME_C, WRITE_KEY_C, SERVER_KEY_C)
-  await makeProject(SLUG_D, PROJECT_NAME_D, WRITE_KEY_D, SERVER_KEY_D)
+  PROJECT_ID_D = await makeProject(SLUG_D, PROJECT_NAME_D, WRITE_KEY_D, SERVER_KEY_D)
+
+  await pg.query('DELETE FROM admin_user')
+  await ensureAdminUser(pg, { email: ADMIN_EMAIL, password: ADMIN_PASSWORD })
 
   const config = loadConfig({
     LYRAFLOW_POSTGRES_URL: 'postgres://lyraflow:lyraflow@localhost:5433/lyraflow_test',
@@ -98,12 +119,23 @@ beforeAll(async () => {
   readiness.markReady()
   app = buildApp({ config, pg, ch, readiness })
   await app.ready()
+
+  const login = await app.inject({
+    method: 'POST',
+    url: '/v1/auth/login',
+    headers: { 'x-lyraflow-ui': '1' },
+    payload: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD },
+  })
+  const setCookie = login.headers['set-cookie']
+  const cookie = `lf_session=${cookieValue(Array.isArray(setCookie) ? (setCookie[0] ?? '') : (setCookie ?? ''))}`
+  sessionHeaders = { cookie, 'x-lyraflow-ui': '1', 'x-lyraflow-project': String(PROJECT_ID_D) }
 })
 
 afterAll(async () => {
   await app.deps.buffer.flush()
   await app.close()
   await cleanup()
+  await pg.query('DELETE FROM admin_user')
   await pg.end()
   await ch.close()
 })
@@ -769,13 +801,56 @@ describe('POST /v1/project/rotate-write-key', () => {
     expect(res.json().error).toBe('invalid_server_key')
   })
 
-  // No test file in this codebase drives the session-cookie path of
-  // makeServerOrSessionAuthenticator (grep confirms no other *.test.ts uses
-  // SESSION_COOKIE or creates a session) -- so there is no helper here to
-  // copy, and this route reuses that authenticator unmodified rather than
-  // adding a second one. Skipped per this task's brief rather than adding
-  // new session-test infrastructure out of scope for this task.
-  it.todo('works over an admin session too')
+  // This route's authenticate is makeServerOrSessionAuthenticator, the SAME
+  // function admin-routes.test.ts's GET/POST /v1/projects tests drive over a
+  // session -- so this reuses that file's helper shape (login, take the
+  // cookie off Set-Cookie, resend it) rather than inventing a second one.
+  // The session path additionally needs x-lyraflow-ui (bridge.ts's
+  // missing_ui_header guard) and x-lyraflow-project (a session names no
+  // project on its own; PROJECT_HEADER is how the caller picks one).
+  it('works over an admin session too', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/project/rotate-write-key',
+      headers: sessionHeaders,
+      payload: {},
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['cache-control']).toBe('no-store')
+    expect(res.json().write_key).toMatch(/^wk_[0-9a-f]{32}$/)
+  })
+
+  // THE test for the `req.body ?? {}` fallback in routes.ts. A request with
+  // no payload and no content-type leaves req.body undefined -- unlike every
+  // other test in this block, which sends an explicit `{}`. Confirms the
+  // fallback lands on RotateBody's own default (24h) rather than throwing
+  // (which app.ts's catch-all would render as a 503) or being rejected.
+  it('accepts a bodyless request (no payload, no content-type) with the default grace', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/project/rotate-write-key',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_D },
+    })
+    expect(res.statusCode).toBe(200)
+    const expires = Date.parse(res.json().previous_write_key_expires_at)
+    expect(expires - Date.now()).toBeGreaterThan(23 * 3600_000)
+    expect(expires - Date.now()).toBeLessThan(25 * 3600_000)
+  })
+
+  // RotateBody is `.strict()` -- an unrecognised field must be refused
+  // rather than silently ignored, which is the difference between a caller
+  // finding out their payload has a typo and a caller assuming a field took
+  // effect when Zod quietly dropped it.
+  it('rejects an unknown field with 400 invalid_body', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/project/rotate-write-key',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_D },
+      payload: { grace_hours: 1, foo: 'bar' },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toBe('invalid_body')
+  })
 
   it('rejects a missing key', async () => {
     const res = await app.inject({
