@@ -184,3 +184,7 @@ export function registerTrendRoutes(app: FastifyInstance, deps: TrendDeps): void
     return reply.code(204).send()
   })
 }
+
+/** The dashboard detail embeds a tile's report in this exact shape -- one
+ *  wire form per report kind, never a second one (see dashboards/resolve.ts). */
+export { toWire as trendToWire }

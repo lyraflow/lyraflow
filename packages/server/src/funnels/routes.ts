@@ -794,3 +794,6 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
     }
   })
 }
+
+/** See `trendToWire` in reports/trend-routes.ts. */
+export { toWire as funnelToWire }

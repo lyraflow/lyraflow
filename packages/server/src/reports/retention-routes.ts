@@ -182,3 +182,6 @@ export function registerRetentionReportRoutes(
     return reply.code(204).send()
   })
 }
+
+/** See `trendToWire` in trend-routes.ts. */
+export { toWire as retentionReportToWire }
