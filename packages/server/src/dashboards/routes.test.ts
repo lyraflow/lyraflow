@@ -219,8 +219,7 @@ describe('dashboard routes', () => {
 
   // I2 from the Task 4 review: the GET guards above were pinned, PATCH and
   // DELETE were not. Each of the four tests below fails on exactly its own
-  // guard when that guard is removed -- see task-4-report.md for the
-  // mutation results.
+  // guard when that guard is removed.
   it('400s a malformed id on PATCH and on DELETE', async () => {
     expect((await call('PATCH', '/v1/dashboards/abc', { name: 'X' })).json()).toEqual({
       error: 'invalid_dashboard_id',
