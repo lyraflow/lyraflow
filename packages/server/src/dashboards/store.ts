@@ -57,6 +57,15 @@ export class DuplicateDashboardNameError extends Error {
 }
 
 const UNIQUE_VIOLATION = '23505'
+/** The name UNIQUE constraint (`023_dashboards.sql`'s `UNIQUE (project_id, name)`). */
+const NAME_UNIQUE_CONSTRAINT = 'dashboards_project_id_name_key'
+/** The one-home-per-project partial unique index -- also a source of
+ *  SQLSTATE 23505, and NOT the same failure as the one above. Confirmed
+ *  against `pg_constraint`/`pg_indexes` on the test database, not guessed:
+ *  Postgres reports a violated unique INDEX under `err.constraint` exactly
+ *  as it does a named CONSTRAINT, even though a partial unique index has
+ *  no row in `pg_constraint` at all. */
+const HOME_UNIQUE_INDEX = 'dashboards_one_home_per_project'
 
 interface Row {
   id: string
@@ -84,8 +93,21 @@ function hydrate(row: Row): StoredDashboard {
   }
 }
 
-function isUniqueViolation(err: unknown): boolean {
-  return (err as { code?: string } | null)?.code === UNIQUE_VIOLATION
+/**
+ * True when `err` is a Postgres unique-violation (23505) against exactly
+ * the named constraint or index -- NOT "any 23505", because `dashboards`
+ * has two independent sources of that SQLSTATE (`NAME_UNIQUE_CONSTRAINT`
+ * and `HOME_UNIQUE_INDEX`) and they mean different things: one is a
+ * caller mistake (`DuplicateDashboardNameError`), the other is a race
+ * `#setHome` retries. Collapsing them onto the SQLSTATE alone -- the
+ * earlier version of this function did -- makes the second kind
+ * unreachable: `#updateRow`'s catch would convert BOTH into
+ * `DuplicateDashboardNameError`, and `#setHome`'s retry, gated on seeing
+ * the raw error, would never fire.
+ */
+function violatesConstraint(err: unknown, constraint: string): boolean {
+  const e = err as { code?: string; constraint?: string } | null
+  return e?.code === UNIQUE_VIOLATION && e?.constraint === constraint
 }
 
 /**
@@ -131,7 +153,7 @@ export class DashboardStore {
       if (!row) throw new Error('INSERT ... RETURNING produced no row')
       return hydrate(row)
     } catch (err) {
-      if (isUniqueViolation(err)) throw new DuplicateDashboardNameError()
+      if (violatesConstraint(err, NAME_UNIQUE_CONSTRAINT)) throw new DuplicateDashboardNameError()
       throw err
     }
   }
@@ -173,7 +195,10 @@ export class DashboardStore {
       const row = r.rows[0]
       return row ? hydrate(row) : null
     } catch (err) {
-      if (isUniqueViolation(err)) throw new DuplicateDashboardNameError()
+      // A 23505 here from `#setHome`'s connection can be EITHER source --
+      // only the name check is converted. A `HOME_UNIQUE_INDEX` violation
+      // is left raw so `#setHome`'s catch can see it and retry.
+      if (violatesConstraint(err, NAME_UNIQUE_CONSTRAINT)) throw new DuplicateDashboardNameError()
       throw err
     }
   }
@@ -183,12 +208,21 @@ export class DashboardStore {
     id: number,
     patch: DashboardPatch,
   ): Promise<StoredDashboard | null> {
-    // One retry: the only way the transaction fails on the partial index
+    // One retry: the only way the transaction fails on `HOME_UNIQUE_INDEX`
     // is a concurrent set-home that committed between our clear and our
     // set. The second attempt sees that row as the current home and clears
-    // it. A second failure is not that race and is thrown.
+    // it. Gated on `violatesConstraint(err, HOME_UNIQUE_INDEX)`, not on
+    // SQLSTATE alone -- see that function's docstring for why a caller's
+    // own name collision (already converted to `DuplicateDashboardNameError`
+    // by `#updateRow`, and so carrying no `.constraint` at all) falls
+    // through to `throw err` below without an extra `instanceof` guard: it
+    // simply never matches `violatesConstraint`.
     for (let attempt = 0; ; attempt++) {
       const client = await this.pool.connect()
+      // Set only if ROLLBACK itself fails, below, and passed to
+      // `client.release()` in `finally` -- see that catch block for why,
+      // same reasoning and pattern as `ProjectDeletionStore.request`.
+      let releaseErr: Error | undefined
       try {
         await client.query('BEGIN')
         await client.query(
@@ -199,17 +233,26 @@ export class DashboardStore {
         await client.query('COMMIT')
         return updated
       } catch (err) {
-        await client.query('ROLLBACK')
-        if (
-          attempt === 0 &&
-          isUniqueViolation(err) &&
-          !(err instanceof DuplicateDashboardNameError)
-        ) {
+        // ROLLBACK itself can fail (e.g. a dead connection); that must not
+        // replace `err`, which is what this method throws. A rollback
+        // failure still has to be dealt with: `client.release()` with NO
+        // argument returns the connection to the pool's IDLE list
+        // regardless of whether the transaction was ever rolled back, and
+        // every later query anyone sends over it then fails with "current
+        // transaction is aborted" -- permanently. `client.release(err)`,
+        // called with a truthy argument, is what makes the pool DESTROY
+        // the connection instead of recycling it.
+        try {
+          await client.query('ROLLBACK')
+        } catch (rollbackErr) {
+          releaseErr = rollbackErr instanceof Error ? rollbackErr : new Error(String(rollbackErr))
+        }
+        if (attempt === 0 && violatesConstraint(err, HOME_UNIQUE_INDEX)) {
           continue
         }
         throw err
       } finally {
-        client.release()
+        client.release(releaseErr)
       }
     }
   }

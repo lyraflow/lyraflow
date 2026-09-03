@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
+import { type Pool, createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { DashboardStore, DuplicateDashboardNameError, type Tile } from './store.js'
 
@@ -168,5 +168,158 @@ describe('DashboardStore', () => {
       [made.id],
     )
     expect(r.rows[0]?.definition_version).toBe(1)
+  })
+})
+
+/**
+ * `#setHome`'s failure paths, tested against a fake pool/client rather than
+ * real Postgres -- same split as `PersonAliases.alias`'s retry loop
+ * (`packages/server/src/identity/aliases.test.ts`) and
+ * `ProjectDeletionStore.request`'s rollback-failure test
+ * (`packages/server/src/privacy/deletion-store.test.ts`): the real
+ * database proves the transaction WORKS (the "setting home moves it" and
+ * "two concurrent" tests above), but reproducing a genuine second
+ * concurrent 23505 collision, or a broken connection whose ROLLBACK itself
+ * fails, deterministically from a test is not practical against a live
+ * server. A fake client whose `query` is scripted to fail on a chosen
+ * statement pins `#setHome`'s own control flow -- which errors retry, how
+ * many times, what reaches `client.release()` -- independent of winning a
+ * race.
+ *
+ * `dashboards_project_id_name_key` and `dashboards_one_home_per_project`
+ * are the real names confirmed against `pg_constraint`/`pg_indexes` on the
+ * test database, not guessed.
+ */
+
+function fakeError(
+  code: string,
+  constraint?: string,
+): Error & { code: string; constraint?: string } {
+  return Object.assign(new Error(`SQLSTATE ${code}`), { code, constraint })
+}
+
+const SUCCESS_ROW = {
+  id: '1',
+  name: 'B',
+  tiles: [],
+  is_home: true,
+  definition_version: 1,
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-01T00:00:00Z',
+}
+
+/**
+ * A fake `Pool` whose one `connect()` hands back one fake client, scripted
+ * around `#setHome`'s exact statement sequence: BEGIN, the clear ("SET
+ * is_home = false"), the set (`#updateRow`'s UPDATE, matched on a
+ * substring unique to it), COMMIT, ROLLBACK. `setFailures[n]` is thrown by
+ * the (n+1)th "set" call; a call past the end of the array succeeds.
+ */
+function fakeHomeClient(opts: { setFailures: Array<Error | null>; rollbackError?: Error }) {
+  const calls = { begin: 0, clear: 0, set: 0, commit: 0, rollback: 0 }
+  let setCallIndex = 0
+  const releaseCalls: unknown[] = []
+  const client = {
+    query: async (text: string) => {
+      if (text === 'BEGIN') {
+        calls.begin++
+        return { rows: [] }
+      }
+      if (text.includes('is_home = false')) {
+        calls.clear++
+        return { rows: [], rowCount: 0 }
+      }
+      if (text.includes('COALESCE($3, name)')) {
+        calls.set++
+        const failure = opts.setFailures[setCallIndex++]
+        if (failure) throw failure
+        return { rows: [SUCCESS_ROW] }
+      }
+      if (text === 'COMMIT') {
+        calls.commit++
+        return { rows: [] }
+      }
+      if (text === 'ROLLBACK') {
+        calls.rollback++
+        if (opts.rollbackError) throw opts.rollbackError
+        return { rows: [] }
+      }
+      throw new Error(`unexpected query in fake client: ${text}`)
+    },
+    release: (err?: unknown) => {
+      releaseCalls.push(err)
+    },
+  }
+  const pool = { connect: async () => client } as unknown as Pool
+  return { pool, calls, releaseCalls }
+}
+
+describe('DashboardStore#setHome failure paths (fake pool/client)', () => {
+  it('retries exactly once on a partial-index violation, and the second attempt wins', async () => {
+    const { pool, calls } = fakeHomeClient({
+      setFailures: [fakeError('23505', 'dashboards_one_home_per_project'), null],
+    })
+    const store = new DashboardStore(pool)
+    const result = await store.update(1, 1, { is_home: true })
+    expect(result).toMatchObject({ id: 1, name: 'B', is_home: true })
+    expect(calls.clear).toBe(2)
+    expect(calls.set).toBe(2)
+    expect(calls.begin).toBe(2)
+    expect(calls.commit).toBe(1)
+  })
+
+  it('a second partial-index violation propagates raw, not as DuplicateDashboardNameError', async () => {
+    const { pool, calls } = fakeHomeClient({
+      setFailures: [
+        fakeError('23505', 'dashboards_one_home_per_project'),
+        fakeError('23505', 'dashboards_one_home_per_project'),
+      ],
+    })
+    const store = new DashboardStore(pool)
+    let caught: unknown
+    try {
+      await store.update(1, 1, { is_home: true })
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).not.toBeInstanceOf(DuplicateDashboardNameError)
+    expect((caught as { code?: string } | undefined)?.code).toBe('23505')
+    expect(calls.begin).toBe(2)
+    expect(calls.set).toBe(2)
+    expect(calls.commit).toBe(0)
+  })
+
+  it('a name violation inside the transaction propagates as DuplicateDashboardNameError, with no retry', async () => {
+    const { pool, calls } = fakeHomeClient({
+      setFailures: [fakeError('23505', 'dashboards_project_id_name_key')],
+    })
+    const store = new DashboardStore(pool)
+    await expect(store.update(1, 1, { is_home: true, name: 'Taken' })).rejects.toBeInstanceOf(
+      DuplicateDashboardNameError,
+    )
+    expect(calls.begin).toBe(1)
+    expect(calls.set).toBe(1)
+  })
+
+  it('destroys the connection, not recycling it, when ROLLBACK itself fails, and surfaces the original error', async () => {
+    const { pool, calls, releaseCalls } = fakeHomeClient({
+      setFailures: [new Error('deliberate set failure')],
+      rollbackError: new Error('deliberate rollback failure'),
+    })
+    const store = new DashboardStore(pool)
+    await expect(store.update(1, 1, { is_home: true })).rejects.toThrow('deliberate set failure')
+    // Not a home-index violation, so no retry -- one attempt only.
+    expect(calls.begin).toBe(1)
+    expect(releaseCalls).toHaveLength(1)
+    expect(releaseCalls[0]).toBeInstanceOf(Error)
+    expect((releaseCalls[0] as Error).message).toBe('deliberate rollback failure')
+  })
+
+  it('releases the connection with no error argument on success', async () => {
+    const { pool, releaseCalls } = fakeHomeClient({ setFailures: [null] })
+    const store = new DashboardStore(pool)
+    await store.update(1, 1, { is_home: true })
+    expect(releaseCalls).toHaveLength(1)
+    expect(releaseCalls[0]).toBeUndefined()
   })
 })
