@@ -216,8 +216,10 @@ if [ -n "$ADMIN_PASSWORD" ]; then
   echo "Admin login, at $HOST:"
   echo "  email:    $ADMIN_EMAIL"
   echo "  password: $ADMIN_PASSWORD"
-  echo "This is printed once. Change it with:"
-  echo "  docker compose exec lyraflow node packages/cli/dist/index.js set-admin-password $ADMIN_EMAIL"
+  echo "  read -rsp 'password: ' P; echo"
+  echo "  printf '%s' \"\$P\" | docker compose exec -T lyraflow \\"
+  echo "    node packages/cli/dist/index.js reset-admin-login $ADMIN_EMAIL"
+  echo "  unset P"
 else
   echo "This install predates the admin account, so .env has no"
   echo "LYRAFLOW_ADMIN_PASSWORD and there is nothing to log in with yet. Set one:"
