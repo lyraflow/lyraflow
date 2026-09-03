@@ -719,6 +719,37 @@ describe('createClient', () => {
     })
   })
 
+  describe('dashboards', () => {
+    // Five calls in one test rather than one apiece: `fakeFetch` answers
+    // every call with the same fixed body, so there is nothing dashboard-
+    // specific to assert per method beyond the verb, the path and the
+    // project header -- the same shape the brief itself asked for. The list
+    // envelope unwrap is the one return value worth checking, on the first
+    // call; the rest are checked by their request only.
+    it('dashboards: unwraps the list envelope and sends the project header on all five', async () => {
+      const f = fakeFetch(200, { dashboards: [] })
+      const client = createClient(f as unknown as typeof fetch)
+      expect(await client.dashboards(1)).toEqual([])
+      await client.dashboard(1, 7)
+      await client.createDashboard(1, { name: 'A' })
+      await client.patchDashboard(1, 7, { is_home: true })
+      await client.deleteDashboard(1, 7)
+
+      const calls = f.mock.calls as unknown as [string, RequestInit][]
+      expect(calls.map(([url, init]) => [url, init.method ?? 'GET'])).toEqual([
+        ['/v1/dashboards', 'GET'],
+        ['/v1/dashboards/7', 'GET'],
+        ['/v1/dashboards', 'POST'],
+        ['/v1/dashboards/7', 'PATCH'],
+        ['/v1/dashboards/7', 'DELETE'],
+      ])
+      for (const [, init] of calls) {
+        expect(new Headers(init.headers).get('x-lyraflow-project')).toBe('1')
+      }
+      expect(calls[3]?.[1].body).toBe(JSON.stringify({ is_home: true }))
+    })
+  })
+
   describe('segments', () => {
     // Invented: `segment` (singular) had zero coverage the way `funnel`
     // (singular) once did -- mutating it to send

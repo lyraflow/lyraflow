@@ -1,6 +1,10 @@
 import { dedupeInFlight } from './dedupe.js'
 import type {
   CreatedProject,
+  Dashboard,
+  DashboardInput,
+  DashboardPatch,
+  DashboardSummary,
   DeletionStatus,
   EventsPage,
   EventsQuery,
@@ -213,6 +217,11 @@ export interface ApiClient {
     patch: Partial<RetentionReportInput>,
   ): Promise<RetentionReport>
   deleteRetentionReport(projectId: number, id: number): Promise<void>
+  dashboards(projectId: number): Promise<DashboardSummary[]>
+  dashboard(projectId: number, id: number): Promise<Dashboard>
+  createDashboard(projectId: number, body: DashboardInput): Promise<Dashboard>
+  patchDashboard(projectId: number, id: number, patch: DashboardPatch): Promise<Dashboard>
+  deleteDashboard(projectId: number, id: number): Promise<void>
   segments(projectId: number): Promise<Segment[]>
   segment(projectId: number, id: number): Promise<Segment>
   createSegment(
@@ -498,6 +507,15 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
       ),
     deleteRetentionReport: (projectId, id) =>
       call(`/v1/retention-reports/${id}`, { method: 'DELETE' }, projectId),
+    dashboards: async (projectId) =>
+      (await call<{ dashboards: DashboardSummary[] }>('/v1/dashboards', {}, projectId)).dashboards,
+    dashboard: (projectId, id) => call(`/v1/dashboards/${id}`, {}, projectId),
+    createDashboard: (projectId, body) =>
+      call('/v1/dashboards', { method: 'POST', body: JSON.stringify(body) }, projectId),
+    patchDashboard: (projectId, id, patch) =>
+      call(`/v1/dashboards/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }, projectId),
+    deleteDashboard: (projectId, id) =>
+      call(`/v1/dashboards/${id}`, { method: 'DELETE' }, projectId),
     segments: async (projectId) =>
       (await call<{ segments: Segment[] }>('/v1/segments', {}, projectId)).segments,
     segment: (projectId, id) => call(`/v1/segments/${id}`, {}, projectId),
