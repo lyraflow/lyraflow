@@ -43,4 +43,27 @@ describe('createRunQueue', () => {
     await expect(first).rejects.toThrow('boom')
     expect(await second).toBe('ok')
   })
+
+  it('a task that throws synchronously rejects its own caller and frees its slot', async () => {
+    // `inFlight++` happens before `task()`, so a SYNCHRONOUS throw escapes
+    // the promise chain that decrements it: the slot leaks forever and every
+    // task queued behind it waits on a queue that is permanently full.
+    const q = createRunQueue(1)
+    const first = q.run<string>(() => {
+      throw new Error('sync boom')
+    })
+    await expect(first).rejects.toThrow('sync boom')
+    let started = false
+    const second = q.run(async () => {
+      started = true
+      return 'ok'
+    })
+    expect(await second).toBe('ok')
+    expect(started).toBe(true)
+    // The slot is freed by a `finally` one link further along the chain than
+    // the `then` that settled the caller, so it has not run yet at the line
+    // above. One turn of the microtask queue, then the count is final.
+    await Promise.resolve()
+    expect(q.inFlight).toBe(0)
+  })
 })

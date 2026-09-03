@@ -5,7 +5,12 @@ import type {
   StatsQuery,
   TrendReport,
 } from '../../api/types.js'
-import { MAX_COHORTS, type RetentionParams, cohortCount } from '../retention/params.js'
+import {
+  MAX_COHORTS,
+  type RetentionParams,
+  cohortCount,
+  tooManyCohorts,
+} from '../retention/params.js'
 import { AUTO, CUSTOM, type RangeChoice, presetById, resolveRange } from '../shared/range.js'
 import { whereFromStored } from '../shared/where.js'
 import {
@@ -14,6 +19,7 @@ import {
   bucketCount,
   groupByOf,
   sourceAndFieldFromGroupBy,
+  tooManyBuckets,
 } from '../trends/params.js'
 
 /** `MAX_RANGE_DAYS` in `core/funnels/validate.ts`, restated for the reason
@@ -97,14 +103,21 @@ export function ceilingFor(tile: ResolvedTile, range: RangeChoice, now: Date): T
   if (tile.report === null) return null
   switch (tile.kind) {
     case 'trend': {
-      const count = bucketCount(trendParamsOf(tile.report, range), now)
-      return count !== null && count > MAX_BUCKETS
+      // The COMPARISON is `tooManyBuckets`, not a second `count > MAX_BUCKETS`
+      // restated here: the whole point of this module is that a tile refuses
+      // exactly what the report's own screen refuses, and two spellings of one
+      // threshold is how the two would come to disagree about the boundary.
+      // `bucketCount` is still called, for the number the message names.
+      const p = trendParamsOf(tile.report, range)
+      const count = bucketCount(p, now)
+      return tooManyBuckets(p, now) && count !== null
         ? { kind: 'buckets', count, max: MAX_BUCKETS }
         : null
     }
     case 'retention': {
-      const count = cohortCount(retentionParamsOf(tile.report, range), now)
-      return count !== null && count > MAX_COHORTS
+      const p = retentionParamsOf(tile.report, range)
+      const count = cohortCount(p, now)
+      return tooManyCohorts(p, now) && count !== null
         ? { kind: 'cohorts', count, max: MAX_COHORTS }
         : null
     }

@@ -31,7 +31,15 @@ export function createRunQueue(limit = MAX_IN_FLIGHT): RunQueue {
       return new Promise<T>((resolve, reject) => {
         waiting.push(() => {
           inFlight++
-          task()
+          // `task()` is called INSIDE a promise executor, not before one: a
+          // task that throws synchronously would otherwise escape past the
+          // `finally` that frees the slot, leaving `inFlight` permanently
+          // above zero and every task queued behind it waiting on a queue
+          // that never drains again. Wrapped, a sync throw is just a
+          // rejection, and takes the same path as any other failure.
+          new Promise<T>((settle) => {
+            settle(task())
+          })
             .then(resolve, reject)
             .finally(() => {
               inFlight--
