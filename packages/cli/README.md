@@ -207,9 +207,9 @@ which includes:
 - for `persons export` specifically, a stream that ended without its
   terminating `{"type":"end",…}` line — the data received is real but
   incomplete, `code` is `export_incomplete`;
-- for `persons delete` specifically, a declined or failed confirmation
-  prompt — the deletion did not happen, which is a different fact from
-  success.
+- for `persons delete` and `snippet --rotate` specifically, a declined or
+  failed confirmation prompt — the deletion or rotation did not happen,
+  which is a different fact from success.
 
 ```sh
 lyraflow events --limit 99999 --json

@@ -689,6 +689,17 @@ describe('POST /v1/project/rotate-write-key', () => {
       payload: { message_id: randomUUID(), anonymous_id: 'rotate-grace', event: 'rotate_probe' },
     })
     expect(trackKey2.statusCode).toBe(202)
+
+    // GET /v1/project must reflect the rotated key, not the one it started
+    // with -- the second rotation's write_key (key2), not oldKey or key1.
+    const getProject = await app.inject({
+      method: 'GET',
+      url: '/v1/project',
+      headers: { 'x-lyraflow-server-key': SERVER_KEY_D },
+    })
+    expect(getProject.statusCode).toBe(200)
+    expect(getProject.json().write_key).toBe(key2)
+    expect(getProject.json().write_key).not.toBe(oldKey)
   })
 
   // There is only ever ONE previous key (migration 022). A rotation inside

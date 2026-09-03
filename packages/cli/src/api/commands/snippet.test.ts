@@ -1049,6 +1049,21 @@ describe('runSnippet', () => {
       expect(calls[0]).toMatchObject({ method: 'post', path: '/v1/project/rotate-write-key' })
     })
 
+    it('--yes rotates on a non-tty stdin without prompting', async () => {
+      const client = fakeGetClient({
+        project: { ...PROJECT, write_key: 'wk_rotated3' },
+        schemaEvents: { events: [] },
+        stats: { buckets: [] },
+        rotate: { write_key: 'wk_rotated3', previous_write_key_expires_at: null },
+      })
+      const promptSpy = vi.fn(async () => false)
+      const { ctx, calls } = makeCtx(client, { stdinIsTty: false, prompt: promptSpy })
+      const code = await runSnippet(['--rotate', '--yes'], ctx)
+      expect(code).toBe(0)
+      expect(promptSpy).not.toHaveBeenCalled()
+      expect(calls[0]).toMatchObject({ method: 'post', path: '/v1/project/rotate-write-key' })
+    })
+
     it('--grace without --rotate is a usage error', async () => {
       const { ctx, calls } = makeCtx(fakeClient)
       const code = await runSnippet(['--grace', '5'], ctx)
