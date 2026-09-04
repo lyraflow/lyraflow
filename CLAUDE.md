@@ -379,6 +379,15 @@ The whole sequence, in order:
 8. **Confirm it is Latest:** `gh release list`. If the new release is not marked, the
    page still advertises the old version.
 
+9. **The marketing site follows the release, in the same session.** lyraflow.app is a
+   separate repository with its own deploy, so nothing in this repo's CI notices when a
+   release makes one of its sentences false. Its version string, its limits box, its
+   hand-written `llms.txt`, and its screenshots of any screen the release touched all
+   move with the release; the site's own README carries the checklist, and its build
+   fails if `llms.txt` names a version other than the current one. Then verify against
+   the live URL, not the build output: the new claim is there and the claim it replaced
+   is gone.
+
 **Version numbers are cheap; a wrong one is not.** If a bump ships without its tag, the
 manifests claim a release that `git tag` cannot name. That happened to `0.2.1`, and the
 fix is to record it in the changelog rather than tag it afterwards — a tag created later
