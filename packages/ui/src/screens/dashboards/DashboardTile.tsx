@@ -7,7 +7,6 @@ import { Button } from '../../components/ui/button.js'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card.js'
 import { Skeleton } from '../../components/ui/skeleton.js'
 import { FunnelFlowOrBars } from '../funnels/FunnelFlowOrBars.js'
-import { StepBars } from '../funnels/StepBars.js'
 import { describeError } from '../funnels/errors.js'
 import { RetentionGrid } from '../retention/RetentionGrid.js'
 import { toRequest } from '../retention/params.js'
@@ -194,7 +193,14 @@ export function DashboardTile(props: {
 
   return (
     <Card
-      className={tile.width === 'full' ? 'sm:col-span-2' : ''}
+      // `min-w-0` on all three of the card, its content and the result
+      // wrapper, and it is not decoration: the funnel flow is allowed to be
+      // wider than the tile and scrolls inside its own `overflow-x-auto`
+      // container (`FunnelFlow.tsx`). A grid item and a flex child both
+      // default to `min-width: auto`, so without these the card grows to
+      // fit an eight-step funnel instead -- taking the two-column layout
+      // with it -- and the scrollbar never appears.
+      className={`min-w-0 ${tile.width === 'full' ? 'sm:col-span-2' : ''}`}
       data-testid={`tile-${tile.kind}-${tile.report_id}`}
     >
       <CardHeader>
@@ -248,7 +254,7 @@ export function DashboardTile(props: {
           </div>
         )}
       </CardHeader>
-      <CardContent>
+      <CardContent className="min-w-0">
         {deleted ? (
           <p data-testid="tile-deleted" role="alert" className="text-sm text-destructive">
             This {KIND_LABEL[tile.kind]} (id {tile.report_id}) has been deleted.
@@ -284,7 +290,7 @@ export function DashboardTile(props: {
         ) : result === null ? (
           <Skeleton data-testid="tile-loading" className="h-40 w-full" />
         ) : (
-          <div data-testid="tile-result">
+          <div data-testid="tile-result" className="min-w-0">
             {result.kind === 'trend' && (
               <TrendPanels
                 series={toSeries(result.page.buckets)}
@@ -295,20 +301,16 @@ export function DashboardTile(props: {
             {/* No `onSelectStep`: a dashboard tile is a picture, not a drill-in.
              * `StepBars`/`FunnelFlow` render no step control at all without it,
              * which is what keeps the step-people call unreachable from here. */}
-            {result.kind === 'funnel' && tile.width === 'half' && (
-              // `FunnelFlowOrBars` picks its rendering from the VIEWPORT
-              // (`useIsWide`), but a half-width tile is sized by its grid
-              // column, not the viewport -- at a normal viewport it is under
-              // 400px wide, the width `StepBars` was built for. Going through
-              // `FunnelFlowOrBars` here would show the flow whenever the
-              // viewport itself is wide, clipping a long funnel inside a card
-              // half that size. `StepBars` directly, unconditionally.
-              <StepBars
-                result={result.result}
-                definition={tile.kind === 'funnel' && tile.report ? tile.report.steps : null}
-              />
-            )}
-            {result.kind === 'funnel' && tile.width === 'full' && (
+            {result.kind === 'funnel' && (
+              // `FunnelFlowOrBars` at EVERY width, so a funnel on a
+              // dashboard is the same picture the funnels screen draws --
+              // flow above 768px, bars below, decided by the viewport and
+              // nothing else. A half-width tile used to force `StepBars`
+              // because the flow is wider than half a grid column; it still
+              // is, and the answer is that it scrolls inside the card (see
+              // the `min-w-0` note on the `Card` above) rather than that a
+              // dashboard shows a different chart from the one the report's
+              // own screen shows.
               <FunnelFlowOrBars
                 result={result.result}
                 definition={tile.kind === 'funnel' && tile.report ? tile.report.steps : null}

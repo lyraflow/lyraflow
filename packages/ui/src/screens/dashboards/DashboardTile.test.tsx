@@ -191,12 +191,21 @@ describe('DashboardTile', () => {
   })
 
   it('result: renders the funnel inert -- no step is selectable and no people call is made', async () => {
+    // Under the wide stub the tile renders the FLOW, so the thing a reader
+    // would click is a node on the plot rather than a bar. `StepBars` had
+    // its own version of this test and passing it there proved nothing
+    // about the rendering a dashboard actually shows now.
+    stubWideMatchMedia()
     const client = stubClient({ runFunnel: vi.fn(async () => FUNNEL_RUN) })
-    renderTile({ tile: funnelTile(), client })
-    // `useIsWide` is false under jsdom, so this is `StepBars`.
-    const step = await screen.findByTestId('funnel-step-1')
-    expect(step.tagName).not.toBe('BUTTON')
-    await userEvent.click(step)
+    // Full width deliberately: the half-width tile's rendering has a test of
+    // its own below, and this one must fail for its OWN reason (a step became
+    // clickable) rather than for that one's.
+    renderTile({ tile: funnelTile({ width: 'full' }), client })
+    await screen.findByTestId('funnel-flow')
+    await act(async () => {})
+    const node = screen.getByTestId('flow-node-1')
+    expect(node.tagName).not.toBe('BUTTON')
+    await userEvent.click(node)
     expect(client.funnelPeople).not.toHaveBeenCalled()
     expect(screen.queryByRole('button', { name: /Show people at step/ })).not.toBeInTheDocument()
   })
@@ -221,22 +230,22 @@ describe('DashboardTile', () => {
     vi.unstubAllGlobals()
   })
 
-  it('result: a half-width funnel tile shows the bars even when the viewport reports wide', async () => {
+  it('result: a half-width funnel tile shows the flow, not the bars', async () => {
     stubWideMatchMedia()
     const client = stubClient({ runFunnel: vi.fn(async () => FUNNEL_RUN) })
     renderTile({ tile: funnelTile({ width: 'half' }), client })
     await screen.findByTestId('tile-result')
-    // `StepBars` renders on FIRST paint regardless (it is what `FunnelFlowOrBars`
-    // shows before its own `useIsWide` effect has run), so seeing it there is
-    // not yet proof of anything -- an extra flush lets that effect (if this
-    // went through `FunnelFlowOrBars` at all) settle to its final rendering
-    // before either assertion below is taken as the answer.
+    // `StepBars` renders on FIRST paint regardless (it is what
+    // `FunnelFlowOrBars` shows before its own `useIsWide` effect has run),
+    // so seeing it there is not yet proof of anything -- an extra flush lets
+    // that effect settle to its final rendering before either assertion
+    // below is taken as the answer.
     await act(async () => {})
-    expect(screen.getByTestId('funnel-step-1')).toBeInTheDocument()
-    expect(screen.queryByTestId('funnel-flow')).not.toBeInTheDocument()
+    expect(screen.getByTestId('funnel-flow')).toBeInTheDocument()
+    expect(screen.queryByTestId('funnel-step-1')).not.toBeInTheDocument()
   })
 
-  it('result: a full-width funnel tile shows the flow when the viewport reports wide', async () => {
+  it('result: a full-width funnel tile shows the flow too', async () => {
     stubWideMatchMedia()
     const client = stubClient({ runFunnel: vi.fn(async () => FUNNEL_RUN) })
     renderTile({ tile: funnelTile({ width: 'full' }), client })
@@ -244,6 +253,30 @@ describe('DashboardTile', () => {
     await act(async () => {})
     expect(screen.getByTestId('funnel-flow')).toBeInTheDocument()
     expect(screen.queryByTestId('funnel-step-1')).not.toBeInTheDocument()
+  })
+
+  // The flow is wider than half a grid column and scrolls INSIDE the card
+  // (`FunnelFlow`'s own container is `overflow-x-auto`). That only works
+  // while every box above it can shrink below its content: a flex child and
+  // a grid item both default to `min-width: auto`, so without these the
+  // card widens to fit an eight-step funnel and takes the side-by-side
+  // layout with it. jsdom does no layout, so this is a tripwire on the
+  // classes rather than a measurement -- the real check was rendering it.
+  it('result: nothing above the flow stops it scrolling inside the card', async () => {
+    stubWideMatchMedia()
+    const client = stubClient({ runFunnel: vi.fn(async () => FUNNEL_RUN) })
+    renderTile({ tile: funnelTile({ width: 'half' }), client })
+    const result = await screen.findByTestId('tile-result')
+    expect(result.className).toContain('min-w-0')
+    const content = result.parentElement as HTMLElement
+    expect(content.dataset.slot).toBe('card-content')
+    expect(content.className).toContain('min-w-0')
+    const card = content.parentElement as HTMLElement
+    expect(card.dataset.slot).toBe('card')
+    expect(card.className).toContain('min-w-0')
+    for (const el of [result, content, card]) {
+      expect(el.className).not.toContain('overflow-hidden')
+    }
   })
 
   it('deleted: says the report is gone, names kind and id, sends nothing', async () => {
