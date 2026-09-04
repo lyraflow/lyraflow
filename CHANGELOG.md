@@ -21,6 +21,234 @@ here as it happened rather than tagged retroactively, for the same reason 0.1.0
 is: a tag created after the fact names a moment nobody could have fetched. Its
 one fix is contained in 0.3.0.
 
+## 0.13.0 — 2026-09-04
+
+### Added
+
+- **Dashboards** (**#241**): a named, ordered grid of tiles, each one a
+  saved trend, a saved retention report or a funnel, half or full width,
+  with one range picker for the whole page. `/dashboards` lists them,
+  `/dashboards/new` takes a name and nothing else, and `/dashboards/:id`
+  is one screen with a view mode and an edit mode. **A star marks one
+  dashboard per project as home**, and `/`, the sidebar's Dashboards
+  entry and the Lyraflow mark all open it — the feed when nothing is
+  starred. Opening a tile opens its report over the dashboard's range; a
+  funnel takes that range when it is one the funnels screen itself
+  offers.
+
+  **The range lives in the URL and is never stored.** A dashboard holds
+  the questions, not the window they were asked over — the same decision
+  a saved trend and a saved retention report already carry, and the
+  reason a dashboard link reproduces the sender's view. Under the default
+  `auto` range the tiles do not share a window at all: each report keeps
+  its own screen's default, and the screen says so in a line under the
+  picker rather than letting "one range for every tile" stand as a claim
+  the default breaks.
+
+  **A tile whose report was deleted stays on the layout and says so.**
+  There is no foreign key from a tile to its report, for the reason a
+  segment reference carries none: `CASCADE` would reshape a dashboard as
+  a side effect of deleting a report, and `SET NULL` cannot apply to an
+  element of a JSON array. So the read path looks each report up and the
+  tile reports its own absence, rather than the layout changing under
+  someone who did not edit it.
+
+  Three limits, all stated on screen rather than discovered: **at most
+  twelve tiles**, enforced as a CHECK as well as in validation; **at most
+  three runs in flight per dashboard**, through a small FIFO queue,
+  because twelve concurrent retention queries against a small ClickHouse
+  is the shape that has killed a test stack before; and **a tile whose
+  stored definition would exceed a server ceiling under the current range
+  warns instead of running** — the same ceiling that report's own screen
+  refuses to send past, so the 6- and 12-month presets say which limit
+  they hit rather than collecting a 400.
+
+  Five routes — `GET`/`POST /v1/dashboards` and
+  `GET`/`PATCH`/`DELETE /v1/dashboards/:id` — behind the same
+  session-or-server-key authenticator, and the same error shapes, that
+  trends and retention already use. **The detail read resolves every tile
+  server-side** and embeds the report in its own wire shape, or
+  `report: null` once it has been deleted, so the client makes only the
+  run call per tile. A write refuses a tile naming a report that does not
+  exist in this project. There is no run endpoint: a tile runs by the
+  call its report's own screen already makes. Migration
+  `023_dashboards.sql` adds one table (`SCHEMA_VERSION` 22 → 23) and is
+  additive.
+
+- **A write key can be rotated** (**#34**). A write key is public by
+  construction — it ships inside every instrumented page and is readable
+  in devtools — so it will eventually be pasted into a repository, a
+  screenshot or a CI log, and until now the only remedy was a new project
+  and the loss of its history. `POST /v1/project/rotate-write-key`
+  replaces it and returns the new one, with an optional `grace_hours`
+  from `0` to `720` (default `24`) during which the key being replaced
+  keeps working, so pages still serving the old snippet keep collecting
+  while their caches turn over. `0` is a hard swap, and there is only
+  ever one previous key: rotating again inside the grace retires the
+  older one immediately. `lyraflow snippet --rotate` rotates and then
+  prints the snippet carrying the new key, and the Settings screen's
+  install card does the same from the UI.
+
+  **A retired key can be accepted for up to a minute past its expiry**,
+  by a server that looked it up just before — Lyraflow caches each key's
+  project for that long. It is written down rather than engineered away:
+  it is the same window `lyraflow projects delete` already waits out.
+  After the grace, a page carrying the old key gets `401
+  invalid_write_key` and the browser SDK stops for the life of that page,
+  which is that SDK's own rule for `401` rather than a choice made here.
+  The **server** key is not rotatable: it is hashed at rest, and that
+  remains a new project. Migration `022_write_key_rotation.sql` adds two
+  nullable columns to `projects` (`SCHEMA_VERSION` 21 → 22).
+
+- **`reset-admin-login`**, an alias for `set-admin-password` whose name
+  says what the command does. It has always replaced *both* the admin's
+  email and their password, and revoked every session while doing it —
+  but the old name says "password", so an operator who has forgotten
+  which address they signed up under would read that section and conclude
+  the command could not help them. It could. `set-admin-password` stays,
+  because the first-run screen and older docs print it, and `--json`
+  output still reports `command: "set-admin-password"` under either
+  spelling.
+
+- **A person's rejected payloads travel with their privacy export**
+  (**#77**), as a fourth NDJSON line type between the events and the
+  terminator: `{"type":"rejection","received_at","reason","detail",
+  "payload","match"}`, with the terminator now
+  `{"type":"end","events":N,"rejections":M}`. A rejected payload has no
+  identity — it is the raw text that failed to parse — and the purge has
+  found a person's rejections by searching that text for their ids in
+  quoted form since it was written, while the export never read the table
+  at all. So a subject-access response said "everything Lyraflow has
+  recorded about one person" while payloads naming them sat in
+  `events_dead_letter` for up to 30 days.
+
+  **The match is now one predicate in one module, used by both paths**,
+  with a test that fails if the literal reappears anywhere else, so
+  deletion and export cannot drift into different ideas of whose data
+  this is. It is a heuristic over unparsed text, so an export can include
+  a payload mentioning this person's id inside someone else's data; every
+  rejection line carries `match: "quoted-id-substring"` so a reader can
+  weigh it. Including them was the choice because the purge already
+  erases them — an export answering "nothing else" while the purge would
+  delete more is the worse of the two failures.
+
+### Changed
+
+- **Schema version 23**, over two additive migrations:
+  `022_write_key_rotation.sql` and `023_dashboards.sql`. No existing row
+  loses data, and both apply automatically at app start.
+
+- **Ingest escapes control characters in event names and property keys**
+  (**#35**). Both were validated for length and nothing else, and the
+  write key is public, so a visitor to an instrumented site could choose
+  those bytes — "a stranger picked this identifier" was the ordinary case
+  rather than the exotic one. Newline, CR, NUL, DEL and a C1 CSI were all
+  accepted, and #33 fixed the same exposure at the CLI alone: its own
+  review showed a forged event name rewriting the install snippet's
+  bundle URL in the operator's terminal and erasing its own table row, at
+  exit code 0. Escaping at write time is one decision instead of sixteen
+  — seven server modules and nine UI components read `event_name` back
+  out today, and every future export or integration inherits the same
+  exposure.
+
+  `\xNN` rather than a dropped byte: it is inert, since every character
+  of the replacement is printable ASCII, and it is legible, where
+  dropping silently collides `sign`+newline+`up` with `signup`. **Names
+  and keys only, never values** — an identifier is chosen by whoever
+  instruments the site and no legitimate one contains a control
+  character, while a value is customer data where a newline can be
+  content. The one real cost is documented: a stored name containing a
+  control character no longer matches the bytes that were sent, which is
+  what would otherwise confuse someone reconciling against their own
+  logs.
+
+- **A stale saved report's badge carries warning weight in the list**
+  (**#213**). It was the low-contrast grey this design system uses for
+  metadata, sitting next to the "Updated …" timestamp and reading as more
+  of the same rather than as a warning that the report cannot be
+  reproduced as it was saved. The detail screen states the problem once
+  the report is open; the list is where an operator decides which report
+  to open, which is the one place understating it costs something. A
+  deliberate exception rather than a change to the system, and Funnels is
+  untouched: its "Segment filter" badge is genuine metadata, and it
+  already expresses staleness as text rather than as a badge.
+
+- **The retention grid says it continues to the right** (**#215**). The
+  wrapper has always scrolled rather than taking the page sideways, and
+  that part worked; what was missing was any sign of it. At 390px the
+  table was cut off mid-column with no fade, no shadow and no scrollbar
+  until the reader happened to drag, so a grid that continues looked like
+  one that had been truncated — a broken report rather than more data. A
+  right-edge gradient now renders only while there is content still to
+  the right, measured rather than inferred from the period count, because
+  whether it overflows depends on the viewport and not on the data.
+
+- **A stale report's Run instruction no longer points anywhere**
+  (**#214**). It read "Run below to see what these controls ask for now",
+  and Run is not below it — the button ends the controls and the message
+  renders underneath that row, so both screens pointed down at nothing.
+  The instruction itself is right and stays: running a stale report is a
+  legitimate thing to do, which is why Run remains enabled there while
+  Save does not.
+
+### Fixed
+
+- **A stale saved report reached by its own link could be overwritten**
+  (**#221**). Both builders block Save when a stored `where` can no
+  longer be parsed, so pressing it cannot write the narrowed definition
+  over the stored one — but the guard was set while seeding the URL from
+  the stored definition, which happens only on the first visit. Seeding
+  writes the surviving definition into the URL, so a reload or a second
+  opening of that same link arrives with the definition already set, the
+  screen treats the URL as the operator's own, and the branch holding the
+  guard never ran. The banner still appeared: the screen said the report
+  was stale and permitted the overwrite in the same breath, by the path
+  an operator is more likely to take. The decision is now computed where
+  it belongs — off the fetched report, depending on neither the URL nor
+  the on-screen params — so it runs identically on both visits.
+
+- **A long funnel or segment name no longer carries Edit and Delete off
+  the screen** (**#218**). Both detail headers are one flex row, and
+  neither heading could shrink below its widest child — an
+  operator-supplied name, often a single unbroken token. Measured at
+  390px: 733px of content in a 390px viewport, with both controls outside
+  the visible area, so a funnel with a long name could not be edited or
+  deleted from that screen on a phone. #218 named only funnels, because
+  that was the screen being rendered when it was found; segments had the
+  identical row and the identical defect, and fixing one would have left
+  the other broken in exactly the way the issue describes.
+
+- **Project ids that ClickHouse still holds rows for are no longer handed
+  out** (**#201**). Postgres owns project ids and ClickHouse holds
+  everything keyed by them, and only one of the two is reset by the
+  `DROP SCHEMA` three suites run deliberately to prove a migration
+  replays from nothing. The drop takes the sequence with it, the next
+  project created anywhere in the run is handed an id another suite's
+  ClickHouse rows already answer to, and its project-scoped queries
+  silently include them — measured, not inferred: the sequence read 34
+  before one such file and 2 after it. The sequence is now raised past
+  the high-water mark of the five tables that store rows under a project
+  id, as a one-way ratchet. **Raising it rather than purging ClickHouse
+  is the point:** purging restores the same invariant by deleting rows
+  out from under whichever suites are mid-flight, while declining to
+  reuse a number cannot damage anyone's data.
+
+- **The trends caption keeps its second sentence while a point is
+  hovered**, so the panels below stop jumping. The readout sits in each
+  panel's own corner, which means "hover a point to read its value" stays
+  true whether or not anything is hovered; dropping it on hover shortened
+  the paragraph, shifted every panel below it on a narrow tile, and
+  shifted them back on mouse-leave.
+
+### What it still cannot do
+
+Dashboards cannot be shared or made public, do not refresh on their own,
+hold only the three saved-report kinds, and have no drag-and-drop and no
+CLI commands. A funnel still takes no breakdown and a retention grid no
+split. Journeys and path analysis remain ahead. There is no alerting, no
+scheduled export and no digest — nothing in Lyraflow sends anything
+anywhere, so every report is one someone opened.
+
 ## 0.12.0 — 2026-08-29
 
 ### Added
