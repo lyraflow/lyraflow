@@ -162,6 +162,28 @@ describe('TrendPanels', () => {
     expect(screen.queryByTestId('trend-readout-a')).toBeNull()
   })
 
+  it('keeps the caption text identical while hovering, so panels below do not jump', () => {
+    // The readout is in each panel's own corner, so the caption's "hover to
+    // read its value" sentence stays true whether or not something is
+    // hovered. Dropping it on hover used to shorten the paragraph and shift
+    // every panel below on a narrow tile, then shift back on mouse-leave.
+    render(
+      <TrendPanels
+        series={series([
+          { bucket: 'b1', series: 'a', events: 3 },
+          { bucket: 'b2', series: 'a', events: 7 },
+        ])}
+      />,
+    )
+    const caption = screen.getByTestId('trend-panels').querySelector('p')
+    const before = caption?.textContent
+    const svg = screen.getByRole('img')
+    svg.getBoundingClientRect = () => ({ left: 0, width: 260 }) as DOMRect
+    fireEvent.mouseMove(svg, { clientX: 260 })
+    expect(screen.getByTestId('trend-readout-a')).toBeInTheDocument()
+    expect(caption?.textContent).toBe(before)
+  })
+
   it('stops drawing every dot once they would merge, but still marks the hovered one', () => {
     // Sixty DISTINCT buckets. The first version of this used `i % 28`, which
     // collapses to 28 once `toSeries` groups them -- under the limit, so the

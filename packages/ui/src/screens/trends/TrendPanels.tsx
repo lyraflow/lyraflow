@@ -55,13 +55,12 @@ export function TrendPanels(props: { series: Series[]; interval?: StatsQuery['in
   }
 
   const bucketCount = series[0]?.points.length ?? 0
-  const hoveredBucket = hovered === null ? null : (series[0]?.points[hovered]?.bucket ?? null)
 
   return (
     <div data-testid="trend-panels" className="flex flex-col gap-2">
       <p className="text-muted-foreground text-xs">
         Every panel is drawn on the same scale, peaking at {peak.toLocaleString()} events, so their
-        heights are comparable. {hoveredBucket === null ? 'Hover a point to read its value.' : null}
+        heights are comparable. Hover a point to read its value.
       </p>
       <ul className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
         {series.map((s) => {
