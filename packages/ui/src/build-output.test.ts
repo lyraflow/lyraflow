@@ -102,4 +102,41 @@ describe('production bundle', () => {
     expect(ast.FUNNEL_DEFINITION_VERSION).toBe(FUNNEL_DEFINITION_VERSION)
     expect(typeof ast.FunnelStep.parse).toBe('function')
   })
+
+  // The stored theme and palette are applied in App.tsx's first effect,
+  // which runs AFTER the first paint -- so a dark or re-accented choice
+  // flashed the default for one frame on every load. index.html carries an
+  // inline script that sets both attributes before the bundle is even
+  // requested. Vite passes a classic inline script through untouched, but
+  // nothing else would notice if a config change or a template rewrite
+  // dropped it: the app still works, one frame later. This reads the BUILT
+  // index.html, not the source, for the same reason the tests above evaluate
+  // the built bundle.
+  it('the built index.html applies the stored theme and palette before first paint', async () => {
+    const pages = import.meta.glob('../dist/index.html', { query: '?raw', import: 'default' })
+    const paths = Object.keys(pages)
+    if (paths.length === 0) {
+      throw new Error(
+        'packages/ui/dist/index.html not found -- run "pnpm build" before "pnpm test".',
+      )
+    }
+    const html = (await (pages[paths[0] as string] as () => Promise<string>)()) as string
+    const inline = html.indexOf('<script>')
+    expect(inline).toBeGreaterThan(-1)
+    // In <head>: a classic script there runs before the body is parsed,
+    // which is before anything is painted. Vite hoists its own module tag
+    // into <head> too, and module scripts are deferred, so where the two
+    // sit relative to each other does not matter -- only that this one is
+    // not in <body>.
+    expect(inline).toBeLessThan(html.indexOf('</head>'))
+    const body = html.slice(inline, html.indexOf('</script>', inline))
+    // Quote-agnostic: the assertions name the keys and attributes, not the
+    // exact source text, so a minifier changing quote style cannot fail them.
+    expect(body).toContain('lf-theme')
+    expect(body).toContain('lf-palette')
+    expect(body).toContain('data-theme')
+    expect(body).toContain('data-palette')
+    expect(body).toContain('setAttribute')
+    expect(body).toContain('try')
+  })
 })
