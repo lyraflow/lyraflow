@@ -35,6 +35,11 @@ export function Dashboards(props: { client: ApiClient; onUnauthorized?: () => vo
   const [dashboards, setDashboards] = useState<DashboardSummary[] | null>(null)
   const [error, setError] = useState(false)
   const [homeError, setHomeError] = useState(false)
+  // The id of the row whose `PATCH` is in flight, or null. One at a time is
+  // enough: the star is disabled while its own request runs, so a second one
+  // cannot be started from the same row, and two rows cannot be clicked in
+  // the same tick.
+  const [pending, setPending] = useState<number | null>(null)
 
   useEffect(() => {
     if (activeId == null) return
@@ -77,6 +82,7 @@ export function Dashboards(props: { client: ApiClient; onUnauthorized?: () => vo
       if (activeId == null) return
       const next = !row.is_home
       setHomeError(false)
+      setPending(row.id)
       client
         .patchDashboard(activeId, row.id, { is_home: next })
         .then((d) => {
@@ -98,6 +104,10 @@ export function Dashboards(props: { client: ApiClient; onUnauthorized?: () => vo
           }
           setHomeError(true)
         })
+        // UNCONDITIONAL: `pending` is what holds the star shut, so a
+        // response that failed -- or a 401 that routed away -- must still
+        // release it, or the row is frozen for the rest of the session.
+        .finally(() => setPending(null))
     },
     [client, activeId, onUnauthorized],
   )
@@ -129,7 +139,17 @@ export function Dashboards(props: { client: ApiClient; onUnauthorized?: () => vo
           // widening the shared interface for one caller's field.
           const d = dashboards?.find((x) => x.id === r.id)
           if (d === undefined) return null
-          return <HomeStar isHome={d.is_home} name={d.name} onToggle={() => toggleHome(d)} />
+          return (
+            <HomeStar
+              isHome={d.is_home}
+              name={d.name}
+              // A second click before the first response lands would send a
+              // second `PATCH` for a state the first one is already moving
+              // to, and the two could land in either order.
+              disabled={pending === d.id}
+              onToggle={() => toggleHome(d)}
+            />
+          )
         }}
       />
     </div>

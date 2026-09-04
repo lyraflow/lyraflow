@@ -231,3 +231,33 @@ describe('Dashboards — the home star', () => {
     expect(star.closest('li')).toBe(link.closest('li'))
   })
 })
+
+describe('Dashboards — the home star, while a PATCH is in flight', () => {
+  it('sends one PATCH for two clicks, and releases the star when it lands', async () => {
+    let resolve: ((d: unknown) => void) | undefined
+    const patchDashboard = vi.fn(
+      () =>
+        new Promise((res) => {
+          resolve = res
+        }),
+    )
+    const client = renderWithPatch(patchDashboard as unknown as ReturnType<typeof vi.fn>)
+
+    const star = await screen.findByRole('button', { name: SET_B })
+    await userEvent.click(star)
+    expect(star).toBeDisabled()
+
+    // The second click is the one that matters: without `pending` this sends
+    // a second `PATCH` for a state the first is already moving to, and the
+    // two can land in either order.
+    await userEvent.click(star)
+    expect(client.patchDashboard).toHaveBeenCalledTimes(1)
+
+    // Only THAT row is held shut -- the other star is still usable.
+    expect(screen.getByRole('button', { name: UNSET_A })).not.toBeDisabled()
+
+    resolve?.(patched(B, true))
+    const filled = await screen.findByRole('button', { name: UNSET_B, pressed: true })
+    expect(filled).not.toBeDisabled()
+  })
+})

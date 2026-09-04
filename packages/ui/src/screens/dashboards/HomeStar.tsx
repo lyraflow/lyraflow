@@ -1,14 +1,10 @@
 import { Star } from 'lucide-react'
 import { Button } from '../../components/ui/button.js'
 
-/**
- * `Shell.tsx` keeps its own `ICON_STROKE = 1.5` as a module-local constant
- * rather than exporting one, so there is nothing to import here. 1.75 is the
- * weight this icon needs at 16px: the star is a five-pointed outline and at
- * 1.5 its points thin out enough that the empty state reads as a smudge
- * beside the crisp `sm` buttons next to it in the dashboard header.
- */
-const STROKE = 1.75
+/** Mirrors `Shell.tsx`'s own `ICON_STROKE`, which is module-local there and
+ *  not exported -- this star sits beside those nav icons and has to be drawn
+ *  at the same weight. */
+const STROKE = 1.5
 
 /**
  * What the button is CALLED depends on which way it goes, and the two are
