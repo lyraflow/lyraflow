@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { Link } from 'react-router'
 import { Badge } from '../../components/ui/badge.js'
 import { formatRelative } from '../funnels/format.js'
@@ -34,47 +35,70 @@ export interface SavedReportRow {
  * a saved report follows the one interface convention every other list in
  * this package already uses.
  */
-function SavedReportRowItem(props: { row: SavedReportRow; hrefFor(id: number): string }) {
-  const { row, hrefFor } = props
+function SavedReportRowItem(props: {
+  row: SavedReportRow
+  hrefFor(id: number): string
+  trailing?: (row: SavedReportRow) => ReactNode
+}) {
+  const { row, hrefFor, trailing } = props
+  const after = trailing?.(row)
+
+  const link = (
+    <Link
+      to={hrefFor(row.id)}
+      className={
+        after == null
+          ? 'flex flex-col gap-1 rounded-md border border-border bg-card px-4 py-3 hover:bg-muted'
+          : // `min-w-0` for the same reason the name and summary inside carry
+            // it: without it a flex child refuses to shrink below its content
+            // and the trailing control is pushed off the row instead.
+            'flex min-w-0 flex-1 flex-col gap-1 rounded-md border border-border bg-card px-4 py-3 hover:bg-muted'
+      }
+    >
+      {/* `break-words` for the SAME reason the summary below carries it,
+       * and it is the name that actually needed it: a report name is
+       * typed by an operator and often has no spaces at all
+       * (`checkout_funnel_weekly_breakdown_by_utm_source_and_plan_tier_v2`).
+       * Without it that one line ran ~180px past the card's right border
+       * at 390px wide, taking the whole list into horizontal scroll with
+       * it. `break-words` rather than `break-all`, so an ordinary
+       * multi-word name still breaks at its spaces. */}
+      <span className="min-w-0 break-words font-medium text-foreground">{row.name}</span>
+      <span className="min-w-0 break-words text-sm text-muted-foreground">{row.summary}</span>
+      <span className="flex items-center gap-2 text-sm text-muted-foreground">
+        {/* `destructive`, not the `secondary` grey this design system
+         * uses for metadata (#213): at a glance the low-contrast badge
+         * read like the "Updated ..." timestamp beside it rather than as
+         * a warning that the report cannot be reproduced as it was saved.
+         * The detail screen states the problem plainly once the report is
+         * open; the list is where an operator picks WHICH one to open,
+         * which is the one place understating it costs something.
+         *
+         * A deliberate exception rather than a system-wide move.
+         * `Funnels.tsx`'s own `secondary` badge reads "Segment filter" --
+         * genuine metadata -- and Funnels says "Steps cannot be read" as
+         * text in its step summary rather than as a badge at all. The two
+         * say different kinds of thing, so nothing there changes. */}
+        {row.stale && (
+          <Badge variant="destructive" data-testid={`report-stale-${row.id}`}>
+            Cannot be read
+          </Badge>
+        )}
+        <span>Updated {formatRelative(row.updatedAt, new Date())}</span>
+      </span>
+    </Link>
+  )
+
+  // No trailing node means the row is EXACTLY what it was before this prop
+  // existed -- a bare `<li>` wrapping the link, with no flex row and no
+  // extra classes. Trends and retention pass nothing, and their tests
+  // (including "renders no button at all") pin that.
+  if (after == null) return <li>{link}</li>
 
   return (
-    <li>
-      <Link
-        to={hrefFor(row.id)}
-        className="flex flex-col gap-1 rounded-md border border-border bg-card px-4 py-3 hover:bg-muted"
-      >
-        {/* `break-words` for the SAME reason the summary below carries it,
-         * and it is the name that actually needed it: a report name is
-         * typed by an operator and often has no spaces at all
-         * (`checkout_funnel_weekly_breakdown_by_utm_source_and_plan_tier_v2`).
-         * Without it that one line ran ~180px past the card's right border
-         * at 390px wide, taking the whole list into horizontal scroll with
-         * it. `break-words` rather than `break-all`, so an ordinary
-         * multi-word name still breaks at its spaces. */}
-        <span className="min-w-0 break-words font-medium text-foreground">{row.name}</span>
-        <span className="min-w-0 break-words text-sm text-muted-foreground">{row.summary}</span>
-        <span className="flex items-center gap-2 text-sm text-muted-foreground">
-          {/* `destructive`, not the `secondary` grey this design system
-           * uses for metadata (#213): at a glance the low-contrast badge
-           * read like the "Updated ..." timestamp beside it rather than as
-           * a warning that the report cannot be reproduced as it was saved.
-           * The detail screen states the problem plainly once the report is
-           * open; the list is where an operator picks WHICH one to open,
-           * which is the one place understating it costs something.
-           *
-           * A deliberate exception rather than a system-wide move.
-           * `Funnels.tsx`'s own `secondary` badge reads "Segment filter" --
-           * genuine metadata -- and Funnels says "Steps cannot be read" as
-           * text in its step summary rather than as a badge at all. The two
-           * say different kinds of thing, so nothing there changes. */}
-          {row.stale && (
-            <Badge variant="destructive" data-testid={`report-stale-${row.id}`}>
-              Cannot be read
-            </Badge>
-          )}
-          <span>Updated {formatRelative(row.updatedAt, new Date())}</span>
-        </span>
-      </Link>
+    <li className="flex items-center gap-2">
+      {link}
+      {after}
     </li>
   )
 }
@@ -104,8 +128,19 @@ export function SavedReportList(props: {
   hrefFor(id: number): string
   newHref: string
   emptyMessage: string
+  /**
+   * An OPTIONAL per-row control, rendered inside the `<li>` and beside the
+   * link rather than inside it. Dashboards passes a home star; trends and
+   * retention pass nothing and get the row exactly as it was.
+   *
+   * Outside the anchor is the requirement, not a layout preference: a
+   * `<button>` nested in an `<a>` is invalid HTML, and a click on it
+   * navigates as well as acting. That is also why this is a render prop
+   * and not a `ReactNode` -- the control needs to know which row it is on.
+   */
+  trailing?: (row: SavedReportRow) => ReactNode
 }) {
-  const { rows, loadFailed, hrefFor, newHref, emptyMessage } = props
+  const { rows, loadFailed, hrefFor, newHref, emptyMessage, trailing } = props
 
   return (
     <>
@@ -132,7 +167,7 @@ export function SavedReportList(props: {
       {rows != null && rows.length > 0 && (
         <ul className="flex flex-col gap-2">
           {rows.map((r) => (
-            <SavedReportRowItem key={r.id} row={r} hrefFor={hrefFor} />
+            <SavedReportRowItem key={r.id} row={r} hrefFor={hrefFor} trailing={trailing} />
           ))}
         </ul>
       )}

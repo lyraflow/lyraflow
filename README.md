@@ -38,11 +38,14 @@ under Docker, and nothing leaves it.
 > condition has — comparison, text matching, presence, true/false, relative
 > date. What it will not do is combine conditions, look for a value across
 > every trait at once, or list **everyone** without naming a condition at all.
-> Journeys, dashboards and path analysis are still ahead. Trends and
+> Journeys and path analysis are still ahead. Trends and
 > retention grids can now be saved and reopened, the same way a funnel
 > already could — but the range one ran over is not part of what gets
 > saved, so reopening a report runs the stored question over whatever
-> range is currently on screen, never the range it was created with. See
+> range is currently on screen, never the range it was created with.
+> Several saved reports can sit side by side on a dashboard, and one
+> dashboard can be the screen you land on — the range is the viewer's
+> choice there too, never part of the dashboard. See
 > [Web UI](#web-ui) for exactly what exists and what does not.
 
 ## What it is good at
@@ -336,9 +339,38 @@ it flips the last step into a success state and waits for you to click
 done with it. There is also a "Skip to dashboard" for the case where you
 cannot instrument the target site right now.
 
-Past the wizard (or immediately, if a project already exists), there are seven
+Past the wizard (or immediately, if a project already exists), there are eight
 screens, reachable from the sidebar:
 
+- **Dashboards** — several saved reports on one screen: a named, ordered
+  grid of tiles, each a saved trend, a saved retention report or a funnel,
+  half or full width. One range picker applies to every tile and lives in
+  the URL, not in the dashboard, for the same reason a saved report never
+  stores its range. Its default setting is the exception, and the screen
+  says so: at *Default for this resolution* no range is sent at all, so each
+  tile falls back to its own report's default window and the tiles are not
+  on one period. Pick a preset to put them on the same range. A project can
+  have many dashboards; the star — on a list row, and on the dashboard
+  itself in both view and edit mode — marks one as **home**. It opens at
+  `/` after login, and "Dashboards" in the sidebar and the Lyraflow mark
+  both go to it when one is starred (the list otherwise); "All dashboards"
+  on a dashboard opens the list. Clicking the filled star clears it,
+  leaving the project with no home. Editing happens in place — rename,
+  reorder, resize, add, remove — and every change saves as it is made. A
+  tile whose report has since
+  been deleted stays on the dashboard and says so rather than vanishing.
+  Clicking a tile opens the report it shows, over the dashboard's range —
+  for a funnel only when that range is one the funnel screen itself offers
+  (24 hours, 7, 30 or 90 days), and otherwise the funnel opens on its own
+  default and says which range it ran.
+  At most twelve tiles, and at most three of them run at once, so opening a
+  dashboard does not fan a dozen queries at ClickHouse together. A tile
+  whose stored definition would exceed a server ceiling under the current
+  range — too many points, too many cohorts, or a funnel range past 90
+  days — warns instead of running, the same way its own screen does. What
+  a dashboard does **not** do yet: it cannot be shared or made public,
+  it does not refresh on its own, and a tile is always a saved report — no
+  single-number tiles, no text.
 - **Feed** — a live event feed, split into an **Accepted** tab and a
   **Rejected** tab, over a window you pick — the last hour through the last
   90 days — with an optional event-name filter. The window and the filter are
@@ -2565,6 +2597,60 @@ warning a fresh grid gets for the same reason. That is a different case from
 the `null` cells above — those come from a grid that *did* run, on periods
 too recent to have closed yet; a report reopened over too wide a range, or
 too fine a granularity, never runs at all.
+
+## Dashboards
+
+A dashboard is a named layout of saved reports — trends, retention reports
+and funnels — as an ordered list of **tiles**, each `{ "kind", "report_id",
+"width" }` with `kind` one of `trend`, `retention`, `funnel` and `width` one
+of `half`, `full`. Position is the array index. There is no `/run`
+endpoint: a tile runs by the call its report already answers to —
+`GET /v1/events/stats`, `POST /v1/reports/retention` or
+`POST /v1/funnels/:id/run` — with whatever range the viewer chose.
+
+```sh
+curl -X POST http://localhost:3000/v1/dashboards \
+  -H "x-lyraflow-server-key: $LYRAFLOW_SERVER_KEY" \
+  -H 'content-type: application/json' \
+  -d '{ "name": "Overview",
+        "tiles": [ { "kind": "trend", "report_id": 3, "width": "half" },
+                   { "kind": "funnel", "report_id": 1, "width": "full" } ] }'
+```
+
+| Method & path | Does |
+| --- | --- |
+| `GET /v1/dashboards` | List every dashboard in the project — name, tile count, whether it is home |
+| `POST /v1/dashboards` | Create one, with or without tiles |
+| `GET /v1/dashboards/:id` | Read one, each tile carrying its report in that report's own shape, or `null` if it has been deleted |
+| `PATCH /v1/dashboards/:id` | Rename it, replace its tiles, or set `is_home` |
+| `DELETE /v1/dashboards/:id` | Delete it — `204`. The reports it showed are untouched |
+
+A duplicate name within the same project is a `409`. A non-numeric `:id` is a
+`400` naming `invalid_dashboard_id`; an id that does not exist, or belongs to
+another project, is a `404`. A tile a write INTRODUCES that names a report
+which does not exist in this project is refused with `400` and
+`{"error": "report_not_found", "kind", "report_id"}`. Tiles already stored on
+the dashboard are not re-checked: deleting a report is allowed, the read
+returns that tile with `"report": null` rather than dropping it, and a
+`PATCH` carrying the whole layout — which is what an edit sends — must still
+be able to reorder, resize and remove around it.
+At most twelve tiles; the thirteenth is a `400`.
+
+`is_home: true` makes this dashboard the project's home and clears the
+previous one in the same transaction — there is exactly one per project, and
+the database enforces it. `is_home: false` clears it. Deleting the home
+leaves the project with none, and the web UI opens the feed again.
+
+**What is not stored is the range**, for the same reason a saved trend or
+funnel never stores one. A dashboard reopens over whatever range the viewer
+has, never the one it was last looked at with. When the viewer picks no
+range, none is sent, and each of these endpoints applies its own default
+window — so the tiles on one dashboard are then showing different periods,
+which the web UI states under the picker.
+
+Every row carries `definition_version`, and a stored layout this build
+cannot parse comes back `"stale": true` with `"tiles": []` rather than
+failing the list — the same behaviour a saved report has.
 
 ## Reading events
 

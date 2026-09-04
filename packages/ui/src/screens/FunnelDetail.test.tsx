@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter, Route, Routes, useNavigate } from 'react-router'
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import { ApiError } from '../api/client.js'
@@ -141,9 +141,18 @@ function fakeClient(over: Record<string, unknown> = {}) {
   }
 }
 
-function renderDetail(client: ApiClient, onUnauthorized?: () => void) {
+/** The URL as the router currently holds it, so a test can assert both what
+ *  the screen READ out of it and that the screen did not write to it. */
+function UrlProbe() {
+  const location = useLocation()
+  return <p data-testid="funnel-url">{`${location.pathname}${location.search}`}</p>
+}
+
+/** The URL the screen opens at, so a test can open it the way a dashboard
+ *  tile links to it -- with a `?days=` the screen is expected to honour. */
+function renderDetail(client: ApiClient, onUnauthorized?: () => void, entry?: string) {
   render(
-    <MemoryRouter initialEntries={[funnelPath(FUNNEL.id)]}>
+    <MemoryRouter initialEntries={[entry ?? funnelPath(FUNNEL.id)]}>
       <ProjectProvider projects={PROJECTS} initialId={1}>
         <Routes>
           <Route
@@ -156,6 +165,7 @@ function renderDetail(client: ApiClient, onUnauthorized?: () => void) {
            * logging "no routes matched". */}
           <Route path={ROUTES.funnels} element={<p>deleted</p>} />
         </Routes>
+        <UrlProbe />
       </ProjectProvider>
     </MemoryRouter>,
   )
@@ -1565,5 +1575,51 @@ describe('FunnelDetail — an optional step seeds a different pair of counts', (
     for (const call of client.funnelPeople.mock.calls) {
       expect((call[2] as { mode: string }).mode).not.toBe('dropped')
     }
+  })
+})
+
+// A tile on a dashboard links here carrying the dashboard's range, so the
+// report opens over the window the operator was already looking at. The
+// funnel screen has no `range` parameter -- four day counts is its whole
+// vocabulary -- so `?days=` is what it reads, and only for a value the
+// picker can actually display.
+describe('FunnelDetail — opens over the range in the URL', () => {
+  it('runs the funnel for `?days=30` on open, and shows 30 in the picker', async () => {
+    const client = fakeClient()
+    renderDetail(client, undefined, `${funnelPath(FUNNEL.id)}?days=30`)
+    await screen.findByTestId('funnel-step-1')
+    expect(client.runFunnel).toHaveBeenCalledTimes(1)
+    expect(client.runFunnel).toHaveBeenCalledWith(1, FUNNEL.id, { days: 30 })
+    // The picker must AGREE with the run: a screen that ran 30 days while
+    // its control says 7 tells the operator the numbers are something they
+    // are not, and the next Run would silently change the answer.
+    expect(screen.getByLabelText(/range/i)).toHaveValue('30')
+  })
+
+  it('ignores a `days` the picker does not offer and runs the default', async () => {
+    const client = fakeClient()
+    renderDetail(client, undefined, `${funnelPath(FUNNEL.id)}?days=12`)
+    await screen.findByTestId('funnel-step-1')
+    expect(client.runFunnel).toHaveBeenCalledWith(1, FUNNEL.id, { days: 7 })
+    expect(screen.getByLabelText(/range/i)).toHaveValue('7')
+  })
+
+  it('runs the default when there is no `days` at all', async () => {
+    const client = fakeClient()
+    renderDetail(client)
+    await screen.findByTestId('funnel-step-1')
+    expect(client.runFunnel).toHaveBeenCalledWith(1, FUNNEL.id, { days: 7 })
+  })
+
+  // The funnel screen's range is NOT URL state (a range change dims the
+  // result and waits for Run -- see the screen's own doc comment), and this
+  // change does not make it so. Writing `days` back on every pick would put
+  // a range in the URL that no run has answered yet.
+  it('does not write the picked range back into the URL', async () => {
+    const client = fakeClient()
+    renderDetail(client, undefined, `${funnelPath(FUNNEL.id)}?days=30`)
+    await screen.findByTestId('funnel-step-1')
+    await userEvent.selectOptions(screen.getByLabelText(/range/i), '90')
+    expect(screen.getByTestId('funnel-url')).toHaveTextContent(`${funnelPath(FUNNEL.id)}?days=30`)
   })
 })

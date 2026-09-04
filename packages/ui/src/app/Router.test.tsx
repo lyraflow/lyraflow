@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import { userEvent } from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
-import { ApiError } from '../api/client.js'
+import { type ApiClient, ApiError } from '../api/client.js'
 import { ProjectProvider } from './ProjectContext.js'
 import { AppRouter } from './Router.js'
 
@@ -18,7 +18,7 @@ const PROJECTS = [
   },
 ]
 
-function renderAt(path: string) {
+function renderAt(path: string, overrides: Partial<ApiClient> = {}) {
   window.history.pushState({}, '', path)
   const client = {
     events: vi.fn(async () => ({ events: [], next_cursor: null })),
@@ -39,6 +39,25 @@ function renderAt(path: string) {
      * this every test that lands on /settings dies inside `AboutSection`,
      * which says nothing about the router. */
     meta: vi.fn(async () => ({ version: '0.10.0' })),
+    dashboards: vi.fn(async () => []),
+    /* `/dashboards/:id` fetches on mount and can rename, reorder or delete
+     * from the same screen; all three are stubbed so a resolution test never
+     * reaches an unstubbed method for a reason unrelated to routing. Tiles
+     * are empty because this file is asserting which screen the router
+     * picked, not what a tile renders. */
+    dashboard: vi.fn(async () => ({
+      id: 7,
+      name: 'Overview',
+      tile_count: 0,
+      is_home: false,
+      definition_version: 1,
+      stale: false,
+      created_at: '',
+      updated_at: '',
+      tiles: [],
+    })),
+    patchDashboard: vi.fn(async () => undefined),
+    deleteDashboard: vi.fn(async () => undefined),
     funnels: vi.fn(async () => []),
     segments: vi.fn(async () => []),
     trendReports: vi.fn(async () => []),
@@ -48,6 +67,7 @@ function renderAt(path: string) {
      * without this, the /trends/new test would hit an unstubbed method
      * inside a timer callback and fail for a reason unrelated to routing. */
     schemaEvents: vi.fn(async () => []),
+    ...overrides,
   } as never
   return render(
     <ProjectProvider projects={PROJECTS} initialId={1}>
@@ -57,9 +77,143 @@ function renderAt(path: string) {
 }
 
 describe('AppRouter', () => {
-  it('renders the feed at the root', async () => {
+  // Task 6: the dashboards list and its create form. Split into two tests
+  // rather than the brief's single one -- this file renders once per test
+  // (see every other resolution guard below), and a second `renderAt` in
+  // the same test would mount a second tree beside the first instead of
+  // replacing it.
+  it('renders the dashboards list at /dashboards', async () => {
+    renderAt('/dashboards')
+    expect(await screen.findByRole('heading', { name: /^dashboards$/i })).toBeInTheDocument()
+  })
+
+  it('renders the dashboard create form at /dashboards/new', async () => {
+    renderAt('/dashboards/new')
+    expect(await screen.findByRole('heading', { name: /new dashboard/i })).toBeInTheDocument()
+  })
+
+  // Task 9: `/dashboards/:id`. `/dashboards/new` above must keep resolving to
+  // the create form rather than to this screen with an id of "new" -- the
+  // router ranks by specificity, and both tests here hold that.
+  it('renders the dashboard screen at /dashboards/7', async () => {
+    renderAt('/dashboards/7')
+    expect(await screen.findByRole('heading', { name: 'Overview' })).toBeInTheDocument()
+  })
+
+  it('renders the feed at / when no dashboard is home', async () => {
     renderAt('/')
     expect(await screen.findByRole('tab', { name: /accepted/i })).toBeInTheDocument()
+  })
+
+  it('redirects / to the home dashboard when one is set, with replace', async () => {
+    const historyLengthBefore = window.history.length
+    renderAt('/', {
+      dashboards: vi.fn(async () => [
+        {
+          id: 7,
+          name: 'Overview',
+          tile_count: 0,
+          is_home: true,
+          definition_version: 1,
+          stale: false,
+          created_at: '',
+          updated_at: '',
+        },
+      ]),
+    })
+    expect(await screen.findByRole('heading', { name: /overview/i })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/dashboards/7')
+    // +1, not +0: `renderAt` itself pushes the entry for `/` -- the redirect
+    // to `/dashboards/7` must add none on top of that. A push instead of a
+    // replace here would land on +2.
+    expect(window.history.length).toBe(historyLengthBefore + 1)
+  })
+
+  it('renders the feed at / when the dashboard list fails to load', async () => {
+    renderAt('/', {
+      dashboards: vi.fn(async () => {
+        throw new Error('network error')
+      }),
+    })
+    expect(await screen.findByRole('tab', { name: /accepted/i })).toBeInTheDocument()
+  })
+
+  // A client whose `dashboards` throws synchronously (rather than
+  // returning a rejected promise) must not crash `HomeEntry`'s effect --
+  // same fall-through as the rejected-promise case above.
+  it('renders the feed at / when the dashboard list throws synchronously', async () => {
+    renderAt('/', {
+      dashboards: vi.fn(() => {
+        throw new Error('boom')
+      }),
+    })
+    expect(await screen.findByRole('tab', { name: /accepted/i })).toBeInTheDocument()
+  })
+
+  it('/feed is always the feed, even with a home dashboard', async () => {
+    renderAt('/feed', {
+      dashboards: vi.fn(async () => [
+        {
+          id: 7,
+          name: 'Overview',
+          tile_count: 0,
+          is_home: true,
+          definition_version: 1,
+          stale: false,
+          created_at: '',
+          updated_at: '',
+        },
+      ]),
+    })
+    expect(await screen.findByRole('tab', { name: /accepted/i })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/feed')
+  })
+
+  // `/dashboards/home` is `HomeEntry` again, with a different fallback: the
+  // list rather than the feed. `/dashboards/:id` would otherwise also match
+  // this path with `id` "home" -- `dashboardsHome` is declared as a
+  // dot-free STATIC segment ahead of it, and `<Routes>` ranks a static
+  // segment over a dynamic one regardless of declaration order (see the
+  // comment on the funnel routes below), so this proves that ranking rather
+  // than assuming it.
+  it('/dashboards/home redirects to the home dashboard when one is set, with replace', async () => {
+    const historyLengthBefore = window.history.length
+    renderAt('/dashboards/home', {
+      dashboards: vi.fn(async () => [
+        {
+          id: 7,
+          name: 'Overview',
+          tile_count: 0,
+          is_home: true,
+          definition_version: 1,
+          stale: false,
+          created_at: '',
+          updated_at: '',
+        },
+      ]),
+    })
+    expect(await screen.findByRole('heading', { name: /overview/i })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/dashboards/7')
+    expect(window.history.length).toBe(historyLengthBefore + 1)
+  })
+
+  it('/dashboards/home falls back to the list, not the feed, when no dashboard is home', async () => {
+    const client = { dashboard: vi.fn() }
+    renderAt('/dashboards/home', client)
+    expect(await screen.findByRole('heading', { name: /^dashboards$/i })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/dashboards')
+    expect(screen.queryByText(/no longer exists/i)).toBeNull()
+    expect(client.dashboard).not.toHaveBeenCalled()
+  })
+
+  it('/dashboards/home falls back to the list when the dashboard list fails to load', async () => {
+    renderAt('/dashboards/home', {
+      dashboards: vi.fn(async () => {
+        throw new Error('network error')
+      }),
+    })
+    expect(await screen.findByRole('heading', { name: /^dashboards$/i })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/dashboards')
   })
 
   // Task 3 replaced the placeholder `Settings` with the real screen (the

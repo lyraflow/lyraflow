@@ -1,5 +1,9 @@
+import { type ReactElement, useEffect, useState } from 'react'
 import { BrowserRouter, Navigate, Route, Routes, useSearchParams } from 'react-router'
-import type { ApiClient } from '../api/client.js'
+import { type ApiClient, ApiError } from '../api/client.js'
+import { Dashboard } from '../screens/Dashboard.js'
+import { DashboardNew } from '../screens/DashboardNew.js'
+import { Dashboards } from '../screens/Dashboards.js'
 import { Feed } from '../screens/Feed.js'
 import { FunnelBuilder } from '../screens/FunnelBuilder.js'
 import { FunnelDetail } from '../screens/FunnelDetail.js'
@@ -16,6 +20,7 @@ import { TrendReports } from '../screens/TrendReports.js'
 import { Trends } from '../screens/Trends.js'
 import { hasRetentionDefinitionParams } from '../screens/retention/params.js'
 import { hasTrendDefinitionParams } from '../screens/trends/params.js'
+import { useProject } from './ProjectContext.js'
 import { Shell } from './Shell.js'
 
 /**
@@ -28,6 +33,9 @@ import { Shell } from './Shell.js'
  * here must keep that property too.
  */
 export const ROUTES = {
+  dashboards: '/dashboards',
+  dashboardsHome: '/dashboards/home',
+  dashboardNew: '/dashboards/new',
   feed: '/feed',
   settings: '/settings',
   profile: '/profile',
@@ -44,12 +52,63 @@ export const ROUTES = {
 
 /** Path builders for the parameterised routes. Numeric ids only, so no final
  * segment can ever acquire a dot. */
+export const dashboardPath = (id: number) => `/dashboards/${id}`
 export const funnelPath = (id: number) => `/funnels/${id}`
 export const funnelEditPath = (id: number) => `/funnels/${id}/edit`
 export const segmentPath = (id: number) => `/segments/${id}`
 export const segmentEditPath = (id: number) => `/segments/${id}/edit`
 export const trendReportPath = (id: number) => `/trends/${id}`
 export const retentionReportPath = (id: number) => `/retention/${id}`
+
+/**
+ * `/` opens the project's home dashboard when one is marked, and its
+ * `fallback` otherwise -- a redirect rather than rendering the fallback in
+ * place, so the URL is truthful and the sidebar's active item is honest.
+ * Renders nothing while the list loads: rendering the fallback first would
+ * fire its fetches for a screen about to be replaced. A failed list read
+ * falls through to the fallback; neither destination this resolves to
+ * depends on dashboards existing.
+ *
+ * `fallback` is a prop rather than always the feed: `/` and `/dashboards/home`
+ * both resolve the same home dashboard, but disagree on where to land when
+ * there is none. `/` falls back to the feed (a bare hard refresh at the root
+ * has to land somewhere); `/dashboards/home` falls back to the dashboards
+ * list, since it was reached by asking for a dashboard specifically. `/feed`
+ * never comes here.
+ */
+function HomeEntry(props: { client: ApiClient; fallback: ReactElement; onUnauthorized?(): void }) {
+  const { activeId } = useProject()
+  const [home, setHome] = useState<number | null | 'loading'>('loading')
+  useEffect(() => {
+    if (activeId == null) return
+    let cancelled = false
+    setHome('loading')
+    // `Promise.resolve().then(...)` rather than calling `dashboards`
+    // directly: a stub (or a real client's own bug) that throws
+    // synchronously instead of returning a rejected promise must land in
+    // this same `.catch` rather than escaping the effect and unmounting
+    // the tree.
+    Promise.resolve()
+      .then(() => props.client.dashboards(activeId))
+      .then((list) => {
+        if (!cancelled) setHome(list.find((d) => d.is_home)?.id ?? null)
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return
+        if (err instanceof ApiError && err.status === 401) {
+          props.onUnauthorized?.()
+          return
+        }
+        setHome(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [props.client, activeId, props.onUnauthorized])
+  if (home === 'loading') return null
+  if (home === null) return props.fallback
+  return <Navigate to={dashboardPath(home)} replace />
+}
 
 /**
  * `/trends` used to BE the builder; it is now the saved-trend list, and the
@@ -108,6 +167,9 @@ export function AppRouter(props: {
    * matching `onUnauthorized`'s own shape. */
   onSessionStale?(): void
 }) {
+  const dashboards = <Dashboards client={props.client} onUnauthorized={props.onUnauthorized} />
+  const dashboardNew = <DashboardNew client={props.client} onUnauthorized={props.onUnauthorized} />
+  const dashboard = <Dashboard client={props.client} onUnauthorized={props.onUnauthorized} />
   const feed = <Feed client={props.client} onUnauthorized={props.onUnauthorized} />
   // IMPORTANT 3 from the whole-branch review: `onUnauthorized` used to be
   // handed only to `Feed` here -- `Settings` has its own two fetches
@@ -216,8 +278,50 @@ export function AppRouter(props: {
     <BrowserRouter>
       <Shell email={props.email} onLogout={props.onLogout} client={props.client}>
         <Routes>
-          <Route path="/" element={feed} />
+          <Route
+            path="/"
+            element={
+              <HomeEntry
+                client={props.client}
+                fallback={feed}
+                onUnauthorized={props.onUnauthorized}
+              />
+            }
+          />
           <Route path={ROUTES.feed} element={feed} />
+          {/*
+           * No `key`s on this pair, unlike the funnel/segment/trend/retention
+           * new-vs-detail pairs above: `/dashboards/new` (`DashboardNew`) and
+           * `/dashboards/:id` (`Dashboard`) are different
+           * component TYPES, so `<Routes>` remounts on navigation between them
+           * without help. Keys only earn their place where the same
+           * component serves both destinations.
+           */}
+          <Route path={ROUTES.dashboards} element={dashboards} />
+          <Route path={ROUTES.dashboardNew} element={dashboardNew} />
+          {/*
+           * The sidebar's Dashboards entry and the brand mark's `/` both
+           * ultimately want "the starred dashboard, or somewhere sane" --
+           * `dashboardsHome` reuses `HomeEntry` for that, falling back to
+           * the list rather than the feed (see `HomeEntry`'s own comment).
+           * It's declared as a STATIC segment ahead of `/dashboards/:id`
+           * deliberately: `<Routes>` ranks a static segment over a dynamic
+           * one regardless of declaration order (matching the funnel/trend/
+           * retention/segment routes below), so this would resolve
+           * correctly even declared after -- but `Router.test.tsx` pins the
+           * ranking directly rather than relying on it silently.
+           */}
+          <Route
+            path={ROUTES.dashboardsHome}
+            element={
+              <HomeEntry
+                client={props.client}
+                fallback={<Navigate to={ROUTES.dashboards} replace />}
+                onUnauthorized={props.onUnauthorized}
+              />
+            }
+          />
+          <Route path="/dashboards/:id" element={dashboard} />
           <Route path={ROUTES.settings} element={settings} />
           <Route path={ROUTES.profile} element={profile} />
           {/*

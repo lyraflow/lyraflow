@@ -33,6 +33,8 @@ function client(over: Partial<Record<string, unknown>> = {}) {
      * Without this every App test that lands on the feed dies inside
      * `EventCombobox`, which says nothing about the App. */
     schemaEvents: vi.fn(async () => []),
+    /* `/` now asks for the home dashboard before showing the feed. */
+    dashboards: vi.fn(async () => []),
     project: vi.fn(async () => ({
       name: PLACEHOLDER_PROJECT.name,
       slug: PLACEHOLDER_PROJECT.slug,
@@ -280,6 +282,31 @@ describe('App', () => {
   // as a phase, not a route, so it can't be reached once a project exists
   // (see App.tsx's own comment). `onReady` re-fetches the project list and
   // falls through to the normal app once one does.
+  // I3 from the final whole-branch review: `handleSessionExpired` was a plain
+  // function declaration in App's body, so every App re-render handed a NEW
+  // callback identity down. `HomeEntry`, `Dashboard` and `Feed` all list
+  // `onUnauthorized` in their load effects, so the whole page re-fetched on
+  // any App state change -- exactly the query storm those effects' own
+  // dependency comments avoid one level down.
+  it('an App re-render does not re-fetch the screens below it', async () => {
+    // The one call this test watches, held by name -- `client()` erases its
+    // own shape to `never`, the same way the session-poll test above holds
+    // `session`.
+    const dashboards = vi.fn(async () => [])
+    const c = client({ dashboards })
+    const { rerender } = render(<App client={c} sessionPollIntervalMs={100_000} />)
+    expect(await screen.findByText('Feed')).toBeInTheDocument()
+    await waitFor(() => expect(dashboards).toHaveBeenCalledTimes(1))
+
+    // A prop change is the cheapest re-render of App itself. The client is
+    // the same object, so nothing below has any other reason to re-fetch.
+    rerender(<App client={c} sessionPollIntervalMs={200_000} />)
+    rerender(<App client={c} sessionPollIntervalMs={300_000} />)
+
+    await waitFor(() => expect(screen.getByText('Feed')).toBeInTheDocument())
+    expect(dashboards).toHaveBeenCalledTimes(1)
+  })
+
   it('renders the first-run wizard instead of the shell when there are no projects yet', async () => {
     const projects = vi.fn().mockResolvedValueOnce([])
     const c = client({ projects })

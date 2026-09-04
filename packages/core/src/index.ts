@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 22
+export const SCHEMA_VERSION = 23
 
 export { hashPassword, verifyPassword } from './auth/password.js'
 export { ProjectExistsError, createProject, slugify } from './projects/create.js'

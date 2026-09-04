@@ -666,6 +666,79 @@ export interface RetentionReportInput {
   segment_id: number | null
 }
 
+/** A tile's report kind. Selects which of the three report tables `report_id` names. */
+export type TileKind = 'trend' | 'retention' | 'funnel'
+
+/** A tile's column span within the dashboard grid: half a row, or the full row. */
+export type TileWidth = 'half' | 'full'
+
+/**
+ * One entry of a dashboard's stored layout -- `POST`/`PATCH`'s `tiles[]`.
+ * Just the reference: `kind` and `report_id` name an existing report, and
+ * resolving that reference into the report itself is what makes a
+ * `DashboardTileInput` into a `ResolvedTile`.
+ */
+export interface DashboardTileInput {
+  kind: TileKind
+  report_id: number
+  width: TileWidth
+}
+
+/**
+ * One tile of `GET /v1/dashboards/:id`'s `tiles[]`, with its report resolved.
+ * A discriminated union on `kind` so a tile component narrowing on it gets
+ * `report` typed as the matching wire shape -- `TrendReport`, `RetentionReport`
+ * or `Funnel` -- rather than a union of all three. `report` is `null` when the
+ * referenced report has since been deleted; the tile still renders, empty,
+ * rather than vanish from the layout.
+ */
+export type ResolvedTile =
+  | { kind: 'trend'; report_id: number; width: TileWidth; report: TrendReport | null }
+  | { kind: 'retention'; report_id: number; width: TileWidth; report: RetentionReport | null }
+  | { kind: 'funnel'; report_id: number; width: TileWidth; report: Funnel | null }
+
+/**
+ * One entry of `GET /v1/dashboards`'s list envelope. `tile_count` stands in
+ * for `tiles` here -- the list route never resolves a dashboard's reports, so
+ * there is nothing to send for them -- and lets a list view show "3 tiles"
+ * without fetching the detail. `stale` is true when the stored layout no
+ * longer parses against `DashboardTileInput`; a detail fetch then answers
+ * with `tiles: []` rather than throwing.
+ */
+export interface DashboardSummary {
+  id: number
+  name: string
+  tile_count: number
+  is_home: boolean
+  definition_version: number
+  stale: boolean
+  created_at: string
+  updated_at: string
+}
+
+/** `GET /v1/dashboards/:id`. Everything a `DashboardSummary` has, plus the resolved tiles. */
+export interface Dashboard extends DashboardSummary {
+  tiles: ResolvedTile[]
+}
+
+/** `POST /v1/dashboards`'s body. `tiles` is optional -- a dashboard can be created empty. */
+export interface DashboardInput {
+  name: string
+  tiles?: DashboardTileInput[]
+}
+
+/**
+ * `PATCH /v1/dashboards/:id`'s body. Every field optional, same "omit means
+ * unchanged" contract as `Partial<TrendReportInput>` elsewhere in this file --
+ * `is_home` included, so flipping the home dashboard doesn't require resending
+ * `name` and `tiles`.
+ */
+export interface DashboardPatch {
+  name?: string
+  tiles?: DashboardTileInput[]
+  is_home?: boolean
+}
+
 /**
  * `GET /v1/persons/:id`.
  *
