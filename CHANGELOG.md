@@ -23,6 +23,19 @@ one fix is contained in 0.3.0.
 
 ## Unreleased
 
+### Added
+
+- **Accent palettes.** The Profile screen has an Appearance card with seven
+  accents: copper, the default, and cobalt, moss, plum, slate, wine and amber.
+  Each is the copper ramp with its hue swapped and its lightness held, measured
+  for contrast in both modes (`brand/contrast-report.txt`). The choice is kept
+  in the browser and changes the accent only. A stored theme or palette is now
+  applied before first paint, so an explicit dark choice no longer flashes light
+  on load.
+- **`brand/tokens.css` is generated.** The copper ramp's tokens are now named
+  `--lf-accent-*`; the `--lf-copper-*` names are gone. Anything outside this
+  repo that read them by name needs the rename.
+
 ### Fixed
 
 - **A saved report could be added to a dashboard more than once** (**#246**). Nothing

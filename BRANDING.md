@@ -83,6 +83,22 @@ table, which is a summary. Full ramps and semantic colours are in the tokens.
 Every pairing in `brand/contrast-report.txt` carries a measured ratio. If you
 introduce a new pairing, measure it — do not estimate it.
 
+### Alternative accents in the product
+
+The web UI can be switched, per browser, to one of six other accents — cobalt,
+moss, plum, slate, wine and amber. Each is the copper ramp with its hue swapped
+and its lightness held step for step, so the funnel chart's ordinal ramp and
+every text pairing keep their measured margins; the ratios are in
+`contrast-report.txt` under each palette's name, and the values are in
+`tokens.css` as `[data-palette="…"]` blocks and in `tokens.json` under
+`palettes`.
+
+**They are for an operator's own instance, not for Lyraflow.** Copper is the
+identity and the default. Do not represent Lyraflow — in a screenshot, a
+listing, a talk — in any of the other six. The alternatives exist so that a
+self-hoster can make their own deployment look like their own; they are not a
+second brand.
+
 ## Type
 
 **IBM Plex Sans** and **IBM Plex Mono**, both under the SIL Open Font License
@@ -128,6 +144,11 @@ Stated so nobody rediscovers them the hard way:
   distinctive on its own and leans on the mark to carry recognition.
 - **Copper's dark-mode step is pale.** `#DDA07F` clears contrast comfortably but
   reads closer to sand than to copper.
+- **A palette can sit next to a status colour.** Cobalt is near `info`, moss
+  near `success`, wine near `danger`, amber near `warning`. The status colours
+  do not move per palette — they appear in three places and never beside an
+  accent fill — so in those palettes the accent and one status colour are
+  close relatives. Deliberate; noted so it is not reported as an oversight.
 
 ## These files are generated
 

@@ -526,7 +526,13 @@ screens, reachable from the sidebar:
   polls to completion rather than trusting the request that started it.
 
 The account menu in the header also has a **Profile** screen, for changing the
-admin's email address and password. Both changes require the current password —
+admin's email address and password, and for picking the UI's **accent colour**.
+Seven palettes — copper, the default, plus cobalt, moss, plum, slate, wine and
+amber — each the same ramp with the hue swapped, and each measured for contrast
+in both light and dark before it shipped (`brand/contrast-report.txt`). The
+choice is kept in the browser, not on the server: it follows the browser, not
+the account, and changes the accent only — surfaces, text and the status colours
+are the same in every palette. Both account changes require the current password —
 a session is enough to read everything this install holds and deliberately not
 enough to change what recovers the account — and a password change signs out
 every other browser, which is the point of changing it after a leak. There is no
