@@ -18,14 +18,15 @@ const DOT_LIMIT = 45
  * Small multiples: one panel per series, all on the same scale.
  *
  * **Why not overlaid lines with a colour legend.** The brand system has one
- * hue -- a copper ramp -- and `styles/theme.css` says in as many words why a
- * set of distinct hues is wrong for the funnel's ORDINAL stages. A trend
- * breakdown is the opposite kind of data: `pro`, `free` and `(not set)` have
- * no order, so a one-hue lightness ramp on them is that same error inverted,
- * spending the only channel there is on a rank the data does not have. There
- * is no categorical palette to reach for, and inventing hex values in a
- * component is exactly what the brand rules refuse -- a new palette is a
- * brand-tooling change that has to re-run its own contrast script.
+ * hue -- an accent ramp, copper by default -- and `styles/theme.css` says in
+ * as many words why a set of distinct hues is wrong for the funnel's
+ * ORDINAL stages. A trend breakdown is the opposite kind of data: `pro`,
+ * `free` and `(not set)` have no order, so a one-hue lightness ramp on them
+ * is that same error inverted, spending the only channel there is on a rank
+ * the data does not have. There is no categorical palette to reach for, and
+ * inventing hex values in a component is exactly what the brand rules
+ * refuse -- a new palette is a brand-tooling change that has to re-run its
+ * own contrast script.
  *
  * Small multiples need no categorical palette at all. They also read better
  * at this width: ten overlaid lines is a hairball whatever colours it is

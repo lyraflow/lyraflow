@@ -19,7 +19,7 @@ const BAR_SCALE = 280
 export const MIN_BAR_HEIGHT = 2
 
 /** How many ordinal ramp steps `theme.css` defines. See its own comment for
- * why this is 7 and not 8 -- it is the widest span of the copper ramp whose
+ * why this is 7 and not 8 -- it is the widest span of the accent ramp whose
  * palest member still clears 2:1 on each mode's surface, measured. */
 export const RAMP_STEPS = 7
 

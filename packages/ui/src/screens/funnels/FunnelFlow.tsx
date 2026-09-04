@@ -644,9 +644,9 @@ export function FunnelFlow(props: {
                       {/* TWO rings, and the outer one is not decoration. The
                        * mark has to read against whatever it traces, and stage
                        * one is the darkest step of the ramp while the accent
-                       * is copper -- rendered, the single ring vanished into
+                       * is the accent -- rendered, the single ring vanished into
                        * the node it was marking. A surface-coloured halo under
-                       * a copper ring separates the mark from both the node and
+                       * an accent ring separates the mark from both the node and
                        * the band that starts immediately beside it. */}
                       <rect
                         {...box}

@@ -44,7 +44,7 @@ export interface SankeyNode {
   step: number // 0-based index into result.steps
   people: number
   optional: boolean
-  ramp: number // copper ramp step, 1-based
+  ramp: number // accent ramp step, 1-based
   x: number // left edge, viewBox units
   y: number // top edge, viewBox units
   height: number
