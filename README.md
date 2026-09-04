@@ -349,12 +349,15 @@ screens, reachable from the sidebar:
   stores its range. Its default setting is the exception, and the screen
   says so: at *Default for this resolution* no range is sent at all, so each
   tile falls back to its own report's default window and the tiles are not
-  on one period. Pick a preset to put them on the same range. A project can have many
-  dashboards; the star — on a list row, and on the dashboard itself in both
-  view and edit mode — marks one as **home**, and it is then what `/` opens
-  after login (the feed stays at `/feed`). Clicking the filled star clears
-  it, leaving the project with no home. Editing happens in place — rename, reorder, resize, add, remove
-  — and every change saves as it is made. A tile whose report has since
+  on one period. Pick a preset to put them on the same range. A project can
+  have many dashboards; the star — on a list row, and on the dashboard
+  itself in both view and edit mode — marks one as **home**. It opens at
+  `/` after login, and "Dashboards" in the sidebar and the Lyraflow mark
+  both go to it when one is starred (the list otherwise); "All dashboards"
+  on a dashboard opens the list. Clicking the filled star clears it,
+  leaving the project with no home. Editing happens in place — rename,
+  reorder, resize, add, remove — and every change saves as it is made. A
+  tile whose report has since
   been deleted stays on the dashboard and says so rather than vanishing.
   Clicking a tile opens the report it shows, over the dashboard's range —
   for a funnel only when that range is one the funnel screen itself offers

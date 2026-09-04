@@ -34,6 +34,7 @@ import { Shell } from './Shell.js'
  */
 export const ROUTES = {
   dashboards: '/dashboards',
+  dashboardsHome: '/dashboards/home',
   dashboardNew: '/dashboards/new',
   feed: '/feed',
   settings: '/settings',
@@ -60,15 +61,22 @@ export const trendReportPath = (id: number) => `/trends/${id}`
 export const retentionReportPath = (id: number) => `/retention/${id}`
 
 /**
- * `/` opens the project's home dashboard when one is marked, and the feed
- * otherwise -- a redirect rather than rendering the dashboard in place, so
- * the URL is truthful and the sidebar's active item is honest. Renders
- * nothing while the list loads: rendering the feed first would fire its
- * fetches for a screen about to be replaced. A failed list read falls
- * through to the feed; the feed does not depend on dashboards existing.
- * `/feed` never comes here.
+ * `/` opens the project's home dashboard when one is marked, and its
+ * `fallback` otherwise -- a redirect rather than rendering the fallback in
+ * place, so the URL is truthful and the sidebar's active item is honest.
+ * Renders nothing while the list loads: rendering the fallback first would
+ * fire its fetches for a screen about to be replaced. A failed list read
+ * falls through to the fallback; neither destination this resolves to
+ * depends on dashboards existing.
+ *
+ * `fallback` is a prop rather than always the feed: `/` and `/dashboards/home`
+ * both resolve the same home dashboard, but disagree on where to land when
+ * there is none. `/` falls back to the feed (a bare hard refresh at the root
+ * has to land somewhere); `/dashboards/home` falls back to the dashboards
+ * list, since it was reached by asking for a dashboard specifically. `/feed`
+ * never comes here.
  */
-function HomeEntry(props: { client: ApiClient; feed: ReactElement; onUnauthorized?(): void }) {
+function HomeEntry(props: { client: ApiClient; fallback: ReactElement; onUnauthorized?(): void }) {
   const { activeId } = useProject()
   const [home, setHome] = useState<number | null | 'loading'>('loading')
   useEffect(() => {
@@ -98,7 +106,7 @@ function HomeEntry(props: { client: ApiClient; feed: ReactElement; onUnauthorize
     }
   }, [props.client, activeId, props.onUnauthorized])
   if (home === 'loading') return null
-  if (home === null) return props.feed
+  if (home === null) return props.fallback
   return <Navigate to={dashboardPath(home)} replace />
 }
 
@@ -273,7 +281,11 @@ export function AppRouter(props: {
           <Route
             path="/"
             element={
-              <HomeEntry client={props.client} feed={feed} onUnauthorized={props.onUnauthorized} />
+              <HomeEntry
+                client={props.client}
+                fallback={feed}
+                onUnauthorized={props.onUnauthorized}
+              />
             }
           />
           <Route path={ROUTES.feed} element={feed} />
@@ -287,6 +299,28 @@ export function AppRouter(props: {
            */}
           <Route path={ROUTES.dashboards} element={dashboards} />
           <Route path={ROUTES.dashboardNew} element={dashboardNew} />
+          {/*
+           * The sidebar's Dashboards entry and the brand mark's `/` both
+           * ultimately want "the starred dashboard, or somewhere sane" --
+           * `dashboardsHome` reuses `HomeEntry` for that, falling back to
+           * the list rather than the feed (see `HomeEntry`'s own comment).
+           * It's declared as a STATIC segment ahead of `/dashboards/:id`
+           * deliberately: `<Routes>` ranks a static segment over a dynamic
+           * one regardless of declaration order (matching the funnel/trend/
+           * retention/segment routes below), so this would resolve
+           * correctly even declared after -- but `Router.test.tsx` pins the
+           * ranking directly rather than relying on it silently.
+           */}
+          <Route
+            path={ROUTES.dashboardsHome}
+            element={
+              <HomeEntry
+                client={props.client}
+                fallback={<Navigate to={ROUTES.dashboards} replace />}
+                onUnauthorized={props.onUnauthorized}
+              />
+            }
+          />
           <Route path="/dashboards/:id" element={dashboard} />
           <Route path={ROUTES.settings} element={settings} />
           <Route path={ROUTES.profile} element={profile} />

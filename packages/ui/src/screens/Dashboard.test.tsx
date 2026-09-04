@@ -352,6 +352,25 @@ describe('Dashboard', () => {
     expect(await screen.findByLabelText('Report to add')).toBeInTheDocument()
   })
 
+  // Now that the sidebar's Dashboards entry and the Lyraflow mark both open
+  // the starred dashboard directly (`/dashboards/home`), the list is no
+  // longer one click away from here -- this link is. In both modes, since
+  // there was never a reason to bury it behind Edit.
+  it('offers a link back to the list, in both view and edit mode', async () => {
+    const { unmount } = renderScreen()
+    expect(await screen.findByRole('link', { name: /all dashboards/i })).toHaveAttribute(
+      'href',
+      ROUTES.dashboards,
+    )
+    unmount()
+
+    renderScreen({ at: '/dashboards/7?edit=1' })
+    expect(await screen.findByRole('link', { name: /all dashboards/i })).toHaveAttribute(
+      'href',
+      ROUTES.dashboards,
+    )
+  })
+
   it('Edit toggles ?edit=1 into the URL; Done removes it', async () => {
     renderScreen()
     await userEvent.click(await screen.findByRole('button', { name: 'Edit' }))

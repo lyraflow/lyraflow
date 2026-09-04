@@ -169,6 +169,53 @@ describe('AppRouter', () => {
     expect(window.location.pathname).toBe('/feed')
   })
 
+  // `/dashboards/home` is `HomeEntry` again, with a different fallback: the
+  // list rather than the feed. `/dashboards/:id` would otherwise also match
+  // this path with `id` "home" -- `dashboardsHome` is declared as a
+  // dot-free STATIC segment ahead of it, and `<Routes>` ranks a static
+  // segment over a dynamic one regardless of declaration order (see the
+  // comment on the funnel routes below), so this proves that ranking rather
+  // than assuming it.
+  it('/dashboards/home redirects to the home dashboard when one is set, with replace', async () => {
+    const historyLengthBefore = window.history.length
+    renderAt('/dashboards/home', {
+      dashboards: vi.fn(async () => [
+        {
+          id: 7,
+          name: 'Overview',
+          tile_count: 0,
+          is_home: true,
+          definition_version: 1,
+          stale: false,
+          created_at: '',
+          updated_at: '',
+        },
+      ]),
+    })
+    expect(await screen.findByRole('heading', { name: /overview/i })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/dashboards/7')
+    expect(window.history.length).toBe(historyLengthBefore + 1)
+  })
+
+  it('/dashboards/home falls back to the list, not the feed, when no dashboard is home', async () => {
+    const client = { dashboard: vi.fn() }
+    renderAt('/dashboards/home', client)
+    expect(await screen.findByRole('heading', { name: /^dashboards$/i })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/dashboards')
+    expect(screen.queryByText(/no longer exists/i)).toBeNull()
+    expect(client.dashboard).not.toHaveBeenCalled()
+  })
+
+  it('/dashboards/home falls back to the list when the dashboard list fails to load', async () => {
+    renderAt('/dashboards/home', {
+      dashboards: vi.fn(async () => {
+        throw new Error('network error')
+      }),
+    })
+    expect(await screen.findByRole('heading', { name: /^dashboards$/i })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/dashboards')
+  })
+
   // Task 3 replaced the placeholder `Settings` with the real screen (the
   // install snippet and this month's usage) -- the page-level heading is
   // still exactly "Settings", so this assertion needed no change, but it's

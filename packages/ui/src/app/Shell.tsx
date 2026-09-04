@@ -272,6 +272,15 @@ export function Shell(props: {
   // relying on `NavLink`'s own match, only for the Feed link's extra case.
   const { pathname } = useLocation()
   const feedActive = pathname === '/' || pathname === ROUTES.feed
+  // Dashboards now links to `/dashboards/home` (O1: the sidebar entry opens
+  // the starred dashboard when one exists), so it can no longer rely on
+  // `NavLink`'s own match against `to` -- that would only mark it current
+  // AT `/dashboards/home` itself, and a click on it actually lands on
+  // `/dashboards/:id` or falls back to the list. Current on the list route
+  // and on any dashboard's own screen, mirroring `feedActive`'s hand-computed
+  // match above for the same reason: the link's destination and the set of
+  // routes it should read as "current" for are not the same set.
+  const dashboardsActive = pathname === ROUTES.dashboards || pathname.startsWith('/dashboards/')
   return (
     // `flex-col` below `sm`, `flex-row` at and above it: a 224px fixed
     // sidebar leaves a 390px viewport with less than half its width for
@@ -288,27 +297,43 @@ export function Shell(props: {
         {/* The product is Lyraflow, not "Lyra" -- pre-existing on `main`,
          * predating this branch, but this file is already touched here and
          * the wordmark spec's hand-set kern pairs (e.g. `fl`) only exist in
-         * the full name. `role="group"` + `aria-label` gives this element a
-         * stable accessible name a test can pin without depending on the
-         * `Mark` SVG's own `aria-hidden` text content. */}
-        {/* biome-ignore lint/a11y/useSemanticElements: biome's suggested
-         * <fieldset> is for grouping form controls, which this isn't -- a
-         * mark plus a wordmark, not inputs. `role="group"` on a `div` is
-         * the correct ARIA choice for "a set of UI objects" that aren't
-         * form controls. */}
-        <div
-          role="group"
-          aria-label="Lyraflow"
+         * the full name.
+         *
+         * O2: a real `Link` to `/`, not a decorative group -- the mark is
+         * now a second way back to the starred dashboard (or the feed, when
+         * there isn't one) beside the sidebar's own Dashboards entry.
+         * `aria-label` overrides the accessible name to say where it goes
+         * ("home") rather than leaving it as just the wordmark text, the
+         * same reason every other icon-plus-label control in this sidebar
+         * keeps its visible text -- SAME classes as the div this replaces,
+         * so it looks identical. */}
+        <Link
+          to="/"
+          aria-label="Lyraflow home"
           className="flex h-14 items-center gap-2 font-semibold sm:border-b sm:border-border sm:px-4"
         >
           <Mark />
           Lyraflow
-        </div>
+        </Link>
         <nav className="flex items-center gap-1 sm:flex-col sm:items-stretch sm:gap-0.5 sm:p-2">
-          <NavLink to={ROUTES.dashboards} className={({ isActive }) => navLinkClass(isActive)}>
+          {/*
+           * O1: this now opens the starred dashboard directly
+           * (`/dashboards/home`, resolved by `Router.tsx`'s `HomeEntry`)
+           * rather than always the list -- so it's a plain `Link`, like
+           * Feed, with `aria-current` computed by hand from
+           * `dashboardsActive` above rather than from `NavLink`'s own match
+           * against `to`: that match is against the LINK'S destination,
+           * which is `/dashboards/home`, not against every route a click on
+           * it can actually land on.
+           */}
+          <Link
+            to={ROUTES.dashboardsHome}
+            aria-current={dashboardsActive ? 'page' : undefined}
+            className={navLinkClass(dashboardsActive)}
+          >
             <LayoutDashboard className="h-4 w-4" strokeWidth={ICON_STROKE} aria-hidden="true" />
             <span className="sr-only sm:not-sr-only">Dashboards</span>
-          </NavLink>
+          </Link>
           {/*
            * Real links now that `Router.tsx` gives this app somewhere to
            * route to -- Important 10 previously ruled out a plain anchor

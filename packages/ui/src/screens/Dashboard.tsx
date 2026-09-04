@@ -250,6 +250,14 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
 
   return (
     <div className="flex min-w-0 flex-col gap-6">
+      {/* The sidebar's Dashboards entry and the Lyraflow mark both now open
+       * the starred dashboard directly rather than the list (O1/O2), so the
+       * list is no longer one click away from here the way it used to be.
+       * This is that click back, in both modes -- there was never a reason
+       * to bury it behind Edit. */}
+      <Link to={ROUTES.dashboards} className="text-sm text-muted-foreground hover:underline">
+        All dashboards
+      </Link>
       <div className="flex flex-wrap items-center justify-between gap-2">
         {editing && dash ? (
           <Input

@@ -91,10 +91,23 @@ describe('Shell', () => {
   // the full name. Pinned via accessible name, not `getByText`, so a
   // regression (or a markup change that hides the string from assistive
   // tech while still painting the old text) fails this the same way.
+  //
+  // The brand element is now a link to `/` (its own test below covers the
+  // destination); this only pins that its accessible name still carries the
+  // full "Lyraflow" wordmark, not the shortened "Lyra".
   it('names the brand element "Lyraflow", not "Lyra"', () => {
     renderShell()
-    expect(screen.getByRole('group', { name: 'Lyraflow' })).toBeInTheDocument()
-    expect(screen.queryByRole('group', { name: 'Lyra' })).toBeNull()
+    expect(screen.getByRole('link', { name: /^lyraflow/i })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /^lyra$/i })).toBeNull()
+  })
+
+  // O2: the mark is the one way back to the home dashboard besides the
+  // sidebar's own Dashboards entry -- a real `Link`, not a decorative group,
+  // so it is reachable the same way every other destination in this sidebar
+  // is.
+  it('the brand mark links to /', () => {
+    renderShell()
+    expect(screen.getByRole('link', { name: /lyraflow home/i })).toHaveAttribute('href', '/')
   })
 
   // `Router.tsx` (Task 2) is what gives this app somewhere to route to --
@@ -130,6 +143,62 @@ describe('Shell', () => {
       'page',
     )
     expect(screen.getByRole('link', { name: /^feed$/i })).not.toHaveAttribute('aria-current')
+  })
+
+  // O1: Dashboards now opens the starred dashboard when one exists --
+  // `/dashboards/home`, resolved by `Router.tsx`'s `HomeEntry` -- rather
+  // than the list directly.
+  it('Dashboards links to /dashboards/home', () => {
+    renderShell()
+    expect(screen.getByRole('link', { name: /^dashboards$/i })).toHaveAttribute(
+      'href',
+      '/dashboards/home',
+    )
+  })
+
+  // Dashboards is a plain `Link` now, like Feed, so its `aria-current` is
+  // computed by hand rather than by `NavLink`'s own match against `to` --
+  // and it has to stay current on every `/dashboards/*` screen, not just at
+  // `/dashboards/home` itself, since that is where a click on it actually
+  // lands. Rendered at a dashboard's own id, the list route, and a
+  // different destination, so this can't pass from `startsWith` alone
+  // matching everything.
+  it('marks Dashboards current on any /dashboards/* screen', () => {
+    render(
+      <MemoryRouter initialEntries={['/dashboards/7']}>
+        <ProjectProvider projects={PROJECTS} initialId={1}>
+          <Shell email="a@b.c" onLogout={vi.fn()} client={fakeClient()}>
+            {null}
+          </Shell>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    expect(screen.getByRole('link', { name: /^dashboards$/i })).toHaveAttribute(
+      'aria-current',
+      'page',
+    )
+    expect(screen.getByRole('link', { name: /^feed$/i })).not.toHaveAttribute('aria-current')
+  })
+
+  it('marks Dashboards current at /dashboards itself', () => {
+    render(
+      <MemoryRouter initialEntries={['/dashboards']}>
+        <ProjectProvider projects={PROJECTS} initialId={1}>
+          <Shell email="a@b.c" onLogout={vi.fn()} client={fakeClient()}>
+            {null}
+          </Shell>
+        </ProjectProvider>
+      </MemoryRouter>,
+    )
+    expect(screen.getByRole('link', { name: /^dashboards$/i })).toHaveAttribute(
+      'aria-current',
+      'page',
+    )
+  })
+
+  it('does not mark Dashboards current at /feed', () => {
+    renderShell()
+    expect(screen.getByRole('link', { name: /^dashboards$/i })).not.toHaveAttribute('aria-current')
   })
 
   it('shows the active project in the switcher', () => {
