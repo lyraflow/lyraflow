@@ -56,10 +56,12 @@ function client(over: Partial<Record<string, unknown>> = {}) {
 describe('App', () => {
   beforeEach(() => {
     document.documentElement.removeAttribute('data-theme')
+    document.documentElement.removeAttribute('data-palette')
     localStorage.clear()
   })
   afterEach(() => {
     document.documentElement.removeAttribute('data-theme')
+    document.documentElement.removeAttribute('data-palette')
     localStorage.clear()
   })
 
@@ -355,6 +357,17 @@ describe('App', () => {
     render(<App client={c} />)
     expect(await screen.findByText(/loading/i)).toBeInTheDocument()
     expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
+  })
+
+  // Same shape as the theme test above, for the same reason: the login and
+  // boot screens are drawn before Shell mounts, and a browser that chose an
+  // accent must see it there too.
+  it('applies a stored palette before authentication, not only inside Shell', async () => {
+    localStorage.setItem('lf-palette', 'moss')
+    const c = client({ session: vi.fn(() => new Promise<never>(() => {})) })
+    render(<App client={c} />)
+    expect(await screen.findByText(/loading/i)).toBeInTheDocument()
+    expect(document.documentElement.getAttribute('data-palette')).toBe('moss')
   })
 
   // The case the phase check at the top of App.tsx exists to catch: that
