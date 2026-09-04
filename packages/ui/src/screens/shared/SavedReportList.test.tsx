@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { SavedReportList } from './SavedReportList.js'
 import type { SavedReportRow } from './SavedReportList.js'
 
@@ -177,5 +177,58 @@ describe('SavedReportList', () => {
     const badge = screen.getByTestId('report-stale-3')
     expect(badge.className).toContain('bg-destructive')
     expect(badge.className).not.toContain('bg-secondary')
+  })
+
+  /**
+   * `trailing` exists so ONE list component can serve a dashboard row --
+   * which carries a home-star button -- without the trend and retention
+   * lists growing a control they have no use for. Two things about it are
+   * behaviour rather than decoration, and both are asserted below: the
+   * node renders inside the `<li>` but OUTSIDE the `<Link>` (a button
+   * nested in an anchor is not clickable as a button, and activating it
+   * would navigate), and omitting the prop leaves the row exactly as it
+   * was -- which is what the "renders no button at all" test above pins
+   * for every caller that does not pass it.
+   */
+  it('renders a trailing node inside the row but outside its link', () => {
+    render(
+      <MemoryRouter>
+        <SavedReportList
+          rows={[ROW]}
+          loadFailed={false}
+          hrefFor={(id) => `/reports/${id}`}
+          newHref="/reports/new"
+          emptyMessage="Nothing saved here yet."
+          trailing={(row) => (
+            <button type="button" data-testid={`trailing-${row.id}`}>
+              Pin
+            </button>
+          )}
+        />
+      </MemoryRouter>,
+    )
+    const trailing = screen.getByTestId('trailing-3')
+    const link = screen.getByRole('link', { name: /Signups by day/ })
+    expect(link).toHaveAttribute('href', '/reports/3')
+    expect(link.contains(trailing)).toBe(false)
+    expect(trailing.closest('li')).toBe(link.closest('li'))
+  })
+
+  it('calls trailing once per row, with that row', () => {
+    const trailing = vi.fn((row: SavedReportRow) => <span data-testid={`t-${row.id}`} />)
+    render(
+      <MemoryRouter>
+        <SavedReportList
+          rows={[ROW, { ...ROW, id: 4, name: 'Second' }]}
+          loadFailed={false}
+          hrefFor={(id) => `/reports/${id}`}
+          newHref="/reports/new"
+          emptyMessage="Nothing saved here yet."
+          trailing={trailing}
+        />
+      </MemoryRouter>,
+    )
+    expect(screen.getByTestId('t-3')).toBeInTheDocument()
+    expect(screen.getByTestId('t-4')).toBeInTheDocument()
   })
 })

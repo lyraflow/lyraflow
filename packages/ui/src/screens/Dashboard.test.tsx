@@ -92,6 +92,18 @@ const funnelTile: ResolvedTile = { kind: 'funnel', report_id: 3, width: 'half', 
 const trendInput: DashboardTileInput = { kind: 'trend', report_id: 1, width: 'half' }
 const funnelInput: DashboardTileInput = { kind: 'funnel', report_id: 3, width: 'half' }
 
+/** The home star's two accessible names. It carries no dashboard name here
+ *  -- there is exactly one dashboard on this screen, so the label has
+ *  nothing to disambiguate from. The list does pass one. */
+const SET_HOME = 'Set as home dashboard'
+const UNSET_HOME = 'Home dashboard — click to unset'
+
+/** Filled or empty is an ATTRIBUTE, not text: lucide draws the outline with
+ *  `fill="none"` and the filled variant overrides it. */
+function starFill(button: HTMLElement): string | null {
+  return button.querySelector('svg')?.getAttribute('fill') ?? null
+}
+
 const DASH: DashboardWire = {
   id: 7,
   name: 'Overview',
@@ -323,7 +335,10 @@ describe('Dashboard', () => {
     await screen.findByTestId('tile-trend-1')
     expect(screen.queryByRole('button', { name: 'Move down' })).toBeNull()
     expect(screen.queryByLabelText('Dashboard name')).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Set as home' })).toBeNull()
+    // The home star is NOT an edit control: it is on screen in both modes,
+    // which is the whole point of it being a star rather than a labelled
+    // button buried behind Edit.
+    expect(screen.getByRole('button', { name: SET_HOME, pressed: false })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^delete$/i })).toBeNull()
     expect(screen.queryByLabelText('Report to add')).toBeNull()
     expect(screen.getByRole('heading', { name: 'Overview' })).toBeInTheDocument()
@@ -332,7 +347,7 @@ describe('Dashboard', () => {
     renderScreen({ at: '/dashboards/7?edit=1' })
     expect(await screen.findByLabelText('Dashboard name')).toHaveValue('Overview')
     expect(screen.getAllByRole('button', { name: 'Move down' })).toHaveLength(2)
-    expect(screen.getByRole('button', { name: 'Set as home' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: SET_HOME })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^delete$/i })).toBeInTheDocument()
     expect(await screen.findByLabelText('Report to add')).toBeInTheDocument()
   })
@@ -445,16 +460,28 @@ describe('Dashboard', () => {
     expect(client.patchDashboard).toHaveBeenCalledTimes(2)
   })
 
-  it('set as home sends { is_home: true } alone; the button then reads Home and sends { is_home: false }', async () => {
+  it('the empty star sends { is_home: true } alone; the filled one then sends { is_home: false }', async () => {
     const { client } = renderScreen({ at: '/dashboards/7?edit=1' })
-    await userEvent.click(await screen.findByRole('button', { name: 'Set as home' }))
+    const empty = await screen.findByRole('button', { name: SET_HOME })
+    expect(starFill(empty)).toBe('none')
+    await userEvent.click(empty)
     await waitFor(() => expect(client.patchDashboard).toHaveBeenCalledWith(1, 7, { is_home: true }))
 
-    const home = await screen.findByRole('button', { name: 'Home' })
+    const home = await screen.findByRole('button', { name: UNSET_HOME, pressed: true })
+    expect(starFill(home)).toBe('currentColor')
     await userEvent.click(home)
     await waitFor(() =>
       expect(client.patchDashboard).toHaveBeenCalledWith(1, 7, { is_home: false }),
     )
+  })
+
+  // The star is the ONLY thing on this screen that says which dashboard `/`
+  // opens, so its fill has to follow the fetched value and not just a click.
+  it('renders a filled star for a dashboard that is already home', async () => {
+    const client = fakeClient({ dashboard: vi.fn(async () => ({ ...DASH, is_home: true })) })
+    renderScreen({ client })
+    const star = await screen.findByRole('button', { name: UNSET_HOME, pressed: true })
+    expect(starFill(star)).toBe('currentColor')
   })
 
   it('a failed PATCH keeps the previous tiles on screen and shows the failure', async () => {
@@ -612,8 +639,8 @@ describe('Dashboard', () => {
     await waitFor(() => expect(client.stats).toHaveBeenCalledTimes(1))
     expect(client.runFunnel).toHaveBeenCalledTimes(1)
 
-    await userEvent.click(screen.getByRole('button', { name: 'Set as home' }))
-    await screen.findByRole('button', { name: 'Home' })
+    await userEvent.click(screen.getByRole('button', { name: SET_HOME }))
+    await screen.findByRole('button', { name: UNSET_HOME })
 
     expect(client.stats).toHaveBeenCalledTimes(1)
     expect(client.runFunnel).toHaveBeenCalledTimes(1)

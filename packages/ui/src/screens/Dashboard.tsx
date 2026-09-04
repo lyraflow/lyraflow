@@ -8,6 +8,7 @@ import { Button } from '../components/ui/button.js'
 import { Input } from '../components/ui/input.js'
 import { AddTilePicker } from './dashboards/AddTilePicker.js'
 import { DashboardTile } from './dashboards/DashboardTile.js'
+import { HomeStar } from './dashboards/HomeStar.js'
 import { createRunQueue } from './dashboards/runQueue.js'
 import { MAX_TILES } from './dashboards/tileRequest.js'
 import { describeError } from './funnels/errors.js'
@@ -266,16 +267,18 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
           <h1 className="min-w-0 break-words font-semibold text-lg">{dash?.name ?? 'Dashboard'}</h1>
         )}
         <div className="flex flex-wrap gap-2">
-          {dash && editing && (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
+          {/* In BOTH modes, unlike every other control in this group. Which
+           * dashboard `/` opens is a fact about this dashboard rather than
+           * an edit to its contents, and it was the one thing a viewer
+           * could not see without entering a mode that also offers Delete.
+           * The star reads as a state when it is filled, which the old
+           * `Home`/`Set as home` button could not do at a glance. */}
+          {dash && (
+            <HomeStar
+              isHome={dash.is_home}
               disabled={saving}
-              onClick={() => patch({ is_home: !dash.is_home })}
-            >
-              {dash.is_home ? 'Home' : 'Set as home'}
-            </Button>
+              onToggle={() => patch({ is_home: !dash.is_home })}
+            />
           )}
           {dash && editing && !confirmingDelete && (
             <Button

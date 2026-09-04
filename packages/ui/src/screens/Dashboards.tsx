@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router'
 import type { ApiClient } from '../api/client.js'
 import { ApiError } from '../api/client.js'
@@ -6,6 +6,7 @@ import type { DashboardSummary } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
 import { ROUTES, dashboardPath } from '../app/Router.js'
 import { Button } from '../components/ui/button.js'
+import { HomeStar } from './dashboards/HomeStar.js'
 import type { SavedReportRow } from './shared/SavedReportList.js'
 import { SavedReportList } from './shared/SavedReportList.js'
 
@@ -33,6 +34,7 @@ export function Dashboards(props: { client: ApiClient; onUnauthorized?: () => vo
   const { activeId } = useProject()
   const [dashboards, setDashboards] = useState<DashboardSummary[] | null>(null)
   const [error, setError] = useState(false)
+  const [homeError, setHomeError] = useState(false)
 
   useEffect(() => {
     if (activeId == null) return
@@ -57,6 +59,49 @@ export function Dashboards(props: { client: ApiClient; onUnauthorized?: () => vo
     }
   }, [client, activeId, onUnauthorized])
 
+  /**
+   * The home star, per row. Nothing is applied before the response, so a
+   * failure needs no rollback -- the same rule `Dashboard`'s own `patch`
+   * keeps, and for the same reason: an optimistic star would show the wrong
+   * project home for as long as a failing request takes to fail.
+   *
+   * On success the list is updated from the response rather than refetched.
+   * "One home per project" is a database constraint the server has ALREADY
+   * applied by the time it answers -- but it answers with the patched
+   * dashboard alone and says nothing about the row it cleared, so that half
+   * is mirrored here. Refetching would be a second round trip during which
+   * the list would show two filled stars.
+   */
+  const toggleHome = useCallback(
+    (row: DashboardSummary) => {
+      if (activeId == null) return
+      const next = !row.is_home
+      setHomeError(false)
+      client
+        .patchDashboard(activeId, row.id, { is_home: next })
+        .then((d) => {
+          setDashboards((prev) =>
+            prev === null
+              ? prev
+              : prev.map((x) => {
+                  if (x.id === row.id) return { ...x, is_home: d.is_home }
+                  // Setting one home clears every other; clearing one
+                  // promotes nothing, so the rest are left alone.
+                  return next ? { ...x, is_home: false } : x
+                }),
+          )
+        })
+        .catch((err: unknown) => {
+          if (err instanceof ApiError && err.status === 401) {
+            onUnauthorized?.()
+            return
+          }
+          setHomeError(true)
+        })
+    },
+    [client, activeId, onUnauthorized],
+  )
+
   return (
     <div className="flex min-w-0 flex-col gap-6">
       <div className="flex items-center justify-between gap-2">
@@ -66,12 +111,26 @@ export function Dashboards(props: { client: ApiClient; onUnauthorized?: () => vo
         </Button>
       </div>
 
+      {homeError && (
+        <p role="alert" className="text-sm text-destructive">
+          Could not change the home dashboard.
+        </p>
+      )}
+
       <SavedReportList
         rows={dashboards === null ? null : dashboards.map(toRow)}
         loadFailed={error}
         hrefFor={dashboardPath}
         newHref={ROUTES.dashboardNew}
         emptyMessage="No dashboards yet."
+        trailing={(r) => {
+          // `SavedReportRow` is a view model and deliberately carries no
+          // `is_home`, so the wire row is looked up by id rather than
+          // widening the shared interface for one caller's field.
+          const d = dashboards?.find((x) => x.id === r.id)
+          if (d === undefined) return null
+          return <HomeStar isHome={d.is_home} name={d.name} onToggle={() => toggleHome(d)} />
+        }}
       />
     </div>
   )

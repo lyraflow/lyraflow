@@ -1,4 +1,5 @@
 import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/client.js'
@@ -121,5 +122,112 @@ describe('Dashboards — unauthorized', () => {
     )
     await waitFor(() => expect(onUnauthorized).toHaveBeenCalled())
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * The home star, on the list.
+ *
+ * The server keeps "one home per project" as a database constraint, so a
+ * successful `PATCH` that sets one dashboard home has ALREADY cleared the
+ * previous one -- but it answers with the patched dashboard only, and says
+ * nothing about the row it cleared. The screen mirrors that rule locally
+ * rather than refetching the list: cheaper, and it cannot show two filled
+ * stars for the moment a refetch would be in flight.
+ */
+const A = { ...ROW, id: 3, name: 'Overview', is_home: true }
+const B = { ...ROW, id: 4, name: 'Growth', is_home: false }
+
+const SET_A = 'Set "Overview" as home dashboard'
+const UNSET_A = '"Overview" is the home dashboard — click to unset'
+const SET_B = 'Set "Growth" as home dashboard'
+const UNSET_B = '"Growth" is the home dashboard — click to unset'
+
+function renderWithPatch(patchDashboard: ReturnType<typeof vi.fn>, onUnauthorized?: () => void) {
+  const client = {
+    dashboards: vi.fn(async () => [A, B]),
+    patchDashboard,
+  } as unknown as ApiClient
+  render(
+    <MemoryRouter>
+      <ProjectProvider projects={PROJECTS} initialId={1}>
+        <Dashboards client={client} onUnauthorized={onUnauthorized} />
+      </ProjectProvider>
+    </MemoryRouter>,
+  )
+  return client
+}
+
+/** The wire answer to a `PATCH`: the row with the change applied, resolved
+ *  tiles and all -- what `patchDashboard` really resolves to. */
+function patched(row: typeof A, is_home: boolean) {
+  return { ...row, is_home, tiles: [] }
+}
+
+describe('Dashboards — the home star', () => {
+  it('sets a dashboard home, and clears the star on the one that was', async () => {
+    const patchDashboard = vi.fn(async () => patched(B, true))
+    const client = renderWithPatch(patchDashboard)
+
+    await userEvent.click(await screen.findByRole('button', { name: SET_B }))
+    await waitFor(() => expect(client.patchDashboard).toHaveBeenCalledWith(1, 4, { is_home: true }))
+
+    // B is filled, A is not -- and the accessible names swapped with them.
+    expect(await screen.findByRole('button', { name: UNSET_B, pressed: true })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: SET_A, pressed: false })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: UNSET_A })).toBeNull()
+  })
+
+  it('clears the home dashboard when its filled star is clicked', async () => {
+    const patchDashboard = vi.fn(async () => patched(A, false))
+    const client = renderWithPatch(patchDashboard)
+
+    await userEvent.click(await screen.findByRole('button', { name: UNSET_A }))
+    await waitFor(() =>
+      expect(client.patchDashboard).toHaveBeenCalledWith(1, 3, { is_home: false }),
+    )
+    expect(await screen.findByRole('button', { name: SET_A, pressed: false })).toBeInTheDocument()
+    // Clearing one does not promote another.
+    expect(screen.getByRole('button', { name: SET_B, pressed: false })).toBeInTheDocument()
+  })
+
+  it('says so and leaves both stars alone when the PATCH fails', async () => {
+    const patchDashboard = vi.fn(async () => {
+      throw new Error('boom')
+    })
+    renderWithPatch(patchDashboard)
+
+    await userEvent.click(await screen.findByRole('button', { name: SET_B }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      /could not change the home dashboard/i,
+    )
+    expect(screen.getByRole('button', { name: UNSET_A, pressed: true })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: SET_B, pressed: false })).toBeInTheDocument()
+  })
+
+  it('routes a 401 to onUnauthorized rather than the generic failure line', async () => {
+    const onUnauthorized = vi.fn()
+    const patchDashboard = vi.fn(async () => {
+      throw new ApiError(401, 'invalid_session')
+    })
+    renderWithPatch(patchDashboard, onUnauthorized)
+
+    await userEvent.click(await screen.findByRole('button', { name: SET_B }))
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalled())
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  // A button nested inside the row's anchor would navigate on click as well
+  // as toggle. It has to be a SIBLING of the link, and the link's own href
+  // has to be untouched by any of this.
+  it('keeps the star outside the row link, and the row link unchanged', async () => {
+    const patchDashboard = vi.fn(async () => patched(B, true))
+    renderWithPatch(patchDashboard)
+
+    const star = await screen.findByRole('button', { name: SET_B })
+    const link = screen.getByRole('link', { name: /Growth/ })
+    expect(link).toHaveAttribute('href', '/dashboards/4')
+    expect(link.contains(star)).toBe(false)
+    expect(star.closest('li')).toBe(link.closest('li'))
   })
 })
