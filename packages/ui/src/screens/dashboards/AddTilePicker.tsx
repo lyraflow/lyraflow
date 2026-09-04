@@ -79,9 +79,16 @@ export function AddTilePicker(props: {
    *  the duration of a request is the failure this control's own load effect
    *  is written to avoid. */
   disabled?: boolean
+  /** The tiles the dashboard already holds. A report on it is LISTED but
+   *  disabled, with the reason on it -- the same decision as for a stale
+   *  report: a row that vanished from the menu reads as "you have no such
+   *  report". The server refuses a second copy anyway (`tiles.<i>` in a
+   *  field-level 400); this is so that refusal is never what an operator
+   *  sees. */
+  present?: DashboardTileInput[]
   onUnauthorized?(): void
 }) {
-  const { client, projectId, onAdd, disabled, onUnauthorized } = props
+  const { client, projectId, onAdd, disabled, present, onUnauthorized } = props
   const [loaded, setLoaded] = useState<Loaded | null>(null)
   const [failed, setFailed] = useState(false)
   const [chosen, setChosen] = useState('')
@@ -132,7 +139,9 @@ export function AddTilePicker(props: {
     return <p className="text-sm text-muted-foreground">Loading saved reports…</p>
   }
 
-  const total = loaded.trend.length + loaded.retention.length + loaded.funnel.length
+  const taken = new Set((present ?? []).map((t) => `${t.kind}:${t.report_id}`))
+  const choices = [...loaded.trend, ...loaded.retention, ...loaded.funnel]
+  const total = choices.length
   if (total === 0) {
     return (
       <p className="text-sm text-muted-foreground">
@@ -153,6 +162,14 @@ export function AddTilePicker(props: {
     )
   }
 
+  if (choices.every((c) => taken.has(`${c.kind}:${c.id}`))) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        Every saved report is already on this dashboard.
+      </p>
+    )
+  }
+
   return (
     <div className="flex flex-wrap items-end gap-2">
       <select
@@ -167,13 +184,17 @@ export function AddTilePicker(props: {
           if (rows.length === 0) return null
           return (
             <optgroup key={g.kind} label={g.label}>
-              {rows.map((c) => (
+              {rows.map((c) => {
                 // `${kind}:${id}` -- an id alone is ambiguous across the
                 // three tables, where 2 can name a trend AND a funnel.
-                <option key={`${c.kind}:${c.id}`} value={`${c.kind}:${c.id}`}>
-                  {c.name}
-                </option>
-              ))}
+                const key = `${c.kind}:${c.id}`
+                const onDash = taken.has(key)
+                return (
+                  <option key={key} value={key} disabled={onDash}>
+                    {onDash ? `${c.name} (already on this dashboard)` : c.name}
+                  </option>
+                )
+              })}
             </optgroup>
           )
         })}
@@ -181,7 +202,10 @@ export function AddTilePicker(props: {
       <Button
         type="button"
         size="sm"
-        disabled={chosen === '' || disabled === true}
+        // `taken.has(chosen)`: a choice made before the dashboard gained
+        // that report from elsewhere (another tab) points at an option
+        // that is now disabled, and the native control does not clear it.
+        disabled={chosen === '' || taken.has(chosen) || disabled === true}
         onClick={() => {
           const [kind, id] = chosen.split(':')
           if (!kind || !id) return

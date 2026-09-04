@@ -443,6 +443,7 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
           projectId={activeId}
           onUnauthorized={onUnauthorized}
           disabled={saving}
+          present={tiles.map(toInput)}
           onAdd={(t) => patch({ tiles: [...tiles.map(toInput), t] })}
         />
       )}

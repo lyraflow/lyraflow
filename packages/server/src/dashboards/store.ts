@@ -19,7 +19,37 @@ export const Tile = z.object({
   width: z.enum(TILE_WIDTHS),
 })
 export type Tile = z.infer<typeof Tile>
-export const Tiles = z.array(Tile).max(MAX_TILES)
+/** The stored shape: what a row is hydrated through. No uniqueness rule
+ *  here, deliberately -- see `Tiles`. */
+const TileList = z.array(Tile).max(MAX_TILES)
+/**
+ * The shape a WRITE must satisfy: the stored shape, plus a report is on a
+ * dashboard at most once. Keyed by the pair, because ids are per table --
+ * trend 2 and funnel 2 are two reports, and a key on the id alone would
+ * let the trend block the funnel. The issue lands on the SECOND occurrence,
+ * as `tiles.<i>`: the first is fine on its own, and the routes send the
+ * path back in their field-level 400.
+ *
+ * Reads go through `TileList` instead, so a row written before this rule
+ * existed still hydrates as its two tiles rather than as `stale` -- stale
+ * means "this build cannot read the layout", and it can. Such a row's next
+ * move or resize is refused until the duplicate is removed, which the edit
+ * screen's Remove can do: it sends the remaining tiles, and those are valid.
+ */
+export const Tiles = TileList.superRefine((tiles, ctx) => {
+  const seen = new Set<string>()
+  tiles.forEach((t, i) => {
+    const key = `${t.kind}:${t.report_id}`
+    if (seen.has(key)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [i],
+        message: `${t.kind} ${t.report_id} is already on this dashboard`,
+      })
+    }
+    seen.add(key)
+  })
+})
 
 /**
  * `stale` is `true` when the stored `tiles` no longer parse under `Tiles`,
@@ -80,7 +110,7 @@ interface Row {
 const COLUMNS = 'id, name, tiles, is_home, definition_version, created_at, updated_at'
 
 function hydrate(row: Row): StoredDashboard {
-  const parsed = Tiles.safeParse(row.tiles)
+  const parsed = TileList.safeParse(row.tiles)
   return {
     id: Number(row.id),
     name: row.name,

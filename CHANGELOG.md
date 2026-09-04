@@ -21,6 +21,23 @@ here as it happened rather than tagged retroactively, for the same reason 0.1.0
 is: a tag created after the fact names a moment nobody could have fetched. Its
 one fix is contained in 0.3.0.
 
+## Unreleased
+
+### Fixed
+
+- **A saved report could be added to a dashboard more than once.** Nothing
+  refused the second tile: the layout schema checked the count and the
+  shape of each tile, not that a report appeared once, and the edit
+  screen's picker listed every saved report whether or not it was already
+  on the dashboard. Now the server refuses a layout naming the same report
+  twice with the field-level `400` the other layout rules use, `tiles.<i>`
+  pointing at the second copy — keyed by kind *and* id, since a trend and
+  a funnel can share an id. The picker still lists a report that is
+  already on the dashboard, disabled and saying so, for the reason it
+  lists a stale one: a row that disappears from the menu reads as "you
+  have no such report". When every saved report is on the dashboard it
+  says that instead of offering a menu of nothing.
+
 ## 0.13.0 — 2026-09-04
 
 ### Added
