@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import type { Funnel, FunnelRunResult, Segment } from '../api/types.js'
@@ -8,7 +8,7 @@ import { ROUTES, funnelEditPath } from '../app/Router.js'
 import { Button } from '../components/ui/button.js'
 import { FunnelFlowOrBars } from './funnels/FunnelFlowOrBars.js'
 import type { RangeDays } from './funnels/RangePicker.js'
-import { DEFAULT_RANGE_DAYS, RangePicker } from './funnels/RangePicker.js'
+import { DEFAULT_RANGE_DAYS, RANGE_DAY_OPTIONS, RangePicker } from './funnels/RangePicker.js'
 import type { StepPeopleSeedCounts } from './funnels/StepPeople.js'
 import { StepPeople } from './funnels/StepPeople.js'
 import { WarningPanel } from './funnels/WarningPanel.js'
@@ -101,6 +101,27 @@ function segmentLabel(
 }
 
 /**
+ * The range this screen opens over, read out of `?days=`.
+ *
+ * A dashboard tile links here carrying the dashboard's range so the report
+ * opens over the window the operator was already looking at. Only a value
+ * `RangePicker` can actually display is accepted -- anything else (a typo, a
+ * day count from some other screen, an empty parameter) falls back to the
+ * default rather than running a range the control on screen would then
+ * misreport. The set is `RANGE_DAY_OPTIONS` itself, never a second spelling
+ * of it, so the two cannot drift.
+ *
+ * Read only. The picked range is deliberately NOT written back (see the
+ * screen's own doc comment): a range change here dims the numbers and waits
+ * for an explicit Run, so putting it in the URL would advertise a range no
+ * run has answered.
+ */
+function daysFromSearch(search: URLSearchParams): RangeDays {
+  const raw = Number(search.get('days'))
+  return RANGE_DAY_OPTIONS.find((d) => d === raw) ?? DEFAULT_RANGE_DAYS
+}
+
+/**
  * Runs a saved funnel once on open and renders the result. A range change
  * does NOT re-run it -- it marks the shown numbers stale and waits for an
  * explicit click on "Run". This is a correctness requirement, not styling:
@@ -118,6 +139,8 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
   const { activeId } = useProject()
   const navigate = useNavigate()
   const params = useParams<{ id: string }>()
+  const [search] = useSearchParams()
+  const seededDays = daysFromSearch(search)
   const id = params.id == null ? null : Number(params.id)
   const validId = id != null && Number.isSafeInteger(id) ? id : null
 
@@ -142,7 +165,7 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
   const [funnelNotFound, setFunnelNotFound] = useState(false)
   const [running, setRunning] = useState(false)
   const [stale, setStale] = useState(false)
-  const [days, setDays] = useState<RangeDays>(DEFAULT_RANGE_DAYS)
+  const [days, setDays] = useState<RangeDays>(seededDays)
   // Task 6: the step whose people the panel beneath the chart shows, by its
   // 1-indexed `index`. `null` until a result has actually landed -- there is
   // nothing to select against a funnel whose shape (step count) is not yet
@@ -277,10 +300,14 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
     [client, activeId, validId, onUnauthorized],
   )
 
-  // Fetch the funnel and run it once for the default range, on mount and
-  // whenever the active project or the id in the URL changes. Deliberately
-  // NOT depending on `days` -- a range change must dim the result and wait
-  // for the explicit Run button, never re-trigger this effect. `runNow` is
+  // Fetch the funnel and run it once for the range the URL asks for (the
+  // default when it asks for nothing), on mount and whenever the active
+  // project or the id in the URL changes. Deliberately NOT depending on
+  // `days` -- a range change must dim the result and wait for the explicit
+  // Run button, never re-trigger this effect. `seededDays` IS a dependency
+  // and is not the same thing: it is what the URL says, which only a
+  // navigation changes, and a navigation to this screen with a different
+  // range is exactly a re-open. `runNow` is
   // intentionally left out of the dependency list below: it is recreated
   // only when `activeId`/`validId` change too, which are already this
   // effect's own deps, so listing it would add nothing but a lint-satisfying
@@ -295,7 +322,7 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
     setFunnelNotFound(false)
     setRunError(null)
     setStale(false)
-    setDays(DEFAULT_RANGE_DAYS)
+    setDays(seededDays)
     // A different funnel entirely (new `:id`, or a project switch) --
     // whatever was selected named a step of the PREVIOUS one, and a stale
     // selection here would go on to request people for a step number this
@@ -318,12 +345,12 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
         setFunnelError(describeError(err))
       })
 
-    runNow(DEFAULT_RANGE_DAYS)
+    runNow(seededDays)
 
     return () => {
       cancelled = true
     }
-  }, [client, activeId, validId, onUnauthorized])
+  }, [client, activeId, validId, onUnauthorized, seededDays])
 
   // Issue #94: fetches `GET /v1/segments` only once the open funnel actually
   // names one -- state 1 (no filter, `segment_id === null`) fetches nothing

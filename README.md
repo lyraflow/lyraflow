@@ -354,6 +354,10 @@ screens, reachable from the sidebar:
   `/feed`). Editing happens in place — rename, reorder, resize, add, remove
   — and every change saves as it is made. A tile whose report has since
   been deleted stays on the dashboard and says so rather than vanishing.
+  Clicking a tile opens the report it shows, over the dashboard's range —
+  for a funnel only when that range is one the funnel screen itself offers
+  (24 hours, 7, 30 or 90 days), and otherwise the funnel opens on its own
+  default and says which range it ran.
   At most twelve tiles, and at most three of them run at once, so opening a
   dashboard does not fan a dozen queries at ClickHouse together. A tile
   whose stored definition would exceed a server ceiling under the current

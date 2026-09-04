@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { Link } from 'react-router'
+import { type MouseEvent, useEffect, useState } from 'react'
+import { Link, useNavigate } from 'react-router'
 import { type ApiClient, ApiError } from '../../api/client.js'
 import type { FunnelRunResult, ResolvedTile, RetentionResult, StatsPage } from '../../api/types.js'
 import { funnelPath, retentionReportPath, trendReportPath } from '../../app/Router.js'
@@ -18,6 +18,7 @@ import {
   type TileCeiling,
   ceilingFor,
   funnelRangeOf,
+  reportQuery,
   retentionParamsOf,
   trendParamsOf,
   trendQueryOf,
@@ -49,14 +50,27 @@ const KIND_LABEL = {
   funnel: 'funnel',
 } as const
 
-function hrefOf(tile: ResolvedTile): string {
+/**
+ * Where this tile leads: the report's own screen, opened over the range the
+ * dashboard is showing.
+ *
+ * The range is the point. Landing on the report's default window shows
+ * different numbers from the tile that was just clicked, with nothing on the
+ * page saying why -- which is worse than not offering the link. The query
+ * per kind is `reportQuery`, kept in `tileRequest.ts` with the rest of the
+ * "what would that screen ask?" mapping and tested there; the paths are
+ * built here because they come from `Router.tsx` (see `AddTilePicker`'s note
+ * on that import cycle -- called from a function, never at module scope).
+ */
+function hrefOf(tile: ResolvedTile, range: RangeChoice): string {
+  const query = reportQuery(tile.kind, range)
   switch (tile.kind) {
     case 'trend':
-      return trendReportPath(tile.report_id)
+      return `${trendReportPath(tile.report_id)}${query}`
     case 'retention':
-      return retentionReportPath(tile.report_id)
+      return `${retentionReportPath(tile.report_id)}${query}`
     case 'funnel':
-      return funnelPath(tile.report_id)
+      return `${funnelPath(tile.report_id)}${query}`
   }
 }
 
@@ -109,6 +123,7 @@ export function DashboardTile(props: {
   const [result, setResult] = useState<Result | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [attempt, setAttempt] = useState(0)
+  const navigate = useNavigate()
 
   const deleted = tile.report === null
   const stale = tile.report?.stale === true
@@ -190,6 +205,31 @@ export function DashboardTile(props: {
   }, [client, projectId, queue, tile, range, attempt, shouldRun])
 
   const title = tile.report?.name ?? `${KIND_LABEL[tile.kind]} ${tile.report_id}`
+  const href = deleted ? null : hrefOf(tile, range)
+
+  /**
+   * The whole body opens the report, not just the title. Cem, testing this:
+   * "when I click on any dashboard section, I must be redirected to that
+   * report with the same time frame so that I can deep dive" -- a chart is
+   * what a reader points at, and the title is a small target beside it.
+   *
+   * Three things it is deliberately not. It is not a `role="link"`: the
+   * title above IS the link, in the accessibility tree and in the tab order,
+   * and a second one over the same destination would put every tile in the
+   * tab order twice while announcing the whole chart as its name. It is not
+   * live in edit mode -- that is where a tile is widened, moved and removed,
+   * and navigating away mid-edit loses the layout being arranged. And it
+   * does not fire for a click that started inside a control of its own: the
+   * stale state's "Open it" link and the failed state's Retry button both
+   * live in this body and both already mean something, so a click landing on
+   * either is theirs.
+   */
+  const openReport = (e: MouseEvent<HTMLDivElement>) => {
+    if (href === null) return
+    if ((e.target as Element).closest('a, button') !== null) return
+    navigate(href)
+  }
+  const bodyOpens = !editing && href !== null
 
   return (
     <Card
@@ -208,7 +248,7 @@ export function DashboardTile(props: {
           {deleted ? (
             title
           ) : (
-            <Link to={hrefOf(tile)} className="hover:underline">
+            <Link to={hrefOf(tile, range)} className="hover:underline">
               {title}
             </Link>
           )}
@@ -254,7 +294,16 @@ export function DashboardTile(props: {
           </div>
         )}
       </CardHeader>
-      <CardContent className="min-w-0">
+      {/* No key handler beside `onClick`, and no `tabindex` -- the keyboard
+       * path to this destination is the title link above, which is already
+       * in the tab order and already names the report. Biome's
+       * `useKeyWithClickEvents` does not reach a click handler passed to a
+       * COMPONENT (it reads intrinsic elements only), so this is a decision
+       * the linter cannot make for us either way: see `openReport`. */}
+      <CardContent
+        className={`min-w-0${bodyOpens ? ' cursor-pointer' : ''}`}
+        onClick={bodyOpens ? openReport : undefined}
+      >
         {deleted ? (
           <p data-testid="tile-deleted" role="alert" className="text-sm text-destructive">
             This {KIND_LABEL[tile.kind]} (id {tile.report_id}) has been deleted.
@@ -262,7 +311,7 @@ export function DashboardTile(props: {
         ) : stale ? (
           <p data-testid="tile-stale" role="alert" className="text-sm text-destructive">
             This report's stored definition cannot be reproduced by this version.{' '}
-            <Link to={hrefOf(tile)} className="underline">
+            <Link to={hrefOf(tile, range)} className="underline">
               Open it
             </Link>{' '}
             to see what was saved.

@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter } from 'react-router'
+import { MemoryRouter, useLocation } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import { ApiError } from '../../api/client.js'
@@ -134,6 +134,13 @@ function stubClient(over: Record<string, unknown> = {}): ApiClient {
   } as unknown as ApiClient
 }
 
+/** Where the router ended up, so a click can be shown to have navigated --
+ *  and, in edit mode, shown not to have. */
+function UrlProbe() {
+  const location = useLocation()
+  return <p data-testid="tile-url">{`${location.pathname}${location.search}`}</p>
+}
+
 function renderTile(opts: {
   tile: ResolvedTile
   client?: ApiClient
@@ -145,7 +152,7 @@ function renderTile(opts: {
 }) {
   const client = opts.client ?? stubClient()
   const view = render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={['/dashboards/1']}>
       <DashboardTile
         client={client}
         projectId={1}
@@ -156,6 +163,7 @@ function renderTile(opts: {
         actions={opts.actions}
         onUnauthorized={opts.onUnauthorized}
       />
+      <UrlProbe />
     </MemoryRouter>,
   )
   return { client, ...view }
@@ -354,7 +362,10 @@ describe('DashboardTile', () => {
     renderTile({ tile: trendTile({ report: { ...TREND, stale: true } }), client })
     expect(await screen.findByTestId('tile-stale')).toHaveTextContent(/cannot be reproduced/i)
     expect(client.stats).not.toHaveBeenCalled()
-    expect(screen.getByRole('link', { name: /Open it/i })).toHaveAttribute('href', '/trends/1')
+    expect(screen.getByRole('link', { name: /Open it/i })).toHaveAttribute(
+      'href',
+      '/trends/1?range=7d',
+    )
   })
 
   it('ceiling: a trend at 1m under 30d warns on first render and NEVER calls stats', async () => {
@@ -461,23 +472,93 @@ describe('DashboardTile', () => {
     )
   })
 
-  it("header links to the report's own screen", async () => {
-    const { unmount } = renderTile({ tile: trendTile() })
+  it("header links to the report's own screen, over the dashboard's range", async () => {
+    // The range travels with the link: opening a report from a dashboard and
+    // landing on the report's own default window shows different numbers
+    // from the tile that was just clicked, with nothing saying why.
+    const { unmount } = renderTile({ tile: trendTile(), range: preset('30d') })
+    expect(screen.getByRole('link', { name: 'Signups by country' })).toHaveAttribute(
+      'href',
+      '/trends/1?range=30d',
+    )
+    unmount()
+
+    const second = renderTile({ tile: retentionTile(), range: preset('30d') })
+    expect(screen.getByRole('link', { name: 'Weekly return' })).toHaveAttribute(
+      'href',
+      '/retention/2?range=30d',
+    )
+    second.unmount()
+
+    // A funnel screen spells a range as a day count, and only offers four.
+    const third = renderTile({ tile: funnelTile(), range: preset('30d') })
+    expect(screen.getByRole('link', { name: 'Signup flow' })).toHaveAttribute(
+      'href',
+      '/funnels/3?days=30',
+    )
+    third.unmount()
+
+    // 180d is not one of them, and `auto` is not a range at all -- both open
+    // the report on its own default rather than on an invented one.
+    const fourth = renderTile({ tile: funnelTile(), range: preset('180d') })
+    expect(screen.getByRole('link', { name: 'Signup flow' })).toHaveAttribute('href', '/funnels/3')
+    fourth.unmount()
+
+    renderTile({ tile: trendTile(), range: preset('auto') })
     expect(screen.getByRole('link', { name: 'Signups by country' })).toHaveAttribute(
       'href',
       '/trends/1',
     )
-    unmount()
+  })
 
-    const second = renderTile({ tile: retentionTile() })
-    expect(screen.getByRole('link', { name: 'Weekly return' })).toHaveAttribute(
-      'href',
-      '/retention/2',
-    )
-    second.unmount()
+  // Cem, testing the feature: "when I click on any dashboard section, I must
+  // be redirected to that report with the same time frame so that I can deep
+  // dive." The header link is the accessible route to the same place; this is
+  // the rest of the card agreeing with it.
+  it('view mode: a click anywhere on the body opens the report over the range', async () => {
+    const client = stubClient({ runRetention: vi.fn(async () => RETENTION_RUN) })
+    renderTile({ tile: retentionTile(), range: preset('30d'), client })
+    await screen.findByTestId('retention-grid')
+    await userEvent.click(screen.getByTestId('tile-result'))
+    expect(screen.getByTestId('tile-url')).toHaveTextContent('/retention/2?range=30d')
+  })
 
-    renderTile({ tile: funnelTile() })
-    expect(screen.getByRole('link', { name: 'Signup flow' })).toHaveAttribute('href', '/funnels/3')
+  it('edit mode: a click on the body moves nowhere', async () => {
+    // Edit mode is where a tile is dragged, widened and removed. A body that
+    // navigates out of the screen mid-edit loses whatever was unsaved.
+    const client = stubClient({ runRetention: vi.fn(async () => RETENTION_RUN) })
+    renderTile({
+      tile: retentionTile(),
+      range: preset('30d'),
+      client,
+      editing: true,
+      actions: { onToggleWidth: vi.fn(), onRemove: vi.fn() },
+    })
+    await screen.findByTestId('retention-grid')
+    await userEvent.click(screen.getByTestId('tile-result'))
+    expect(screen.getByTestId('tile-url')).toHaveTextContent('/dashboards/1')
+  })
+
+  it('view mode: Retry retries, and does not navigate away from the dashboard', async () => {
+    // The two controls inside the body that already mean something else:
+    // this button, and the stale state's "Open it" link. A blanket body
+    // handler swallows them into a navigation, and Retry becomes unreachable.
+    const stats = vi
+      .fn()
+      .mockRejectedValueOnce(new ApiError(503, 'unavailable'))
+      .mockResolvedValueOnce({ buckets: [{ bucket: T, series: 'pro', events: 1 }] })
+    renderTile({ tile: trendTile(), range: preset('30d'), client: stubClient({ stats }) })
+    await screen.findByTestId('tile-error')
+    await userEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(await screen.findByTestId('trend-panels')).toBeInTheDocument()
+    expect(stats).toHaveBeenCalledTimes(2)
+    expect(screen.getByTestId('tile-url')).toHaveTextContent('/dashboards/1')
+  })
+
+  it('deleted: the body is not clickable, because there is nowhere to go', async () => {
+    renderTile({ tile: trendTile({ report: null }), range: preset('30d') })
+    await userEvent.click(await screen.findByTestId('tile-deleted'))
+    expect(screen.getByTestId('tile-url')).toHaveTextContent('/dashboards/1')
   })
 
   it('sends the query Trends would send for the stored definition and the range', async () => {

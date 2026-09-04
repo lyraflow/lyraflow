@@ -4,6 +4,7 @@ import { DEFAULT_RANGE, type RangeChoice } from '../shared/range.js'
 import {
   ceilingFor,
   funnelRangeOf,
+  reportQuery,
   retentionParamsOf,
   trendParamsOf,
   trendQueryOf,
@@ -136,5 +137,45 @@ describe('ceilingFor', () => {
   })
   it('a deleted report has no ceiling to check', () => {
     expect(ceilingFor(tileOf('trend', null), preset('30d'), NOW)).toBeNull()
+  })
+})
+
+describe('reportQuery', () => {
+  const custom: RangeChoice = { preset: 'custom', from: '2026-08-01', to: '2026-08-31' }
+
+  // The query a tile appends to its report's own URL, so opening the report
+  // from a dashboard opens it over the range the dashboard was showing.
+  it('gives a trend the range in the spelling Trends reads back', () => {
+    expect(reportQuery('trend', DEFAULT_RANGE)).toBe('')
+    expect(reportQuery('trend', preset('30d'))).toBe('?range=30d')
+    expect(reportQuery('trend', custom)).toBe('?range=custom&from=2026-08-01&to=2026-08-31')
+  })
+
+  it('gives retention the same query, since it reads the same one', () => {
+    expect(reportQuery('retention', DEFAULT_RANGE)).toBe('')
+    expect(reportQuery('retention', preset('30d'))).toBe('?range=30d')
+    expect(reportQuery('retention', custom)).toBe('?range=custom&from=2026-08-01&to=2026-08-31')
+  })
+
+  // A funnel screen has no `range` parameter at all -- it offers four day
+  // counts and nothing else -- so the dashboard's range is carried across
+  // only when it is one of those four.
+  it('gives a funnel a day count for a preset the funnel screen offers', () => {
+    expect(reportQuery('funnel', preset('24h'))).toBe('?days=1')
+    expect(reportQuery('funnel', preset('7d'))).toBe('?days=7')
+    expect(reportQuery('funnel', preset('30d'))).toBe('?days=30')
+    expect(reportQuery('funnel', preset('90d'))).toBe('?days=90')
+  })
+
+  it('gives a funnel no query for a range it cannot offer', () => {
+    // `auto` is "let the server pick", which the funnel screen does not
+    // express; 180d and 365d are past its longest option AND past the
+    // 90-day cap the run endpoint enforces; a custom pair is not a day
+    // count. Each opens the funnel on its own default rather than on a
+    // range the screen would have to invent a control for.
+    expect(reportQuery('funnel', DEFAULT_RANGE)).toBe('')
+    expect(reportQuery('funnel', preset('180d'))).toBe('')
+    expect(reportQuery('funnel', preset('365d'))).toBe('')
+    expect(reportQuery('funnel', custom)).toBe('')
   })
 })

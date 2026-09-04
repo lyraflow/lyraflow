@@ -3,15 +3,24 @@ import type {
   ResolvedTile,
   RetentionReport,
   StatsQuery,
+  TileKind,
   TrendReport,
 } from '../../api/types.js'
+import { RANGE_DAY_OPTIONS, type RangeDays } from '../funnels/RangePicker.js'
 import {
   MAX_COHORTS,
   type RetentionParams,
   cohortCount,
   tooManyCohorts,
 } from '../retention/params.js'
-import { AUTO, CUSTOM, type RangeChoice, presetById, resolveRange } from '../shared/range.js'
+import {
+  AUTO,
+  CUSTOM,
+  type RangeChoice,
+  presetById,
+  resolveRange,
+  writeRange,
+} from '../shared/range.js'
 import { whereFromStored } from '../shared/where.js'
 import {
   MAX_BUCKETS,
@@ -134,4 +143,45 @@ export function ceilingFor(tile: ResolvedTile, range: RangeChoice, now: Date): T
         : null
     }
   }
+}
+
+/**
+ * The dashboard's range as the funnel screen's own control spells it, or
+ * `null` when that screen cannot express it.
+ *
+ * `RANGE_DAY_OPTIONS` is the whole vocabulary there -- four day counts, and
+ * deliberately not free text (see `RangePicker`). So `auto` (no bounds at
+ * all), a custom pair of dates, and the two presets longer than 90 days have
+ * no spelling, and the honest answer is to send none: the funnel opens on
+ * its own default and says on screen which range it ran.
+ */
+function funnelDaysOf(range: RangeChoice): RangeDays | null {
+  if (range.preset === AUTO || range.preset === CUSTOM) return null
+  const days = Math.round((presetById(range.preset)?.spanMs ?? 0) / MS_PER_DAY)
+  // The MEMBERSHIP test is `RANGE_DAY_OPTIONS`, not a `days <= 90` of its
+  // own: the set the funnel screen offers is the set its `<select>` renders,
+  // and a second spelling of it here is how a `?days=` the picker cannot
+  // display would come to be linked to.
+  return RANGE_DAY_OPTIONS.find((d) => d === days) ?? null
+}
+
+/**
+ * The query string a tile appends to its report's own path, so that opening
+ * the report from a dashboard opens it over the range the dashboard was
+ * showing rather than over the report's default.
+ *
+ * Trends and Retention both hold their range in the URL and read it with
+ * `readRange`, so both get exactly what `writeRange` produces -- the same
+ * bytes those screens write when their own picker moves. A funnel does not:
+ * see `funnelDaysOf`.
+ *
+ * Includes the leading `?`, and is `''` when there is nothing to say.
+ */
+export function reportQuery(kind: TileKind, range: RangeChoice): string {
+  if (kind === 'funnel') {
+    const days = funnelDaysOf(range)
+    return days === null ? '' : `?days=${days}`
+  }
+  const query = writeRange(new URLSearchParams(), range).toString()
+  return query === '' ? '' : `?${query}`
 }
