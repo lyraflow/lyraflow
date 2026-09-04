@@ -25,7 +25,7 @@ one fix is contained in 0.3.0.
 
 ### Fixed
 
-- **A saved report could be added to a dashboard more than once.** Nothing
+- **A saved report could be added to a dashboard more than once** (**#246**). Nothing
   refused the second tile: the layout schema checked the count and the
   shape of each tile, not that a report appeared once, and the edit
   screen's picker listed every saved report whether or not it was already
