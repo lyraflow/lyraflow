@@ -11,4 +11,4 @@
  * changes — `version.test.ts` fails if you forget, which is the only thing
  * keeping the two in step.
  */
-export const SERVER_VERSION = '0.13.0'
+export const SERVER_VERSION = '0.14.0'

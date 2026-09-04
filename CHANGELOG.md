@@ -21,7 +21,7 @@ here as it happened rather than tagged retroactively, for the same reason 0.1.0
 is: a tag created after the fact names a moment nobody could have fetched. Its
 one fix is contained in 0.3.0.
 
-## Unreleased
+## 0.14.0 — 2026-09-04
 
 ### Added
 
@@ -50,6 +50,17 @@ one fix is contained in 0.3.0.
   lists a stale one: a row that disappears from the menu reads as "you
   have no such report". When every saved report is on the dashboard it
   says that instead of offering a menu of nothing.
+
+### What it still cannot do
+
+A palette is kept in the browser, so it does not follow the account to a
+second browser, and it is one operator's choice rather than the project's.
+There is no custom colour and no way to add a palette without a rebuild of
+the tokens. Amber reads as ochre on a light surface, which is where the sRGB
+gamut ends at the lightness a readable accent needs. Everything the 0.13.0
+entry listed still stands: no shared or public dashboards, no auto-refresh,
+no funnel breakdown or retention split, no journeys or path analysis, no
+alerting, scheduled export or digest.
 
 ## 0.13.0 — 2026-09-04
 
