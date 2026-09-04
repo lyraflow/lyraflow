@@ -36,7 +36,7 @@ export const OUTPUT_SCHEMA_VERSION = 1
  * the test only catches forgetting, not the two ever having a real reason
  * to differ (there is none: they name the same release).
  */
-export const CLI_VERSION = '0.12.0'
+export const CLI_VERSION = '0.13.0'
 
 export type Mode = 'human' | 'json'
 
