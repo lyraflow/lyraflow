@@ -87,9 +87,10 @@ introduce a new pairing, measure it — do not estimate it.
 
 The web UI can be switched, per browser, to one of six other accents — cobalt,
 moss, plum, slate, wine and amber. Each is the copper ramp with its hue swapped
-and its lightness held step for step, so the funnel chart's ordinal ramp and
-every text pairing keep their measured margins; the ratios are in
-`contrast-report.txt` under each palette's name, and the values are in
+and its lightness held step for step, so the funnel chart's ordinal ramp keeps
+its lightness gaps and every text pairing lands close to copper's — close, not
+equal, which is why each palette is measured again in both modes; the ratios
+are in `contrast-report.txt` under each palette's name, and the values are in
 `tokens.css` as `[data-palette="…"]` blocks and in `tokens.json` under
 `palettes`.
 

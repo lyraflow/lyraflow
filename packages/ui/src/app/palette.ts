@@ -5,12 +5,16 @@
  *
  * Same model as `ThemeToggle.tsx`, deliberately: an attribute on `<html>`
  * that `tokens.css` keys its override blocks on, and one localStorage key.
- * An ABSENT attribute is copper -- there is no `[data-palette="copper"]`
- * block and there must never be one, so that a first visit, a cleared
- * storage and a removed palette all land on the same default for the same
- * reason. Per browser, not per account: a colour is the operator's own
- * taste, and syncing it would need a migration and an endpoint for a
- * preference the browser already keeps.
+ * An ABSENT attribute is copper -- `applyPalette('copper')` removes it, so
+ * that a first visit, a cleared storage and a removed palette all land on
+ * the same default for the same reason. `tokens.css` also carries its own
+ * `[data-palette="copper"]` block, so an element explicitly scoped to it --
+ * the Appearance picker's own swatch -- resolves copper even while a
+ * different palette is active on `<html>`; that block exists for that one
+ * case and changes nothing about the absent-attribute default above. Per
+ * browser, not per account: a colour is the operator's own taste, and
+ * syncing it would need a migration and an endpoint for a preference the
+ * browser already keeps.
  */
 export type PaletteId = 'copper' | 'cobalt' | 'moss' | 'plum' | 'slate' | 'wine' | 'amber'
 

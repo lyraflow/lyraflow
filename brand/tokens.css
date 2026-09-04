@@ -158,12 +158,53 @@
   --lf-info: #8FBEE8;
 }
 
-/* --- alternative accent palettes ---
+/* --- accent palettes ---
  *
  * Each block re-states the accent ramp and the five accent roles, and
  * nothing else: neutrals, surfaces and status colours are the same in every
  * palette. Three blocks per palette, mirroring light / prefers-dark /
- * explicit-dark above, so a palette and a theme compose in any order. */
+ * explicit-dark above, so a palette and a theme compose in any order.
+ *
+ * Copper gets its own blocks here too, even though :root above already
+ * carries the same values under the same names. An absent [data-palette]
+ * is still copper -- that invariant does not change -- but an element
+ * explicitly scoped to [data-palette="copper"] (the Appearance picker's
+ * own swatch) needs to resolve copper's colour even while a different
+ * palette is active on <html>, and inheritance alone can't do that: only
+ * an explicit copper block can. */
+[data-palette="copper"] {
+  --lf-accent-50: #FBF2EC;
+  --lf-accent-100: #F6E1D5;
+  --lf-accent-200: #EBC3AC;
+  --lf-accent-300: #DDA07F;
+  --lf-accent-400: #CE7F54;
+  --lf-accent-500: #BC6438;
+  --lf-accent-600: #A5522A;
+  --lf-accent-700: #8C4421;
+  --lf-accent-800: #6E351A;
+  --lf-accent-900: #4B2412;
+  --lf-accent: #8C4421;
+  --lf-accent-hover: #6E351A;
+  --lf-accent-surface: #FBF2EC;
+  --lf-accent-border: #EBC3AC;
+  --lf-on-accent: #FBFAF7;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"])[data-palette="copper"] {
+    --lf-accent: #DDA07F;
+    --lf-accent-hover: #EBC3AC;
+    --lf-accent-surface: #2A170E;
+    --lf-accent-border: #573019;
+    --lf-on-accent: #121110;
+  }
+}
+:root[data-theme="dark"][data-palette="copper"] {
+  --lf-accent: #DDA07F;
+  --lf-accent-hover: #EBC3AC;
+  --lf-accent-surface: #2A170E;
+  --lf-accent-border: #573019;
+  --lf-on-accent: #121110;
+}
 [data-palette="cobalt"] {
   --lf-accent-50: #EFF4FD;
   --lf-accent-100: #DCE6F9;
