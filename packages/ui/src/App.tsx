@@ -5,6 +5,7 @@ import type { Project } from './api/types.js'
 import { ProjectProvider } from './app/ProjectContext.js'
 import { AppRouter } from './app/Router.js'
 import { applyTheme, readStoredTheme } from './app/ThemeToggle.js'
+import { applyPalette, readStoredPalette } from './app/palette.js'
 import { Button } from './components/ui/button.js'
 import { Card, CardContent, CardHeader, CardTitle } from './components/ui/card.js'
 import { Login } from './screens/Login.js'
@@ -119,13 +120,16 @@ export default function App(props: { client?: ApiClient; sessionPollIntervalMs?:
   // re-run even though `client` itself never changes identity.
   const [retryToken, setRetryToken] = useState(0)
 
-  // Applies the stored theme choice at app start, before authentication.
-  // MINOR from the whole-branch review: `ThemeToggle` previously only
+  // Applies the stored theme and palette choices at app start, before
+  // authentication. MINOR from the whole-branch review: `ThemeToggle` previously only
   // mounted inside `Shell`, so an explicit light/dark choice was ignored on
   // the login, boot and unavailable screens -- all three fell back to the
   // system preference no matter what an admin had picked last time.
+  // The palette follows the same path for the same reason: the login
+  // screen is drawn in whatever this browser last chose.
   useEffect(() => {
     applyTheme(readStoredTheme())
+    applyPalette(readStoredPalette())
   }, [])
 
   // `retryToken` is deliberately unused inside the effect body below -- it

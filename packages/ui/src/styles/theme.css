@@ -127,16 +127,18 @@ body {
  * change, not a UI one.
  *
  * NO HEX VALUES HERE, same rule as the rest of this file: these only map
- * `--lf-copper-*`, and the three blocks mirror how tokens.css itself states
- * light, prefers-dark, and explicit-dark. */
+ * `--lf-accent-*` -- copper by default, and whichever palette `data-palette`
+ * names when an operator has picked one on their Profile screen -- and the
+ * three blocks mirror how tokens.css itself states light, prefers-dark, and
+ * explicit-dark. */
 :root {
-  --chart-funnel-1: var(--lf-copper-900);
-  --chart-funnel-2: var(--lf-copper-800);
-  --chart-funnel-3: var(--lf-copper-700);
-  --chart-funnel-4: var(--lf-copper-600);
-  --chart-funnel-5: var(--lf-copper-500);
-  --chart-funnel-6: var(--lf-copper-400);
-  --chart-funnel-7: var(--lf-copper-300);
+  --chart-funnel-1: var(--lf-accent-900);
+  --chart-funnel-2: var(--lf-accent-800);
+  --chart-funnel-3: var(--lf-accent-700);
+  --chart-funnel-4: var(--lf-accent-600);
+  --chart-funnel-5: var(--lf-accent-500);
+  --chart-funnel-6: var(--lf-accent-400);
+  --chart-funnel-7: var(--lf-accent-300);
   /* The ribbons, one colour for all of them.
    *
    * NOT the bar colour at reduced opacity, which is what this was first:
@@ -151,27 +153,27 @@ body {
    * count -- and adjacent to the nearest bar step, so the ramp's own
    * measured dL >= 0.06 keeps the two apart. The bars carry the ordinal
    * signal; the ribbon only has to carry the eye. */
-  --chart-funnel-ribbon: var(--lf-copper-200);
+  --chart-funnel-ribbon: var(--lf-accent-200);
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --chart-funnel-1: var(--lf-copper-100);
-    --chart-funnel-2: var(--lf-copper-200);
-    --chart-funnel-3: var(--lf-copper-300);
-    --chart-funnel-4: var(--lf-copper-400);
-    --chart-funnel-5: var(--lf-copper-500);
-    --chart-funnel-6: var(--lf-copper-600);
-    --chart-funnel-7: var(--lf-copper-700);
-    --chart-funnel-ribbon: var(--lf-copper-800);
+    --chart-funnel-1: var(--lf-accent-100);
+    --chart-funnel-2: var(--lf-accent-200);
+    --chart-funnel-3: var(--lf-accent-300);
+    --chart-funnel-4: var(--lf-accent-400);
+    --chart-funnel-5: var(--lf-accent-500);
+    --chart-funnel-6: var(--lf-accent-600);
+    --chart-funnel-7: var(--lf-accent-700);
+    --chart-funnel-ribbon: var(--lf-accent-800);
   }
 }
 [data-theme="dark"] {
-  --chart-funnel-1: var(--lf-copper-100);
-  --chart-funnel-2: var(--lf-copper-200);
-  --chart-funnel-3: var(--lf-copper-300);
-  --chart-funnel-4: var(--lf-copper-400);
-  --chart-funnel-5: var(--lf-copper-500);
-  --chart-funnel-6: var(--lf-copper-600);
-  --chart-funnel-7: var(--lf-copper-700);
-  --chart-funnel-ribbon: var(--lf-copper-800);
+  --chart-funnel-1: var(--lf-accent-100);
+  --chart-funnel-2: var(--lf-accent-200);
+  --chart-funnel-3: var(--lf-accent-300);
+  --chart-funnel-4: var(--lf-accent-400);
+  --chart-funnel-5: var(--lf-accent-500);
+  --chart-funnel-6: var(--lf-accent-600);
+  --chart-funnel-7: var(--lf-accent-700);
+  --chart-funnel-ribbon: var(--lf-accent-800);
 }

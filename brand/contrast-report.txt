@@ -1,5 +1,5 @@
 
-=== light ===
+=== copper / light ===
   PASS  18.07:1  (min 4.5)  body on surface                        #121110 on #FBFAF7
   PASS  18.86:1  (min 4.5)  body on raised                         #121110 on #FFFFFF
   PASS  17.17:1  (min 4.5)  body on sunken                         #121110 on #F6F4F0
@@ -14,13 +14,30 @@
   PASS   4.25:1  (min 3.0)  control border on raised               #807A70 on #FFFFFF
   PASS   6.79:1  (min 3.0)  accent as graphic (the mark)           #8C4421 on #FBFAF7
   PASS  17.08:1  (min 4.5)  body on accent tint                    #121110 on #FBF2EC
+  PASS   6.23:1  (min 4.5)  muted on sunken                        #5F5A52 on #F6F4F0
+  PASS  15.85:1  (min 4.5)  body on inset                          #121110 on #EEEBE5
+  PASS   7.09:1  (min 3.0)  focus ring on raised                   #8C4421 on #FFFFFF
+  PASS   6.45:1  (min 3.0)  focus ring on sunken                   #8C4421 on #F6F4F0
+  PASS   7.19:1  (min 4.5)  label on destructive fill              #FBFAF7 on #A32219
+  PASS   7.50:1  (min 4.5)  destructive menu item text on raised   #A32219 on #FFFFFF
+  PASS   6.45:1  (min 3.0)  funnel bar fill in its track           #8C4421 on #F6F4F0
+  PASS   4.01:1  (min 3.0)  palette swatch                         #BC6438 on #FBFAF7
+  PASS   4.18:1  (min 3.0)  palette swatch on the card             #BC6438 on #FFFFFF
   -- semantics on #FBFAF7 --
   PASS   6.16:1  (min 4.5)  success                                #2E6B32
   PASS   6.37:1  (min 4.5)  warning                                #7A5600
   PASS   7.19:1  (min 4.5)  danger                                 #A32219
   PASS   6.71:1  (min 4.5)  info                                   #2B5C8A
+  PASS  dL 0.089  (min 0.06)  funnel step 900 -> 800
+  PASS  dL 0.073  (min 0.06)  funnel step 800 -> 700
+  PASS  dL 0.062  (min 0.06)  funnel step 700 -> 600
+  PASS  dL 0.064  (min 0.06)  funnel step 600 -> 500
+  PASS  dL 0.074  (min 0.06)  funnel step 500 -> 400
+  PASS  dL 0.085  (min 0.06)  funnel step 400 -> 300
+  PASS  funnel ramp monotone in L
+  PASS   2.14:1  (min 2.0)  palest funnel step on surface              #DDA07F on #FBFAF7
 
-=== dark ===
+=== copper / dark ===
   PASS  16.57:1  (min 4.5)  body on surface                        #F2F0EC on #121110
   PASS  15.25:1  (min 4.5)  body on raised                         #F2F0EC on #1C1A17
   PASS  17.28:1  (min 4.5)  body on sunken                         #F2F0EC on #0C0B0A
@@ -35,10 +52,423 @@
   PASS   4.08:1  (min 3.0)  control border on raised               #807A70 on #1C1A17
   PASS   8.45:1  (min 3.0)  accent as graphic (the mark)           #DDA07F on #121110
   PASS  15.03:1  (min 4.5)  body on accent tint                    #F2F0EC on #2A170E
+  PASS   7.85:1  (min 4.5)  muted on sunken                        #A9A398 on #0C0B0A
+  PASS  12.72:1  (min 4.5)  body on inset                          #F2F0EC on #2C2925
+  PASS   7.78:1  (min 3.0)  focus ring on raised                   #DDA07F on #1C1A17
+  PASS   8.81:1  (min 3.0)  focus ring on sunken                   #DDA07F on #0C0B0A
+  PASS   8.48:1  (min 4.5)  label on destructive fill              #121110 on #F0968C
+  PASS   7.81:1  (min 4.5)  destructive menu item text on raised   #F0968C on #1C1A17
+  PASS   8.81:1  (min 3.0)  funnel bar fill in its track           #DDA07F on #0C0B0A
+  PASS   4.51:1  (min 3.0)  palette swatch                         #BC6438 on #121110
+  PASS   4.15:1  (min 3.0)  palette swatch on the card             #BC6438 on #1C1A17
   -- semantics on #121110 --
   PASS   9.54:1  (min 4.5)  success                                #7FC98A
   PASS   9.93:1  (min 4.5)  warning                                #E8B44A
   PASS   8.48:1  (min 4.5)  danger                                 #F0968C
   PASS   9.61:1  (min 4.5)  info                                   #8FBEE8
+  PASS  dL 0.077  (min 0.06)  funnel step 100 -> 200
+  PASS  dL 0.090  (min 0.06)  funnel step 200 -> 300
+  PASS  dL 0.085  (min 0.06)  funnel step 300 -> 400
+  PASS  dL 0.074  (min 0.06)  funnel step 400 -> 500
+  PASS  dL 0.064  (min 0.06)  funnel step 500 -> 600
+  PASS  dL 0.062  (min 0.06)  funnel step 600 -> 700
+  PASS  funnel ramp monotone in L
+  PASS   2.66:1  (min 2.0)  palest funnel step on surface              #8C4421 on #121110
+
+=== cobalt / light ===
+  PASS  18.07:1  (min 4.5)  body on surface                        #121110 on #FBFAF7
+  PASS  18.86:1  (min 4.5)  body on raised                         #121110 on #FFFFFF
+  PASS  17.17:1  (min 4.5)  body on sunken                         #121110 on #F6F4F0
+  PASS   6.55:1  (min 4.5)  muted on surface                       #5F5A52 on #FBFAF7
+  PASS   6.84:1  (min 4.5)  muted on raised                        #5F5A52 on #FFFFFF
+  PASS   4.08:1  (min 3.0)  subtle on surface (non-essential)      #807A70 on #FBFAF7
+  PASS   6.60:1  (min 4.5)  accent text on surface                 #385998 on #FBFAF7
+  PASS   6.88:1  (min 4.5)  accent text on raised                  #385998 on #FFFFFF
+  PASS   6.24:1  (min 4.5)  accent text on accent tint             #385998 on #EFF4FD
+  PASS   6.60:1  (min 4.5)  label on accent fill                   #FBFAF7 on #385998
+  PASS   4.08:1  (min 3.0)  control border (WCAG 1.4.11)           #807A70 on #FBFAF7
+  PASS   4.25:1  (min 3.0)  control border on raised               #807A70 on #FFFFFF
+  PASS   6.60:1  (min 3.0)  accent as graphic (the mark)           #385998 on #FBFAF7
+  PASS  17.09:1  (min 4.5)  body on accent tint                    #121110 on #EFF4FD
+  PASS   6.23:1  (min 4.5)  muted on sunken                        #5F5A52 on #F6F4F0
+  PASS  15.85:1  (min 4.5)  body on inset                          #121110 on #EEEBE5
+  PASS   6.88:1  (min 3.0)  focus ring on raised                   #385998 on #FFFFFF
+  PASS   6.27:1  (min 3.0)  focus ring on sunken                   #385998 on #F6F4F0
+  PASS   7.19:1  (min 4.5)  label on destructive fill              #FBFAF7 on #A32219
+  PASS   7.50:1  (min 4.5)  destructive menu item text on raised   #A32219 on #FFFFFF
+  PASS   6.27:1  (min 3.0)  funnel bar fill in its track           #385998 on #F6F4F0
+  PASS   3.85:1  (min 3.0)  palette swatch                         #547ECB on #FBFAF7
+  PASS   4.02:1  (min 3.0)  palette swatch on the card             #547ECB on #FFFFFF
+  PASS  dL 0.091  (min 0.06)  funnel step 900 -> 800
+  PASS  dL 0.072  (min 0.06)  funnel step 800 -> 700
+  PASS  dL 0.063  (min 0.06)  funnel step 700 -> 600
+  PASS  dL 0.064  (min 0.06)  funnel step 600 -> 500
+  PASS  dL 0.073  (min 0.06)  funnel step 500 -> 400
+  PASS  dL 0.084  (min 0.06)  funnel step 400 -> 300
+  PASS  funnel ramp monotone in L
+  PASS   2.10:1  (min 2.0)  palest funnel step on surface              #92B0E7 on #FBFAF7
+
+=== cobalt / dark ===
+  PASS  16.57:1  (min 4.5)  body on surface                        #F2F0EC on #121110
+  PASS  15.25:1  (min 4.5)  body on raised                         #F2F0EC on #1C1A17
+  PASS  17.28:1  (min 4.5)  body on sunken                         #F2F0EC on #0C0B0A
+  PASS   7.53:1  (min 4.5)  muted on surface                       #A9A398 on #121110
+  PASS   6.93:1  (min 4.5)  muted on raised                        #A9A398 on #1C1A17
+  PASS   4.43:1  (min 3.0)  subtle on surface (non-essential)      #807A70 on #121110
+  PASS   8.61:1  (min 4.5)  accent text on surface                 #92B0E7 on #121110
+  PASS   7.93:1  (min 4.5)  accent text on raised                  #92B0E7 on #1C1A17
+  PASS   7.78:1  (min 4.5)  accent text on accent tint             #92B0E7 on #131C2D
+  PASS   8.61:1  (min 4.5)  label on accent fill                   #121110 on #92B0E7
+  PASS   4.43:1  (min 3.0)  control border (WCAG 1.4.11)           #807A70 on #121110
+  PASS   4.08:1  (min 3.0)  control border on raised               #807A70 on #1C1A17
+  PASS   8.61:1  (min 3.0)  accent as graphic (the mark)           #92B0E7 on #121110
+  PASS  14.98:1  (min 4.5)  body on accent tint                    #F2F0EC on #131C2D
+  PASS   7.85:1  (min 4.5)  muted on sunken                        #A9A398 on #0C0B0A
+  PASS  12.72:1  (min 4.5)  body on inset                          #F2F0EC on #2C2925
+  PASS   7.93:1  (min 3.0)  focus ring on raised                   #92B0E7 on #1C1A17
+  PASS   8.98:1  (min 3.0)  focus ring on sunken                   #92B0E7 on #0C0B0A
+  PASS   8.48:1  (min 4.5)  label on destructive fill              #121110 on #F0968C
+  PASS   7.81:1  (min 4.5)  destructive menu item text on raised   #F0968C on #1C1A17
+  PASS   8.98:1  (min 3.0)  funnel bar fill in its track           #92B0E7 on #0C0B0A
+  PASS   4.69:1  (min 3.0)  palette swatch                         #547ECB on #121110
+  PASS   4.32:1  (min 3.0)  palette swatch on the card             #547ECB on #1C1A17
+  PASS  dL 0.078  (min 0.06)  funnel step 100 -> 200
+  PASS  dL 0.090  (min 0.06)  funnel step 200 -> 300
+  PASS  dL 0.084  (min 0.06)  funnel step 300 -> 400
+  PASS  dL 0.073  (min 0.06)  funnel step 400 -> 500
+  PASS  dL 0.064  (min 0.06)  funnel step 500 -> 600
+  PASS  dL 0.063  (min 0.06)  funnel step 600 -> 700
+  PASS  funnel ramp monotone in L
+  PASS   2.74:1  (min 2.0)  palest funnel step on surface              #385998 on #121110
+
+=== moss / light ===
+  PASS  18.07:1  (min 4.5)  body on surface                        #121110 on #FBFAF7
+  PASS  18.86:1  (min 4.5)  body on raised                         #121110 on #FFFFFF
+  PASS  17.17:1  (min 4.5)  body on sunken                         #121110 on #F6F4F0
+  PASS   6.55:1  (min 4.5)  muted on surface                       #5F5A52 on #FBFAF7
+  PASS   6.84:1  (min 4.5)  muted on raised                        #5F5A52 on #FFFFFF
+  PASS   4.08:1  (min 3.0)  subtle on surface (non-essential)      #807A70 on #FBFAF7
+  PASS   6.21:1  (min 4.5)  accent text on surface                 #336A2E on #FBFAF7
+  PASS   6.48:1  (min 4.5)  accent text on raised                  #336A2E on #FFFFFF
+  PASS   5.89:1  (min 4.5)  accent text on accent tint             #336A2E on #EFF6EE
+  PASS   6.21:1  (min 4.5)  label on accent fill                   #FBFAF7 on #336A2E
+  PASS   4.08:1  (min 3.0)  control border (WCAG 1.4.11)           #807A70 on #FBFAF7
+  PASS   4.25:1  (min 3.0)  control border on raised               #807A70 on #FFFFFF
+  PASS   6.21:1  (min 3.0)  accent as graphic (the mark)           #336A2E on #FBFAF7
+  PASS  17.14:1  (min 4.5)  body on accent tint                    #121110 on #EFF6EE
+  PASS   6.23:1  (min 4.5)  muted on sunken                        #5F5A52 on #F6F4F0
+  PASS  15.85:1  (min 4.5)  body on inset                          #121110 on #EEEBE5
+  PASS   6.48:1  (min 3.0)  focus ring on raised                   #336A2E on #FFFFFF
+  PASS   5.90:1  (min 3.0)  focus ring on sunken                   #336A2E on #F6F4F0
+  PASS   7.19:1  (min 4.5)  label on destructive fill              #FBFAF7 on #A32219
+  PASS   7.50:1  (min 4.5)  destructive menu item text on raised   #A32219 on #FFFFFF
+  PASS   5.90:1  (min 3.0)  funnel bar fill in its track           #336A2E on #F6F4F0
+  PASS   3.63:1  (min 3.0)  palette swatch                         #4F9248 on #FBFAF7
+  PASS   3.79:1  (min 3.0)  palette swatch on the card             #4F9248 on #FFFFFF
+  PASS  dL 0.090  (min 0.06)  funnel step 900 -> 800
+  PASS  dL 0.073  (min 0.06)  funnel step 800 -> 700
+  PASS  dL 0.062  (min 0.06)  funnel step 700 -> 600
+  PASS  dL 0.064  (min 0.06)  funnel step 600 -> 500
+  PASS  dL 0.073  (min 0.06)  funnel step 500 -> 400
+  PASS  dL 0.085  (min 0.06)  funnel step 400 -> 300
+  PASS  funnel ramp monotone in L
+  PASS   2.02:1  (min 2.0)  palest funnel step on surface              #91BE8B on #FBFAF7
+
+=== moss / dark ===
+  PASS  16.57:1  (min 4.5)  body on surface                        #F2F0EC on #121110
+  PASS  15.25:1  (min 4.5)  body on raised                         #F2F0EC on #1C1A17
+  PASS  17.28:1  (min 4.5)  body on sunken                         #F2F0EC on #0C0B0A
+  PASS   7.53:1  (min 4.5)  muted on surface                       #A9A398 on #121110
+  PASS   6.93:1  (min 4.5)  muted on raised                        #A9A398 on #1C1A17
+  PASS   4.43:1  (min 3.0)  subtle on surface (non-essential)      #807A70 on #121110
+  PASS   8.93:1  (min 4.5)  accent text on surface                 #91BE8B on #121110
+  PASS   8.22:1  (min 4.5)  accent text on raised                  #91BE8B on #1C1A17
+  PASS   7.93:1  (min 4.5)  accent text on accent tint             #91BE8B on #132111
+  PASS   8.93:1  (min 4.5)  label on accent fill                   #121110 on #91BE8B
+  PASS   4.43:1  (min 3.0)  control border (WCAG 1.4.11)           #807A70 on #121110
+  PASS   4.08:1  (min 3.0)  control border on raised               #807A70 on #1C1A17
+  PASS   8.93:1  (min 3.0)  accent as graphic (the mark)           #91BE8B on #121110
+  PASS  14.72:1  (min 4.5)  body on accent tint                    #F2F0EC on #132111
+  PASS   7.85:1  (min 4.5)  muted on sunken                        #A9A398 on #0C0B0A
+  PASS  12.72:1  (min 4.5)  body on inset                          #F2F0EC on #2C2925
+  PASS   8.22:1  (min 3.0)  focus ring on raised                   #91BE8B on #1C1A17
+  PASS   9.31:1  (min 3.0)  focus ring on sunken                   #91BE8B on #0C0B0A
+  PASS   8.48:1  (min 4.5)  label on destructive fill              #121110 on #F0968C
+  PASS   7.81:1  (min 4.5)  destructive menu item text on raised   #F0968C on #1C1A17
+  PASS   9.31:1  (min 3.0)  funnel bar fill in its track           #91BE8B on #0C0B0A
+  PASS   4.97:1  (min 3.0)  palette swatch                         #4F9248 on #121110
+  PASS   4.58:1  (min 3.0)  palette swatch on the card             #4F9248 on #1C1A17
+  PASS  dL 0.078  (min 0.06)  funnel step 100 -> 200
+  PASS  dL 0.090  (min 0.06)  funnel step 200 -> 300
+  PASS  dL 0.085  (min 0.06)  funnel step 300 -> 400
+  PASS  dL 0.073  (min 0.06)  funnel step 400 -> 500
+  PASS  dL 0.064  (min 0.06)  funnel step 500 -> 600
+  PASS  dL 0.062  (min 0.06)  funnel step 600 -> 700
+  PASS  funnel ramp monotone in L
+  PASS   2.91:1  (min 2.0)  palest funnel step on surface              #336A2E on #121110
+
+=== plum / light ===
+  PASS  18.07:1  (min 4.5)  body on surface                        #121110 on #FBFAF7
+  PASS  18.86:1  (min 4.5)  body on raised                         #121110 on #FFFFFF
+  PASS  17.17:1  (min 4.5)  body on sunken                         #121110 on #F6F4F0
+  PASS   6.55:1  (min 4.5)  muted on surface                       #5F5A52 on #FBFAF7
+  PASS   6.84:1  (min 4.5)  muted on raised                        #5F5A52 on #FFFFFF
+  PASS   4.08:1  (min 3.0)  subtle on surface (non-essential)      #807A70 on #FBFAF7
+  PASS   6.88:1  (min 4.5)  accent text on surface                 #7D4278 on #FBFAF7
+  PASS   7.19:1  (min 4.5)  accent text on raised                  #7D4278 on #FFFFFF
+  PASS   6.49:1  (min 4.5)  accent text on accent tint             #7D4278 on #F9F1F8
+  PASS   6.88:1  (min 4.5)  label on accent fill                   #FBFAF7 on #7D4278
+  PASS   4.08:1  (min 3.0)  control border (WCAG 1.4.11)           #807A70 on #FBFAF7
+  PASS   4.25:1  (min 3.0)  control border on raised               #807A70 on #FFFFFF
+  PASS   6.88:1  (min 3.0)  accent as graphic (the mark)           #7D4278 on #FBFAF7
+  PASS  17.03:1  (min 4.5)  body on accent tint                    #121110 on #F9F1F8
+  PASS   6.23:1  (min 4.5)  muted on sunken                        #5F5A52 on #F6F4F0
+  PASS  15.85:1  (min 4.5)  body on inset                          #121110 on #EEEBE5
+  PASS   7.19:1  (min 3.0)  focus ring on raised                   #7D4278 on #FFFFFF
+  PASS   6.54:1  (min 3.0)  focus ring on sunken                   #7D4278 on #F6F4F0
+  PASS   7.19:1  (min 4.5)  label on destructive fill              #FBFAF7 on #A32219
+  PASS   7.50:1  (min 4.5)  destructive menu item text on raised   #A32219 on #FFFFFF
+  PASS   6.54:1  (min 3.0)  funnel bar fill in its track           #7D4278 on #F6F4F0
+  PASS   4.08:1  (min 3.0)  palette swatch                         #A961A3 on #FBFAF7
+  PASS   4.26:1  (min 3.0)  palette swatch on the card             #A961A3 on #FFFFFF
+  PASS  dL 0.089  (min 0.06)  funnel step 900 -> 800
+  PASS  dL 0.072  (min 0.06)  funnel step 800 -> 700
+  PASS  dL 0.061  (min 0.06)  funnel step 700 -> 600
+  PASS  dL 0.064  (min 0.06)  funnel step 600 -> 500
+  PASS  dL 0.074  (min 0.06)  funnel step 500 -> 400
+  PASS  dL 0.084  (min 0.06)  funnel step 400 -> 300
+  PASS  funnel ramp monotone in L
+  PASS   2.17:1  (min 2.0)  palest funnel step on surface              #CF9CCA on #FBFAF7
+
+=== plum / dark ===
+  PASS  16.57:1  (min 4.5)  body on surface                        #F2F0EC on #121110
+  PASS  15.25:1  (min 4.5)  body on raised                         #F2F0EC on #1C1A17
+  PASS  17.28:1  (min 4.5)  body on sunken                         #F2F0EC on #0C0B0A
+  PASS   7.53:1  (min 4.5)  muted on surface                       #A9A398 on #121110
+  PASS   6.93:1  (min 4.5)  muted on raised                        #A9A398 on #1C1A17
+  PASS   4.43:1  (min 3.0)  subtle on surface (non-essential)      #807A70 on #121110
+  PASS   8.32:1  (min 4.5)  accent text on surface                 #CF9CCA on #121110
+  PASS   7.66:1  (min 4.5)  accent text on raised                  #CF9CCA on #1C1A17
+  PASS   7.57:1  (min 4.5)  accent text on accent tint             #CF9CCA on #261624
+  PASS   8.32:1  (min 4.5)  label on accent fill                   #121110 on #CF9CCA
+  PASS   4.43:1  (min 3.0)  control border (WCAG 1.4.11)           #807A70 on #121110
+  PASS   4.08:1  (min 3.0)  control border on raised               #807A70 on #1C1A17
+  PASS   8.32:1  (min 3.0)  accent as graphic (the mark)           #CF9CCA on #121110
+  PASS  15.09:1  (min 4.5)  body on accent tint                    #F2F0EC on #261624
+  PASS   7.85:1  (min 4.5)  muted on sunken                        #A9A398 on #0C0B0A
+  PASS  12.72:1  (min 4.5)  body on inset                          #F2F0EC on #2C2925
+  PASS   7.66:1  (min 3.0)  focus ring on raised                   #CF9CCA on #1C1A17
+  PASS   8.67:1  (min 3.0)  focus ring on sunken                   #CF9CCA on #0C0B0A
+  PASS   8.48:1  (min 4.5)  label on destructive fill              #121110 on #F0968C
+  PASS   7.81:1  (min 4.5)  destructive menu item text on raised   #F0968C on #1C1A17
+  PASS   8.67:1  (min 3.0)  funnel bar fill in its track           #CF9CCA on #0C0B0A
+  PASS   4.42:1  (min 3.0)  palette swatch                         #A961A3 on #121110
+  PASS   4.07:1  (min 3.0)  palette swatch on the card             #A961A3 on #1C1A17
+  PASS  dL 0.077  (min 0.06)  funnel step 100 -> 200
+  PASS  dL 0.091  (min 0.06)  funnel step 200 -> 300
+  PASS  dL 0.084  (min 0.06)  funnel step 300 -> 400
+  PASS  dL 0.074  (min 0.06)  funnel step 400 -> 500
+  PASS  dL 0.064  (min 0.06)  funnel step 500 -> 600
+  PASS  dL 0.061  (min 0.06)  funnel step 600 -> 700
+  PASS  funnel ramp monotone in L
+  PASS   2.62:1  (min 2.0)  palest funnel step on surface              #7D4278 on #121110
+
+=== slate / light ===
+  PASS  18.07:1  (min 4.5)  body on surface                        #121110 on #FBFAF7
+  PASS  18.86:1  (min 4.5)  body on raised                         #121110 on #FFFFFF
+  PASS  17.17:1  (min 4.5)  body on sunken                         #121110 on #F6F4F0
+  PASS   6.55:1  (min 4.5)  muted on surface                       #5F5A52 on #FBFAF7
+  PASS   6.84:1  (min 4.5)  muted on raised                        #5F5A52 on #FFFFFF
+  PASS   4.08:1  (min 3.0)  subtle on surface (non-essential)      #807A70 on #FBFAF7
+  PASS   6.44:1  (min 4.5)  accent text on surface                 #465E76 on #FBFAF7
+  PASS   6.72:1  (min 4.5)  accent text on raised                  #465E76 on #FFFFFF
+  PASS   6.10:1  (min 4.5)  accent text on accent tint             #465E76 on #F1F4F8
+  PASS   6.44:1  (min 4.5)  label on accent fill                   #FBFAF7 on #465E76
+  PASS   4.08:1  (min 3.0)  control border (WCAG 1.4.11)           #807A70 on #FBFAF7
+  PASS   4.25:1  (min 3.0)  control border on raised               #807A70 on #FFFFFF
+  PASS   6.44:1  (min 3.0)  accent as graphic (the mark)           #465E76 on #FBFAF7
+  PASS  17.10:1  (min 4.5)  body on accent tint                    #121110 on #F1F4F8
+  PASS   6.23:1  (min 4.5)  muted on sunken                        #5F5A52 on #F6F4F0
+  PASS  15.85:1  (min 4.5)  body on inset                          #121110 on #EEEBE5
+  PASS   6.72:1  (min 3.0)  focus ring on raised                   #465E76 on #FFFFFF
+  PASS   6.12:1  (min 3.0)  focus ring on sunken                   #465E76 on #F6F4F0
+  PASS   7.19:1  (min 4.5)  label on destructive fill              #FBFAF7 on #A32219
+  PASS   7.50:1  (min 4.5)  destructive menu item text on raised   #A32219 on #FFFFFF
+  PASS   6.12:1  (min 3.0)  funnel bar fill in its track           #465E76 on #F6F4F0
+  PASS   3.78:1  (min 3.0)  palette swatch                         #6683A1 on #FBFAF7
+  PASS   3.94:1  (min 3.0)  palette swatch on the card             #6683A1 on #FFFFFF
+  PASS  dL 0.087  (min 0.06)  funnel step 900 -> 800
+  PASS  dL 0.074  (min 0.06)  funnel step 800 -> 700
+  PASS  dL 0.062  (min 0.06)  funnel step 700 -> 600
+  PASS  dL 0.065  (min 0.06)  funnel step 600 -> 500
+  PASS  dL 0.073  (min 0.06)  funnel step 500 -> 400
+  PASS  dL 0.083  (min 0.06)  funnel step 400 -> 300
+  PASS  funnel ramp monotone in L
+  PASS   2.08:1  (min 2.0)  palest funnel step on surface              #9EB2C8 on #FBFAF7
+
+=== slate / dark ===
+  PASS  16.57:1  (min 4.5)  body on surface                        #F2F0EC on #121110
+  PASS  15.25:1  (min 4.5)  body on raised                         #F2F0EC on #1C1A17
+  PASS  17.28:1  (min 4.5)  body on sunken                         #F2F0EC on #0C0B0A
+  PASS   7.53:1  (min 4.5)  muted on surface                       #A9A398 on #121110
+  PASS   6.93:1  (min 4.5)  muted on raised                        #A9A398 on #1C1A17
+  PASS   4.43:1  (min 3.0)  subtle on surface (non-essential)      #807A70 on #121110
+  PASS   8.67:1  (min 4.5)  accent text on surface                 #9EB2C8 on #121110
+  PASS   7.98:1  (min 4.5)  accent text on raised                  #9EB2C8 on #1C1A17
+  PASS   7.80:1  (min 4.5)  accent text on accent tint             #9EB2C8 on #171D24
+  PASS   8.67:1  (min 4.5)  label on accent fill                   #121110 on #9EB2C8
+  PASS   4.43:1  (min 3.0)  control border (WCAG 1.4.11)           #807A70 on #121110
+  PASS   4.08:1  (min 3.0)  control border on raised               #807A70 on #1C1A17
+  PASS   8.67:1  (min 3.0)  accent as graphic (the mark)           #9EB2C8 on #121110
+  PASS  14.91:1  (min 4.5)  body on accent tint                    #F2F0EC on #171D24
+  PASS   7.85:1  (min 4.5)  muted on sunken                        #A9A398 on #0C0B0A
+  PASS  12.72:1  (min 4.5)  body on inset                          #F2F0EC on #2C2925
+  PASS   7.98:1  (min 3.0)  focus ring on raised                   #9EB2C8 on #1C1A17
+  PASS   9.04:1  (min 3.0)  focus ring on sunken                   #9EB2C8 on #0C0B0A
+  PASS   8.48:1  (min 4.5)  label on destructive fill              #121110 on #F0968C
+  PASS   7.81:1  (min 4.5)  destructive menu item text on raised   #F0968C on #1C1A17
+  PASS   9.04:1  (min 3.0)  funnel bar fill in its track           #9EB2C8 on #0C0B0A
+  PASS   4.78:1  (min 3.0)  palette swatch                         #6683A1 on #121110
+  PASS   4.40:1  (min 3.0)  palette swatch on the card             #6683A1 on #1C1A17
+  PASS  dL 0.079  (min 0.06)  funnel step 100 -> 200
+  PASS  dL 0.091  (min 0.06)  funnel step 200 -> 300
+  PASS  dL 0.083  (min 0.06)  funnel step 300 -> 400
+  PASS  dL 0.073  (min 0.06)  funnel step 400 -> 500
+  PASS  dL 0.065  (min 0.06)  funnel step 500 -> 600
+  PASS  dL 0.062  (min 0.06)  funnel step 600 -> 700
+  PASS  funnel ramp monotone in L
+  PASS   2.81:1  (min 2.0)  palest funnel step on surface              #465E76 on #121110
+
+=== wine / light ===
+  PASS  18.07:1  (min 4.5)  body on surface                        #121110 on #FBFAF7
+  PASS  18.86:1  (min 4.5)  body on raised                         #121110 on #FFFFFF
+  PASS  17.17:1  (min 4.5)  body on sunken                         #121110 on #F6F4F0
+  PASS   6.55:1  (min 4.5)  muted on surface                       #5F5A52 on #FBFAF7
+  PASS   6.84:1  (min 4.5)  muted on raised                        #5F5A52 on #FFFFFF
+  PASS   4.08:1  (min 3.0)  subtle on surface (non-essential)      #807A70 on #FBFAF7
+  PASS   6.87:1  (min 4.5)  accent text on surface                 #8E3E47 on #FBFAF7
+  PASS   7.17:1  (min 4.5)  accent text on raised                  #8E3E47 on #FFFFFF
+  PASS   6.48:1  (min 4.5)  accent text on accent tint             #8E3E47 on #FCF1F1
+  PASS   6.87:1  (min 4.5)  label on accent fill                   #FBFAF7 on #8E3E47
+  PASS   4.08:1  (min 3.0)  control border (WCAG 1.4.11)           #807A70 on #FBFAF7
+  PASS   4.25:1  (min 3.0)  control border on raised               #807A70 on #FFFFFF
+  PASS   6.87:1  (min 3.0)  accent as graphic (the mark)           #8E3E47 on #FBFAF7
+  PASS  17.06:1  (min 4.5)  body on accent tint                    #121110 on #FCF1F1
+  PASS   6.23:1  (min 4.5)  muted on sunken                        #5F5A52 on #F6F4F0
+  PASS  15.85:1  (min 4.5)  body on inset                          #121110 on #EEEBE5
+  PASS   7.17:1  (min 3.0)  focus ring on raised                   #8E3E47 on #FFFFFF
+  PASS   6.52:1  (min 3.0)  focus ring on sunken                   #8E3E47 on #F6F4F0
+  PASS   7.19:1  (min 4.5)  label on destructive fill              #FBFAF7 on #A32219
+  PASS   7.50:1  (min 4.5)  destructive menu item text on raised   #A32219 on #FFFFFF
+  PASS   6.52:1  (min 3.0)  funnel bar fill in its track           #8E3E47 on #F6F4F0
+  PASS   4.07:1  (min 3.0)  palette swatch                         #BF5C67 on #FBFAF7
+  PASS   4.25:1  (min 3.0)  palette swatch on the card             #BF5C67 on #FFFFFF
+  PASS  dL 0.089  (min 0.06)  funnel step 900 -> 800
+  PASS  dL 0.073  (min 0.06)  funnel step 800 -> 700
+  PASS  dL 0.061  (min 0.06)  funnel step 700 -> 600
+  PASS  dL 0.064  (min 0.06)  funnel step 600 -> 500
+  PASS  dL 0.074  (min 0.06)  funnel step 500 -> 400
+  PASS  dL 0.085  (min 0.06)  funnel step 400 -> 300
+  PASS  funnel ramp monotone in L
+  PASS   2.16:1  (min 2.0)  palest funnel step on surface              #E19A9E on #FBFAF7
+
+=== wine / dark ===
+  PASS  16.57:1  (min 4.5)  body on surface                        #F2F0EC on #121110
+  PASS  15.25:1  (min 4.5)  body on raised                         #F2F0EC on #1C1A17
+  PASS  17.28:1  (min 4.5)  body on sunken                         #F2F0EC on #0C0B0A
+  PASS   7.53:1  (min 4.5)  muted on surface                       #A9A398 on #121110
+  PASS   6.93:1  (min 4.5)  muted on raised                        #A9A398 on #1C1A17
+  PASS   4.43:1  (min 3.0)  subtle on surface (non-essential)      #807A70 on #121110
+  PASS   8.37:1  (min 4.5)  accent text on surface                 #E19A9E on #121110
+  PASS   7.70:1  (min 4.5)  accent text on raised                  #E19A9E on #1C1A17
+  PASS   7.62:1  (min 4.5)  accent text on accent tint             #E19A9E on #2B1517
+  PASS   8.37:1  (min 4.5)  label on accent fill                   #121110 on #E19A9E
+  PASS   4.43:1  (min 3.0)  control border (WCAG 1.4.11)           #807A70 on #121110
+  PASS   4.08:1  (min 3.0)  control border on raised               #807A70 on #1C1A17
+  PASS   8.37:1  (min 3.0)  accent as graphic (the mark)           #E19A9E on #121110
+  PASS  15.09:1  (min 4.5)  body on accent tint                    #F2F0EC on #2B1517
+  PASS   7.85:1  (min 4.5)  muted on sunken                        #A9A398 on #0C0B0A
+  PASS  12.72:1  (min 4.5)  body on inset                          #F2F0EC on #2C2925
+  PASS   7.70:1  (min 3.0)  focus ring on raised                   #E19A9E on #1C1A17
+  PASS   8.73:1  (min 3.0)  focus ring on sunken                   #E19A9E on #0C0B0A
+  PASS   8.48:1  (min 4.5)  label on destructive fill              #121110 on #F0968C
+  PASS   7.81:1  (min 4.5)  destructive menu item text on raised   #F0968C on #1C1A17
+  PASS   8.73:1  (min 3.0)  funnel bar fill in its track           #E19A9E on #0C0B0A
+  PASS   4.44:1  (min 3.0)  palette swatch                         #BF5C67 on #121110
+  PASS   4.09:1  (min 3.0)  palette swatch on the card             #BF5C67 on #1C1A17
+  PASS  dL 0.079  (min 0.06)  funnel step 100 -> 200
+  PASS  dL 0.089  (min 0.06)  funnel step 200 -> 300
+  PASS  dL 0.085  (min 0.06)  funnel step 300 -> 400
+  PASS  dL 0.074  (min 0.06)  funnel step 400 -> 500
+  PASS  dL 0.064  (min 0.06)  funnel step 500 -> 600
+  PASS  dL 0.061  (min 0.06)  funnel step 600 -> 700
+  PASS  funnel ramp monotone in L
+  PASS   2.63:1  (min 2.0)  palest funnel step on surface              #8E3E47 on #121110
+
+=== amber / light ===
+  PASS  18.07:1  (min 4.5)  body on surface                        #121110 on #FBFAF7
+  PASS  18.86:1  (min 4.5)  body on raised                         #121110 on #FFFFFF
+  PASS  17.17:1  (min 4.5)  body on sunken                         #121110 on #F6F4F0
+  PASS   6.55:1  (min 4.5)  muted on surface                       #5F5A52 on #FBFAF7
+  PASS   6.84:1  (min 4.5)  muted on raised                        #5F5A52 on #FFFFFF
+  PASS   4.08:1  (min 3.0)  subtle on surface (non-essential)      #807A70 on #FBFAF7
+  PASS   6.60:1  (min 4.5)  accent text on surface                 #7B5200 on #FBFAF7
+  PASS   6.89:1  (min 4.5)  accent text on raised                  #7B5200 on #FFFFFF
+  PASS   6.25:1  (min 4.5)  accent text on accent tint             #7B5200 on #F9F3EB
+  PASS   6.60:1  (min 4.5)  label on accent fill                   #FBFAF7 on #7B5200
+  PASS   4.08:1  (min 3.0)  control border (WCAG 1.4.11)           #807A70 on #FBFAF7
+  PASS   4.25:1  (min 3.0)  control border on raised               #807A70 on #FFFFFF
+  PASS   6.60:1  (min 3.0)  accent as graphic (the mark)           #7B5200 on #FBFAF7
+  PASS  17.11:1  (min 4.5)  body on accent tint                    #121110 on #F9F3EB
+  PASS   6.23:1  (min 4.5)  muted on sunken                        #5F5A52 on #F6F4F0
+  PASS  15.85:1  (min 4.5)  body on inset                          #121110 on #EEEBE5
+  PASS   6.89:1  (min 3.0)  focus ring on raised                   #7B5200 on #FFFFFF
+  PASS   6.27:1  (min 3.0)  focus ring on sunken                   #7B5200 on #F6F4F0
+  PASS   7.19:1  (min 4.5)  label on destructive fill              #FBFAF7 on #A32219
+  PASS   7.50:1  (min 4.5)  destructive menu item text on raised   #A32219 on #FFFFFF
+  PASS   6.27:1  (min 3.0)  funnel bar fill in its track           #7B5200 on #F6F4F0
+  PASS   3.88:1  (min 3.0)  palette swatch                         #AB7300 on #FBFAF7
+  PASS   4.05:1  (min 3.0)  palette swatch on the card             #AB7300 on #FFFFFF
+  PASS  dL 0.089  (min 0.06)  funnel step 900 -> 800
+  PASS  dL 0.073  (min 0.06)  funnel step 800 -> 700
+  PASS  dL 0.062  (min 0.06)  funnel step 700 -> 600
+  PASS  dL 0.065  (min 0.06)  funnel step 600 -> 500
+  PASS  dL 0.073  (min 0.06)  funnel step 500 -> 400
+  PASS  dL 0.084  (min 0.06)  funnel step 400 -> 300
+  PASS  funnel ramp monotone in L
+  PASS   2.11:1  (min 2.0)  palest funnel step on surface              #D0A871 on #FBFAF7
+
+=== amber / dark ===
+  PASS  16.57:1  (min 4.5)  body on surface                        #F2F0EC on #121110
+  PASS  15.25:1  (min 4.5)  body on raised                         #F2F0EC on #1C1A17
+  PASS  17.28:1  (min 4.5)  body on sunken                         #F2F0EC on #0C0B0A
+  PASS   7.53:1  (min 4.5)  muted on surface                       #A9A398 on #121110
+  PASS   6.93:1  (min 4.5)  muted on raised                        #A9A398 on #1C1A17
+  PASS   4.43:1  (min 3.0)  subtle on surface (non-essential)      #807A70 on #121110
+  PASS   8.55:1  (min 4.5)  accent text on surface                 #D0A871 on #121110
+  PASS   7.87:1  (min 4.5)  accent text on raised                  #D0A871 on #1C1A17
+  PASS   7.72:1  (min 4.5)  accent text on accent tint             #D0A871 on #261A08
+  PASS   8.55:1  (min 4.5)  label on accent fill                   #121110 on #D0A871
+  PASS   4.43:1  (min 3.0)  control border (WCAG 1.4.11)           #807A70 on #121110
+  PASS   4.08:1  (min 3.0)  control border on raised               #807A70 on #1C1A17
+  PASS   8.55:1  (min 3.0)  accent as graphic (the mark)           #D0A871 on #121110
+  PASS  14.96:1  (min 4.5)  body on accent tint                    #F2F0EC on #261A08
+  PASS   7.85:1  (min 4.5)  muted on sunken                        #A9A398 on #0C0B0A
+  PASS  12.72:1  (min 4.5)  body on inset                          #F2F0EC on #2C2925
+  PASS   7.87:1  (min 3.0)  focus ring on raised                   #D0A871 on #1C1A17
+  PASS   8.92:1  (min 3.0)  focus ring on sunken                   #D0A871 on #0C0B0A
+  PASS   8.48:1  (min 4.5)  label on destructive fill              #121110 on #F0968C
+  PASS   7.81:1  (min 4.5)  destructive menu item text on raised   #F0968C on #1C1A17
+  PASS   8.92:1  (min 3.0)  funnel bar fill in its track           #D0A871 on #0C0B0A
+  PASS   4.66:1  (min 3.0)  palette swatch                         #AB7300 on #121110
+  PASS   4.29:1  (min 3.0)  palette swatch on the card             #AB7300 on #1C1A17
+  PASS  dL 0.079  (min 0.06)  funnel step 100 -> 200
+  PASS  dL 0.091  (min 0.06)  funnel step 200 -> 300
+  PASS  dL 0.084  (min 0.06)  funnel step 300 -> 400
+  PASS  dL 0.073  (min 0.06)  funnel step 400 -> 500
+  PASS  dL 0.065  (min 0.06)  funnel step 500 -> 600
+  PASS  dL 0.062  (min 0.06)  funnel step 600 -> 700
+  PASS  funnel ramp monotone in L
+  PASS   2.74:1  (min 2.0)  palest funnel step on surface              #7B5200 on #121110
 
 ALL PASS

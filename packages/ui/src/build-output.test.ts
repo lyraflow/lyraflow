@@ -102,4 +102,96 @@ describe('production bundle', () => {
     expect(ast.FUNNEL_DEFINITION_VERSION).toBe(FUNNEL_DEFINITION_VERSION)
     expect(typeof ast.FunnelStep.parse).toBe('function')
   })
+
+  // The stored theme and palette are applied in App.tsx's first effect,
+  // which runs AFTER the first paint -- so a dark or re-accented choice
+  // flashed the default for one frame on every load. index.html carries an
+  // inline script that sets both attributes before the bundle is even
+  // requested. Vite passes a classic inline script through untouched, but
+  // nothing else would notice if a config change or a template rewrite
+  // dropped it: the app still works, one frame later. This reads the BUILT
+  // index.html, not the source, for the same reason the tests above evaluate
+  // the built bundle.
+  describe('the built index.html applies the stored theme and palette before first paint', () => {
+    // A substring check (`toContain('setAttribute')`) can't tell the theme
+    // call from the palette call apart, so a mutant that deletes the
+    // palette's `setAttribute` line but leaves `data-palette` sitting in the
+    // comment above it would still pass. Executing the script's body is the
+    // only way to pin what it actually DOES: `new Function` is fine here
+    // because the built script is a classic inline script with no imports,
+    // and `document`/`localStorage` are already globals in this jsdom
+    // environment -- running it this way is exactly what a browser does
+    // with a classic <script> tag.
+    let body: string
+
+    beforeAll(async () => {
+      const pages = import.meta.glob('../dist/index.html', { query: '?raw', import: 'default' })
+      const paths = Object.keys(pages)
+      if (paths.length === 0) {
+        throw new Error(
+          'packages/ui/dist/index.html not found -- run "pnpm build" before "pnpm test".',
+        )
+      }
+      const html = (await (pages[paths[0] as string] as () => Promise<string>)()) as string
+      const inline = html.indexOf('<script>')
+      expect(inline).toBeGreaterThan(-1)
+      // In <head>: a classic script there runs before the body is parsed,
+      // which is before anything is painted. Vite hoists its own module tag
+      // into <head> too, and module scripts are deferred, so where the two
+      // sit relative to each other does not matter -- only that this one is
+      // not in <body>.
+      expect(inline).toBeLessThan(html.indexOf('</head>'))
+      body = html.slice(inline + '<script>'.length, html.indexOf('</script>', inline))
+    })
+
+    const root = () => document.documentElement
+    const run = () => new Function(body)()
+    const reset = () => {
+      localStorage.clear()
+      root().removeAttribute('data-theme')
+      root().removeAttribute('data-palette')
+    }
+
+    it('applies a stored dark theme and a stored non-default palette', () => {
+      reset()
+      localStorage.setItem('lf-theme', 'dark')
+      localStorage.setItem('lf-palette', 'moss')
+      run()
+      expect(root().getAttribute('data-theme')).toBe('dark')
+      expect(root().getAttribute('data-palette')).toBe('moss')
+    })
+
+    it('leaves data-palette absent for the stored default, "copper"', () => {
+      reset()
+      localStorage.setItem('lf-palette', 'copper')
+      run()
+      expect(root().hasAttribute('data-palette')).toBe(false)
+    })
+
+    it('leaves data-palette absent for a value the lowercase-letters guard rejects', () => {
+      reset()
+      localStorage.setItem('lf-palette', 'Moss')
+      run()
+      expect(root().hasAttribute('data-palette')).toBe(false)
+
+      reset()
+      localStorage.setItem('lf-palette', 'moss; drop')
+      run()
+      expect(root().hasAttribute('data-palette')).toBe(false)
+    })
+
+    it('leaves data-theme absent for a value that is neither "light" nor "dark"', () => {
+      reset()
+      localStorage.setItem('lf-theme', 'blue')
+      run()
+      expect(root().hasAttribute('data-theme')).toBe(false)
+    })
+
+    it('leaves both attributes absent when nothing is stored', () => {
+      reset()
+      run()
+      expect(root().hasAttribute('data-theme')).toBe(false)
+      expect(root().hasAttribute('data-palette')).toBe(false)
+    })
+  })
 })

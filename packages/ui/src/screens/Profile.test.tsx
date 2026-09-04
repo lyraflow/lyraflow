@@ -210,3 +210,12 @@ describe('Profile — password', () => {
     await waitFor(() => expect(screen.getByLabelText('New password')).toHaveValue(''))
   })
 })
+
+describe('Profile — appearance', () => {
+  it('renders the accent picker above the forms', () => {
+    renderProfile(fakeClient())
+    const group = screen.getByRole('group', { name: /accent colour/i })
+    const email = screen.getByText('Email address')
+    expect(group.compareDocumentPosition(email) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+})

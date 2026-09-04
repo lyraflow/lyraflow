@@ -41,5 +41,12 @@ export default defineConfig({
     // that did not exist in an older `dist`, at which point the suite grew
     // two phantom files that no source change could fix.
     exclude: [...configDefaults.exclude, 'e2e/**', 'dist/**'],
+    // Vitest mocks every `.css` import to an empty string by default, and
+    // its own detection regex doesn't exclude query suffixes -- so
+    // `foo.css?raw` matches "is CSS" and gets emptied out too, before Vite's
+    // own `?raw` handling ever sees it. Only re-enable it for the raw
+    // imports that actually want the file's text; anything else stays
+    // mocked, which is what keeps rendering tests fast.
+    css: { include: [/\?raw$/] },
   },
 })

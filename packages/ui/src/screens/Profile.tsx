@@ -5,6 +5,7 @@ import { Button } from '../components/ui/button.js'
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card.js'
 import { Input } from '../components/ui/input.js'
 import { Label } from '../components/ui/label.js'
+import { AppearanceSection } from './profile/AppearanceSection.js'
 
 /** Mirrors `MIN_PASSWORD_LENGTH` in the server's `auth/routes.ts`, which is
  * what actually refuses a short one. Stated here so the form can say the
@@ -237,6 +238,10 @@ function PasswordForm(props: { client: ApiClient }) {
  * session state, which this screen has just made stale. Re-reading the
  * session is one request and keeps one source of truth, rather than
  * threading a setter for a value the server already returns.
+ *
+ * The Appearance card sits above both forms: it is the only thing on this
+ * screen that needs no password, because it changes nothing the server
+ * holds.
  */
 export function Profile(props: {
   client: ApiClient
@@ -246,6 +251,7 @@ export function Profile(props: {
   return (
     <div className="flex min-w-0 flex-col gap-4">
       <h1 className="font-semibold text-xl">Profile</h1>
+      <AppearanceSection />
       <EmailForm client={props.client} email={props.email} onChanged={props.onEmailChanged} />
       <PasswordForm client={props.client} />
     </div>

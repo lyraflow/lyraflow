@@ -5,6 +5,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="icon" href="/favicon.svg" />
     <title>Lyraflow</title>
+    <!-- Applies the stored theme and palette before first paint, so a dark
+         or re-accented browser does not flash the default for one frame.
+         The keys and the attributes mirror app/ThemeToggle.tsx and
+         app/palette.ts, which remain the source of truth once React is up
+         (an unknown stored palette is left here and removed there). Guarded
+         because a blocked storage API throws on access, and a theme is not
+         worth a blank page. -->
+    <script>
+      try {
+        var t = localStorage.getItem('lf-theme')
+        if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t)
+        var p = localStorage.getItem('lf-palette')
+        if (p && /^[a-z]+$/.test(p) && p !== 'copper') document.documentElement.setAttribute('data-palette', p)
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>
