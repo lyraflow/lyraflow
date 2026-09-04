@@ -1,7 +1,7 @@
 import { join } from 'node:path'
 import { type Pool, createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
-import { DashboardStore, DuplicateDashboardNameError, type Tile } from './store.js'
+import { DashboardStore, DuplicateDashboardNameError, type Tile, Tiles } from './store.js'
 
 const pg = createPgPool('postgres://lyraflow:lyraflow@localhost:5433/lyraflow_test')
 const ch = createChClient({
@@ -279,6 +279,21 @@ function fakeHomeClient(opts: { setFailures: Array<Error | null>; rollbackError?
   const pool = { connect: async () => client } as unknown as Pool
   return { pool, calls, releaseCalls }
 }
+
+describe('Tiles', () => {
+  it('a report is on a dashboard at most once, keyed by kind AND id', () => {
+    // `2` names a trend and a funnel at once -- ids are per table -- so the
+    // key is the pair, or a trend would block the funnel that shares its id.
+    const trend2 = { kind: 'trend', report_id: 2, width: 'half' } as const
+    const funnel2 = { kind: 'funnel', report_id: 2, width: 'half' } as const
+    expect(Tiles.safeParse([trend2, funnel2]).success).toBe(true)
+
+    const twice = Tiles.safeParse([trend2, funnel2, { ...trend2, width: 'full' }])
+    expect(twice.success).toBe(false)
+    if (twice.success) throw new Error('unreachable')
+    expect(twice.error.issues.map((i) => i.path)).toEqual([[2]])
+  })
+})
 
 describe('DashboardStore#setHome failure paths (fake pool/client)', () => {
   it('retries exactly once on a partial-index violation, and the second attempt wins', async () => {

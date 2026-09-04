@@ -2634,7 +2634,10 @@ the dashboard are not re-checked: deleting a report is allowed, the read
 returns that tile with `"report": null` rather than dropping it, and a
 `PATCH` carrying the whole layout — which is what an edit sends — must still
 be able to reorder, resize and remove around it.
-At most twelve tiles; the thirteenth is a `400`.
+At most twelve tiles; the thirteenth is a `400`. A report is on a dashboard
+at most once; a second tile naming the same report is a `400` too, naming
+that tile's index in `detail[].path` (`tiles.1`). The same id under two kinds
+is two reports, and fine.
 
 `is_home: true` makes this dashboard the project's home and clears the
 previous one in the same transaction — there is exactly one per project, and

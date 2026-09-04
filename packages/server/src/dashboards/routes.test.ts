@@ -274,6 +274,28 @@ describe('dashboard routes', () => {
     expect(res.json().detail[0].path).toBe('tiles')
   })
 
+  it('refuses the same report twice, on create and on patch, with a field-level 400', async () => {
+    const t = await makeTrend()
+    const tile = { kind: 'trend', report_id: t, width: 'half' }
+    const created = await call('POST', '/v1/dashboards', { name: 'Twice', tiles: [tile, tile] })
+    expect(created.statusCode).toBe(400)
+    expect(created.json().error).toBe('invalid_dashboard')
+    // The SECOND occurrence is the one named: the first is fine on its own.
+    expect(created.json().detail[0].path).toBe('tiles.1')
+
+    // The edit screen adds by PATCHing the whole layout plus the new tile,
+    // so this is the request an operator's duplicate actually arrives as.
+    const d = await call('POST', '/v1/dashboards', { name: 'Once', tiles: [tile] })
+    const patched = await call('PATCH', `/v1/dashboards/${d.json().id}`, {
+      tiles: [tile, { ...tile, width: 'full' }],
+    })
+    expect(patched.statusCode).toBe(400)
+    expect(patched.json().error).toBe('invalid_dashboard')
+    expect(patched.json().detail[0].path).toBe('tiles.1')
+    const detail = await call('GET', `/v1/dashboards/${d.json().id}`)
+    expect(detail.json().tiles).toHaveLength(1)
+  })
+
   it('refuses a tile naming a report that does not exist', async () => {
     const res = await call('POST', '/v1/dashboards', {
       name: 'Dangling',

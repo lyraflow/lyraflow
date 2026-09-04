@@ -461,6 +461,25 @@ describe('Dashboard', () => {
     expect(await screen.findByTestId('tile-retention-2')).toBeInTheDocument()
   })
 
+  it('the picker marks the reports already on the dashboard', async () => {
+    renderScreen({ at: '/dashboards/7?edit=1' })
+    const select = await screen.findByLabelText('Report to add')
+    expect(within(select).getByRole('option', { name: /Signups by country/ })).toBeDisabled()
+    expect(within(select).getByRole('option', { name: /Signup flow/ })).toBeDisabled()
+    expect(within(select).getByRole('option', { name: 'Weekly return' })).toBeEnabled()
+  })
+
+  it('a just-added report is marked as soon as the patch lands', async () => {
+    renderScreen({ at: '/dashboards/7?edit=1' })
+    const select = await screen.findByLabelText('Report to add')
+    await userEvent.selectOptions(select, 'retention:2')
+    await userEvent.click(screen.getByRole('button', { name: 'Add tile' }))
+    await screen.findByTestId('tile-retention-2')
+    expect(
+      await screen.findByText(/Every saved report is already on this dashboard\./i),
+    ).toBeInTheDocument()
+  })
+
   it('rename sends { name } alone, on blur and on enter', async () => {
     const { client } = renderScreen({ at: '/dashboards/7?edit=1' })
     const input = await screen.findByLabelText('Dashboard name')
