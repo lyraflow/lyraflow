@@ -264,12 +264,15 @@ describe('DashboardTile', () => {
   })
 
   // The flow is wider than half a grid column and scrolls INSIDE the card
-  // (`FunnelFlow`'s own container is `overflow-x-auto`). That only works
-  // while every box above it can shrink below its content: a flex child and
-  // a grid item both default to `min-width: auto`, so without these the
-  // card widens to fit an eight-step funnel and takes the side-by-side
-  // layout with it. jsdom does no layout, so this is a tripwire on the
-  // classes rather than a measurement -- the real check was rendering it.
+  // (`FunnelFlow`'s own container is `overflow-x-auto`). jsdom does no
+  // layout, so this is a tripwire on the classes and NOT a proof: the
+  // measurement was a browser at 1180px, where a half tile holding a
+  // 1120px plot stays 582px wide with the plot scrolling. That measurement
+  // also showed the `min-w-0`s are not what makes it work today -- the
+  // scroll container's own automatic minimum size is zero -- so what this
+  // pins is that they do not silently disappear before something without
+  // an `overflow` rule of its own is added between the card and the plot.
+  // The `overflow-hidden` half is the one that would break it outright.
   it('result: nothing above the flow stops it scrolling inside the card', async () => {
     stubWideMatchMedia()
     const client = stubClient({ runFunnel: vi.fn(async () => FUNNEL_RUN) })

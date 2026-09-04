@@ -233,13 +233,21 @@ export function DashboardTile(props: {
 
   return (
     <Card
-      // `min-w-0` on all three of the card, its content and the result
-      // wrapper, and it is not decoration: the funnel flow is allowed to be
-      // wider than the tile and scrolls inside its own `overflow-x-auto`
-      // container (`FunnelFlow.tsx`). A grid item and a flex child both
-      // default to `min-width: auto`, so without these the card grows to
-      // fit an eight-step funnel instead -- taking the two-column layout
-      // with it -- and the scrollbar never appears.
+      // `min-w-0` on the card, its content and the result wrapper, so a
+      // funnel flow wider than the tile scrolls inside its own
+      // `overflow-x-auto` container (`FunnelFlow.tsx`) instead of widening
+      // the card.
+      //
+      // MEASURED, not reasoned: rendered at 1180px against the built
+      // stylesheet, a half tile holding a 1120px plot stays 582px wide and
+      // the plot scrolls -- and it does so with these classes removed too,
+      // because a scroll container's own automatic minimum size is already
+      // zero. So they are not what makes today's layout work, and the
+      // comment they replace said they were. They stay as the guard for the
+      // case that rule does not cover: any box between the card and the
+      // plot that is NOT a scroll container -- which is what `tile-result`
+      // and `CardContent` are the moment something is added beside the
+      // chart.
       className={`min-w-0 ${tile.width === 'full' ? 'sm:col-span-2' : ''}`}
       data-testid={`tile-${tile.kind}-${tile.report_id}`}
     >
