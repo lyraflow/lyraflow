@@ -18,7 +18,7 @@
     "@lyraflow/core": "workspace:*",
     "@lyraflow/db": "workspace:*",
     "@lyraflow/sdk-browser": "workspace:*",
-    "fastify": "^5.2.0",
+    "fastify": "^5.12.1",
     "pino": "^9.5.0",
     "zod": "^3.23.0"
   }
