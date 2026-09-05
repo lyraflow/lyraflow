@@ -2,7 +2,7 @@
 
 Thanks for your interest in contributing! Lyraflow is in its earliest phase, so the most valuable contributions right now are ideas, use cases, and feedback via [issues](../../issues).
 
-**Found a security problem? Do not open an issue.** Email `hello@lyraflow.app` with `security` in the subject — see [SECURITY.md](SECURITY.md) for what to include and what to expect. Lyraflow is self-hosted, so a public report is a set of instructions for attacking every install that has not upgraded yet.
+**Found a security problem? Do not open an issue.** Use [private vulnerability reporting](../../security/advisories/new) — the "Report a vulnerability" button on the Security tab — or email `hello@lyraflow.app` with `security` in the subject. See [SECURITY.md](SECURITY.md) for what to include and what to expect. Lyraflow is self-hosted, so a public report is a set of instructions for attacking every install that has not upgraded yet.
 
 ## Before you contribute code
 

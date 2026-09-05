@@ -2,14 +2,20 @@
 
 ## Reporting a vulnerability
 
-**Email `hello@lyraflow.app` with `security` in the subject line. Please do not
-open a public issue.**
+**Use [GitHub's private vulnerability reporting](../../security/advisories/new).**
+It is the "Report a vulnerability" button on this repository's Security tab, it
+needs no email address from you, and it opens a private thread that only you and
+the maintainer can read.
 
-Filing a vulnerability in a public tracker publishes it to everyone running
-Lyraflow before there is anything for them to upgrade to. Lyraflow is
-self-hosted, so those people cannot be patched centrally — they each have to
-pull a new image, and until they do, the report is a set of instructions for
-attacking them.
+**If you would rather use email, `hello@lyraflow.app` with `security` in the
+subject line reaches the same person.** Either is fine; the advisory is easier to
+keep track of.
+
+**Please do not open a public issue.** Filing a vulnerability in a public tracker
+publishes it to everyone running Lyraflow before there is anything for them to
+upgrade to. Lyraflow is self-hosted, so those people cannot be patched centrally
+— they each have to pull a new image, and until they do, the report is a set of
+instructions for attacking them.
 
 Include, as far as you have it:
 
@@ -33,7 +39,8 @@ more useful than a policy nobody is behind:
   a number with nothing behind it. What you will get instead is an honest
   estimate once the report has been read, and an update when the fix ships.
 - **You will be credited in the release notes if you want to be**, under whatever
-  name you give, and not at all if you would rather not.
+  name you give, and not at all if you would rather not. A report that came in as
+  a GitHub advisory can also credit you on the published advisory itself.
 
 Please give a reasonable window before publishing. If you have a deadline, say
 so in the first message rather than at the end of it.
