@@ -45,6 +45,13 @@ import { registerSchemaRoutes } from './schema/routes.js'
 import { registerSdkRoutes } from './sdk/routes.js'
 import { SegmentCache } from './segments/cache.js'
 import { registerSegmentRoutes } from './segments/routes.js'
+import {
+  InFlightCap,
+  ResultCache,
+  SHARED_RUNS_PER_WINDOW,
+  SHARED_RUN_WINDOW_MS,
+} from './shared/limits.js'
+import { registerSharedRoutes } from './shared/routes.js'
 import { registerStatic } from './static.js'
 
 export interface AppDeps {
@@ -120,6 +127,21 @@ export function buildApp(input: {
   pg: Pool
   ch: ClickHouseClient
   readiness: Readiness
+  /**
+   * A TEST SEAM, for the same reason `loginLimiter` is exposed on `AppDeps`
+   * below: the three bounds on the shared viewer surface are only
+   * observable at their edges, and the real values (120 runs a minute, 3
+   * in flight, a 60 s cache) cannot be driven from a test in any
+   * reasonable time. A test hands in small ones and asserts against the
+   * EXACT instances the routes check -- see shared/routes.test.ts's
+   * `describe('limits')`. Absent everywhere else, including index.ts, so
+   * production always gets the constants in shared/limits.ts.
+   */
+  shared?: {
+    limiter?: AttemptLimiter
+    inFlight?: InFlightCap
+    cache?: ResultCache<unknown>
+  }
 }): FastifyInstance {
   const { config, pg, ch, readiness } = input
 
@@ -416,6 +438,19 @@ export function buildApp(input: {
   // a dashboard never runs anything -- each tile runs through the report
   // endpoints the screen already calls (see dashboards/routes.ts).
   registerDashboardRoutes(app, { authenticate, pg })
+  // The viewer surface: unauthenticated by design, and NOT given
+  // `authenticate` -- see shared/routes.ts. Its three bounds are built here
+  // so a test can hand it small ones.
+  registerSharedRoutes(app, {
+    pg,
+    ch,
+    database: config.ch.database,
+    readiness,
+    limiter:
+      input.shared?.limiter ?? new AttemptLimiter(SHARED_RUNS_PER_WINDOW, SHARED_RUN_WINDOW_MS),
+    inFlight: input.shared?.inFlight ?? new InFlightCap(),
+    cache: input.shared?.cache ?? new ResultCache(),
+  })
   // Ad hoc, unstored, and sharing the funnel routes' dependencies exactly --
   // a retention grid scans the same table, resolves the same people and
   // applies the same suppression, so a second set of ceilings here would be
