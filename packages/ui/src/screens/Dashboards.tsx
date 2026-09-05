@@ -11,12 +11,17 @@ import type { SavedReportRow } from './shared/SavedReportList.js'
 import { SavedReportList } from './shared/SavedReportList.js'
 
 /** A dashboard's summary line: its tile count, singular for one tile, plus
- * `· home` when it is the one an operator lands on. Nothing else about a
- * dashboard's layout is worth showing in a list row -- `Dashboard` (a later
- * task) is where the tiles themselves render. */
+ * `· home` when it is the one an operator lands on, plus `· shared` when it
+ * currently has a live share link -- `DashboardSummary.shared` is the
+ * list-safe substitute for the token itself, which the list route never
+ * sends (`api/types.ts`'s own comment on that field). Nothing else about a
+ * dashboard's layout is worth showing in a list row -- `Dashboard` is where
+ * the tiles themselves render, and where the share link is created. */
 function summary(d: DashboardSummary): string {
-  const tiles = d.tile_count === 1 ? '1 tile' : `${d.tile_count} tiles`
-  return d.is_home ? `${tiles} · home` : tiles
+  const parts = [d.tile_count === 1 ? '1 tile' : `${d.tile_count} tiles`]
+  if (d.is_home) parts.push('home')
+  if (d.shared) parts.push('shared')
+  return parts.join(' · ')
 }
 
 function toRow(d: DashboardSummary): SavedReportRow {

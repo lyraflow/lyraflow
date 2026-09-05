@@ -195,6 +195,76 @@ describe('DashboardStore', () => {
     )
     expect(r.rows[0]?.definition_version).toBe(1)
   })
+
+  describe('sharing', () => {
+    it('share mints a 43-character base64url token once, and returns the same one again', async () => {
+      const d = await store.create(projectA, { name: 'shareable', tiles: [] })
+      const first = await store.share(projectA, d.id)
+      expect(first?.token).toMatch(/^[A-Za-z0-9_-]{43}$/)
+      expect(Number.isNaN(new Date(first?.shared_at as never).getTime())).toBe(false)
+      const second = await store.share(projectA, d.id)
+      expect(second).toEqual(first)
+      const read = await store.get(projectA, d.id)
+      expect(read?.shared).toBe(true)
+      expect(read?.share).toEqual(first)
+    })
+
+    it('share is null for an id in another project', async () => {
+      const d = await store.create(projectA, { name: 'mine', tiles: [] })
+      expect(await store.share(projectB, d.id)).toBeNull()
+      expect((await store.get(projectA, d.id))?.share).toBeNull()
+    })
+
+    it('unshare is not_found for an id in another project, and leaves it shared', async () => {
+      const d = await store.create(projectA, { name: 'theirs', tiles: [] })
+      await store.share(projectA, d.id)
+      expect(await store.unshare(projectB, d.id)).toBe('not_found')
+      expect((await store.get(projectA, d.id))?.share).not.toBeNull()
+    })
+
+    it('unshare clears both columns and reports what it found', async () => {
+      const d = await store.create(projectA, { name: 'revocable', tiles: [] })
+      expect(await store.unshare(projectA, d.id)).toBe('not_shared')
+      await store.share(projectA, d.id)
+      expect(await store.unshare(projectA, d.id)).toBe('revoked')
+      const row = await pg.query('SELECT share_token, shared_at FROM dashboards WHERE id = $1', [
+        d.id,
+      ])
+      expect(row.rows[0]).toEqual({ share_token: null, shared_at: null })
+      expect(await store.unshare(projectA, 999_999)).toBe('not_found')
+    })
+
+    it('share after unshare mints a different token', async () => {
+      const d = await store.create(projectA, { name: 'rotated', tiles: [] })
+      const a = await store.share(projectA, d.id)
+      await store.unshare(projectA, d.id)
+      const b = await store.share(projectA, d.id)
+      expect(b?.token).not.toBe(a?.token)
+    })
+
+    it('byShareToken resolves the row and its project, and nothing for a revoked or unknown token', async () => {
+      const d = await store.create(projectA, { name: 'lookup', tiles: [] })
+      const s = await store.share(projectA, d.id)
+      if (!s) throw new Error('unreachable')
+      const found = await store.byShareToken(s.token)
+      expect(found?.projectId).toBe(projectA)
+      expect(found?.dashboard.id).toBe(d.id)
+      expect(found?.dashboard.share).toEqual(s)
+      expect(await store.byShareToken('A'.repeat(43))).toBeNull()
+      await store.unshare(projectA, d.id)
+      expect(await store.byShareToken(s.token)).toBeNull()
+    })
+
+    it('list says shared and never carries the token', async () => {
+      const d = await store.create(projectA, { name: 'listed', tiles: [] })
+      await store.share(projectA, d.id)
+      const rows = await store.list(projectA)
+      const row = rows.find((r) => r.id === d.id)
+      expect(row?.shared).toBe(true)
+      expect(row?.share).toBeNull()
+      expect(JSON.stringify(rows)).not.toContain('share_token')
+    })
+  })
 })
 
 /**

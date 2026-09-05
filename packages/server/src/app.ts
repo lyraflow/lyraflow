@@ -1,7 +1,11 @@
 import { join } from 'node:path'
 import cookie from '@fastify/cookie'
 import type { ClickHouseClient, Pool } from '@lyraflow/db'
-import Fastify, { type FastifyError, type FastifyInstance } from 'fastify'
+import Fastify, {
+  type FastifyError,
+  type FastifyInstance,
+  type FastifyServerOptions,
+} from 'fastify'
 import { makeServerOrSessionAuthenticator } from './auth/bridge.js'
 import { ProjectCache } from './auth/project-cache.js'
 import { AttemptLimiter } from './auth/rate-limit.js'
@@ -45,6 +49,14 @@ import { registerSchemaRoutes } from './schema/routes.js'
 import { registerSdkRoutes } from './sdk/routes.js'
 import { SegmentCache } from './segments/cache.js'
 import { registerSegmentRoutes } from './segments/routes.js'
+import {
+  InFlightCap,
+  ResultCache,
+  SHARED_RUNS_PER_WINDOW,
+  SHARED_RUN_WINDOW_MS,
+} from './shared/limits.js'
+import { redactShareToken } from './shared/redact.js'
+import { registerSharedRoutes } from './shared/routes.js'
 import { registerStatic } from './static.js'
 
 export interface AppDeps {
@@ -120,16 +132,90 @@ export function buildApp(input: {
   pg: Pool
   ch: ClickHouseClient
   readiness: Readiness
+  /**
+   * A TEST SEAM, for the same reason `loginLimiter` is exposed on `AppDeps`
+   * below: the three bounds on the shared viewer surface are only
+   * observable at their edges, and the real values (120 runs a minute, 3
+   * in flight, a 60 s cache) cannot be driven from a test in any
+   * reasonable time. A test hands in small ones and asserts against the
+   * EXACT instances the routes check -- see shared/routes.test.ts's
+   * `describe('limits')`. Absent everywhere else, including index.ts, so
+   * production always gets the constants in shared/limits.ts.
+   */
+  shared?: {
+    limiter?: AttemptLimiter
+    inFlight?: InFlightCap
+    cache?: ResultCache<unknown>
+  }
+  /**
+   * A TEST SEAM, in the same spirit as `shared` above: pino writes to
+   * stdout, and the only way to assert on what a request log line actually
+   * contains is to hand it somewhere else to write. Used by
+   * shared/routes.test.ts to prove the share token is redacted out of
+   * `req.url`. Absent everywhere else, including index.ts, so production
+   * logs go where they always did.
+   */
+  logStream?: NodeJS.WritableStream
 }): FastifyInstance {
   const { config, pg, ch, readiness } = input
 
   // Fastify is constructed first because the buffer's onError logs through it.
-  const app = Fastify({
-    logger: { level: process.env.LYRAFLOW_LOG_LEVEL ?? 'info' },
+  //
+  // Typed as `FastifyServerOptions` rather than passed inline: adding
+  // `serializers` (and the conditional `stream` below) makes the options
+  // object's inferred shape ambiguous across Fastify's constructor
+  // overloads, and it silently resolves to the HTTP/2-over-TLS one --
+  // which then fails to type against every `registerX(app, ...)` call
+  // below. The annotation pins the plain-HTTP overload, which is what this
+  // server actually is.
+  const options: FastifyServerOptions = {
+    logger: {
+      level: process.env.LYRAFLOW_LOG_LEVEL ?? 'info',
+      ...(input.logStream ? { stream: input.logStream } : {}),
+      serializers: {
+        /**
+         * Fastify's default request serializer, with ONE field changed --
+         * `url` goes through `redactShareToken`.
+         *
+         * A share token is the first credential this product carries in a
+         * URL PATH (`/v1/shared/<token>`). Every other one travels in a
+         * header: a project server key in `x-lyraflow-server-key`, a
+         * browser session in `Cookie`. The default serializer logs no
+         * headers at all, which is why nothing before the viewer routes
+         * could put a credential in a log line -- and why the fix belongs
+         * here rather than at those routes, which do not get to choose
+         * what the framework logs about them.
+         *
+         * The other five fields are copied verbatim from
+         * `fastify/lib/logger-pino.js`'s `asReqValue`, deliberately
+         * including `version` and `remotePort`: replacing a serializer
+         * replaces it whole, so anything omitted here simply stops being
+         * logged everywhere in the product.
+         */
+        req(req) {
+          // Node types a header as `string | string[]`, and pino's
+          // serializer type wants a plain string. Joined rather than
+          // dropped or first-only, so a repeated `accept-version` still
+          // logs everything it carried; in practice Node has already
+          // joined duplicates of any header but `set-cookie`, so this
+          // branch is a type obligation rather than a live case.
+          const version = req.headers?.['accept-version']
+          return {
+            method: req.method,
+            url: redactShareToken(req.url),
+            version: Array.isArray(version) ? version.join(', ') : version,
+            host: req.host,
+            remoteAddress: req.ip,
+            remotePort: req.socket?.remotePort,
+          }
+        },
+      },
+    },
     // Browsers cannot be trusted to send small bodies; cap before parsing.
     bodyLimit: 1_048_576,
     trustProxy: true,
-  })
+  }
+  const app = Fastify(options)
 
   // Rule 1: ingest never returns 5xx for bad data, and reserves 5xx for
   // saturation/outage only — as 503, not 500. authenticate() awaits
@@ -416,6 +502,19 @@ export function buildApp(input: {
   // a dashboard never runs anything -- each tile runs through the report
   // endpoints the screen already calls (see dashboards/routes.ts).
   registerDashboardRoutes(app, { authenticate, pg })
+  // The viewer surface: unauthenticated by design, and NOT given
+  // `authenticate` -- see shared/routes.ts. Its three bounds are built here
+  // so a test can hand it small ones.
+  registerSharedRoutes(app, {
+    pg,
+    ch,
+    database: config.ch.database,
+    readiness,
+    limiter:
+      input.shared?.limiter ?? new AttemptLimiter(SHARED_RUNS_PER_WINDOW, SHARED_RUN_WINDOW_MS),
+    inFlight: input.shared?.inFlight ?? new InFlightCap(),
+    cache: input.shared?.cache ?? new ResultCache(),
+  })
   // Ad hoc, unstored, and sharing the funnel routes' dependencies exactly --
   // a retention grid scans the same table, resolves the same people and
   // applies the same suppression, so a second set of ceilings here would be

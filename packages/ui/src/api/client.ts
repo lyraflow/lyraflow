@@ -4,6 +4,7 @@ import type {
   Dashboard,
   DashboardInput,
   DashboardPatch,
+  DashboardShare,
   DashboardSummary,
   DeletionStatus,
   EventsPage,
@@ -35,6 +36,9 @@ import type {
   SchemaProperty,
   Segment,
   SegmentPreview,
+  SharedDashboard,
+  SharedRangePreset,
+  SharedRunResult,
   StatsPage,
   StatsQuery,
   TrendReport,
@@ -63,10 +67,29 @@ export class ApiError extends Error {
     // wrong (rather than a code an operator cannot act on) needs it kept,
     // not discarded at the one call site that parses the response body.
     readonly detail?: ApiErrorDetail[],
+    // Seconds to wait before retrying, off a 429's `retry-after` header --
+    // the shared-viewer run route is the one caller that can hit this
+    // (120 runs/token/60s), and a UI that shows "try again" needs the
+    // number rather than having to re-parse the header itself. Absent for
+    // every other error, including a 429 that (unexpectedly) carries no
+    // header or a non-numeric one.
+    readonly retryAfterSeconds?: number,
   ) {
     super(`${status} ${code}`)
     this.name = 'ApiError'
   }
+}
+
+/**
+ * Reads `retry-after` off an error response as a positive whole number of
+ * seconds, or `undefined` for anything that isn't one -- missing header,
+ * `NaN`, zero, negative. Factored out of `call` and `callPublic` so the two
+ * cannot drift: both throw `ApiError` on the same failure path and both
+ * need the exact same tolerance for a header that is absent or malformed.
+ */
+function parseRetryAfter(res: Response): number | undefined {
+  const retryAfter = Number(res.headers.get('retry-after'))
+  return Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : undefined
 }
 
 /**
@@ -222,6 +245,29 @@ export interface ApiClient {
   createDashboard(projectId: number, body: DashboardInput): Promise<Dashboard>
   patchDashboard(projectId: number, id: number, patch: DashboardPatch): Promise<Dashboard>
   deleteDashboard(projectId: number, id: number): Promise<void>
+  /**
+   * Mints (or re-mints) this dashboard's share link. Session-authenticated
+   * like every other dashboard call above -- sharing is an owner action,
+   * not a viewer one -- and the plaintext token in the response is the
+   * caller's one chance to show or copy it, same one-time-disclosure
+   * discipline as `createProject`'s `server_key`.
+   */
+  shareDashboard(projectId: number, id: number): Promise<DashboardShare>
+  /** Revokes this dashboard's share link. Any viewer holding the old token
+   * gets `share_not_found` from `sharedDashboard` afterwards. */
+  unshareDashboard(projectId: number, id: number): Promise<void>
+  /**
+   * The two calls a share link's VIEWER makes -- unauthenticated, unlike
+   * every method above this pair. Routed through `callPublic`, not `call`:
+   * a person holding a link has no session, and must not be handed the
+   * owner's cookie, UI header or project header by accident. See
+   * `callPublic`'s own docstring for why.
+   */
+  sharedDashboard(token: string): Promise<SharedDashboard>
+  /** Runs one tile's report for the viewer, over the given preset range.
+   * Rate-limited server-side (120/token/60s, 3 in flight) -- a 429 here
+   * carries `ApiError.retryAfterSeconds`. */
+  runSharedTile(token: string, index: number, range: SharedRangePreset): Promise<SharedRunResult>
   segments(projectId: number): Promise<Segment[]>
   segment(projectId: number, id: number): Promise<Segment>
   createSegment(
@@ -372,10 +418,27 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
 
     if (!res.ok) {
       const { code, detail } = await parseErrorCode(res)
-      throw new ApiError(res.status, code, detail)
+      throw new ApiError(res.status, code, detail, parseRetryAfter(res))
     }
 
     if (res.status === 204) return undefined as T
+    return (await res.json()) as T
+  }
+
+  /**
+   * The viewer surface. No session header, no project header, and
+   * `credentials: 'omit'`: a person holding a share link has no session and
+   * must not be handed one by accident, and the routes ignore both headers
+   * anyway. Shares `parseErrorCode` with `call` and nothing else.
+   */
+  async function callPublic<T>(path: string, init: RequestInit = {}): Promise<T> {
+    const headers = new Headers(init.headers)
+    if (init.body !== undefined) headers.set('content-type', 'application/json')
+    const res = await fetchImpl(path, { ...init, headers, credentials: 'omit' })
+    if (!res.ok) {
+      const { code, detail } = await parseErrorCode(res)
+      throw new ApiError(res.status, code, detail, parseRetryAfter(res))
+    }
     return (await res.json()) as T
   }
 
@@ -516,6 +579,16 @@ export function createClient(fetchImpl: typeof fetch = fetch): ApiClient {
       call(`/v1/dashboards/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }, projectId),
     deleteDashboard: (projectId, id) =>
       call(`/v1/dashboards/${id}`, { method: 'DELETE' }, projectId),
+    shareDashboard: (projectId, id) =>
+      call(`/v1/dashboards/${id}/share`, { method: 'POST' }, projectId),
+    unshareDashboard: (projectId, id) =>
+      call(`/v1/dashboards/${id}/share`, { method: 'DELETE' }, projectId),
+    sharedDashboard: (token) => callPublic(`/v1/shared/${encodeURIComponent(token)}`),
+    runSharedTile: (token, index, range) =>
+      callPublic(`/v1/shared/${encodeURIComponent(token)}/tiles/${index}/run`, {
+        method: 'POST',
+        body: JSON.stringify({ range }),
+      }),
     segments: async (projectId) =>
       (await call<{ segments: Segment[] }>('/v1/segments', {}, projectId)).segments,
     segment: (projectId, id) => call(`/v1/segments/${id}`, {}, projectId),

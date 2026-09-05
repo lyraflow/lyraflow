@@ -34,7 +34,11 @@ function parseId(raw: string): number | null {
   return parseNumericId(raw)
 }
 
-/** The list row. No tiles: a list of N dashboards must not resolve N layouts. */
+/** The list row. No tiles: a list of N dashboards must not resolve N layouts.
+ *  `shared` is a boolean, never the token -- `store.ts`'s `LIST_COLUMNS`
+ *  is what keeps a list of N dashboards from carrying N read credentials
+ *  (global constraints, "the token never appears in a list body"); this
+ *  wire shape just doesn't add a field that would undo it. */
 function toListWire(d: StoredDashboard) {
   return {
     id: d.id,
@@ -45,11 +49,12 @@ function toListWire(d: StoredDashboard) {
     stale: d.stale,
     created_at: d.created_at,
     updated_at: d.updated_at,
+    shared: d.shared,
   }
 }
 
 function toDetailWire(d: StoredDashboard, tiles: ResolvedTile[]) {
-  return { ...toListWire(d), tiles }
+  return { ...toListWire(d), tiles, share: d.share }
 }
 
 export function registerDashboardRoutes(app: FastifyInstance, deps: DashboardDeps): void {
@@ -171,6 +176,41 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: DashboardDep
     if (id === null) return reply.code(400).send({ error: 'invalid_dashboard_id' })
     const removed = await store.remove(project.id, id)
     if (!removed) return reply.code(404).send({ error: 'dashboard_not_found' })
+    return reply.code(204).send()
+  })
+
+  /** Idempotent by design, not by accident: a double-submit (a client
+   *  retrying a timed-out request, two tabs open on the same edit screen)
+   *  must not rotate the link out from under someone who already copied
+   *  it. `store.share` is what makes a second call return the SAME token
+   *  rather than minting a new one -- pinned by "mints once, returns the
+   *  same link again" in `routes.test.ts`. */
+  app.post<{ Params: { id: string } }>('/v1/dashboards/:id/share', async (req, reply) => {
+    const project = await authenticate(req, reply)
+    if (!project) return
+    const id = parseId(req.params.id)
+    if (id === null) return reply.code(400).send({ error: 'invalid_dashboard_id' })
+    const share = await store.share(project.id, id)
+    if (!share) return reply.code(404).send({ error: 'dashboard_not_found' })
+    return reply.code(200).send(share)
+  })
+
+  /** `store.unshare` reports three outcomes, and this is the only place
+   *  that fans them back out to different statuses: `dashboard_not_found`
+   *  for an id this project doesn't own (the same 404 every other route
+   *  here gives a foreign id), and a DISTINCT `not_shared` for a
+   *  dashboard that exists but has no link -- a caller revoking twice, or
+   *  racing another revoke, needs to tell "there was nothing to undo"
+   *  from "that dashboard isn't yours". Pinned by "revokes, then 404
+   *  not_shared on a second revoke" in `routes.test.ts`. */
+  app.delete<{ Params: { id: string } }>('/v1/dashboards/:id/share', async (req, reply) => {
+    const project = await authenticate(req, reply)
+    if (!project) return
+    const id = parseId(req.params.id)
+    if (id === null) return reply.code(400).send({ error: 'invalid_dashboard_id' })
+    const outcome = await store.unshare(project.id, id)
+    if (outcome === 'not_found') return reply.code(404).send({ error: 'dashboard_not_found' })
+    if (outcome === 'not_shared') return reply.code(404).send({ error: 'not_shared' })
     return reply.code(204).send()
   })
 }

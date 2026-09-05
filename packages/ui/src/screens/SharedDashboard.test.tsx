@@ -1,0 +1,323 @@
+import { act, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { ApiClient } from '../api/client.js'
+import { ApiError } from '../api/client.js'
+import type { ResolvedTile, SharedDashboard as SharedDashboardWire } from '../api/types.js'
+import { SharedDashboard } from './SharedDashboard.js'
+
+const T = '2026-08-01T00:00:00.000Z'
+const TOKEN = 'A'.repeat(43)
+
+const TREND = {
+  id: 1,
+  name: 'Signups by country',
+  event: 'signup',
+  interval: '1d' as const,
+  group_by: 'attribute:country',
+  where: [],
+  definition_version: 1,
+  stale: false,
+  created_at: T,
+  updated_at: T,
+}
+
+const trendTile = (id: number, name: string): ResolvedTile => ({
+  kind: 'trend',
+  report_id: id,
+  width: 'half',
+  report: { ...TREND, id, name },
+})
+
+const dash = (over: Partial<SharedDashboardWire> = {}): SharedDashboardWire => ({
+  name: 'Overview',
+  updated_at: T,
+  stale: false,
+  tiles: [],
+  ...over,
+})
+
+/** A run that never settles -- every tile stays on its skeleton, which is
+ *  what lets the in-flight cap be counted. */
+const pending = <T,>(): Promise<T> => new Promise<T>(() => {})
+
+function stubClient(over: Record<string, unknown> = {}): ApiClient {
+  return {
+    sharedDashboard: vi.fn(async () => dash()),
+    runSharedTile: vi.fn(() => pending()),
+    ...over,
+  } as unknown as ApiClient
+}
+
+beforeEach(() => {
+  window.history.replaceState(null, '', `/shared/${TOKEN}`)
+})
+
+afterEach(() => {
+  window.history.replaceState(null, '', '/')
+  // The two busy tests below drive a plain `vi.useFakeTimers()`; leaving it
+  // installed would stop every later test's timers dead.
+  vi.useRealTimers()
+})
+
+describe('SharedDashboard', () => {
+  it('loads by token, shows the name, a presets-only picker, the auto note and the footer', async () => {
+    const client = stubClient()
+    render(<SharedDashboard client={client} token={TOKEN} />)
+
+    expect(await screen.findByRole('heading', { name: 'Overview' })).toBeInTheDocument()
+    expect(client.sharedDashboard).toHaveBeenCalledWith(TOKEN)
+    // Custom dates are not in the shared surface's vocabulary at all.
+    expect(screen.queryByRole('option', { name: 'Between two dates…' })).toBeNull()
+    expect(screen.getByText(/each tile uses its own report's default window/)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /Lyraflow/ })).toHaveAttribute(
+      'href',
+      'https://lyraflow.app',
+    )
+    expect(screen.getByText('This dashboard has no tiles yet.')).toBeInTheDocument()
+  })
+
+  // 404 is the ONE outcome that is not a fault: the link is spent. There is
+  // nothing to retry, so there is no button -- a Try again that can only
+  // ever fail again reads as "keep trying" and is worse than none.
+  it('a 404 says the link is no longer valid, and offers no retry', async () => {
+    const client = stubClient({
+      sharedDashboard: vi.fn().mockRejectedValue(new ApiError(404, 'share_not_found')),
+    })
+    render(<SharedDashboard client={client} token={TOKEN} />)
+
+    expect(await screen.findByText('This link is no longer valid.')).toBeInTheDocument()
+    expect(
+      screen.getByText('The dashboard it opened has been unshared or deleted.'),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /try again/i })).toBeNull()
+  })
+
+  it('a 5xx renders the not-responding card, whose Try again re-fetches', async () => {
+    const client = stubClient({
+      sharedDashboard: vi
+        .fn()
+        .mockRejectedValueOnce(new ApiError(503, 'unavailable'))
+        .mockResolvedValueOnce(dash({ name: 'Overview' })),
+    })
+    render(<SharedDashboard client={client} token={TOKEN} />)
+
+    expect(await screen.findByText(/Lyraflow is not responding/)).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    expect(await screen.findByRole('heading', { name: 'Overview' })).toBeInTheDocument()
+    expect(client.sharedDashboard).toHaveBeenCalledTimes(2)
+  })
+
+  // The page's OWN load counts against the same 120-requests-a-minute
+  // window the tile runs do, so a link that has been passed around 429s on
+  // the GET itself -- and every viewer holding it used to be shown "Lyraflow
+  // is not responding", with a Try again that spent one more of the attempts
+  // they were all queueing for. Whole-branch review I2.
+  //
+  // Plain fake timers and no `findBy`/`waitFor`, for the reason
+  // `SharedTile.test.tsx` sets out at length: Testing Library can only
+  // advance JEST's clock, so polling under vitest's would spin on a clock
+  // that never moves. What this pins is a deadline, so the clock is
+  // advanced by hand and the DOM read synchronously afterwards.
+  it('a 429 on the load says busy, and holds Try again until retry-after', async () => {
+    vi.useFakeTimers()
+    const client = stubClient({
+      sharedDashboard: vi
+        .fn()
+        .mockRejectedValueOnce(new ApiError(429, 'too_many_runs', undefined, 3))
+        .mockResolvedValueOnce(dash({ name: 'Overview' })),
+    })
+    render(<SharedDashboard client={client} token={TOKEN} />)
+
+    await act(() => vi.advanceTimersByTimeAsync(0))
+    expect(screen.getByText('This dashboard is busy. Try again in a moment.')).toBeInTheDocument()
+    // A busy link is not an outage, and saying so is the whole finding.
+    expect(screen.queryByText(/Lyraflow is not responding/)).toBeNull()
+    expect(screen.getByRole('button', { name: 'Try again in 3 s' })).toBeDisabled()
+
+    await act(() => vi.advanceTimersByTimeAsync(2000))
+    expect(screen.getByRole('button', { name: 'Try again in 1 s' })).toBeDisabled()
+    expect(client.sharedDashboard).toHaveBeenCalledTimes(1)
+
+    await act(() => vi.advanceTimersByTimeAsync(1000))
+    const button = screen.getByRole('button', { name: 'Try again' })
+    expect(button).toBeEnabled()
+    // `userEvent` drives real timers, so the click is dispatched directly.
+    act(() => button.click())
+    await act(() => vi.advanceTimersByTimeAsync(0))
+    expect(client.sharedDashboard).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole('heading', { name: 'Overview' })).toBeInTheDocument()
+  })
+
+  // The header is the server's own answer and is what the wait should be;
+  // this is only the fallback for a 429 that carries none. A whole minute,
+  // because a minute is the whole of the server's window -- guessing
+  // shorter would put the viewer straight back into the same limit.
+  it('waits a whole minute when the 429 carries no retry-after', async () => {
+    vi.useFakeTimers()
+    const client = stubClient({
+      sharedDashboard: vi.fn().mockRejectedValue(new ApiError(429, 'too_many_runs')),
+    })
+    render(<SharedDashboard client={client} token={TOKEN} />)
+
+    await act(() => vi.advanceTimersByTimeAsync(0))
+    expect(screen.getByRole('button', { name: 'Try again in 60 s' })).toBeDisabled()
+    await act(() => vi.advanceTimersByTimeAsync(59_000))
+    expect(screen.getByRole('button', { name: 'Try again in 1 s' })).toBeDisabled()
+    await act(() => vi.advanceTimersByTimeAsync(1000))
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeEnabled()
+  })
+
+  it('changing the range writes ?range= and re-runs every tile', async () => {
+    // These runs SETTLE, unlike the cap test's below. Cancelling a tile's
+    // effect stops it reading the answer; it does not free the queue slot,
+    // which only settling does -- so a page of never-settling runs would
+    // queue the re-runs behind the originals forever and this test would be
+    // counting the queue rather than the re-run.
+    const client = stubClient({
+      sharedDashboard: vi.fn(async () => dash({ tiles: [trendTile(1, 'A'), trendTile(2, 'B')] })),
+      runSharedTile: vi.fn(async () => ({ kind: 'trend', result: { buckets: [] } })),
+    })
+    render(<SharedDashboard client={client} token={TOKEN} />)
+    await waitFor(() => expect(client.runSharedTile).toHaveBeenCalledTimes(2))
+    expect(client.runSharedTile).toHaveBeenNthCalledWith(1, TOKEN, 0, 'auto')
+
+    await userEvent.selectOptions(screen.getByLabelText('Range'), '30d')
+
+    await waitFor(() => expect(client.runSharedTile).toHaveBeenCalledTimes(4))
+    expect(client.runSharedTile).toHaveBeenNthCalledWith(3, TOKEN, 0, '30d')
+    expect(client.runSharedTile).toHaveBeenNthCalledWith(4, TOKEN, 1, '30d')
+    expect(window.location.search).toBe('?range=30d')
+    // The note belongs to `auto` alone. Ungated it would sit under every
+    // preset saying each tile uses its own window, which is the opposite of
+    // what a chosen preset does.
+    expect(screen.queryByText(/each tile uses its own report's default window/)).toBeNull()
+    // The token stays in the path: this page has no router, so the range
+    // write is the one call that could drop it.
+    expect(window.location.pathname).toBe(`/shared/${TOKEN}`)
+  })
+
+  // A custom range cannot be expressed on this surface (the run route takes
+  // only `SHARED_RANGE_PRESETS`), and the URL an operator is most likely to
+  // paste is their OWN dashboard's, which can carry exactly that. It is
+  // rewritten on mount rather than silently ignored, so the address bar and
+  // the picker cannot disagree about what is on screen.
+  it('rewrites a pasted ?range=custom URL to auto on mount', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      `/shared/${TOKEN}?range=custom&from=2026-01-01&to=2026-01-02`,
+    )
+    const client = stubClient({
+      sharedDashboard: vi.fn(async () => dash({ tiles: [trendTile(1, 'A')] })),
+    })
+    render(<SharedDashboard client={client} token={TOKEN} />)
+
+    await screen.findByRole('heading', { name: 'Overview' })
+    await waitFor(() => expect(window.location.search).toBe(''))
+    expect(screen.getByLabelText('Range')).toHaveValue('auto')
+    expect(client.runSharedTile).toHaveBeenCalledWith(TOKEN, 0, 'auto')
+  })
+
+  // The same cap the operator's dashboard runs under, and for the same
+  // reason: a shared link can be opened by many people at once, and the
+  // server allows only three runs in flight per token anyway.
+  it('runs at most three tiles at once', async () => {
+    const tiles = [1, 2, 3, 4, 5].map((i) => trendTile(i, `Report ${i}`))
+    const client = stubClient({ sharedDashboard: vi.fn(async () => dash({ tiles })) })
+    render(<SharedDashboard client={client} token={TOKEN} />)
+
+    await waitFor(() => expect(client.runSharedTile).toHaveBeenCalledTimes(3))
+    // And it stays three: nothing settles, so no slot ever frees.
+    await Promise.resolve()
+    expect(client.runSharedTile).toHaveBeenCalledTimes(3)
+    expect(screen.getAllByTestId('tile-loading')).toHaveLength(5)
+  })
+
+  // The queue is held in a ref, and this is what that ref is for. Rebuilt
+  // per render it would still LOOK like a queue -- three of five tiles
+  // running is what you see on first paint either way -- but each render
+  // would hand the tiles a fresh, empty one, so the cap would reset every
+  // time anything on the page changed. A range change with runs still in
+  // flight is exactly that moment.
+  it('keeps one queue across renders, so the cap survives a range change', async () => {
+    const gates: (() => void)[] = []
+    const client = stubClient({
+      sharedDashboard: vi.fn(async () =>
+        dash({ tiles: [1, 2, 3, 4, 5].map((i) => trendTile(i, `Report ${i}`)) }),
+      ),
+      // Never settles on its own -- each call parks a resolver so the test
+      // decides when a slot frees, which is the only way to read the cap
+      // rather than a race.
+      runSharedTile: vi.fn(
+        () =>
+          new Promise((resolve) =>
+            gates.push(() => resolve({ kind: 'trend', result: { buckets: [] } })),
+          ),
+      ),
+    })
+    render(<SharedDashboard client={client} token={TOKEN} />)
+
+    await waitFor(() => expect(client.runSharedTile).toHaveBeenCalledTimes(3))
+    await userEvent.selectOptions(screen.getByLabelText('Range'), '30d')
+
+    // The five tiles all want to re-run and the three original runs are
+    // still holding every slot, so the count must not move at all. A queue
+    // rebuilt on this render would have three fresh slots to give away.
+    await waitFor(() => expect(window.location.search).toBe('?range=30d'))
+    await Promise.resolve()
+    expect(client.runSharedTile).toHaveBeenCalledTimes(3)
+
+    // Freeing one slot lets exactly one more through, which is what shows
+    // the queue is still the one that was counting.
+    gates[0]?.()
+    await waitFor(() => expect(client.runSharedTile).toHaveBeenCalledTimes(4))
+    await Promise.resolve()
+    expect(client.runSharedTile).toHaveBeenCalledTimes(4)
+  })
+
+  it('says so when the stored layout cannot be read', async () => {
+    const client = stubClient({ sharedDashboard: vi.fn(async () => dash({ stale: true })) })
+    render(<SharedDashboard client={client} token={TOKEN} />)
+    expect(
+      await screen.findByText("This dashboard's stored layout cannot be read by this version."),
+    ).toBeInTheDocument()
+    // The empty-tiles line would be a second, contradictory explanation for
+    // the same blank page.
+    expect(screen.queryByText('This dashboard has no tiles yet.')).toBeNull()
+  })
+
+  // The wire type carries no project at all, deliberately -- a viewer holding
+  // a link is told what the dashboard shows and nothing about the install it
+  // came from. This asserts the OUTCOME rather than the absent field, because
+  // the field is not what a later change would add back: a header, a footer
+  // line or a tile subtitle would be.
+  it('mentions no project anywhere', async () => {
+    const client = stubClient({
+      sharedDashboard: vi.fn(async () =>
+        dash({ tiles: [trendTile(1, 'Signups by country'), trendTile(2, 'Weekly actives')] }),
+      ),
+    })
+    render(<SharedDashboard client={client} token={TOKEN} />)
+    await screen.findByRole('heading', { name: 'Overview' })
+    expect(screen.getByText('Signups by country')).toBeInTheDocument()
+    expect(document.body.textContent?.toLowerCase()).not.toContain('project')
+  })
+
+  // Every report screen is behind a login this viewer does not have, so the
+  // ONLY link on the page is the one in the footer.
+  it('links nowhere but lyraflow.app', async () => {
+    const client = stubClient({
+      sharedDashboard: vi.fn(async () => dash({ tiles: [trendTile(1, 'A')] })),
+    })
+    const { container } = render(<SharedDashboard client={client} token={TOKEN} />)
+    await screen.findByRole('heading', { name: 'Overview' })
+    const links = within(container).getAllByRole('link')
+    expect(links).toHaveLength(1)
+    expect(links[0]).toHaveAttribute('href', 'https://lyraflow.app')
+    // And it carries no `Referer` when it is followed: this page's URL
+    // CONTAINS the share token, so a plain link would hand a working
+    // credential to whatever it points at.
+    expect(links[0]).toHaveAttribute('rel', 'noreferrer')
+  })
+})

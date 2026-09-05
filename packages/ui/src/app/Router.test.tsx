@@ -118,6 +118,7 @@ describe('AppRouter', () => {
           stale: false,
           created_at: '',
           updated_at: '',
+          shared: false,
         },
       ]),
     })
@@ -162,6 +163,7 @@ describe('AppRouter', () => {
           stale: false,
           created_at: '',
           updated_at: '',
+          shared: false,
         },
       ]),
     })
@@ -189,6 +191,7 @@ describe('AppRouter', () => {
           stale: false,
           created_at: '',
           updated_at: '',
+          shared: false,
         },
       ]),
     })

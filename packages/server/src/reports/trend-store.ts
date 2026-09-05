@@ -20,8 +20,15 @@ const TREND_DEFINITION_VERSION = 1
  * predicate. A second one would drift from the first the moment the grammar
  * changes, which is exactly the failure `stale` exists to make visible
  * rather than silently wrong.
+ *
+ * Exported for that reason and no other: `shared/run-tile.ts` re-parses a
+ * stored trend's `where` on its way into `runStats` (`StoredTrend.where` is
+ * `unknown[]` by contract), and it must re-parse against THIS schema. It
+ * briefly used a bare `z.array(WherePredicate)` of its own, which was a
+ * third notion of a valid predicate list and silently dropped the
+ * `MAX_WHERE_PREDICATES` cap `stale` is computed against.
  */
-const StoredWhere = z.array(WherePredicate).max(MAX_WHERE_PREDICATES)
+export const StoredWhere = z.array(WherePredicate).max(MAX_WHERE_PREDICATES)
 
 /**
  * `stale` is `true` when the row's stored `event_where` no longer parses

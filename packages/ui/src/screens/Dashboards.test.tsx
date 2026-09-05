@@ -84,6 +84,19 @@ describe('Dashboards', () => {
     expect(screen.queryByText(/home/)).not.toBeInTheDocument()
   })
 
+  it('badges a dashboard with a live share link, after tiles and home', async () => {
+    renderList([{ ...ROW, id: 6, name: 'Overview', tile_count: 3, is_home: true, shared: true }])
+    expect(await screen.findByText('3 tiles · home · shared')).toBeInTheDocument()
+  })
+
+  it('omits "· shared" for a dashboard with no share link', async () => {
+    renderList([
+      { ...ROW, id: 7, name: 'private one', tile_count: 2, is_home: false, shared: false },
+    ])
+    expect(await screen.findByText('2 tiles')).toBeInTheDocument()
+    expect(screen.queryByText(/shared/)).not.toBeInTheDocument()
+  })
+
   it('badges a dashboard whose stored layout no longer parses', async () => {
     renderList([{ ...ROW, id: 5, name: 'broken', stale: true }])
     expect(await screen.findByTestId('report-stale-5')).toBeInTheDocument()

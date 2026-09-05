@@ -449,4 +449,51 @@ describe('dashboard routes', () => {
     const detail = await call('GET', `/v1/dashboards/${list[0].id}`)
     expect(detail.json()).toMatchObject({ stale: true, tiles: [] })
   })
+
+  describe('sharing', () => {
+    it('mints once, returns the same link again, and the detail carries it', async () => {
+      const created = await call('POST', '/v1/dashboards', { name: 'S' })
+      const id = created.json().id
+      expect(created.json().share).toBeNull()
+
+      const a = await call('POST', `/v1/dashboards/${id}/share`)
+      expect(a.statusCode).toBe(200)
+      expect(a.json().token).toMatch(/^[A-Za-z0-9_-]{43}$/)
+      const b = await call('POST', `/v1/dashboards/${id}/share`)
+      expect(b.json()).toEqual(a.json())
+
+      const detail = await call('GET', `/v1/dashboards/${id}`)
+      expect(detail.json().share).toEqual(a.json())
+      const list = await call('GET', '/v1/dashboards')
+      expect(list.json().dashboards[0]).toMatchObject({ id, shared: true })
+      expect(JSON.stringify(list.json())).not.toContain(a.json().token)
+    })
+
+    it('revokes, then 404 not_shared on a second revoke', async () => {
+      const id = (await call('POST', '/v1/dashboards', { name: 'R' })).json().id
+      await call('POST', `/v1/dashboards/${id}/share`)
+      expect((await call('DELETE', `/v1/dashboards/${id}/share`)).statusCode).toBe(204)
+      expect((await call('GET', `/v1/dashboards/${id}`)).json().share).toBeNull()
+      const again = await call('DELETE', `/v1/dashboards/${id}/share`)
+      expect(again.statusCode).toBe(404)
+      expect(again.json()).toEqual({ error: 'not_shared' })
+    })
+
+    it('is scoped to the project on both routes', async () => {
+      const id = (await call('POST', '/v1/dashboards', { name: 'P' })).json().id
+      const post = await call('POST', `/v1/dashboards/${id}/share`, undefined, OTHER_SERVER_KEY)
+      expect(post.statusCode).toBe(404)
+      expect(post.json()).toEqual({ error: 'dashboard_not_found' })
+      const del = await call('DELETE', `/v1/dashboards/${id}/share`, undefined, OTHER_SERVER_KEY)
+      expect(del.statusCode).toBe(404)
+      expect(del.json()).toEqual({ error: 'dashboard_not_found' })
+    })
+
+    it('rejects a non-numeric id and requires credentials', async () => {
+      expect((await call('POST', '/v1/dashboards/x/share')).statusCode).toBe(400)
+      expect((await app.inject({ method: 'POST', url: '/v1/dashboards/1/share' })).statusCode).toBe(
+        401,
+      )
+    })
+  })
 })

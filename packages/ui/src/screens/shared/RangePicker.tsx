@@ -19,8 +19,27 @@ export function RangePicker(props: {
   id: string
   value: RangeChoice
   onChange: (next: RangeChoice) => void
+  /**
+   * Drops `Between two dates…` from the list and never reveals the date
+   * boxes, for a surface whose range vocabulary is only the presets.
+   *
+   * The shared viewer page (`screens/SharedDashboard.tsx`) is the one such
+   * surface: `SHARED_RANGE_PRESETS` is the entire set the public run route
+   * accepts, so a custom pair of dates there is a choice the server answers
+   * with a 400. Filtering the OPTIONS rather than declining the value in
+   * the handler is the point -- a control that offers something and then
+   * refuses it is worse than one that never offered it.
+   *
+   * The date boxes are suppressed even when `value.preset` IS `custom`,
+   * because a pasted `?range=custom&from=…` URL reaches `readRange` before
+   * anything normalises it; `useSharedRange` rewrites that on mount, and
+   * this makes the render in between honest rather than briefly offering a
+   * range the page cannot run.
+   */
+  presetsOnly?: boolean
 }) {
-  const { id, value, onChange } = props
+  const { id, value, onChange, presetsOnly } = props
+  const presets = presetsOnly ? RANGE_PRESETS.filter((p) => p.id !== CUSTOM) : RANGE_PRESETS
   return (
     <>
       <div className="flex min-w-0 flex-col gap-1">
@@ -32,14 +51,14 @@ export function RangePicker(props: {
           onChange={(e) => onChange({ ...value, preset: e.target.value as RangeChoice['preset'] })}
           className="h-9 rounded-md border border-input bg-background px-2 text-foreground text-sm shadow-xs"
         >
-          {RANGE_PRESETS.map((p) => (
+          {presets.map((p) => (
             <option key={p.id} value={p.id}>
               {p.label}
             </option>
           ))}
         </select>
       </div>
-      {value.preset === CUSTOM && (
+      {!presetsOnly && value.preset === CUSTOM && (
         <>
           <div className="flex min-w-0 flex-col gap-1">
             <Label htmlFor={`${id}-from`}>From</Label>
