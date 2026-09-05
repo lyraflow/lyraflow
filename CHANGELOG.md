@@ -21,6 +21,69 @@ here as it happened rather than tagged retroactively, for the same reason 0.1.0
 is: a tag created after the fact names a moment nobody could have fetched. Its
 one fix is contained in 0.3.0.
 
+## 0.15.0 — 2026-09-05
+
+### Added
+
+- **Shared dashboards** (**#251**). A dashboard can be shared by a **secret link**:
+  `POST /v1/dashboards/:id/share` mints one and returns it again on every later
+  call rather than rotating it, `DELETE /v1/dashboards/:id/share` revokes it, and
+  anyone holding `/shared/<token>` opens the dashboard with no login, picks a
+  preset range, and sees every tile. One link per dashboard, stored in plaintext
+  so the share card can show it again; revoking it is a `404` on the next request,
+  and every bookmark of it breaks. The Share button on the dashboard screen lists
+  what a link exposes — the dashboard and report names, event names, every
+  breakdown value, every filter value — before it creates one, and the dashboards
+  list marks a shared row.
+
+  **The viewer routes run only what the dashboard already asks.**
+  `GET /v1/shared/:token` and `POST /v1/shared/:token/tiles/:index/run` take no
+  key and no session; the token is the whole credential and it names one
+  dashboard. Every query is built from the stored report on the server, never from
+  the request, so a link cannot ask for a trend, a breakdown or a grid the
+  dashboard does not show. A token presented as a server key or a session reaches
+  nothing. Unknown, malformed, revoked and deleted tokens all answer one body,
+  `404 share_not_found`. A funnel run through a link does not update the funnel's
+  cached last run, and the shared read strips a funnel's cached operator counts.
+
+  **Because the caller is anonymous, three bounds apply per link:** 120 requests a
+  minute, page loads and tile runs together (`429` with `retry-after`); at most
+  three tile runs executing at once; and a result cache of 60 seconds per link,
+  tile and preset, so a link opened by fifty readers costs one query per tile
+  rather than fifty. Presets only, no custom dates, because that cache's key space
+  has to be finite. An edit to a dashboard or a report shows on a shared page
+  within a minute rather than at once.
+
+  **The token never appears in a log line.** Lyraflow's request log redacts the
+  token segment of both `/shared/<token>` and `/v1/shared/<token>`, after the same
+  URL normalization the static handler uses. A reverse proxy in front of Lyraflow
+  will still hold the link in its own access log; the README says so.
+
+  The three run handlers — trend stats, retention, funnel — are callable
+  functions now, which is what lets a stored report run without a request to
+  parse. The routes call the same functions, so there is one query per kind.
+  Migration `024_dashboard_shares.sql` adds two nullable columns to `dashboards`
+  (`SCHEMA_VERSION` 23 → 24) and is additive.
+
+### Changed
+
+- **Schema version 24**, over one additive migration: `024_dashboard_shares.sql`.
+  No existing row changes, and it applies automatically at app start.
+- **Tiles keep their scroll position and observers when a dashboard enters edit
+  mode.** Toggling Edit used to remount every tile body; it no longer does.
+
+### What it still cannot do
+
+A shared page cannot be embedded in another site — and the server sends no frame
+header for any page, so it can be framed; that is **#252**, a decision still to
+make. There is no password on a link, no expiry, no count of who opened it, one
+link per dashboard, no sharing of a single report, and no way to list shared
+dashboards other than the `shared` flag on the dashboards list. A link is a
+credential: anyone who has it has the dashboard, and revoking it is the only
+remedy for one that spread further than intended. Everything the 0.14.0 entry
+listed still stands: no auto-refresh, no funnel breakdown or retention split, no
+journeys or path analysis, no alerting, scheduled export or digest.
+
 ## 0.14.0 — 2026-09-04
 
 ### Added
