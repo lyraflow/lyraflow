@@ -144,6 +144,13 @@ export function registerSharedRoutes(app: FastifyInstance, deps: SharedDeps): vo
       // the next link to the same dashboard inherit its warm entries, and
       // a revoked token never reaches here at all because `lookup` above
       // already failed for it.
+      // `no-store` on every answer this route gives, for the GET's reason:
+      // the body is a credentialed read, and a POST being uncacheable by
+      // default is a property of the method rather than a decision anyone
+      // made about this data. Set before the first `send` so a cache hit
+      // carries it too.
+      reply.header('cache-control', 'no-store')
+
       const key = `${token}:${index}:${preset}`
       const cached = cache.get(key)
       if (cached !== undefined) return reply.code(200).send(cached)

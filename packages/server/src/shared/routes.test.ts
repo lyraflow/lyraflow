@@ -1,4 +1,5 @@
 import { join } from 'node:path'
+import { Writable } from 'node:stream'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -327,6 +328,52 @@ describe('GET /v1/shared/:token', () => {
     }
   })
 
+  it('never writes the token into a request log line', async () => {
+    // pino writes to stdout, so the only way to read a real log line is to
+    // hand the app somewhere else to write -- see `buildApp`'s `logStream`
+    // seam. This is the whole reason `redactShareToken` exists: the share
+    // token is the only credential in the product that travels in a URL
+    // path, and Fastify's default serializer logs `req.url` on every
+    // request at `info`.
+    const lines: string[] = []
+    const stream = new Writable({
+      write(chunk, _enc, done) {
+        lines.push(String(chunk))
+        done()
+      },
+    })
+    const logged = buildApp({ config, pg, ch, readiness, logStream: stream })
+    await logged.ready()
+    try {
+      const t = await makeTrend()
+      const { token } = await sharedDashboard([{ kind: 'trend', report_id: t, width: 'half' }])
+      expect((await logged.inject({ method: 'GET', url: `/v1/shared/${token}` })).statusCode).toBe(
+        200,
+      )
+      expect(
+        (
+          await logged.inject({
+            method: 'POST',
+            url: `/v1/shared/${token}/tiles/0/run`,
+            headers: { 'content-type': 'application/json' },
+            payload: { range: '7d' },
+          })
+        ).statusCode,
+      ).toBe(200)
+
+      const shared = lines.filter((l) => l.includes('/v1/shared'))
+      expect(shared.length).toBeGreaterThan(0)
+      for (const line of shared) expect(line).not.toContain(token)
+      expect(shared.some((l) => l.includes('/v1/shared/[redacted]'))).toBe(true)
+      expect(shared.some((l) => l.includes('/v1/shared/[redacted]/tiles/0/run'))).toBe(true)
+      // The rest of the default serializer survives being replaced.
+      const first = JSON.parse(shared[0] ?? '{}')
+      expect(first.req).toMatchObject({ method: expect.any(String), remoteAddress: '127.0.0.1' })
+    } finally {
+      await logged.close()
+    }
+  })
+
   it('a stale dashboard reads back stale with no tiles', async () => {
     const { id, token } = await sharedDashboard([])
     // An array (the CHECK allows it) that `TileList` cannot parse: stale.
@@ -349,6 +396,9 @@ describe('POST /v1/shared/:token/tiles/:index/run', () => {
     ])
     const a = await run(token, 0)
     expect(a.statusCode).toBe(200)
+    // A credentialed read, like the GET: never stored by anything on the
+    // path to a shared link, which is a path nobody chose.
+    expect(a.headers['cache-control']).toBe('no-store')
     expect(a.json()).toEqual({ kind: 'trend', result: { buckets: [] } })
     const b = await run(token, 1)
     expect(b.statusCode).toBe(200)
