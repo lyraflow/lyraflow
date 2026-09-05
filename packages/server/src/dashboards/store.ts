@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto'
 import type { Pool, PoolClient } from '@lyraflow/db'
 import { z } from 'zod'
 
@@ -66,6 +67,24 @@ export interface StoredDashboard {
   stale: boolean
   created_at: string
   updated_at: string
+  shared: boolean
+  share: DashboardShare | null
+}
+
+/** The `dashboards.share_token`/`shared_at` pair, hydrated together --
+ *  `024_dashboard_shares.sql`'s CHECK guarantees they are both null or both
+ *  set, so nothing here represents the other four combinations. */
+export interface DashboardShare {
+  token: string
+  shared_at: string
+}
+
+/** 32 random bytes as base64url: 43 characters, no padding (global
+ *  constraints, "Product rules"). The pattern is what the shared routes
+ *  match a path segment against BEFORE any query, in Task 6. */
+export const SHARE_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/
+export function newShareToken(): string {
+  return randomBytes(32).toString('base64url')
 }
 
 export interface DashboardInput {
@@ -105,9 +124,28 @@ interface Row {
   definition_version: number
   created_at: string
   updated_at: string
+  share_token: string | null
+  shared_at: string | null
 }
 
-const COLUMNS = 'id, name, tiles, is_home, definition_version, created_at, updated_at'
+// `shared_at::text` -- node-postgres parses a bare `timestamptz` column
+// into a JS `Date`, not a string (confirmed against the test database, not
+// assumed), which would make `DashboardShare.shared_at` a lie about its own
+// type. `created_at`/`updated_at` carry the same untruth already and nothing
+// in this task reads them as strings, so they are left alone; `shared_at`
+// is cast because `store.test.ts`'s "mints a ... token" test asserts
+// `typeof ... shared_at === 'string'` and `byShareToken`'s test compares a
+// hydrated `share` object against one that came back from `share()` itself,
+// so both sides must agree on the type.
+const COLUMNS =
+  'id, name, tiles, is_home, definition_version, created_at, updated_at, share_token, shared_at::text AS shared_at'
+/** `list()`'s column list, identical to `COLUMNS` except the token itself --
+ *  a list of N dashboards must not carry N read credentials (global
+ *  constraints, "the token never appears in a list body"). `shared_at`
+ *  alone is enough to say whether a link exists; `NULL::text` keeps the
+ *  column position and type so `hydrate` needs no special case for it. */
+const LIST_COLUMNS =
+  'id, name, tiles, is_home, definition_version, created_at, updated_at, NULL::text AS share_token, shared_at::text AS shared_at'
 
 function hydrate(row: Row): StoredDashboard {
   const parsed = TileList.safeParse(row.tiles)
@@ -120,6 +158,14 @@ function hydrate(row: Row): StoredDashboard {
     stale: !parsed.success,
     created_at: row.created_at,
     updated_at: row.updated_at,
+    // `shared_at` is the source of truth for "has a link", even from a
+    // `list()` row where `share_token` is always the literal NULL above --
+    // `024_dashboard_shares.sql`'s pair CHECK is what makes that safe.
+    shared: row.shared_at !== null,
+    share:
+      row.share_token !== null && row.shared_at !== null
+        ? { token: row.share_token, shared_at: row.shared_at }
+        : null,
   }
 }
 
@@ -142,7 +188,9 @@ function violatesConstraint(err: unknown, constraint: string): boolean {
 
 /**
  * CRUD over `dashboards`. Every statement filters on `project_id`, for the
- * reason `TrendStore` gives: an id is a caller-supplied path segment.
+ * reason `TrendStore` gives: an id is a caller-supplied path segment. The
+ * one exception is `byShareToken`, whose own docstring says why a share
+ * token needs no additional scope.
  *
  * `update` with `is_home: true` is the one transactional path: clear the
  * project's current home, set this row, commit. The partial unique index
@@ -163,7 +211,7 @@ export class DashboardStore {
 
   async list(projectId: number): Promise<StoredDashboard[]> {
     const r = await this.pool.query<Row>(
-      `SELECT ${COLUMNS} FROM dashboards WHERE project_id = $1 ORDER BY name ASC`,
+      `SELECT ${LIST_COLUMNS} FROM dashboards WHERE project_id = $1 ORDER BY name ASC`,
       [projectId],
     )
     return r.rows.map(hydrate)
@@ -316,5 +364,69 @@ export class DashboardStore {
       id,
     ])
     return (r.rowCount ?? 0) > 0
+  }
+
+  /** Idempotent: a row that already has a link keeps it, rather than
+   *  minting a second one on a repeat call -- the "returns the same one
+   *  again" test in `store.test.ts` pins this. `COALESCE` on both columns
+   *  also makes two concurrent calls safe without a transaction: whichever
+   *  UPDATE commits first fixes the token, and the second's COALESCE sees
+   *  that committed value and writes it right back, rather than each
+   *  minting its own and racing to be "the" link. */
+  async share(projectId: number, id: number): Promise<DashboardShare | null> {
+    const r = await this.pool.query<{ share_token: string; shared_at: string }>(
+      `UPDATE dashboards
+          SET share_token = COALESCE(share_token, $3),
+              shared_at   = COALESCE(shared_at, now())
+        WHERE project_id = $1 AND id = $2
+        RETURNING share_token, shared_at::text AS shared_at`,
+      [projectId, id, newShareToken()],
+    )
+    const row = r.rows[0]
+    return row ? { token: row.share_token, shared_at: row.shared_at } : null
+  }
+
+  /** Reports which of three things happened, distinguished because the
+   *  route layer (Task 6) answers each with a different status. The old
+   *  value has to come from a row read BEFORE the UPDATE runs, not
+   *  `RETURNING` off the updated row -- `RETURNING (shared_at IS NOT
+   *  NULL)` evaluates against the NEW row, which this statement has just
+   *  set to NULL, so it would report `false` even when a link existed a
+   *  moment ago. The `FROM (SELECT ...) old` subquery captures the
+   *  pre-update state once, scoped by `project_id` the same as every other
+   *  statement here, and `RETURNING old.was_shared` is what a wrong first
+   *  draft of this method got backwards -- the "unshare clears both
+   *  columns" test in `store.test.ts` is what would have caught it. */
+  async unshare(projectId: number, id: number): Promise<'revoked' | 'not_shared' | 'not_found'> {
+    const r = await this.pool.query<{ was_shared: boolean }>(
+      `UPDATE dashboards d
+          SET share_token = NULL, shared_at = NULL
+         FROM (SELECT id, shared_at IS NOT NULL AS was_shared FROM dashboards WHERE project_id = $1 AND id = $2) old
+        WHERE d.id = old.id
+        RETURNING old.was_shared`,
+      [projectId, id],
+    )
+    const row = r.rows[0]
+    if (!row) return 'not_found'
+    return row.was_shared ? 'revoked' : 'not_shared'
+  }
+
+  /** The one read in this store keyed by something other than
+   *  `project_id` -- every other statement filters on it because an id is
+   *  a caller-supplied path segment (this class's own docstring), but a
+   *  share token IS the scope: it is an unguessable 43-character secret,
+   *  not a small integer a caller could iterate. The project id is handed
+   *  back because every downstream read the shared routes make (Task 6)
+   *  still needs one. `dashboards_share_token_key`'s partial unique index
+   *  is what makes `share_token = $1` resolve to at most one row. */
+  async byShareToken(
+    token: string,
+  ): Promise<{ projectId: number; dashboard: StoredDashboard } | null> {
+    const r = await this.pool.query<Row & { project_id: string }>(
+      `SELECT project_id, ${COLUMNS} FROM dashboards WHERE share_token = $1`,
+      [token],
+    )
+    const row = r.rows[0]
+    return row ? { projectId: Number(row.project_id), dashboard: hydrate(row) } : null
   }
 }
