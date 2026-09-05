@@ -11,7 +11,7 @@ Lyraflow records what people do in your product, stitches anonymous visits to
 known accounts, and lets you ask who did what. It runs on your own machine
 under Docker, and nothing leaves it.
 
-> **Early days.** v0.14 is the API and the operations behind it — ingest,
+> **Early days.** v0.15 is the API and the operations behind it — ingest,
 > identity, segments, funnels, event reads, privacy, retention, quotas and
 > backup — with a web UI over the top: a live event feed where any event opens
 > to show everything it arrived with, funnels that read as a flow and whose
@@ -855,7 +855,7 @@ not here.
 
 ### `GET /v1/meta`
 
-**What release this install is running**, as `{"version": "0.14.0"}`. The Settings
+**What release this install is running**, as `{"version": "0.15.0"}`. The Settings
 screen's Install card reads it, which is where an operator finds the number to
 quote into a bug report or to compare against the latest release.
 
