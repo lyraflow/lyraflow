@@ -2,7 +2,7 @@ import type { ClickHouseClient, Pool } from '@lyraflow/db'
 import type { FastifyInstance, FastifyReply } from 'fastify'
 import { z } from 'zod'
 import type { AttemptLimiter } from '../auth/rate-limit.js'
-import { resolveTiles } from '../dashboards/resolve.js'
+import { type ResolvedTile, resolveTiles } from '../dashboards/resolve.js'
 import { DashboardStore, SHARE_TOKEN_PATTERN, type Tile } from '../dashboards/store.js'
 import { makeFunnelRunner } from '../funnels/run.js'
 import { FunnelStore } from '../funnels/store.js'
@@ -24,6 +24,46 @@ export interface SharedDeps {
 }
 
 const RunBody = z.object({ range: RangePresetSchema })
+
+/**
+ * The fields of a funnel's wire shape a token holder never sees.
+ *
+ * `funnelToWire` carries the operator's own cached run: how many people
+ * entered and converted the last time THEY ran it, when that was, and over
+ * what range. None of it is on the exposure list the Share card shows
+ * before minting a link and the README publishes beside it, and that list
+ * is the contract -- a viewer who was told "this link exposes the report's
+ * definition" is entitled to have that be the whole of it.
+ *
+ * Stripped rather than documented, because there is nothing here for a
+ * viewer to use: the shared surface runs every tile live, and a run through
+ * a link deliberately records nothing (see `run-tile.ts`'s note on dropping
+ * `result`, and the "never records a run" test). The counts would be a
+ * second, older set of numbers beside the live ones, and `last_evaluated_at`
+ * would additionally tell whoever holds the link when the operator last
+ * looked at their own funnel. Whole-branch review M2; pinned by "never
+ * exposes a funnel's cached counts".
+ */
+const OPERATOR_ONLY_FUNNEL_FIELDS = [
+  'last_entered',
+  'last_converted',
+  'last_evaluated_at',
+  'last_range',
+] as const
+
+/** `resolveTiles`'s output with `OPERATOR_ONLY_FUNNEL_FIELDS` dropped from
+ *  every funnel report. Trend and retention reports are returned untouched:
+ *  neither wire shape carries a cached run, so there is nothing to strip
+ *  and a blanket key filter would be a second, weaker statement of which
+ *  fields this surface publishes. */
+function withoutOperatorRunCounts(tiles: ResolvedTile[]): ResolvedTile[] {
+  return tiles.map((tile) => {
+    if (tile.kind !== 'funnel' || tile.report === null) return tile
+    const report = { ...tile.report }
+    for (const field of OPERATOR_ONLY_FUNNEL_FIELDS) delete report[field]
+    return { ...tile, report }
+  })
+}
 
 /** Every "no" this surface says about the token is the same 404: unknown,
  *  malformed, revoked, deleted. The shape of a valid token is not something
@@ -133,7 +173,7 @@ export function registerSharedRoutes(app: FastifyInstance, deps: SharedDeps): vo
       name: dashboard.name,
       updated_at: dashboard.updated_at,
       stale: dashboard.stale,
-      tiles,
+      tiles: withoutOperatorRunCounts(tiles),
     })
   })
 
@@ -183,7 +223,21 @@ export function registerSharedRoutes(app: FastifyInstance, deps: SharedDeps): vo
       // the next link to the same dashboard inherit its warm entries, and a
       // revoked token never reaches here at all because `lookup` above
       // already failed for it.
-      const key = `${token}:${index}:${preset}`
+      //
+      // And keyed by WHICH TILE, not only by where it sits. The index alone
+      // is not an identity: a `PATCH` that reorders or removes tiles makes
+      // index N a different report while its entries are still warm, and the
+      // next viewer would be served one tile's numbers under another tile's
+      // title for the rest of the TTL -- a wrong answer, not a stale one.
+      // Whole-branch review I1, pinned by "keys the cache by the tile".
+      //
+      // The key space per token stays bounded, which is the property the
+      // preset-only range vocabulary exists to protect: a dashboard holds at
+      // most 12 tiles, so at most 12 live combinations of index, kind and
+      // report id, times 7 presets. Entries for a layout that has since
+      // changed are strays that the 60-second TTL expires, under the cache's
+      // own 4096-entry cap.
+      const key = `${token}:${index}:${tile.kind}:${tile.report_id}:${preset}`
       const cached = cache.get(key)
       if (cached !== undefined) return reply.code(200).send(cached)
 

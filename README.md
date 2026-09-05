@@ -2629,7 +2629,7 @@ curl -X POST http://localhost:3000/v1/dashboards \
 
 | Method & path | Does |
 | --- | --- |
-| `GET /v1/dashboards` | List every dashboard in the project — name, tile count, whether it is home, and `"shared": true|false` |
+| `GET /v1/dashboards` | List every dashboard in the project — name, tile count, whether it is home, and `"shared": true\|false` |
 | `POST /v1/dashboards` | Create one, with or without tiles |
 | `GET /v1/dashboards/:id` | Read one, each tile carrying its report in that report's own shape, or `null` if it has been deleted; carries `"share": { "token", "shared_at" }`, or `null` if it is not shared |
 | `PATCH /v1/dashboards/:id` | Rename it, replace its tiles, or set `is_home` |
@@ -2749,6 +2749,15 @@ execute for one token at once; a fourth gets the same `429` with
 preset, so a link opened by fifty readers costs one query per tile rather
 than fifty, and an edit to the dashboard or to a report it shows reaches the
 shared page within a minute rather than at once.
+
+**The token is in the URL, and Lyraflow's own request log redacts it.** Both
+the viewer page `/shared/<token>` and the API call it makes,
+`/v1/shared/<token>`, are logged with the token replaced by `[redacted]`.
+Nothing in front of Lyraflow does that: a reverse proxy keeps its own access
+log, and nginx's default `combined` format writes the whole request line — so
+if you run one, every page load of a shared dashboard puts a working link
+into `access.log`, where it is readable by anyone who can read that file.
+Redact it there, or treat those logs as holding credentials.
 
 **What this does not do.** There is no embedding flow — the link opens as a
 full page, not an iframe snippet — but the server sends no frame header on

@@ -52,6 +52,43 @@ describe('redactShareToken', () => {
     expect(redactShareToken(`/v1/shared/${'A'.repeat(200)}`)).toBe('/v1/shared/[redacted]')
   })
 
+  it('redacts the viewer page URL, which is the link people actually hold', () => {
+    // `/shared/<token>` is what `shareUrl` (ui/src/screens/dashboards/
+    // ShareCard.tsx) builds and what an operator copies out of the Share
+    // card; `/v1/shared/<token>` is only what that page then calls. The
+    // page URL is served by static.ts's SPA fallback, and Fastify logs
+    // `req.url` on it exactly as it does on an API route -- so while this
+    // prefix went unmatched, every single viewer page load wrote a whole
+    // working credential into the request log.
+    expect(redactShareToken(`/shared/${TOKEN}`)).toBe('/shared/[redacted]')
+    expect(redactShareToken(`/shared/${TOKEN}/`)).toBe('/shared/[redacted]/')
+    expect(redactShareToken(`/shared/${TOKEN}?range=7d`)).toBe('/shared/[redacted]?range=7d')
+    // The same four dodges the `/v1/shared/` case is pinned against, since
+    // both prefixes are matched through the one `normalizePath`.
+    for (const url of [
+      `//shared/${TOKEN}`,
+      `/shared//${TOKEN}`,
+      `/shared%2F${TOKEN}`,
+      `/SHARED/${TOKEN}`,
+    ]) {
+      const out = redactShareToken(url)
+      expect(out).not.toContain(TOKEN)
+      expect(out).toContain('[redacted]')
+    }
+    expect(redactShareToken(`//shared/${TOKEN}`)).toBe('/shared/[redacted]')
+    expect(redactShareToken(`/SHARED/${TOKEN}`)).toBe('/SHARED/[redacted]')
+  })
+
+  it('leaves /shared with no segment, and an unrelated path, alone', () => {
+    // Same reasoning as `/v1/shared` below: there is no token in any of
+    // these, and rewriting one would make the log claim a request carried
+    // a credential when it did not.
+    expect(redactShareToken('/shared')).toBe('/shared')
+    expect(redactShareToken('/shared/')).toBe('/shared/')
+    expect(redactShareToken('/shared//')).toBe('/shared//')
+    expect(redactShareToken('/dashboards/1')).toBe('/dashboards/1')
+  })
+
   it('leaves an unrelated URL alone', () => {
     for (const url of [
       '/v1/dashboards/1/share',

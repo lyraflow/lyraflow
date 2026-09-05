@@ -272,6 +272,42 @@ describe('GET /v1/shared/:token', () => {
     expect(text).not.toContain('"project_id"')
   })
 
+  it("never exposes a funnel's cached counts or when the operator last ran it", async () => {
+    // `funnelToWire` carries `last_entered`, `last_converted`,
+    // `last_evaluated_at` and `last_range` -- the operator's OWN cached
+    // numbers from their own runs, and the times they made them. None of
+    // that is on the exposure list the Share card and the README publish,
+    // and a viewer has no use for it: this surface runs live, and a run
+    // through a link deliberately records nothing (see "a funnel run
+    // through the link never records a run"). Whole-branch review M2.
+    const f = await makeFunnel()
+    const { id, token } = await sharedDashboard([{ kind: 'funnel', report_id: f, width: 'full' }])
+    // The operator runs it once, which is what writes those four fields.
+    expect((await call('POST', `/v1/funnels/${f}/run`, {})).statusCode).toBe(200)
+
+    const report = (await view(token)).json().tiles[0].report
+    for (const key of ['last_entered', 'last_converted', 'last_evaluated_at', 'last_range']) {
+      expect(report).not.toHaveProperty(key)
+    }
+    // Asserted on the body text too: `toHaveProperty` would not notice the
+    // four moving into a nested object.
+    for (const key of ['last_entered', 'last_converted', 'last_evaluated_at', 'last_range']) {
+      expect((await view(token)).body).not.toContain(key)
+    }
+    // The definition itself is untouched -- this strips the operator's
+    // cached numbers, not the tile.
+    expect(report).toMatchObject({ id: f, steps: expect.any(Array), window_seconds: 3600 })
+
+    // And the operator's own read still carries them: the stripping is a
+    // property of this surface, not of `funnelToWire`.
+    const own = (await call('GET', `/v1/dashboards/${id}`)).json()
+    expect(own.tiles[0].report).toMatchObject({
+      last_entered: expect.any(Number),
+      last_converted: expect.any(Number),
+      last_evaluated_at: expect.any(String),
+    })
+  })
+
   it('404 share_not_found for unknown, malformed, revoked and deleted, with one body', async () => {
     const byShareToken = vi.spyOn(DashboardStore.prototype, 'byShareToken')
     try {
@@ -386,13 +422,34 @@ describe('GET /v1/shared/:token', () => {
         ).statusCode,
       ).toBe(200)
 
-      const shared = lines.filter((l) => l.includes('/v1/shared'))
-      expect(shared.length).toBeGreaterThan(0)
-      for (const line of shared) expect(line).not.toContain(token)
-      expect(shared.some((l) => l.includes('/v1/shared/[redacted]'))).toBe(true)
-      expect(shared.some((l) => l.includes('/v1/shared/[redacted]/tiles/0/run'))).toBe(true)
+      // The VIEWER PAGE, which is the URL an operator actually copies --
+      // `${origin}/shared/<token>`, served by static.ts's SPA fallback and
+      // logged like any other request. Injected after the two API calls
+      // above so one assertion covers both prefixes.
+      await logged.inject({ method: 'GET', url: `/shared/${token}` })
+      await logged.inject({ method: 'GET', url: `/shared/${token}?range=7d` })
+
+      // Over ALL captured lines, not a `/v1/shared` subset. This filter
+      // used to select the lines before asserting on them, which meant the
+      // assertion could only ever see the prefix the redactor already
+      // handled: the viewer page's own line was filtered out of the test
+      // that existed to catch exactly this.
+      expect(lines.length).toBeGreaterThan(0)
+      for (const line of lines) expect(line).not.toContain(token)
+      // Matched on the serialized `url` field rather than as a loose
+      // substring, because `/shared/[redacted]` is a substring of
+      // `/v1/shared/[redacted]` -- a loose check would let the API line
+      // stand in for the page line and pass with the page unredacted.
+      for (const url of [
+        '/v1/shared/[redacted]',
+        '/v1/shared/[redacted]/tiles/0/run',
+        '/shared/[redacted]',
+        '/shared/[redacted]?range=7d',
+      ]) {
+        expect(lines.some((l) => l.includes(`"url":"${url}"`))).toBe(true)
+      }
       // The rest of the default serializer survives being replaced.
-      const first = JSON.parse(shared[0] ?? '{}')
+      const first = JSON.parse(lines.find((l) => l.includes('"req":')) ?? '{}')
       expect(first.req).toMatchObject({ method: expect.any(String), remoteAddress: '127.0.0.1' })
     } finally {
       await logged.close()
@@ -696,7 +753,14 @@ describe('POST /v1/shared/:token/tiles/:index/run', () => {
     const { token } = await sharedDashboard([{ kind: 'funnel', report_id: f, width: 'full' }])
     const res = await run(token, 0, '180d')
     expect(res.statusCode).toBe(400)
-    expect(res.json().code).toBeDefined()
+    // The funnel validator's own code for its range ceiling
+    // (`validateRange` in core/funnels/validate.ts throws
+    // `FunnelValidationError(..., 'range')` past `MAX_RANGE_DAYS`). Asserted
+    // as the literal string rather than merely "defined": a run that failed
+    // for some entirely different reason also carries a defined `code`, so
+    // the weaker assertion passed without ever showing this refusal was the
+    // ceiling's.
+    expect(res.json().code).toBe('range')
   })
 
   it('refuses a funnel whose stored definition this build cannot read', async () => {
@@ -742,6 +806,37 @@ describe('POST /v1/shared/:token/tiles/:index/run', () => {
     expect(statsSpy).toHaveBeenCalledTimes(1)
     expect((await run(token, 0, '30d')).statusCode).toBe(200)
     expect(statsSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('keys the cache by the tile, not by the position it happens to be at', async () => {
+    // A `PATCH` reorders the layout while entries are still warm, and
+    // index 0 is then a DIFFERENT tile. Keyed by position alone, the next
+    // run of index 0 would serve the TREND's cached body under the funnel's
+    // title for the rest of the 60-second TTL -- one report's numbers
+    // rendered as another's, which is a wrong answer rather than a stale
+    // one. Whole-branch review I1.
+    const t = await makeTrend()
+    const f = await makeFunnel()
+    const { id, token } = await sharedDashboard([
+      { kind: 'trend', report_id: t, width: 'half' },
+      { kind: 'funnel', report_id: f, width: 'full' },
+    ])
+    const before = await run(token, 0, '30d')
+    expect(before.statusCode).toBe(200)
+    expect(before.json().kind).toBe('trend')
+
+    const patched = await call('PATCH', `/v1/dashboards/${id}`, {
+      tiles: [
+        { kind: 'funnel', report_id: f, width: 'full' },
+        { kind: 'trend', report_id: t, width: 'half' },
+      ],
+    })
+    expect(patched.statusCode).toBe(200)
+
+    // Same index, same preset, well inside the TTL the first run warmed.
+    const after = await run(token, 0, '30d')
+    expect(after.statusCode).toBe(200)
+    expect(after.json().kind).toBe('funnel')
   })
 
   it('a revoked token gets 404 even with a warm cache', async () => {

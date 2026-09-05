@@ -1,15 +1,31 @@
 import { normalizePath } from '../url-path.js'
 
-/** The one path prefix in this server whose next segment is a credential.
+/** The two path prefixes in this server whose next segment is a credential,
+ *  longest first so `/v1/shared/` is never matched as the shorter one.
  *  Compared against a LOWERCASED normalized path, so `/V1/Shared/<token>`
- *  -- which 404s at the router, and whose `req.url` is logged just the same
- *  -- cannot dodge the match on case. */
-const SHARED_PREFIX = '/v1/shared/'
+ *  and `/SHARED/<token>` -- which 404 at the router, and whose `req.url` is
+ *  logged just the same -- cannot dodge the match on case. */
+const SHARED_PREFIXES = ['/v1/shared/', '/shared/'] as const
 const REDACTED = '[redacted]'
 
 /**
- * `/v1/shared/<token>` and `/v1/shared/<token>/tiles/0/run` with the token
- * replaced by `[redacted]`; every other URL returned unchanged.
+ * `/shared/<token>`, `/v1/shared/<token>` and
+ * `/v1/shared/<token>/tiles/0/run` with the token replaced by
+ * `[redacted]`; every other URL returned unchanged.
+ *
+ * BOTH prefixes, because they are two different URLs and only one of them
+ * is the credential anybody handles. `/shared/<token>` is the VIEWER PAGE
+ * -- what `shareUrl` (ui/src/screens/dashboards/ShareCard.tsx) builds, what
+ * the operator copies out of the Share card, and what gets pasted into a
+ * chat or a bookmark. It is served by static.ts's SPA fallback, which is a
+ * request like any other, so Fastify logs `req.url` for it exactly as it
+ * does for an API route. `/v1/shared/<token>` is only what that page then
+ * calls once it has loaded. Covering the API prefix alone left the more
+ * common of the two -- one line per page load, per viewer -- writing a
+ * whole working credential into the log; found by the whole-branch review
+ * (Critical 1) and pinned by "redacts the viewer page URL" in
+ * `redact.test.ts` and by the log assertion in `routes.test.ts`, which
+ * reads ALL captured lines rather than the ones a filter pre-selected.
  *
  * The share token is the first credential this product carries in a URL
  * PATH. Every other one travels in a header -- a project server key in
@@ -39,22 +55,24 @@ const REDACTED = '[redacted]'
  * separator is no longer visible in the log -- a small, deliberate trade
  * against leaking the credential those shapes were hiding behind.
  *
- * Deliberately NOT rewriting `/v1/shared`, or a path whose every segment
- * after the prefix is empty: there is no token there to hide, and
- * rewriting them would make the log claim a request carried a credential
- * when it did not.
+ * Deliberately NOT rewriting `/shared` or `/v1/shared`, or a path whose
+ * every segment after the prefix is empty: there is no token there to hide,
+ * and rewriting them would make the log claim a request carried a
+ * credential when it did not.
  */
 export function redactShareToken(url: string): string {
   const path = normalizePath(url)
-  if (!path.toLowerCase().startsWith(SHARED_PREFIX)) return url
-  const segments = path.slice(SHARED_PREFIX.length).split('/')
+  const lowered = path.toLowerCase()
+  const prefix = SHARED_PREFIXES.find((p) => lowered.startsWith(p))
+  if (prefix === undefined) return url
+  const segments = path.slice(prefix.length).split('/')
   // `normalizePath` has already collapsed repeated slashes, so an empty
-  // first segment can now only be a trailing one (`/v1/shared/`). The scan
+  // first segment can now only be a trailing one (`/shared/`). The scan
   // is kept anyway rather than assuming that: this function's whole point
   // is that it must not depend on the shape it was handed.
   const at = segments.findIndex((s) => s !== '')
   if (at === -1) return url
   segments[at] = REDACTED
   const query = url.slice(url.indexOf('?'))
-  return path.slice(0, SHARED_PREFIX.length) + segments.join('/') + (url.includes('?') ? query : '')
+  return path.slice(0, prefix.length) + segments.join('/') + (url.includes('?') ? query : '')
 }
