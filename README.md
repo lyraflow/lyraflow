@@ -3829,3 +3829,6 @@ dropped for age until you turn it back on.
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). We'd love your help once the foundation is in place.
+
+**Security problems go to `hello@lyraflow.app`, not to the issue tracker** — see
+[SECURITY.md](SECURITY.md).

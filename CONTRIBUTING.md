@@ -2,6 +2,8 @@
 
 Thanks for your interest in contributing! Lyraflow is in its earliest phase, so the most valuable contributions right now are ideas, use cases, and feedback via [issues](../../issues).
 
+**Found a security problem? Do not open an issue.** Email `hello@lyraflow.app` with `security` in the subject — see [SECURITY.md](SECURITY.md) for what to include and what to expect. Lyraflow is self-hosted, so a public report is a set of instructions for attacking every install that has not upgraded yet.
+
 ## Before you contribute code
 
 > **Contributor License Agreement (CLA) — required.**
