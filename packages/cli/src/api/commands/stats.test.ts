@@ -262,7 +262,7 @@ describe('runStats', () => {
     const { ctx } = makeCtx(client)
     await runStats(['--interval', '1m', '--until', '2026-08-01T00:00:00.000Z'], ctx)
     expect(calls[0]?.query.until).toBe('2026-08-01T00:00:00.000Z')
-    // STATS_DEFAULT_WINDOW_MS['1m'] (events/routes.ts) is 1 hour.
+    // STATS_DEFAULT_WINDOW_MS['1m'] (events/stats.ts) is 1 hour.
     expect(calls[0]?.query.since).toBe('2026-07-31T23:00:00.000Z')
   })
 
@@ -337,13 +337,13 @@ describe('runStats', () => {
       // discipline. packages/cli has no dependency on packages/server, so
       // this reads the source file directly instead of importing the
       // constant.
-      const routesSrc = readFileSync(
-        join(import.meta.dirname, '..', '..', '..', '..', 'server', 'src', 'events', 'routes.ts'),
+      const statsSrc = readFileSync(
+        join(import.meta.dirname, '..', '..', '..', '..', 'server', 'src', 'events', 'stats.ts'),
         'utf8',
       )
       const block =
         /export const STATS_DEFAULT_WINDOW_MS: Record<keyof typeof STATS_INTERVALS, number> = \{([\s\S]*?)\}/.exec(
-          routesSrc,
+          statsSrc,
         )?.[1]
       expect(block).toBeDefined()
 
