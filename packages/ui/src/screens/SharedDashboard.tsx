@@ -319,12 +319,22 @@ export function SharedDashboard(props: { client: ApiClient; token: string }) {
        * credential for somebody else's dashboard to lyraflow.app as the
        * `Referer`. One link on the page means one link that could leak it,
        * which is why the "links nowhere but lyraflow.app" test asserts the
-       * attribute alongside the count. */}
+       * attribute alongside the count.
+       *
+       * `?ref=shared-dashboard` is what replaces the referrer the line above
+       * deliberately suppresses -- it is how the site can tell a visit that
+       * came from a shared dashboard from any other direct visit. It is a
+       * constant, so it says which SURFACE sent the viewer and never which
+       * install, which dashboard or who shared it. */}
       <footer className="flex items-center gap-2 pt-6 text-muted-foreground text-sm">
         <Mark />
         <span>
           Shared from{' '}
-          <a href="https://lyraflow.app" rel="noreferrer" className="underline">
+          <a
+            href="https://lyraflow.app/?ref=shared-dashboard"
+            rel="noreferrer"
+            className="underline"
+          >
             Lyraflow
           </a>
         </span>
