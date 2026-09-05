@@ -75,4 +75,51 @@ describe('TileCard', () => {
     mount({ kind: 'result', result: { kind: 'trend', page: { buckets: [] } } })
     expect(screen.getByTestId('tile-result')).toBeInTheDocument()
   })
+
+  // M1 from the review. `OpeningContent` and a bare `CardContent` used to be
+  // two different component TYPES at the same position, so flipping `editing`
+  // unmounted the whole body and mounted a fresh one -- every chart rebuilt,
+  // every ResizeObserver torn down and remade, any scroll position inside a
+  // funnel flow lost. Nothing about that shows up in a query-by-text
+  // assertion, which is why this one holds a DOM node by identity across the
+  // flip instead.
+  it('does not remount the body when edit mode is toggled', () => {
+    const result: TileStatus = {
+      kind: 'result',
+      result: { kind: 'trend', page: { buckets: [] } },
+    }
+    const { rerender } = render(
+      <MemoryRouter>
+        <TileCard
+          tile={tile}
+          range={preset('7d')}
+          status={result}
+          href="/trends/1?range=7d"
+          editing={false}
+          actions={{ onToggleWidth: () => {}, onRemove: () => {} }}
+          onRetry={() => {}}
+        />
+      </MemoryRouter>,
+    )
+    const before = screen.getByTestId('tile-result')
+
+    rerender(
+      <MemoryRouter>
+        <TileCard
+          tile={tile}
+          range={preset('7d')}
+          status={result}
+          href="/trends/1?range=7d"
+          editing={true}
+          actions={{ onToggleWidth: () => {}, onRemove: () => {} }}
+          onRetry={() => {}}
+        />
+      </MemoryRouter>,
+    )
+
+    // The SAME object, not merely an equal one.
+    expect(screen.getByTestId('tile-result')).toBe(before)
+    // And the flip did take effect, so this is not passing on a no-op render.
+    expect(screen.getByRole('button', { name: 'Remove' })).toBeInTheDocument()
+  })
 })

@@ -52,10 +52,21 @@ export function useSharedRange(): [RangeChoice, (next: RangeChoice) => void] {
   return [range, set]
 }
 
-/** The dates are cleared for EVERY preset, not only for `custom`: they are
- *  meaningless without it (see `RangeChoice`), and leaving them on the value
- *  would let `writeRange` put `from`/`to` back into a URL that nothing on
- *  this page reads. */
+/**
+ * `custom` reads as `auto`, and the dates go with it.
+ *
+ * Clearing the dates on the NON-custom branch is DELIBERATELY REDUNDANT
+ * with `writeRange`, which already drops `from` and `to` for every preset
+ * but `custom` -- so mutating that half changes nothing observable, and
+ * nothing here or in `SharedDashboard.test.tsx` would fail. It stays for
+ * the reason `resolveRange`'s own redundant empty-string guard stays (see
+ * `shared/range.ts`): what this function returns is the value the picker
+ * and the tiles read directly, not only the value the URL is written from,
+ * and "a preset carries no dates" is a property of the value, not a
+ * property of one of its two consumers. Noted so nobody deletes it
+ * thinking it is live, or spends a round wondering why breaking it fails
+ * nothing.
+ */
 function normalise(r: RangeChoice): RangeChoice {
   return r.preset === CUSTOM ? { preset: AUTO, from: '', to: '' } : { ...r, from: '', to: '' }
 }

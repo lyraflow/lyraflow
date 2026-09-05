@@ -1,5 +1,5 @@
-import type { MouseEvent, ReactNode } from 'react'
-import { Link, useNavigate } from 'react-router'
+import { type MouseEvent, type ReactNode, useCallback, useEffect, useRef } from 'react'
+import { Link, type NavigateFunction, useNavigate } from 'react-router'
 import type { FunnelRunResult, ResolvedTile, RetentionResult, StatsPage } from '../../api/types.js'
 import { Button } from '../../components/ui/button.js'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card.js'
@@ -105,9 +105,42 @@ export function TileCard(props: {
 
   const title = tile.report?.name ?? `${KIND_LABEL[tile.kind]} ${tile.report_id}`
 
-  /** The body, built once and handed to whichever of the two wrappers below
-   *  applies -- so the click behaviour is the only thing that differs
-   *  between a tile that leads somewhere and one that does not. */
+  /**
+   * The whole body opens the report, not just the title. Cem, testing this:
+   * "when I click on any dashboard section, I must be redirected to that
+   * report with the same time frame so that I can deep dive" -- a chart is
+   * what a reader points at, and the title is a small target beside it.
+   *
+   * Three things it is deliberately not. It is not a `role="link"`: the
+   * title above IS the link, in the accessibility tree and in the tab
+   * order, and a second one over the same destination would put every tile
+   * in the tab order twice while announcing the whole chart as its name. It
+   * is not live in edit mode -- that is where a tile is widened, moved and
+   * removed, and navigating away mid-edit loses the layout being arranged.
+   * And it does not fire for a click that started inside a control of its
+   * own: the stale state's "Open it" link and the failed state's Retry
+   * button both live in this body and both already mean something, so a
+   * click landing on either is theirs.
+   *
+   * No key handler beside `onClick`, and no `tabindex` -- the keyboard path
+   * to this destination is the title link above. Biome's
+   * `useKeyWithClickEvents` does not reach a click handler passed to a
+   * COMPONENT (it reads intrinsic elements only), so this is a decision the
+   * linter cannot make for us either way.
+   */
+  const bodyOpens = !editing && href !== null
+  const navigateRef = useRef<NavigateFunction | null>(null)
+  // `useCallback` with no dependencies, so `Navigator`'s effect does not
+  // re-run on every render of this card.
+  const setNavigate = useCallback((nav: NavigateFunction) => {
+    navigateRef.current = nav
+  }, [])
+  const openReport = (e: MouseEvent<HTMLDivElement>) => {
+    if (href === null) return
+    if ((e.target as Element).closest('a, button') !== null) return
+    navigateRef.current?.(href)
+  }
+
   const body = (
     <>
       {deleted ? (
@@ -207,60 +240,51 @@ export function TileCard(props: {
           </div>
         )}
       </CardHeader>
-      {/* The clickable body is a COMPONENT rather than a handler on the
-       * `CardContent` below, because `useNavigate` throws outright outside a
-       * `<Router>` (react-router's own invariant) and the shared viewer page
-       * renders this card with no router at all -- `href` is `null` there
-       * for every tile. A hook cannot be called conditionally, so the only
-       * way not to call it is not to render the component that calls it.
-       * See `screens/shared-view/SharedTile.tsx`, and
-       * `SharedTile.test.tsx`'s "renders no link anywhere", which is what
-       * this shape is pinned by. */}
-      {!editing && href !== null ? (
-        <OpeningContent href={href}>{body}</OpeningContent>
-      ) : (
-        <CardContent className="min-w-0">{body}</CardContent>
-      )}
+      {/* ONE `CardContent` for both cases, with the handler hoisted into it
+       * -- not two branches rendering two different component types at this
+       * position. That is what this was, and React treats a change of type
+       * at a position as an unmount plus a mount: flipping `editing`
+       * rebuilt the entire body, so every chart was thrown away and redrawn
+       * and anything holding state inside it (a `ResizeObserver`, a funnel
+       * flow's scroll position) went with it. Pinned by
+       * `TileCard.test.tsx`'s "does not remount the body when edit mode is
+       * toggled", which holds a DOM node by identity across the flip.
+       *
+       * `useNavigate` is why there is any conditional here at all: it
+       * throws outright outside a `<Router>` (react-router's own
+       * invariant), and the shared viewer page renders this card with no
+       * router -- `href` is `null` there for every tile (see
+       * `screens/shared-view/SharedTile.tsx`). A hook cannot be called
+       * conditionally, so the call lives in `Navigator`, a child that
+       * renders nothing and mounts only when there is somewhere to go. The
+       * handler it hands back arrives through a ref, so this element's own
+       * type never changes. */}
+      <CardContent
+        className={`min-w-0${bodyOpens ? ' cursor-pointer' : ''}`}
+        onClick={bodyOpens ? openReport : undefined}
+      >
+        {bodyOpens && <Navigator href={href} onReady={setNavigate} />}
+        {body}
+      </CardContent>
     </Card>
   )
 }
 
 /**
- * `TileCard`'s body when the tile leads somewhere: the whole body opens the
- * report, not just the title. Cem, testing this: "when I click on any
- * dashboard section, I must be redirected to that report with the same time
- * frame so that I can deep dive" -- a chart is what a reader points at, and
- * the title is a small target beside it.
+ * Calls `useNavigate` and hands the result up, rendering nothing.
  *
- * Three things it is deliberately not. It is not a `role="link"`: the title
- * in the header IS the link, in the accessibility tree and in the tab order,
- * and a second one over the same destination would put every tile in the tab
- * order twice while announcing the whole chart as its name. It is not
- * rendered in edit mode -- that is where a tile is widened, moved and
- * removed, and navigating away mid-edit loses the layout being arranged. And
- * it does not fire for a click that started inside a control of its own: the
- * stale state's "Open it" link and the failed state's Retry button both live
- * in this body and both already mean something, so a click landing on either
- * is theirs.
- *
- * No key handler beside `onClick`, and no `tabindex` -- the keyboard path to
- * this destination is the title link, which is already in the tab order and
- * already names the report. Biome's `useKeyWithClickEvents` does not reach a
- * click handler passed to a COMPONENT (it reads intrinsic elements only), so
- * this is a decision the linter cannot make for us either way.
+ * It exists only so that the hook is not called when there is no router --
+ * see the note at its one call site. Mounted as a child rather than
+ * wrapping the body, so that the body's own element identity does not
+ * depend on whether the tile leads anywhere.
  */
-function OpeningContent(props: { href: string; children: ReactNode }) {
-  const { href, children } = props
+function Navigator(props: { href: string; onReady(nav: NavigateFunction): void }) {
   const navigate = useNavigate()
-  const openReport = (e: MouseEvent<HTMLDivElement>) => {
-    if ((e.target as Element).closest('a, button') !== null) return
-    navigate(href)
-  }
-  return (
-    <CardContent className="min-w-0 cursor-pointer" onClick={openReport}>
-      {children}
-    </CardContent>
-  )
+  const { onReady } = props
+  useEffect(() => {
+    onReady(navigate)
+  }, [navigate, onReady])
+  return null
 }
 
 /** The four `TileStatus` kinds, once the tile isn't deleted, stale or over a

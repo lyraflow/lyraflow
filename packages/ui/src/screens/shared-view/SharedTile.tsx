@@ -5,7 +5,7 @@ import { KIND_LABEL, TileCard, type TileResult, type TileStatus } from '../dashb
 import type { RunQueue } from '../dashboards/runQueue.js'
 import { ceilingFor } from '../dashboards/tileRequest.js'
 import { describeError } from '../funnels/errors.js'
-import type { RangeChoice } from '../shared/range.js'
+import { AUTO, CUSTOM, type RangeChoice } from '../shared/range.js'
 
 /**
  * How many times a 429 is waited out before the tile gives up and says so.
@@ -79,6 +79,13 @@ export function SharedTile(props: {
   // it from the list makes the button inert with no test-visible error.
   // `retries` IS read (to decide whether another wait is allowed), and is
   // also what makes the busy timer fire the next attempt.
+  //
+  // StrictMode double-invokes this effect in DEVELOPMENT, so a dev build
+  // issues two runs per tile against a token budgeted at 120 runs a minute
+  // -- six tiles is twelve sends on first paint. The cancellation flag and
+  // the queue make that correct, not just tolerable, and production
+  // invokes it once. Worth knowing before anyone debugs a local 429 that
+  // has nothing to do with their change.
   // biome-ignore lint/correctness/useExhaustiveDependencies: see comment above
   useEffect(() => {
     if (!shouldRun) return
@@ -91,11 +98,7 @@ export function SharedTile(props: {
     if (retries === 0) setStatus({ kind: 'loading' })
 
     queue
-      // `range.preset` is a `SharedRangePreset` because `useSharedRange`
-      // normalises `custom` away before this ever sees it -- that
-      // normalisation is the only thing standing between a pasted
-      // `?range=custom` URL and a 400 from the run route.
-      .run(() => client.runSharedTile(token, index, range.preset as SharedRangePreset))
+      .run(() => client.runSharedTile(token, index, sharedPresetOf(range)))
       .then((r) => {
         if (cancelled) return
         setStatus({ kind: 'result', result: asTileResult(r) })
@@ -155,6 +158,23 @@ export function SharedTile(props: {
       }}
     />
   )
+}
+
+/**
+ * The range this page's run route can be asked for.
+ *
+ * `useSharedRange` already normalises `custom` away before a range reaches
+ * this component, so in the assembled page this branch is unreachable --
+ * but a cast (`range.preset as SharedRangePreset`) would make that a fact
+ * about a module this one does not import, and silently send `custom` to a
+ * route that answers 400 the day some other caller renders a `SharedTile`.
+ * Narrowing here makes the component correct on its own terms. `auto` is
+ * the right image for `custom` for the same reason the hook picks it: it is
+ * what "this range cannot be expressed here" already means everywhere else
+ * on this surface.
+ */
+function sharedPresetOf(range: RangeChoice): SharedRangePreset {
+  return range.preset === CUSTOM ? AUTO : range.preset
 }
 
 /**

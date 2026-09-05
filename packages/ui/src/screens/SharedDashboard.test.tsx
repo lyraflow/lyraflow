@@ -125,6 +125,10 @@ describe('SharedDashboard', () => {
     expect(client.runSharedTile).toHaveBeenNthCalledWith(3, TOKEN, 0, '30d')
     expect(client.runSharedTile).toHaveBeenNthCalledWith(4, TOKEN, 1, '30d')
     expect(window.location.search).toBe('?range=30d')
+    // The note belongs to `auto` alone. Ungated it would sit under every
+    // preset saying each tile uses its own window, which is the opposite of
+    // what a chosen preset does.
+    expect(screen.queryByText(/each tile uses its own report's default window/)).toBeNull()
     // The token stays in the path: this page has no router, so the range
     // write is the one call that could drop it.
     expect(window.location.pathname).toBe(`/shared/${TOKEN}`)
@@ -165,6 +169,48 @@ describe('SharedDashboard', () => {
     await Promise.resolve()
     expect(client.runSharedTile).toHaveBeenCalledTimes(3)
     expect(screen.getAllByTestId('tile-loading')).toHaveLength(5)
+  })
+
+  // The queue is held in a ref, and this is what that ref is for. Rebuilt
+  // per render it would still LOOK like a queue -- three of five tiles
+  // running is what you see on first paint either way -- but each render
+  // would hand the tiles a fresh, empty one, so the cap would reset every
+  // time anything on the page changed. A range change with runs still in
+  // flight is exactly that moment.
+  it('keeps one queue across renders, so the cap survives a range change', async () => {
+    const gates: (() => void)[] = []
+    const client = stubClient({
+      sharedDashboard: vi.fn(async () =>
+        dash({ tiles: [1, 2, 3, 4, 5].map((i) => trendTile(i, `Report ${i}`)) }),
+      ),
+      // Never settles on its own -- each call parks a resolver so the test
+      // decides when a slot frees, which is the only way to read the cap
+      // rather than a race.
+      runSharedTile: vi.fn(
+        () =>
+          new Promise((resolve) =>
+            gates.push(() => resolve({ kind: 'trend', result: { buckets: [] } })),
+          ),
+      ),
+    })
+    render(<SharedDashboard client={client} token={TOKEN} />)
+
+    await waitFor(() => expect(client.runSharedTile).toHaveBeenCalledTimes(3))
+    await userEvent.selectOptions(screen.getByLabelText('Range'), '30d')
+
+    // The five tiles all want to re-run and the three original runs are
+    // still holding every slot, so the count must not move at all. A queue
+    // rebuilt on this render would have three fresh slots to give away.
+    await waitFor(() => expect(window.location.search).toBe('?range=30d'))
+    await Promise.resolve()
+    expect(client.runSharedTile).toHaveBeenCalledTimes(3)
+
+    // Freeing one slot lets exactly one more through, which is what shows
+    // the queue is still the one that was counting.
+    gates[0]?.()
+    await waitFor(() => expect(client.runSharedTile).toHaveBeenCalledTimes(4))
+    await Promise.resolve()
+    expect(client.runSharedTile).toHaveBeenCalledTimes(4)
   })
 
   it('says so when the stored layout cannot be read', async () => {

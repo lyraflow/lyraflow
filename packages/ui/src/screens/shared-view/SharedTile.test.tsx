@@ -252,7 +252,7 @@ describe('SharedTile', () => {
     expect(client.runSharedTile).toHaveBeenCalledTimes(2)
   })
 
-  it('shows the tile kind in a non-429 failure, with a Retry that resets the busy count', async () => {
+  it('names the tile kind in a non-429 failure, and Retry re-runs it', async () => {
     const client = stubClient({
       runSharedTile: vi
         .fn()
@@ -266,6 +266,90 @@ describe('SharedTile', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Retry' }))
     expect(await screen.findByTestId('tile-result')).toBeInTheDocument()
     expect(client.runSharedTile).toHaveBeenCalledTimes(2)
+  })
+
+  // The rename above was a review finding: that test reaches Retry from a
+  // 404, where the busy count is already 0, so it cannot see whether Retry
+  // resets it. This one can. After two automatic waits the tile is in its
+  // terminal error state with the count at its ceiling; if Retry did not
+  // reset it, the run it fires would find `retries` still at the limit and
+  // go straight back to the error, for four sends in total. Reset, the two
+  // waits are available again -- five.
+  it('Retry restores the two automatic waits a run had used up', async () => {
+    vi.useFakeTimers()
+    const client = stubClient({
+      runSharedTile: vi.fn().mockRejectedValue(new ApiError(429, 'too_many_runs', undefined, 2)),
+    })
+    renderTile({ client })
+
+    await act(() => vi.advanceTimersByTimeAsync(0))
+    await act(() => vi.advanceTimersByTimeAsync(2000))
+    await act(() => vi.advanceTimersByTimeAsync(2000))
+    expect(screen.getByTestId('tile-error')).toBeInTheDocument()
+    expect(client.runSharedTile).toHaveBeenCalledTimes(3)
+
+    // `userEvent` drives real timers, so the click is dispatched directly.
+    act(() => {
+      screen.getByRole('button', { name: 'Retry' }).click()
+    })
+    await act(() => vi.advanceTimersByTimeAsync(0))
+    expect(client.runSharedTile).toHaveBeenCalledTimes(4)
+    expect(screen.getByTestId('tile-busy')).toBeInTheDocument()
+
+    await act(() => vi.advanceTimersByTimeAsync(2000))
+    expect(client.runSharedTile).toHaveBeenCalledTimes(5)
+    await act(() => vi.advanceTimersByTimeAsync(2000))
+    expect(client.runSharedTile).toHaveBeenCalledTimes(6)
+    expect(screen.getByTestId('tile-error')).toBeInTheDocument()
+  })
+
+  // A wait that outlives the range that started it. The unmount case is NOT
+  // what this asserts, and that is a finding rather than an omission: with
+  // the retry count paired to its range, a timer firing after unmount
+  // reaches a no-op state setter, and one firing after a range change
+  // writes a count against a range nothing is reading. Neither is visible.
+  // What IS visible is a timer whose range has been REPLACED and whose
+  // write therefore zeroes the count the new range has already spent -- a
+  // tile that had given up starts running again, on its own, with no click.
+  // The two `retry-after` values are what stage that: the first range waits
+  // ten seconds, long enough for the second range to burn both its retries
+  // and settle into the error state first.
+  it('cancels a busy wait left behind by a range change, so a settled tile stays settled', async () => {
+    vi.useFakeTimers()
+    const runSharedTile = vi
+      .fn()
+      .mockRejectedValueOnce(new ApiError(429, 'too_many_runs', undefined, 10))
+      .mockRejectedValue(new ApiError(429, 'too_many_runs', undefined, 1))
+    const client = stubClient({ runSharedTile })
+    const props = {
+      client,
+      token: 'T',
+      index: 0,
+      tile: trendTile(),
+      queue: createRunQueue(),
+    }
+    const { rerender } = render(<SharedTile {...props} range={preset('7d')} />)
+
+    await act(() => vi.advanceTimersByTimeAsync(0))
+    expect(screen.getByTestId('tile-busy')).toBeInTheDocument()
+    expect(runSharedTile).toHaveBeenCalledTimes(1)
+
+    // The range moves on while that ten-second wait is still pending.
+    await act(() => vi.advanceTimersByTimeAsync(10))
+    rerender(<SharedTile {...props} range={preset('30d')} />)
+    await act(() => vi.advanceTimersByTimeAsync(0))
+    expect(runSharedTile).toHaveBeenCalledTimes(2)
+
+    // The new range spends both of its own waits and gives up.
+    await act(() => vi.advanceTimersByTimeAsync(1000))
+    await act(() => vi.advanceTimersByTimeAsync(1000))
+    expect(runSharedTile).toHaveBeenCalledTimes(4)
+    expect(screen.getByTestId('tile-error')).toBeInTheDocument()
+
+    // Now walk past the abandoned range's deadline. Nothing may happen.
+    await act(() => vi.advanceTimersByTimeAsync(10_000))
+    expect(runSharedTile).toHaveBeenCalledTimes(4)
+    expect(screen.getByTestId('tile-error')).toBeInTheDocument()
   })
 
   // Everything a link would lead to is behind the login this viewer does not
