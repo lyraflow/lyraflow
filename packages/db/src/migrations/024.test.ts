@@ -97,4 +97,13 @@ describe('024_dashboard_shares', () => {
     await insert('n1', null, null)
     await insert('n2', null, null)
   })
+
+  it('the token index is partial, so unshared rows are not indexed at all', async () => {
+    const r = await pg.query<{ def: string }>(
+      `SELECT pg_get_indexdef(indexrelid) AS def FROM pg_index
+        WHERE indexrelid = 'dashboards_share_token_key'::regclass`,
+    )
+    expect(r.rows[0]?.def).toMatch(/WHERE \(share_token IS NOT NULL\)/)
+    expect(r.rows[0]?.def).toMatch(/UNIQUE/)
+  })
 })
