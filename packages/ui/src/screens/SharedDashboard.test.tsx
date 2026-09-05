@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '../api/client.js'
@@ -55,6 +55,9 @@ beforeEach(() => {
 
 afterEach(() => {
   window.history.replaceState(null, '', '/')
+  // The two busy tests below drive a plain `vi.useFakeTimers()`; leaving it
+  // installed would stop every later test's timers dead.
+  vi.useRealTimers()
 })
 
 describe('SharedDashboard', () => {
@@ -103,6 +106,66 @@ describe('SharedDashboard', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Try again' }))
     expect(await screen.findByRole('heading', { name: 'Overview' })).toBeInTheDocument()
     expect(client.sharedDashboard).toHaveBeenCalledTimes(2)
+  })
+
+  // The page's OWN load counts against the same 120-requests-a-minute
+  // window the tile runs do, so a link that has been passed around 429s on
+  // the GET itself -- and every viewer holding it used to be shown "Lyraflow
+  // is not responding", with a Try again that spent one more of the attempts
+  // they were all queueing for. Whole-branch review I2.
+  //
+  // Plain fake timers and no `findBy`/`waitFor`, for the reason
+  // `SharedTile.test.tsx` sets out at length: Testing Library can only
+  // advance JEST's clock, so polling under vitest's would spin on a clock
+  // that never moves. What this pins is a deadline, so the clock is
+  // advanced by hand and the DOM read synchronously afterwards.
+  it('a 429 on the load says busy, and holds Try again until retry-after', async () => {
+    vi.useFakeTimers()
+    const client = stubClient({
+      sharedDashboard: vi
+        .fn()
+        .mockRejectedValueOnce(new ApiError(429, 'too_many_runs', undefined, 3))
+        .mockResolvedValueOnce(dash({ name: 'Overview' })),
+    })
+    render(<SharedDashboard client={client} token={TOKEN} />)
+
+    await act(() => vi.advanceTimersByTimeAsync(0))
+    expect(screen.getByText('This dashboard is busy. Try again in a moment.')).toBeInTheDocument()
+    // A busy link is not an outage, and saying so is the whole finding.
+    expect(screen.queryByText(/Lyraflow is not responding/)).toBeNull()
+    expect(screen.getByRole('button', { name: 'Try again in 3 s' })).toBeDisabled()
+
+    await act(() => vi.advanceTimersByTimeAsync(2000))
+    expect(screen.getByRole('button', { name: 'Try again in 1 s' })).toBeDisabled()
+    expect(client.sharedDashboard).toHaveBeenCalledTimes(1)
+
+    await act(() => vi.advanceTimersByTimeAsync(1000))
+    const button = screen.getByRole('button', { name: 'Try again' })
+    expect(button).toBeEnabled()
+    // `userEvent` drives real timers, so the click is dispatched directly.
+    act(() => button.click())
+    await act(() => vi.advanceTimersByTimeAsync(0))
+    expect(client.sharedDashboard).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole('heading', { name: 'Overview' })).toBeInTheDocument()
+  })
+
+  // The header is the server's own answer and is what the wait should be;
+  // this is only the fallback for a 429 that carries none. A whole minute,
+  // because a minute is the whole of the server's window -- guessing
+  // shorter would put the viewer straight back into the same limit.
+  it('waits a whole minute when the 429 carries no retry-after', async () => {
+    vi.useFakeTimers()
+    const client = stubClient({
+      sharedDashboard: vi.fn().mockRejectedValue(new ApiError(429, 'too_many_runs')),
+    })
+    render(<SharedDashboard client={client} token={TOKEN} />)
+
+    await act(() => vi.advanceTimersByTimeAsync(0))
+    expect(screen.getByRole('button', { name: 'Try again in 60 s' })).toBeDisabled()
+    await act(() => vi.advanceTimersByTimeAsync(59_000))
+    expect(screen.getByRole('button', { name: 'Try again in 1 s' })).toBeDisabled()
+    await act(() => vi.advanceTimersByTimeAsync(1000))
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeEnabled()
   })
 
   it('changing the range writes ?range= and re-runs every tile', async () => {
@@ -252,5 +315,9 @@ describe('SharedDashboard', () => {
     const links = within(container).getAllByRole('link')
     expect(links).toHaveLength(1)
     expect(links[0]).toHaveAttribute('href', 'https://lyraflow.app')
+    // And it carries no `Referer` when it is followed: this page's URL
+    // CONTAINS the share token, so a plain link would hand a working
+    // credential to whatever it points at.
+    expect(links[0]).toHaveAttribute('rel', 'noreferrer')
   })
 })

@@ -14,22 +14,37 @@ import { RangePicker } from './shared/RangePicker.js'
 import { AUTO } from './shared/range.js'
 
 /**
- * The four things this page can be showing, as one value rather than a set
+ * The five things this page can be showing, as one value rather than a set
  * of booleans that could disagree -- the same shape `App`'s `Phase` uses,
  * for the same reason.
  *
- * `gone` and `unavailable` are deliberately separate. A 404 is the one
- * outcome that is not a fault: the link is spent, and there is nothing to
- * retry. Anything else means the server could not be reached or could not
- * answer, which is temporary and IS worth a Try again. Collapsing the two
- * would either offer a button that can only ever fail again, or tell
- * somebody their link is dead during a deploy.
+ * `gone`, `busy` and `unavailable` are deliberately separate, because the
+ * three call for different things from the viewer. A 404 is the one outcome
+ * that is not a fault: the link is spent, and there is nothing to retry, so
+ * there is no button. A 429 means the link is working and momentarily
+ * oversubscribed -- one link is allowed 120 requests a minute across every
+ * viewer, and the page's own load counts against that window, so a link
+ * that has been passed around 429s on the GET itself. Anything else means
+ * the server could not be reached or could not answer.
+ *
+ * Folding 429 into `unavailable` (which is what this file did until the
+ * whole-branch review, Important 2) told a whole audience that Lyraflow was
+ * down when it was not, and gave each of them a Try again that spent
+ * another of the attempts they were all queueing for.
  */
 type State =
   | { kind: 'loading' }
   | { kind: 'gone' }
+  | { kind: 'busy'; retryAfterSeconds: number }
   | { kind: 'unavailable' }
   | { kind: 'ready'; dash: SharedDashboardWire }
+
+/** Waited out when a 429 carries no usable `retry-after` (see
+ *  `parseRetryAfter` in `api/client.ts`, which rejects a missing, zero,
+ *  negative or non-numeric header). Sixty seconds, because that is the
+ *  whole of the server's window and the value it sends when it does send
+ *  one -- guessing shorter would put the viewer back into the same limit. */
+const BUSY_FALLBACK_SECONDS = 60
 
 /** A full-page card, the shape `App` uses for its own boot-time failures.
  *  Centred and alone on the page because there is nothing else on a shared
@@ -39,6 +54,8 @@ function FullPageCard(props: {
   title: string
   message: string
   onRetry?(): void
+  retryLabel?: string
+  retryDisabled?: boolean
 }) {
   return (
     <div className="flex h-dvh items-center justify-center bg-background p-4 text-foreground">
@@ -49,13 +66,57 @@ function FullPageCard(props: {
         <CardContent className="space-y-3 text-muted-foreground text-sm">
           <p role="alert">{props.message}</p>
           {props.onRetry && (
-            <Button type="button" className="w-full" onClick={props.onRetry}>
-              Try again
+            <Button
+              type="button"
+              className="w-full"
+              disabled={props.retryDisabled}
+              onClick={props.onRetry}
+            >
+              {props.retryLabel ?? 'Try again'}
             </Button>
           )}
         </CardContent>
       </Card>
     </div>
+  )
+}
+
+/**
+ * The page's own 429: the link is fine, and too many requests reached it at
+ * once.
+ *
+ * The button is HELD until the server's `retry-after` has elapsed, rather
+ * than offered immediately. Every viewer of an oversubscribed link is
+ * looking at this card at the same moment, and an enabled button asks each
+ * of them to spend another of the 120 attempts a minute they are all
+ * waiting on -- which is how a busy link becomes a stuck one. The countdown
+ * in the label is there so the disabled button reads as "not yet" rather
+ * than as broken.
+ *
+ * The message is word for word the one `SharedTile` shows for a 429 on a
+ * tile. Same condition, same words: a viewer who meets it on the page and
+ * then on a tile must not conclude they are two different problems.
+ */
+function BusyCard(props: { retryAfterSeconds: number; onRetry(): void }) {
+  const [remaining, setRemaining] = useState(props.retryAfterSeconds)
+  // One interval, installed once, that keeps ticking after it reaches zero
+  // rather than tearing itself down. At zero the updater returns the value
+  // it was given, React bails out, and nothing re-renders -- so stopping it
+  // would buy nothing and would cost either a side effect inside a state
+  // updater or an effect that re-subscribes on every tick. Pressing Try
+  // again unmounts the card, which is what actually clears it.
+  useEffect(() => {
+    const timer = setInterval(() => setRemaining((n) => (n > 0 ? n - 1 : n)), 1000)
+    return () => clearInterval(timer)
+  }, [])
+  return (
+    <FullPageCard
+      title="Too many requests at once"
+      message="This dashboard is busy. Try again in a moment."
+      onRetry={props.onRetry}
+      retryDisabled={remaining > 0}
+      retryLabel={remaining > 0 ? `Try again in ${remaining} s` : 'Try again'}
+    />
   )
 }
 
@@ -126,12 +187,21 @@ export function SharedDashboard(props: { client: ApiClient; token: string }) {
         if (cancelled) return
         // A 404 here is `share_not_found`: the link was unshared, or the
         // dashboard behind it was deleted. Both are permanent from the
-        // viewer's side.
-        setState(
-          err instanceof ApiError && err.status === 404
-            ? { kind: 'gone' }
-            : { kind: 'unavailable' },
-        )
+        // viewer's side. A 429 is `too_many_runs` and is the opposite --
+        // the link works and is oversubscribed, and this route counts
+        // against the same per-token window the tile runs do.
+        if (err instanceof ApiError && err.status === 404) {
+          setState({ kind: 'gone' })
+          return
+        }
+        if (err instanceof ApiError && err.status === 429) {
+          setState({
+            kind: 'busy',
+            retryAfterSeconds: err.retryAfterSeconds ?? BUSY_FALLBACK_SECONDS,
+          })
+          return
+        }
+        setState({ kind: 'unavailable' })
       })
     return () => {
       cancelled = true
@@ -151,6 +221,19 @@ export function SharedDashboard(props: { client: ApiClient; token: string }) {
       <FullPageCard
         title="This link is no longer valid."
         message="The dashboard it opened has been unshared or deleted."
+      />
+    )
+  }
+
+  if (state.kind === 'busy') {
+    return (
+      <BusyCard
+        // Keyed by the wait, so a second 429 after a Try again mounts a
+        // fresh card and restarts the countdown rather than reusing the
+        // one that had already run down to zero.
+        key={`${reload}-${state.retryAfterSeconds}`}
+        retryAfterSeconds={state.retryAfterSeconds}
+        onRetry={() => setReload((n) => n + 1)}
       />
     )
   }
@@ -229,12 +312,19 @@ export function SharedDashboard(props: { client: ApiClient; token: string }) {
 
       {/* The mark and where this came from, and nothing else. A viewer is
        * told what they are looking at and who made it; they are not sold
-       * anything, and they are not told which install it is. */}
+       * anything, and they are not told which install it is.
+       *
+       * The one link carries `rel="noreferrer"` because THIS PAGE'S OWN URL
+       * CONTAINS the share token: without it, every click hands a working
+       * credential for somebody else's dashboard to lyraflow.app as the
+       * `Referer`. One link on the page means one link that could leak it,
+       * which is why the "links nowhere but lyraflow.app" test asserts the
+       * attribute alongside the count. */}
       <footer className="flex items-center gap-2 pt-6 text-muted-foreground text-sm">
         <Mark />
         <span>
           Shared from{' '}
-          <a href="https://lyraflow.app" className="underline">
+          <a href="https://lyraflow.app" rel="noreferrer" className="underline">
             Lyraflow
           </a>
         </span>
