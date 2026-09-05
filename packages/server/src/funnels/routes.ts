@@ -1,28 +1,21 @@
 import {
-  type CostWarning,
-  type Cursor,
   FunnelDefinition,
   FunnelStep,
   FunnelValidationError,
   MEMBER_PAGE_SIZE,
   MEMBER_WINDOW_MAX,
-  Params,
-  type SegmentQuery,
   compileFunnel,
-  compileSegment,
   validateFunnel,
 } from '@lyraflow/core'
 import type { ClickHouseClient, Pool } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { Authenticate } from '../auth/bridge.js'
-import type { Project } from '../auth/project-cache.js'
 import { parseNumericId } from '../numeric-id.js'
 import { type WalkCursor, makeWalkCursorCodec } from '../query/walk-cursor.js'
 import { SegmentTimeoutError, runSegment } from '../segments/execute.js'
-import { SegmentStore, StoredTreeError } from '../segments/store.js'
-import { describeWindow } from './duration.js'
-import { runDropoff, runFunnel, runPeople } from './execute.js'
+import { runDropoff, runPeople } from './execute.js'
+import { FUNNEL_DEFAULT_RANGE_MS, makeFunnelRunner, rangeWire } from './run.js'
 import {
   DuplicateFunnelNameError,
   FunnelStore,
@@ -39,8 +32,6 @@ export interface FunnelDeps {
   database: string
 }
 
-const DEFAULT_RANGE_MS = 7 * 86_400_000
-
 /**
  * The range `POST /v1/funnels` and `PATCH /v1/funnels/:id` compile against to
  * measure a definition, discarding the SQL. See the note at the POST handler
@@ -54,11 +45,11 @@ const DEFAULT_RANGE_MS = 7 * 86_400_000
  *
  * It is not entirely arbitrary: `compileFunnel` refuses a range whose `since`
  * is not strictly before its `until`, so this must be a real span. A week,
- * matching `DEFAULT_RANGE_MS`.
+ * matching `FUNNEL_DEFAULT_RANGE_MS`.
  */
 const COMPILE_PROBE = {
-  range: { since: new Date(0), until: new Date(DEFAULT_RANGE_MS) },
-  now: new Date(DEFAULT_RANGE_MS),
+  range: { since: new Date(0), until: new Date(FUNNEL_DEFAULT_RANGE_MS) },
+  now: new Date(FUNNEL_DEFAULT_RANGE_MS),
 }
 
 /**
@@ -185,7 +176,10 @@ function stepIsOptional(steps: FunnelStep[], step: number): boolean {
 export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): void {
   const { authenticate, ch, pg, database } = deps
   const store = new FunnelStore(pg)
-  const segments = new SegmentStore(pg)
+  // `compileFor` and `execute` live in `run.ts` and construct their own
+  // `SegmentStore` there; nothing else in this file touches segments
+  // directly, so there is no separate instance to keep here.
+  const runner = makeFunnelRunner({ ch, pg, database })
 
   /**
    * Resolves the range for a run. Defaults to the last seven days so a bare
@@ -211,121 +205,8 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
     const until = parsed.data.until ? new Date(parsed.data.until) : now
     const since = parsed.data.since
       ? new Date(parsed.data.since)
-      : new Date(until.getTime() - DEFAULT_RANGE_MS)
+      : new Date(until.getTime() - FUNNEL_DEFAULT_RANGE_MS)
     return { since, until }
-  }
-
-  /**
-   * Compiles a funnel, resolving a segment restriction if it has one.
-   *
-   * ONE `Params` is threaded through both compilations. Names are positional,
-   * so compiling the segment separately and merging its map afterwards would
-   * silently overwrite the funnel's own `p0`.
-   *
-   * A `segment_id` naming a segment that no longer exists is not an error: the
-   * funnel runs over everyone and says so. Deleting a segment must not break
-   * every report built on it, but it does change what those reports mean, and
-   * a silent widening of the population is the worst way to learn that.
-   */
-  async function compileFor(
-    project: Project,
-    funnel: { steps: FunnelStep[]; windowSeconds: number; segmentId: number | null },
-    range: { since: Date; until: Date },
-    now: Date,
-    peopleAt?: {
-      step: number
-      mode: 'reached' | 'dropped' | 'skipped'
-      select: 'ids' | 'members' | 'count'
-      cursor?: Cursor
-    },
-  ): Promise<{ compiled: ReturnType<typeof compileFunnel>; extraWarnings: CostWarning[] }> {
-    const params = new Params()
-    const extraWarnings: CostWarning[] = []
-    let segmentPersonSql: string | undefined
-
-    if (funnel.segmentId !== null) {
-      let segment = null
-      try {
-        segment = await segments.get(project.id, funnel.segmentId)
-      } catch (err) {
-        // A segment whose stored tree no longer parses cannot restrict
-        // anything. Same treatment as a deleted one: run wide, and say why.
-        if (!(err instanceof StoredTreeError)) throw err
-      }
-      if (segment) {
-        segmentPersonSql = compileSegment({
-          query: { ast_version: segment.astVersion, filter: segment.filter } as SegmentQuery,
-          projectId: project.id,
-          database,
-          now,
-          select: 'persons',
-          params,
-        }).sql
-      } else {
-        extraWarnings.push({
-          path: 'segment_id',
-          reason: `segment ${funnel.segmentId} no longer exists or cannot be read, so this funnel ran over everyone rather than the population it names`,
-        })
-      }
-    }
-
-    const compiled = compileFunnel({
-      definition: {
-        steps: funnel.steps,
-        window_seconds: funnel.windowSeconds,
-        segment_id: funnel.segmentId,
-      },
-      projectId: project.id,
-      database,
-      range,
-      now,
-      params,
-      segmentPersonSql,
-      peopleAt,
-    })
-    return { compiled, extraWarnings }
-  }
-
-  function rangeWire(range: { since: Date; until: Date }) {
-    return { since: range.since.toISOString(), until: range.until.toISOString() }
-  }
-
-  /**
-   * The single derivation both run paths use.
-   *
-   * #21 was that the saved-segment run response omitted warnings the ad-hoc
-   * preview returns. Having two entry points is fine; computing the same
-   * thing twice is what drifts, so `/preview` and `/:id/run` both end here
-   * and neither assembles a response of its own. `/v1/segments/preview` and
-   * `/v1/segments/:id/preview` now follow the same shape via `runTree` in
-   * segments/routes.ts.
-   */
-  async function execute(
-    project: Project,
-    funnel: { steps: FunnelStep[]; windowSeconds: number; segmentId: number | null },
-    range: { since: Date; until: Date },
-  ) {
-    const now = new Date()
-    const { compiled, extraWarnings } = await compileFor(project, funnel, range, now)
-    const result = await runFunnel({ client: ch, compiled, steps: funnel.steps })
-    const warnings = [...compiled.warnings, ...extraWarnings]
-    if (result.partial_window_entrants > 0) {
-      warnings.push({
-        path: 'range',
-        reason: `${result.partial_window_entrants} of the people who entered did so too recently to have had the full ${describeWindow(funnel.windowSeconds)} window, and can still convert`,
-      })
-    }
-    return {
-      entered: result.entered,
-      converted: result.converted,
-      conversion_rate: result.conversion_rate,
-      steps: result.steps,
-      partial_window_entrants: result.partial_window_entrants,
-      range: rangeWire(range),
-      as_of: now.toISOString(),
-      warnings,
-      result,
-    }
   }
 
   app.post('/v1/funnels', async (req, reply) => {
@@ -488,7 +369,7 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
     const range = resolveRange(req.body)
     if (!range) return reply.code(400).send({ error: 'invalid range' })
     try {
-      const { result: _result, ...body } = await execute(
+      const { result: _result, ...body } = await runner.execute(
         project,
         {
           steps: definition.data.steps,
@@ -529,7 +410,7 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
     if (!funnel) return reply.code(404).send({ error: 'funnel_not_found' })
 
     try {
-      const { result, ...body } = await execute(project, funnel, range)
+      const { result, ...body } = await runner.execute(project, funnel, range)
       // A cache, not a fact: written after every run, never recomputed, and
       // always rendered next to its timestamp.
       await store.recordRun(project.id, id, {
@@ -622,7 +503,7 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
       // The same compile path the run uses, so a drop-off list inherits the
       // segment restriction and the suppression filter rather than a second
       // assembly of them.
-      const { compiled } = await compileFor(project, funnel, range, asOf, {
+      const { compiled } = await runner.compileFor(project, funnel, range, asOf, {
         step: body.data.step,
         // `/dropoff` has always meant "stopped exactly here" -- pinned
         // explicitly rather than left to a default, same reasoning as
@@ -741,7 +622,7 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
     const asOf = walk ? new Date(walk.cursor.asOf) : now
 
     try {
-      const { compiled } = await compileFor(project, funnel, range, asOf, {
+      const { compiled } = await runner.compileFor(project, funnel, range, asOf, {
         step: body.data.step,
         mode: body.data.mode,
         select: 'members',
@@ -755,7 +636,7 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
       // MemberList's own comment says why that gap matters: comparing a
       // stale count against a page length is exactly how "that is everyone"
       // gets printed over a truncated preview.
-      const { compiled: countCompiled } = await compileFor(project, funnel, range, asOf, {
+      const { compiled: countCompiled } = await runner.compileFor(project, funnel, range, asOf, {
         step: body.data.step,
         mode: body.data.mode,
         select: 'count',
