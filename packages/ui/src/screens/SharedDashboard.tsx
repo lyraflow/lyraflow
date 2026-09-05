@@ -88,26 +88,23 @@ export function SharedDashboard(props: { client: ApiClient; token: string }) {
   // page cannot run. `useSharedRange` has already normalised the VALUE; this
   // is what makes the URL agree with it.
   //
-  // It does NOT matter that this effect is declared before the load effect
-  // below, and the reason is worth stating because the opposite is the
-  // natural guess: `setRange` here hands back a NEW object every time, so a
-  // rewrite landing after tiles had mounted would change `range`'s identity
-  // and re-issue every tile's run. It cannot, in either order. Both effects
-  // fire in one passive flush, before any paint; tiles exist only in the
-  // `ready` state, which the load below cannot reach until its promise
-  // resolves, which is strictly later than both. MEASURED, not reasoned:
-  // with the two effects swapped, a two-tile fixture opened on a
-  // `?range=custom` URL still issues exactly two runs.
+  // Declaration order against the load effect below does NOT matter, and
+  // that is worth stating because the opposite is the natural guess.
+  // `setRange` hands back a NEW object every time, so a rewrite landing
+  // after tiles had mounted would change `range`'s identity and re-issue
+  // every tile's run -- two sends per tile on first paint, against a token
+  // allowed 120 runs a minute. It cannot land there in either order: both
+  // effects fire in one passive flush before any paint, and a tile exists
+  // only in the `ready` state, which the load cannot reach until its
+  // promise resolves, strictly later than both. MEASURED, not reasoned --
+  // with the two swapped, a two-tile fixture opened on a `?range=custom`
+  // URL still issues exactly two runs.
   //
-  // **This effect must stay declared BEFORE the load effect below.** Effects
-  // fire in declaration order, and `setRange` here is a state update: run
-  // second, it lands after the load has already resolved and the tiles have
-  // mounted against the pre-rewrite range, so every tile unmounts its run
-  // and issues a second one -- two sends per tile on first paint, against a
-  // token allowed 120 a minute. Run first, the update is batched into the
-  // same commit as the load's `loading` state and no tile has mounted yet.
-  // The swap is invisible in a diff and in every assertion that only counts
-  // final state.
+  // What WOULD cost the second send is moving this rewrite somewhere that
+  // runs after a tile has mounted: into an effect that depends on `state`,
+  // into the load's own `.then`, or down into the `ready` branch. The
+  // constraint is "before any tile mounts", not "before the effect below",
+  // and only the first of those is a property this file can lose.
   // biome-ignore lint/correctness/useExhaustiveDependencies: mount only, on purpose -- listing `range`/`setRange` would rewrite the URL after every range change, which the picker's own `setRange` already did, and listing `range` alone would loop.
   useEffect(() => {
     setRange(range)
