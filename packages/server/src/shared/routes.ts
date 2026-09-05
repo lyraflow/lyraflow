@@ -1,21 +1,17 @@
-import { FunnelValidationError, RetentionValidationError, WherePredicate } from '@lyraflow/core'
 import type { ClickHouseClient, Pool } from '@lyraflow/db'
 import type { FastifyInstance, FastifyReply } from 'fastify'
 import { z } from 'zod'
 import type { AttemptLimiter } from '../auth/rate-limit.js'
 import { resolveTiles } from '../dashboards/resolve.js'
 import { DashboardStore, SHARE_TOKEN_PATTERN, type Tile } from '../dashboards/store.js'
-import { BreakdownError, parseBreakdown } from '../events/breakdown.js'
-import { StatsQueryError, runStats } from '../events/stats.js'
-import { FUNNEL_DEFAULT_RANGE_MS, makeFunnelRunner } from '../funnels/run.js'
-import { FunnelStore, StoredDefinitionError } from '../funnels/store.js'
+import { makeFunnelRunner } from '../funnels/run.js'
+import { FunnelStore } from '../funnels/store.js'
 import { type Readiness, refuseIfDraining } from '../health.js'
-import { RetentionBody, runRetentionReport } from '../reports/retention-run.js'
 import { RetentionReportStore } from '../reports/retention-store.js'
 import { TrendStore } from '../reports/trend-store.js'
-import { SegmentTimeoutError } from '../segments/execute.js'
 import { type InFlightCap, type ResultCache, SHARED_RUN_WINDOW_MS } from './limits.js'
-import { type RangePreset, RangePresetSchema, resolvePreset } from './range.js'
+import { RangePresetSchema } from './range.js'
+import { type RunTileDeps, runTile } from './run-tile.js'
 
 export interface SharedDeps {
   pg: Pool
@@ -37,12 +33,6 @@ function shareNotFound(reply: FastifyReply) {
   return reply.code(404).send({ error: 'share_not_found' })
 }
 
-/** What `runTile` answers with: a body to cache and send as 200, or a
- *  status the tile's own report endpoint would have sent, which is never
- *  cached -- a refusal that depends on a stored definition must be
- *  re-derived once that definition changes. */
-type TileOutcome = { body: unknown } | { status: number; body: unknown }
-
 /**
  * The first unauthenticated read path in the product. NO `authenticate` in
  * its deps, on purpose: the token is the whole credential, it names one
@@ -52,6 +42,11 @@ type TileOutcome = { body: unknown } | { status: number; body: unknown }
  * session cookie and a valid server key" and "a share token opens nothing
  * under the authenticated surface"). Registered without CORS, like every
  * non-ingest route.
+ *
+ * This file holds the two handlers and the three bounds they enforce; the
+ * per-kind derivation lives in `run-tile.ts`, so "what does the shared
+ * surface allow" and "what does one tile run" are two questions with two
+ * answers rather than one function with both.
  */
 export function registerSharedRoutes(app: FastifyInstance, deps: SharedDeps): void {
   const { pg, ch, database, readiness, limiter, inFlight, cache } = deps
@@ -61,7 +56,13 @@ export function registerSharedRoutes(app: FastifyInstance, deps: SharedDeps): vo
     retention: new RetentionReportStore(pg),
     funnels: new FunnelStore(pg),
   }
-  const funnels = makeFunnelRunner({ ch, pg, database })
+  const runDeps: RunTileDeps = {
+    pg,
+    ch,
+    database,
+    ...stores,
+    runner: makeFunnelRunner({ ch, pg, database }),
+  }
 
   /** The drain gate runs FIRST, before the token pattern check, so a
    *  draining server answers 503 to everything on this surface rather than
@@ -84,17 +85,47 @@ export function registerSharedRoutes(app: FastifyInstance, deps: SharedDeps): vo
     return found
   }
 
+  /** The per-token key both routes below count against, in its own
+   *  `share:` namespace -- `AttemptLimiter` bounds each namespace's map
+   *  independently, which is what a caller-influenced key needs (see that
+   *  class's own docstring; sharing the login route's namespace would let
+   *  share traffic evict blocked login entries). */
+  const limitKeyFor = (token: string) => `share:${token}`
+
+  /** The one 429 both routes send. The retry-after is the WHOLE window, not
+   *  a computed remainder: the limiter keeps per-attempt timestamps but
+   *  exposes no "when does the oldest expire", and a client that waits the
+   *  full window is always right where one that waits a guess is sometimes
+   *  wrong. */
+  function tooManyRuns(reply: FastifyReply) {
+    return reply
+      .code(429)
+      .header('retry-after', String(Math.ceil(SHARED_RUN_WINDOW_MS / 1000)))
+      .send({ error: 'too_many_runs' })
+  }
+
   /**
    * The layout and the definitions it names, and nothing else -- no
    * dashboard id, no `is_home`, no project. The token holder is not an
    * operator: they can see what this one dashboard asks, and cannot learn
-   * that the dashboard has an id worth guessing or a project it belongs
-   * to. `no-store` because the body is a credentialed read and every
+   * that the dashboard has an id worth guessing or a project it belongs to.
+   * `no-store` because the body is a credentialed read and every
    * intermediary on the path to a shared link is one nobody chose.
+   *
+   * It counts against the SAME per-token limiter as the run route, and that
+   * is the point rather than an implementation detail: a page load costs
+   * one attempt of the 120 and each tile it then runs costs one more, so
+   * one link's ceiling is 120 requests a minute in total, not 120 runs on
+   * top of unlimited resolves. Left uncounted, this route would be the
+   * cheap way to hammer a link -- it resolves the token and reads every
+   * report on the dashboard, which is not free.
    */
   app.get<{ Params: { token: string } }>('/v1/shared/:token', async (req, reply) => {
     const found = await lookup(req.params.token, reply)
     if (!found) return
+    const limitKey = limitKeyFor(req.params.token)
+    if (!limiter.check([limitKey])) return tooManyRuns(reply)
+    limiter.record([limitKey])
     const { projectId, dashboard } = found
     const tiles = await resolveTiles(stores, projectId, dashboard.tiles)
     reply.header('cache-control', 'no-store')
@@ -116,10 +147,11 @@ export function registerSharedRoutes(app: FastifyInstance, deps: SharedDeps): vo
    * first: a cache hit is served before either limit is consulted, because
    * a repeat of a question already answered costs no query and counting it
    * would make an ordinary page refresh look like an attack. The limiter
-   * then bounds runs over a window, and the in-flight cap bounds
-   * concurrent ones -- a single request cannot pass the first and be
-   * refused by the second without having actually been admitted, which is
-   * why `limiter.record` happens after both.
+   * then bounds runs over a window, and the in-flight cap bounds concurrent
+   * ones. `limiter.record` comes AFTER `inFlight.acquire`, deliberately: a
+   * request refused by the in-flight cap never ran, so charging it against
+   * the window would make a burst of concurrent tiles eat a link's whole
+   * minute for work nobody did.
    */
   app.post<{ Params: { token: string; index: string } }>(
     '/v1/shared/:token/tiles/:index/run',
@@ -140,10 +172,6 @@ export function registerSharedRoutes(app: FastifyInstance, deps: SharedDeps): vo
       const tile: Tile | undefined = dashboard.tiles[index]
       if (!tile) return reply.code(404).send({ error: 'tile_not_found' })
 
-      // Keyed by token, not by dashboard id: revoking a link must not let
-      // the next link to the same dashboard inherit its warm entries, and
-      // a revoked token never reaches here at all because `lookup` above
-      // already failed for it.
       // `no-store` on every answer this route gives, for the GET's reason:
       // the body is a credentialed read, and a POST being uncacheable by
       // default is a property of the method rather than a decision anyone
@@ -151,180 +179,36 @@ export function registerSharedRoutes(app: FastifyInstance, deps: SharedDeps): vo
       // carries it too.
       reply.header('cache-control', 'no-store')
 
+      // Keyed by token, not by dashboard id: revoking a link must not let
+      // the next link to the same dashboard inherit its warm entries, and a
+      // revoked token never reaches here at all because `lookup` above
+      // already failed for it.
       const key = `${token}:${index}:${preset}`
       const cached = cache.get(key)
       if (cached !== undefined) return reply.code(200).send(cached)
 
-      // `share:` namespaces the key inside `AttemptLimiter`, which bounds
-      // each namespace's map independently -- see that class's own
-      // docstring for why a caller-influenced key needs its own namespace
-      // rather than sharing the login route's.
-      const limitKey = `share:${token}`
-      if (!limiter.check([limitKey])) {
-        return (
-          reply
-            .code(429)
-            // The whole window, not a computed remainder: the limiter keeps
-            // per-attempt timestamps but exposes no "when does the oldest
-            // expire", and a client that waits the full window is always
-            // right where one that waits a guess is sometimes wrong.
-            .header('retry-after', String(Math.ceil(SHARED_RUN_WINDOW_MS / 1000)))
-            .send({ error: 'too_many_runs' })
-        )
-      }
+      const limitKey = limitKeyFor(token)
+      if (!limiter.check([limitKey])) return tooManyRuns(reply)
       if (!inFlight.acquire(token)) {
         // One second, because this refusal is about what is running right
-        // now rather than about a window: the runs ahead of this one are
-        // in flight, not scheduled.
+        // now rather than about a window: the runs ahead of this one are in
+        // flight, not scheduled.
         return reply.code(429).header('retry-after', '1').send({ error: 'too_many_runs' })
       }
       limiter.record([limitKey])
       try {
-        const out = await runTile(projectId, tile, preset)
+        const out = await runTile(runDeps, projectId, tile, preset)
         if ('status' in out) return reply.code(out.status).send(out.body)
         cache.set(key, out.body)
         return reply.code(200).send(out.body)
       } finally {
+        // In `finally`, not after the `send`: a run that THROWS -- a
+        // ClickHouse outage reaching the error handler as a 503 -- still
+        // held a slot, and releasing only on success would leak one per
+        // failure until the cap wedged the link shut permanently. Pinned by
+        // "a failed run releases its in-flight slot".
         inFlight.release(token)
       }
     },
   )
-
-  /**
-   * Builds the request from the STORED report -- never from the caller --
-   * and runs it through the same lifted function the report's own route
-   * calls, so a tile on a shared page and the same tile on the operator's
-   * dashboard cannot answer differently.
-   *
-   * ONE clock reading for the whole call: `resolvePreset` takes `now` for
-   * that reason, and the funnel's own `auto` fallback below reuses the
-   * same instant rather than reading the clock a second time.
-   *
-   * Both `stale_definition` refusals come BEFORE any parse of the stored
-   * definition. A stale row's `where` is whatever a past or future build
-   * wrote and this one cannot read, so running it would answer a question
-   * nobody saved -- and answering with `invalid_where` instead would blame
-   * the caller for a row they cannot see.
-   */
-  async function runTile(projectId: number, tile: Tile, preset: RangePreset): Promise<TileOutcome> {
-    const now = new Date()
-    const range = resolvePreset(preset, now)
-    switch (tile.kind) {
-      case 'trend': {
-        const trend = await stores.trends.get(projectId, tile.report_id)
-        if (!trend) return { status: 404, body: { error: 'report_not_found' } }
-        if (trend.stale) return { status: 400, body: { error: 'stale_definition' } }
-        let breakdown: ReturnType<typeof parseBreakdown>
-        try {
-          breakdown = parseBreakdown(trend.group_by ?? undefined)
-        } catch (err) {
-          if (!(err instanceof BreakdownError)) throw err
-          return { status: 400, body: { error: 'invalid_group_by', detail: err.message } }
-        }
-        // `StoredTrend.where` is `unknown[]` by contract even when the row
-        // is not stale, so it is re-parsed here rather than asserted --
-        // the same re-parse `trend-routes.ts` does on the way out.
-        const predicates = z.array(WherePredicate).safeParse(trend.where)
-        if (!predicates.success) return { status: 400, body: { error: 'invalid_where' } }
-        try {
-          const result = await runStats(
-            { ch, database },
-            { id: projectId },
-            {
-              since: range?.since,
-              until: range?.until,
-              interval: trend.interval,
-              event: trend.event,
-              breakdown,
-              predicates: predicates.data,
-            },
-          )
-          return { body: { kind: 'trend', result } }
-        } catch (err) {
-          if (err instanceof StatsQueryError) {
-            return { status: 400, body: { error: err.code, detail: err.detail } }
-          }
-          throw err
-        }
-      }
-      case 'retention': {
-        const report = await stores.retention.get(projectId, tile.report_id)
-        if (!report) return { status: 404, body: { error: 'report_not_found' } }
-        if (report.stale) return { status: 400, body: { error: 'stale_definition' } }
-        const input = RetentionBody.safeParse({
-          start_event: report.start_event,
-          return_event: report.return_event,
-          start_where: report.start_where,
-          return_where: report.return_where,
-          granularity: report.granularity,
-          periods: report.periods,
-          segment_id: report.segment_id,
-          // Omitted entirely for `auto`, rather than sent as `undefined`:
-          // `runRetentionReport` defaults an absent range to the report's
-          // own `periods` whole periods, which is the "auto" a saved
-          // retention report means.
-          ...(range ? { since: range.since.toISOString(), until: range.until.toISOString() } : {}),
-        })
-        if (!input.success) return { status: 400, body: { error: 'validation_failed' } }
-        try {
-          const result = await runRetentionReport(
-            { ch, pg, database },
-            { id: projectId },
-            input.data,
-          )
-          return { body: { kind: 'retention', result } }
-        } catch (err) {
-          if (err instanceof RetentionValidationError) {
-            return { status: 400, body: { error: err.code, detail: err.message } }
-          }
-          if (err instanceof SegmentTimeoutError) {
-            return { status: 503, body: { error: 'query_timeout' } }
-          }
-          throw err
-        }
-      }
-      case 'funnel': {
-        let funnel: Awaited<ReturnType<FunnelStore['get']>>
-        try {
-          funnel = await stores.funnels.get(projectId, tile.report_id)
-        } catch (err) {
-          // `FunnelStore.get` throws rather than flagging, unlike the two
-          // stores above -- a funnel with an unreadable definition is this
-          // kind's own `stale_definition`, and `/v1/funnels/:id/run`
-          // answers it with 400 and the same message.
-          if (err instanceof StoredDefinitionError) {
-            return { status: 400, body: { error: err.message } }
-          }
-          throw err
-        }
-        if (!funnel) return { status: 404, body: { error: 'report_not_found' } }
-        const funnelRange = range ?? {
-          since: new Date(now.getTime() - FUNNEL_DEFAULT_RANGE_MS),
-          until: now,
-        }
-        try {
-          // `result` is the raw grid `/v1/funnels/:id/run` reads to write
-          // its cached counts through `recordRun`. A run through a shared
-          // link must NOT record one -- a viewer refreshing a page would
-          // otherwise keep rewriting the operator's "last evaluated"
-          // snapshot with a window the operator never chose -- so it is
-          // dropped here rather than passed anywhere.
-          const { result: _raw, ...body } = await funnels.execute(
-            { id: projectId },
-            funnel,
-            funnelRange,
-          )
-          return { body: { kind: 'funnel', result: body } }
-        } catch (err) {
-          if (err instanceof FunnelValidationError) {
-            return { status: 400, body: { error: err.message, code: err.code } }
-          }
-          if (err instanceof SegmentTimeoutError) {
-            return { status: 422, body: { error: err.message } }
-          }
-          throw err
-        }
-      }
-    }
-  }
 }

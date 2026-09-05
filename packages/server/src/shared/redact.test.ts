@@ -16,6 +16,33 @@ describe('redactShareToken', () => {
 
   it('redacts a token with a query string, keeping the query', () => {
     expect(redactShareToken(`/v1/shared/${TOKEN}?range=7d`)).toBe('/v1/shared/[redacted]?range=7d')
+    expect(redactShareToken(`/v1/shared/${TOKEN}?x=1`)).toBe('/v1/shared/[redacted]?x=1')
+  })
+
+  it('redacts a token with a trailing slash', () => {
+    expect(redactShareToken(`/v1/shared/${TOKEN}/`)).toBe('/v1/shared/[redacted]/')
+  })
+
+  it('redacts every shape that dodges a literal prefix match', () => {
+    // All four 404 at the router, and Fastify logs `req.url` raw on a 404
+    // exactly as it does on a 200 -- so each of these used to put a whole
+    // credential in the log. Matched through `normalizePath`, the same
+    // normalizer static.ts's API-prefix check uses.
+    for (const url of [
+      `//v1/shared/${TOKEN}`,
+      `/v1/shared//${TOKEN}`,
+      `/v1%2Fshared/${TOKEN}`,
+      `/V1/shared/${TOKEN}`,
+      `//v1//shared//${TOKEN}//tiles//0//run`,
+    ]) {
+      const out = redactShareToken(url)
+      expect(out).not.toContain(TOKEN)
+      expect(out).toContain('[redacted]')
+    }
+    // The path emitted is the normalized one, so the doubled slash is gone;
+    // the case of the prefix as the caller sent it survives.
+    expect(redactShareToken(`//v1/shared/${TOKEN}`)).toBe('/v1/shared/[redacted]')
+    expect(redactShareToken(`/V1/shared/${TOKEN}`)).toBe('/V1/shared/[redacted]')
   })
 
   it('redacts a malformed segment too', () => {
@@ -30,6 +57,7 @@ describe('redactShareToken', () => {
       '/v1/dashboards/1/share',
       '/v1/dashboards',
       '/v1/events/stats?interval=1d',
+      '/v1/sharedish/x',
       '/health',
       '/',
       '',
@@ -44,5 +72,6 @@ describe('redactShareToken', () => {
     expect(redactShareToken('/v1/shared')).toBe('/v1/shared')
     expect(redactShareToken('/v1/shared/')).toBe('/v1/shared/')
     expect(redactShareToken('/v1/shared/?x=1')).toBe('/v1/shared/?x=1')
+    expect(redactShareToken('/v1/shared//')).toBe('/v1/shared//')
   })
 })

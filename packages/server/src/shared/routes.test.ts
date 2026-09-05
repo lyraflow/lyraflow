@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { Writable } from 'node:stream'
 import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
@@ -11,7 +12,7 @@ import { loadConfig } from '../config.js'
 import { DashboardStore } from '../dashboards/store.js'
 import { FUNNEL_DEFAULT_RANGE_MS } from '../funnels/run.js'
 import { Readiness } from '../health.js'
-import { InFlightCap, ResultCache } from './limits.js'
+import { InFlightCap, ResultCache, SHARED_MAX_IN_FLIGHT } from './limits.js'
 
 // `runStats` and `runRetentionReport` are ESM namespace exports, and a
 // namespace binding is not configurable -- `vi.spyOn(module, 'runStats')`
@@ -46,6 +47,7 @@ const pg = createPgPool('postgres://lyraflow:lyraflow@localhost:5433/lyraflow_te
 const ch = createChClient(CH)
 
 const WRITE_KEY = 'wk_shared_routes'
+const OTHER_WRITE_KEY = 'wk_shared_routes_other'
 const SERVER_KEY = 'sk_shared_routes'
 const OTHER_SERVER_KEY = 'sk_shared_routes_other'
 
@@ -113,7 +115,7 @@ beforeAll(async () => {
   const other = await pg.query<{ id: string }>(
     `INSERT INTO projects (name, slug, write_key, server_key_hash)
      VALUES ('Shared Routes Other', 'shared-routes-other', $1, $2) RETURNING id`,
-    ['wk_shared_routes_other', hashServerKey(OTHER_SERVER_KEY)],
+    [OTHER_WRITE_KEY, hashServerKey(OTHER_SERVER_KEY)],
   )
   otherProjectId = Number(other.rows[0]?.id)
 
@@ -199,6 +201,26 @@ async function makeFunnel(): Promise<number> {
   return res.json().id
 }
 
+/** One event into whichever project owns `writeKey`, flushed -- the 202
+ *  returns before the row has landed in ClickHouse, and every read below
+ *  needs it to have landed. Same shape privacy/end-to-end.test.ts uses. */
+async function track(writeKey: string, event: string) {
+  const res = await app.inject({
+    method: 'POST',
+    url: '/v1/track',
+    headers: { 'x-lyraflow-write-key': writeKey, 'content-type': 'application/json' },
+    payload: {
+      message_id: randomUUID(),
+      anonymous_id: randomUUID(),
+      type: 'track',
+      event,
+      timestamp: new Date().toISOString(),
+    },
+  })
+  expect(res.statusCode).toBe(202)
+  await app.deps.buffer.flush()
+}
+
 async function sharedDashboard(tiles: unknown[]): Promise<{ id: number; token: string }> {
   const d = await call('POST', '/v1/dashboards', { name: `d-${Math.random()}`, tiles })
   expect(d.statusCode).toBe(201)
@@ -222,6 +244,9 @@ describe('GET /v1/shared/:token', () => {
     const { token } = await sharedDashboard([{ kind: 'trend', report_id: t, width: 'half' }])
     const res = await view(token)
     expect(res.statusCode).toBe(200)
+    // A credentialed read: no intermediary on the path to a shared link is
+    // one anybody chose.
+    expect(res.headers['cache-control']).toBe('no-store')
     expect(res.json()).toEqual({
       name: expect.any(String),
       updated_at: expect.any(String),
@@ -445,6 +470,12 @@ describe('POST /v1/shared/:token/tiles/:index/run', () => {
     expect(operator.statusCode).toBe(200)
 
     expect(statsSpy).toHaveBeenCalledTimes(2)
+    // The project comes from the TOKEN, never from the request: the shared
+    // run and the operator's own call are scoped to the same project id.
+    expect(statsSpy.mock.calls[0]?.[1]).toEqual({ id: projectId })
+    // The operator's route passes its whole authenticated project record;
+    // only the id has to agree.
+    expect(statsSpy.mock.calls[1]?.[1]).toMatchObject({ id: projectId })
     const [sharedCall, operatorCall] = statsSpy.mock.calls.map((c) => c[2])
     expect(sharedCall?.interval).toBe(operatorCall?.interval)
     expect(sharedCall?.event).toBe(operatorCall?.event)
@@ -489,6 +520,8 @@ describe('POST /v1/shared/:token/tiles/:index/run', () => {
     expect(operator.statusCode).toBe(200)
 
     expect(retentionSpy).toHaveBeenCalledTimes(2)
+    expect(retentionSpy.mock.calls[0]?.[1]).toEqual({ id: projectId })
+    expect(retentionSpy.mock.calls[1]?.[1]).toMatchObject({ id: projectId })
     const [sharedCall, operatorCall] = retentionSpy.mock.calls.map((c) => c[2])
     expect({ ...sharedCall, since: undefined, until: undefined }).toEqual({
       ...operatorCall,
@@ -593,6 +626,106 @@ describe('POST /v1/shared/:token/tiles/:index/run', () => {
     expect(gone.json()).toEqual({ error: 'report_not_found' })
   })
 
+  it("reads only the token's own project, whatever key rides along", async () => {
+    // The project id comes from `DashboardStore.byShareToken`, never from
+    // the request -- there is no authentication here to influence, and a
+    // server key presented alongside is simply ignored. An empty result on
+    // its own would prove nothing, so this ingests into the OTHER project
+    // first (which must not be counted) and then into this one (which
+    // must).
+    const event = `xproj_${randomUUID().replace(/-/g, '')}`
+    const t = (
+      await call('POST', '/v1/trends', { name: `x-${Math.random()}`, event, interval: '1d' })
+    ).json().id
+    const { token } = await sharedDashboard([{ kind: 'trend', report_id: t, width: 'half' }])
+
+    await track(OTHER_WRITE_KEY, event)
+    await track(OTHER_WRITE_KEY, event)
+    const blind = await app.inject({
+      method: 'POST',
+      url: `/v1/shared/${token}/tiles/0/run`,
+      // The other project's server key, on the request, ignored.
+      headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': OTHER_SERVER_KEY },
+      payload: { range: '7d' },
+    })
+    expect(blind.statusCode).toBe(200)
+    expect(blind.json().result.buckets).toEqual([])
+
+    await track(WRITE_KEY, event)
+    // A different preset, so this is a fresh run rather than the cached one.
+    const own = await run(token, 0, '30d')
+    expect(own.statusCode).toBe(200)
+    const total = (own.json().result.buckets as { events: number }[]).reduce(
+      (n, b) => n + b.events,
+      0,
+    )
+    expect(total).toBe(1)
+  })
+
+  it('a failed run releases its in-flight slot', async () => {
+    // Without `finally`, a slot leaks on every failure and the cap wedges
+    // the link shut for the process's lifetime -- which is worse than the
+    // outage that caused it, because it outlives it.
+    statsSpy.mockImplementation(() => Promise.reject(new Error('clickhouse is down (simulated)')))
+    const t = await makeTrend()
+    const { token } = await sharedDashboard([{ kind: 'trend', report_id: t, width: 'half' }])
+    for (let i = 0; i < SHARED_MAX_IN_FLIGHT; i++) {
+      const failed = await run(token, 0, '7d')
+      expect(failed.statusCode).toBe(503)
+    }
+    statsSpy.mockRestore()
+    const after = await run(token, 0, '7d')
+    expect(after.statusCode).not.toBe(429)
+    expect(after.statusCode).toBe(200)
+  })
+
+  it('runs a retention tile at auto with no bounds of its own', async () => {
+    const r = await makeRetention()
+    const { token } = await sharedDashboard([{ kind: 'retention', report_id: r, width: 'half' }])
+    expect((await run(token, 0, 'auto')).statusCode).toBe(200)
+    const sent = retentionSpy.mock.calls[0]?.[2]
+    expect(sent?.since).toBeUndefined()
+    expect(sent?.until).toBeUndefined()
+  })
+
+  it("refuses a funnel preset the funnel's own run would refuse", async () => {
+    // 180 days at a 1-hour window is the funnel compiler's own ceiling, and
+    // the shared route hands back exactly the code it raises rather than
+    // inventing one.
+    const f = await makeFunnel()
+    const { token } = await sharedDashboard([{ kind: 'funnel', report_id: f, width: 'full' }])
+    const res = await run(token, 0, '180d')
+    expect(res.statusCode).toBe(400)
+    expect(res.json().code).toBeDefined()
+  })
+
+  it('refuses a funnel whose stored definition this build cannot read', async () => {
+    const f = await makeFunnel()
+    // `FunnelStore` parses `steps` with `z.array(FunnelStep).min(2)` and
+    // THROWS `StoredDefinitionError` rather than flagging, unlike the trend
+    // and retention stores. A one-step array is jsonb the column accepts
+    // and that schema refuses.
+    await pg.query(`UPDATE funnels SET steps = '[{"event":"a"}]'::jsonb WHERE id = $1`, [f])
+    const { token } = await sharedDashboard([{ kind: 'funnel', report_id: f, width: 'full' }])
+    const res = await run(token, 0, '7d')
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toBeDefined()
+  })
+
+  it('refuses a stored retention definition the run schema will not accept', async () => {
+    // REACHABLE, not defensive: `020_saved_reports.sql` bounds `periods`
+    // only by `> 0`, while `RetentionBody` caps it at MAX_PERIODS (26). Such
+    // a row is NOT stale -- `stale` is computed from the `where` columns
+    // alone -- so it reaches the body parse with everything else intact.
+    const r = await makeRetention()
+    await pg.query('UPDATE retention_reports SET periods = 999 WHERE id = $1', [r])
+    const { token } = await sharedDashboard([{ kind: 'retention', report_id: r, width: 'half' }])
+    const res = await run(token, 0, '7d')
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'validation_failed' })
+    expect(retentionSpy).not.toHaveBeenCalled()
+  })
+
   it('a funnel run through the link never records a run', async () => {
     const f = await makeFunnel()
     const { token } = await sharedDashboard([{ kind: 'funnel', report_id: f, width: 'full' }])
@@ -690,6 +823,98 @@ describe('limits', () => {
       expect((await third).statusCode).toBe(200)
     } finally {
       statsSpy.mockRestore()
+      await small.close()
+    }
+  })
+
+  it('an in-flight refusal is not charged against the window', async () => {
+    // `limiter.record` comes AFTER `inFlight.acquire`, and this is what
+    // that ordering buys: a request the cap turned away never ran, so
+    // charging it would let a burst of concurrent tiles eat a link's whole
+    // minute for work nobody did.
+    //
+    // Two attempts and one slot, so the ordering is the only thing that
+    // decides the third request. Correct order: run 1 records (1 of 2), run
+    // 2 is refused by the cap and records nothing, run 3 records (2 of 2)
+    // and SUCCEEDS. Wrong order: run 2's refusal records anyway (2 of 2)
+    // and run 3 is a 429 from the window instead.
+    const gates: (() => void)[] = []
+    statsSpy.mockImplementation(
+      () => new Promise((resolve) => gates.push(() => resolve({ buckets: [] }))),
+    )
+    const small = buildApp({
+      config,
+      pg,
+      ch,
+      readiness,
+      shared: {
+        limiter: new AttemptLimiter(2, 60_000),
+        inFlight: new InFlightCap(1),
+        cache: new ResultCache({ ttlMs: 0 }),
+      },
+    })
+    await small.ready()
+    try {
+      const t = await makeTrend()
+      const { token } = await sharedDashboard([{ kind: 'trend', report_id: t, width: 'half' }])
+      const post = (range: string) =>
+        small.inject({
+          method: 'POST',
+          url: `/v1/shared/${token}/tiles/0/run`,
+          headers: { 'content-type': 'application/json' },
+          payload: { range },
+        })
+
+      const first = post('7d')
+      await vi.waitFor(() => expect(gates).toHaveLength(1))
+      const refused = await post('30d')
+      expect(refused.statusCode).toBe(429)
+      expect(refused.headers['retry-after']).toBe('1')
+      gates[0]?.()
+      expect((await first).statusCode).toBe(200)
+
+      const third = post('90d')
+      await vi.waitFor(() => expect(gates).toHaveLength(2))
+      gates[1]?.()
+      expect((await third).statusCode).toBe(200)
+
+      // And the window is genuinely spent now -- the two that RAN used it,
+      // so this proves the run above was admitted by the limiter rather
+      // than by the limiter having no teeth.
+      const fourth = await post('180d')
+      expect(fourth.statusCode).toBe(429)
+      expect(fourth.headers['retry-after']).toBe(String(Math.ceil(60_000 / 1000)))
+    } finally {
+      statsSpy.mockRestore()
+      await small.close()
+    }
+  })
+
+  it('a page load counts against the same per-token window as a run', async () => {
+    // One link's ceiling is 120 REQUESTS a minute, not 120 runs on top of
+    // unlimited resolves: the GET resolves the token and reads every report
+    // on the dashboard, which is not free, and leaving it uncounted would
+    // make it the cheap way to hammer a link.
+    const small = buildApp({
+      config,
+      pg,
+      ch,
+      readiness,
+      shared: { limiter: new AttemptLimiter(1, 60_000) },
+    })
+    await small.ready()
+    try {
+      const a = await sharedDashboard([])
+      const b = await sharedDashboard([])
+      const get = (tok: string) => small.inject({ method: 'GET', url: `/v1/shared/${tok}` })
+      expect((await get(a.token)).statusCode).toBe(200)
+      const second = await get(a.token)
+      expect(second.statusCode).toBe(429)
+      expect(second.json()).toEqual({ error: 'too_many_runs' })
+      expect(Number(second.headers['retry-after'])).toBeGreaterThan(0)
+      // Per token, not global.
+      expect((await get(b.token)).statusCode).toBe(200)
+    } finally {
       await small.close()
     }
   })
