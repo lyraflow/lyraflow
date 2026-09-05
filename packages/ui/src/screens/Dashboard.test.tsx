@@ -848,3 +848,144 @@ describe('Dashboard', () => {
     expect(screen.queryByText(/each tile uses its own report's default window/i)).toBeNull()
   })
 })
+
+const SHARE = { token: 'T'.repeat(43), shared_at: T }
+
+describe('Dashboard — sharing', () => {
+  it('Share is offered in view mode and opens the card; Create link sends POST share once and the card shows the URL', async () => {
+    const shareDashboard = vi.fn(async () => SHARE)
+    const client = fakeClient({ shareDashboard })
+    renderScreen({ client })
+    await screen.findByTestId('tile-trend-1')
+    expect(screen.queryByRole('button', { name: 'Create link' })).toBeNull()
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Share' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Create link' }))
+
+    expect(client.shareDashboard).toHaveBeenCalledTimes(1)
+    expect(client.shareDashboard).toHaveBeenCalledWith(1, 7)
+    expect(screen.getByRole('textbox', { name: 'Share link' })).toHaveValue(
+      `${window.location.origin}/shared/${SHARE.token}`,
+    )
+  })
+
+  it('Revoke sends DELETE share and the card returns to its pre-link state', async () => {
+    const unshareDashboard = vi.fn(async () => undefined)
+    const client = fakeClient({
+      dashboard: vi.fn(async () => ({ ...DASH, shared: true, share: SHARE })),
+      unshareDashboard,
+    })
+    renderScreen({ client })
+    await screen.findByTestId('tile-trend-1')
+    await userEvent.click(await screen.findByRole('button', { name: 'Share' }))
+    expect(await screen.findByRole('textbox', { name: 'Share link' })).toHaveValue(
+      `${window.location.origin}/shared/${SHARE.token}`,
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: 'Revoke link' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Revoke' }))
+
+    await waitFor(() => expect(client.unshareDashboard).toHaveBeenCalledWith(1, 7))
+    expect(await screen.findByRole('button', { name: 'Create link' })).toBeInTheDocument()
+    expect(screen.queryByRole('textbox', { name: 'Share link' })).toBeNull()
+  })
+
+  it('Share is not offered in edit mode, and entering edit mode closes an open card', async () => {
+    renderScreen({ at: '/dashboards/7?edit=1' })
+    await screen.findByLabelText('Dashboard name')
+    expect(screen.queryByRole('button', { name: 'Share' })).toBeNull()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Done' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Share' }))
+    expect(await screen.findByRole('button', { name: 'Create link' })).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    expect(screen.queryByRole('button', { name: 'Create link' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Share' })).toBeNull()
+  })
+
+  it('a failed share leaves an error on the card and the dashboard unchanged', async () => {
+    const client = fakeClient({
+      shareDashboard: vi.fn(async () => {
+        throw new ApiError(500, 'server_error')
+      }),
+    })
+    renderScreen({ client })
+    await screen.findByTestId('tile-trend-1')
+    await userEvent.click(await screen.findByRole('button', { name: 'Share' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Create link' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/something went wrong/i)
+    expect(screen.getByRole('button', { name: 'Create link' })).toBeInTheDocument()
+    expect(screen.queryByRole('textbox', { name: 'Share link' })).toBeNull()
+  })
+
+  it('a failed revoke leaves an error on the card and the link in place', async () => {
+    const client = fakeClient({
+      dashboard: vi.fn(async () => ({ ...DASH, shared: true, share: SHARE })),
+      unshareDashboard: vi.fn(async () => {
+        throw new ApiError(500, 'server_error')
+      }),
+    })
+    renderScreen({ client })
+    await screen.findByTestId('tile-trend-1')
+    await userEvent.click(await screen.findByRole('button', { name: 'Share' }))
+    await screen.findByRole('textbox', { name: 'Share link' })
+    await userEvent.click(screen.getByRole('button', { name: 'Revoke link' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Revoke' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/something went wrong/i)
+    expect(screen.getByRole('textbox', { name: 'Share link' })).toHaveValue(
+      `${window.location.origin}/shared/${SHARE.token}`,
+    )
+  })
+
+  it('routes a 401 on share to onUnauthorized rather than the card error', async () => {
+    const onUnauthorized = vi.fn()
+    const client = fakeClient({
+      shareDashboard: vi.fn(async () => {
+        throw new ApiError(401, 'unauthorized')
+      }),
+    })
+    renderScreen({ client, onUnauthorized })
+    await screen.findByTestId('tile-trend-1')
+    await userEvent.click(await screen.findByRole('button', { name: 'Share' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Create link' }))
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalledTimes(1))
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  // Same discipline `patch()` already keeps for a stale response: a share
+  // answer for a dashboard no longer on screen must not land on whatever IS
+  // on screen now. Both dashboards carry id 7 -- project 1's response
+  // landing on project 2's dashboard is the bug this guards, and it is
+  // visible only if the card for project 2's dashboard is reopened AFTER
+  // the stale response would otherwise have applied: the project switch
+  // itself closes the card, so a card left shut can't show the leak either
+  // way.
+  it('drops a share response that lands after the project changed, even once its card is reopened', async () => {
+    const gate = deferred<typeof SHARE>()
+    const client = fakeClient({
+      dashboard: vi.fn(async (projectId: number) => (projectId === 1 ? DASH : BETA)),
+      shareDashboard: vi.fn(() => gate.promise),
+    })
+    renderTwoProjectScreen(client, '/dashboards/7')
+    await screen.findByTestId('tile-trend-1')
+    await userEvent.click(screen.getByRole('button', { name: 'Share' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Create link' }))
+
+    await userEvent.click(screen.getByRole('button', { name: 'switch project' }))
+    expect(await screen.findByTestId('tile-retention-2')).toBeInTheDocument()
+
+    // Reopen the card for project 2's dashboard 7 -- it has no share yet.
+    await userEvent.click(screen.getByRole('button', { name: 'Share' }))
+    expect(await screen.findByRole('button', { name: 'Create link' })).toBeInTheDocument()
+
+    gate.resolve(SHARE)
+    await waitFor(() => expect(client.dashboard).toHaveBeenCalledWith(2, 7))
+    // Still no share -- project 1's response never reached project 2's
+    // dashboard, even though both are id 7 and the card is open.
+    expect(screen.getByRole('button', { name: 'Create link' })).toBeInTheDocument()
+    expect(screen.queryByRole('textbox', { name: 'Share link' })).toBeNull()
+  })
+})

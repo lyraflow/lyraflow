@@ -9,6 +9,7 @@ import { Input } from '../components/ui/input.js'
 import { AddTilePicker } from './dashboards/AddTilePicker.js'
 import { DashboardTile } from './dashboards/DashboardTile.js'
 import { HomeStar } from './dashboards/HomeStar.js'
+import { ShareCard } from './dashboards/ShareCard.js'
 import { createRunQueue } from './dashboards/runQueue.js'
 import { MAX_TILES } from './dashboards/tileRequest.js'
 import { describeError } from './funnels/errors.js'
@@ -91,6 +92,14 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
   const [saving, setSaving] = useState(false)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
+  // The Share card's own state, separate from `saving`/`saveError`: creating
+  // or revoking a link is neither a layout edit nor a rename, and folding it
+  // into `patch()` would mean every OTHER edit control also disabled itself
+  // while a share request was in flight, and vice versa, for two actions
+  // that touch different fields entirely.
+  const [sharing, setSharing] = useState(false)
+  const [shareBusy, setShareBusy] = useState(false)
+  const [shareError, setShareError] = useState<string | null>(null)
 
   // What the screen is currently ASKING ABOUT, as one value. A response is
   // applied only if this still matches what the request was made for.
@@ -118,6 +127,15 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
     // A save failure belongs to the dashboard it was reported for. Left
     // standing, it reads as a failure of the one now on screen.
     setSaveError(null)
+    // Same rule for the share card: a card left open, or an error left
+    // standing, from the PREVIOUS dashboard on this screen would read as
+    // being about the one that just loaded -- and for the shared `id: 7`
+    // case (two different dashboards on two different projects can carry
+    // the same id) it would be a card that looks like it belongs to a
+    // dashboard it has never once described.
+    setSharing(false)
+    setShareBusy(false)
+    setShareError(null)
     client
       .dashboard(activeId, id)
       .then((d) => {
@@ -187,6 +205,69 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
     [client, activeId, id, onUnauthorized],
   )
 
+  /**
+   * `POST /v1/dashboards/:id/share`. Mints (or re-mints, over an existing
+   * one -- the card never offers that from a `share !== null` state, but
+   * the server allows it, so this handler does too) this dashboard's share
+   * link. Kept apart from `patch()` -- a share is neither a `PATCH` nor a
+   * layout edit, and the two disabled-while-busy flags would otherwise
+   * cross-block controls that touch entirely different fields.
+   */
+  function handleShareCreate() {
+    if (activeId == null || id === null) return
+    const askedFor = `${activeId}:${id}`
+    setShareBusy(true)
+    setShareError(null)
+    client
+      .shareDashboard(activeId, id)
+      .then((share) => {
+        // Same check `patch()` keeps, and for the same reason: two
+        // dashboards on two different projects can share this same numeric
+        // `id`, so this is the only thing standing between a stale
+        // response and it landing on a dashboard it has never described.
+        if (asking.current !== askedFor) return
+        setDash((prev) => (prev ? { ...prev, share } : prev))
+      })
+      .catch((err: unknown) => {
+        if (asking.current !== askedFor) return
+        if (err instanceof ApiError && err.status === 401) {
+          onUnauthorized?.()
+          return
+        }
+        setShareError(describeError(err, NOUN))
+      })
+      // UNCONDITIONAL, matching `patch()`'s own `saving`: `shareBusy` holds
+      // Create/Copy/Revoke shut, and skipping it for a late response would
+      // freeze the card for a dashboard that is no longer on screen.
+      .finally(() => setShareBusy(false))
+  }
+
+  /** `DELETE /v1/dashboards/:id/share`. Any viewer holding the old token
+   *  gets `share_not_found` from the shared-viewer route afterwards -- the
+   *  card returns to its pre-link state on success, same as `Dashboard.share`
+   *  turning `null` on a fresh load. */
+  function handleShareRevoke() {
+    if (activeId == null || id === null) return
+    const askedFor = `${activeId}:${id}`
+    setShareBusy(true)
+    setShareError(null)
+    client
+      .unshareDashboard(activeId, id)
+      .then(() => {
+        if (asking.current !== askedFor) return
+        setDash((prev) => (prev ? { ...prev, share: null } : prev))
+      })
+      .catch((err: unknown) => {
+        if (asking.current !== askedFor) return
+        if (err instanceof ApiError && err.status === 401) {
+          onUnauthorized?.()
+          return
+        }
+        setShareError(describeError(err, NOUN))
+      })
+      .finally(() => setShareBusy(false))
+  }
+
   const tiles = dash?.tiles ?? []
   const sendTiles = (next: ResolvedTile[]) => patch({ tiles: next.map(toInput) })
 
@@ -197,6 +278,11 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
     // that no longer shows any other edit control, and the operator who
     // pressed Done has already said they are finished editing.
     if (!on) setConfirmingDelete(false)
+    // Entering edit mode closes an open share card for the same reason:
+    // Share is a view-mode-only control (`dash && !editing` below), so a
+    // card left open would be the one edit-adjacent panel with no button
+    // left on screen that could have raised it.
+    if (on) setSharing(false)
     setSearch(
       (prev) => {
         const next = new URLSearchParams(prev)
@@ -298,6 +384,14 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
               Delete
             </Button>
           )}
+          {/* View mode only -- editing already closes the card
+           * (`setEditing`), and offering both at once would mean a viewer
+           * shares a layout mid-edit that the server has not seen yet. */}
+          {dash && !editing && (
+            <Button type="button" variant="outline" size="sm" onClick={() => setSharing((s) => !s)}>
+              Share
+            </Button>
+          )}
           {dash && (
             <Button type="button" size="sm" onClick={() => setEditing(!editing)}>
               {editing ? 'Done' : 'Edit'}
@@ -305,6 +399,22 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
           )}
         </div>
       </div>
+
+      {dash && sharing && (
+        <ShareCard
+          share={dash.share}
+          busy={shareBusy}
+          error={shareError}
+          // The server never guesses its own public origin -- a
+          // self-hosted install can sit behind any hostname or path an
+          // operator chose -- so the browser is the one that knows it, and
+          // hands it down at the moment this card renders.
+          origin={window.location.origin}
+          onCreate={handleShareCreate}
+          onRevoke={handleShareRevoke}
+          onClose={() => setSharing(false)}
+        />
+      )}
 
       {editing && confirmingDelete && (
         <div className="flex flex-wrap items-center gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">
