@@ -2635,7 +2635,7 @@ curl -X POST http://localhost:3000/v1/dashboards \
 | `PATCH /v1/dashboards/:id` | Rename it, replace its tiles, or set `is_home` |
 | `DELETE /v1/dashboards/:id` | Delete it — `204`. The reports it showed are untouched, and its share link, if any, is gone with it |
 | `POST /v1/dashboards/:id/share` | Mint a secret link, or return the existing one — see [Sharing a dashboard](#sharing-a-dashboard) |
-| `DELETE /v1/dashboards/:id/share` | Revoke the link — see [Sharing a dashboard](#sharing-a-dashboard) |
+| `DELETE /v1/dashboards/:id/share` | Revoke the link — `204`, or `404 not_shared` if there is none — see [Sharing a dashboard](#sharing-a-dashboard) |
 
 A duplicate name within the same project is a `409`. A non-numeric `:id` is a
 `400` naming `invalid_dashboard_id`; an id that does not exist, or belongs to
@@ -2679,9 +2679,12 @@ dashboard with no login, pick a preset range and see every tile — the viewer
 page never shows the project name, and a tile there is inert: no link to the
 report behind it, no funnel step drill-down. `DELETE /v1/dashboards/:id/share`
 revokes it; the next request against that link is a `404`, and every bookmark
-of it breaks. There is no separate rotate call — rotating a link is revoke
-then share again. One link per dashboard, and deleting the dashboard deletes
-its link with it. `GET /v1/dashboards` rows carry `"shared": true|false`, and
+of it breaks. Calling it on a dashboard that is not currently shared — never
+shared, or already revoked — is a distinct `404 { "error": "not_shared" }`,
+so a caller can tell "there was nothing to undo" from "that dashboard isn't
+yours". There is no separate rotate call — rotating a link is revoke then
+share again. One link per dashboard, and deleting the dashboard deletes its
+link with it. `GET /v1/dashboards` rows carry `"shared": true|false`, and
 `GET /v1/dashboards/:id` carries the token and its creation time as `"share"`,
 or `null` when the dashboard has no link — the same pair the web UI's
 dashboards list and Share card read.
@@ -2724,13 +2727,18 @@ per link and a caller free to name arbitrary bounds could mint an unbounded
 number of them against one token. The query itself is built entirely from the
 tile's stored report; a link cannot ask anything the dashboard does not
 already ask. A bad index is `404 tile_not_found`; a tile whose report has
-since been deleted is `404 report_not_found`; a stored definition this build
-cannot read is `400 stale_definition`; a malformed `range` is
+since been deleted is `404 report_not_found`; a malformed `range` is
 `400 invalid_range`; and a preset that report's own ceiling refuses — a
 funnel range past 90 days, a trend that would exceed the bucket cap — gets
 that report endpoint's own `400`, the same one its authenticated route would
-send. Running a funnel through a link does not update the funnel's cached
-last run; that number belongs to the operator's own screen.
+send. A trend or retention tile whose stored `where` this build cannot parse
+is `400 stale_definition`, the same flag the dashboard's own read marks the
+tile with. A funnel is not this — a funnel store throws rather than
+flagging, so a funnel whose stored steps this build cannot read comes back
+as a plain `400` naming the definition version in its `error` message, the
+same message [`GET /v1/funnels/:id`](#funnels) sends for that row. Running a
+funnel through a link does not update the funnel's cached last run; that
+number belongs to the operator's own screen.
 
 **Three bounds apply to every link, because the caller is anonymous.** At
 most 120 requests a minute count against one token — page loads (the `GET`)
