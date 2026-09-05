@@ -215,6 +215,13 @@ describe('DashboardStore', () => {
       expect((await store.get(projectA, d.id))?.share).toBeNull()
     })
 
+    it('unshare is not_found for an id in another project, and leaves it shared', async () => {
+      const d = await store.create(projectA, { name: 'theirs', tiles: [] })
+      await store.share(projectA, d.id)
+      expect(await store.unshare(projectB, d.id)).toBe('not_found')
+      expect((await store.get(projectA, d.id))?.share).not.toBeNull()
+    })
+
     it('unshare clears both columns and reports what it found', async () => {
       const d = await store.create(projectA, { name: 'revocable', tiles: [] })
       expect(await store.unshare(projectA, d.id)).toBe('not_shared')
