@@ -128,24 +128,25 @@ interface Row {
   shared_at: string | null
 }
 
-// `shared_at::text` -- node-postgres parses a bare `timestamptz` column
-// into a JS `Date`, not a string (confirmed against the test database, not
-// assumed), which would make `DashboardShare.shared_at` a lie about its own
-// type. `created_at`/`updated_at` carry the same untruth already and nothing
-// in this task reads them as strings, so they are left alone; `shared_at`
-// is cast because `store.test.ts`'s "mints a ... token" test asserts
-// `typeof ... shared_at === 'string'` and `byShareToken`'s test compares a
-// hydrated `share` object against one that came back from `share()` itself,
-// so both sides must agree on the type.
+// `shared_at` is left uncast, deliberately carrying the same untruth
+// `created_at`/`updated_at` already carry: node-postgres parses a bare
+// `timestamptz` column into a JS `Date`, not the `string` these fields are
+// typed as (confirmed against the test database, not assumed). Casting only
+// `shared_at` to `::text` would make it arrive on the wire as Postgres text
+// (`2026-09-05 12:03:11.123456+00`) while `created_at`/`updated_at` arrive
+// as ISO 8601, because `JSON.stringify` calls a `Date`'s own `toISOString`
+// -- one row would then carry two date formats. Matching `created_at`'s
+// treatment keeps the wire consistent; `hydrate` and every caller still see
+// a `Date` at runtime regardless of the declared type.
 const COLUMNS =
-  'id, name, tiles, is_home, definition_version, created_at, updated_at, share_token, shared_at::text AS shared_at'
+  'id, name, tiles, is_home, definition_version, created_at, updated_at, share_token, shared_at'
 /** `list()`'s column list, identical to `COLUMNS` except the token itself --
  *  a list of N dashboards must not carry N read credentials (global
  *  constraints, "the token never appears in a list body"). `shared_at`
  *  alone is enough to say whether a link exists; `NULL::text` keeps the
  *  column position and type so `hydrate` needs no special case for it. */
 const LIST_COLUMNS =
-  'id, name, tiles, is_home, definition_version, created_at, updated_at, NULL::text AS share_token, shared_at::text AS shared_at'
+  'id, name, tiles, is_home, definition_version, created_at, updated_at, NULL::text AS share_token, shared_at'
 
 function hydrate(row: Row): StoredDashboard {
   const parsed = TileList.safeParse(row.tiles)
@@ -379,7 +380,7 @@ export class DashboardStore {
           SET share_token = COALESCE(share_token, $3),
               shared_at   = COALESCE(shared_at, now())
         WHERE project_id = $1 AND id = $2
-        RETURNING share_token, shared_at::text AS shared_at`,
+        RETURNING share_token, shared_at`,
       [projectId, id, newShareToken()],
     )
     const row = r.rows[0]

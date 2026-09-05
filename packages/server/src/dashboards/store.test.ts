@@ -201,7 +201,7 @@ describe('DashboardStore', () => {
       const d = await store.create(projectA, { name: 'shareable', tiles: [] })
       const first = await store.share(projectA, d.id)
       expect(first?.token).toMatch(/^[A-Za-z0-9_-]{43}$/)
-      expect(typeof first?.shared_at).toBe('string')
+      expect(Number.isNaN(new Date(first?.shared_at as never).getTime())).toBe(false)
       const second = await store.share(projectA, d.id)
       expect(second).toEqual(first)
       const read = await store.get(projectA, d.id)
