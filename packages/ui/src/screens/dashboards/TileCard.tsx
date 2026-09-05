@@ -98,7 +98,6 @@ export function TileCard(props: {
   onRetry(): void
 }) {
   const { tile, range, status, href, editing, actions, onRetry } = props
-  const navigate = useNavigate()
 
   const deleted = tile.report === null
   const stale = tile.report?.stale === true
@@ -106,29 +105,36 @@ export function TileCard(props: {
 
   const title = tile.report?.name ?? `${KIND_LABEL[tile.kind]} ${tile.report_id}`
 
-  /**
-   * The whole body opens the report, not just the title. Cem, testing this:
-   * "when I click on any dashboard section, I must be redirected to that
-   * report with the same time frame so that I can deep dive" -- a chart is
-   * what a reader points at, and the title is a small target beside it.
-   *
-   * Three things it is deliberately not. It is not a `role="link"`: the
-   * title above IS the link, in the accessibility tree and in the tab order,
-   * and a second one over the same destination would put every tile in the
-   * tab order twice while announcing the whole chart as its name. It is not
-   * live in edit mode -- that is where a tile is widened, moved and removed,
-   * and navigating away mid-edit loses the layout being arranged. And it
-   * does not fire for a click that started inside a control of its own: the
-   * stale state's "Open it" link and the failed state's Retry button both
-   * live in this body and both already mean something, so a click landing on
-   * either is theirs.
-   */
-  const openReport = (e: MouseEvent<HTMLDivElement>) => {
-    if (href === null) return
-    if ((e.target as Element).closest('a, button') !== null) return
-    navigate(href)
-  }
-  const bodyOpens = !editing && href !== null
+  /** The body, built once and handed to whichever of the two wrappers below
+   *  applies -- so the click behaviour is the only thing that differs
+   *  between a tile that leads somewhere and one that does not. */
+  const body = (
+    <>
+      {deleted ? (
+        <p data-testid="tile-deleted" role="alert" className="text-sm text-destructive">
+          This {KIND_LABEL[tile.kind]} (id {tile.report_id}) has been deleted.
+        </p>
+      ) : stale ? (
+        <p data-testid="tile-stale" role="alert" className="text-sm text-destructive">
+          This report's stored definition cannot be reproduced by this version.{' '}
+          {href === null ? null : (
+            <>
+              <Link to={href} className="underline">
+                Open it
+              </Link>{' '}
+              to see what was saved.
+            </>
+          )}
+        </p>
+      ) : ceiling ? (
+        <p data-testid="tile-ceiling" className="text-sm text-muted-foreground">
+          {ceilingText(ceiling, tile)}
+        </p>
+      ) : (
+        <StatusBody status={status} tile={tile} onRetry={onRetry} />
+      )}
+    </>
+  )
 
   return (
     <Card
@@ -201,41 +207,59 @@ export function TileCard(props: {
           </div>
         )}
       </CardHeader>
-      {/* No key handler beside `onClick`, and no `tabindex` -- the keyboard
-       * path to this destination is the title link above, which is already
-       * in the tab order and already names the report. Biome's
-       * `useKeyWithClickEvents` does not reach a click handler passed to a
-       * COMPONENT (it reads intrinsic elements only), so this is a decision
-       * the linter cannot make for us either way: see `openReport`. */}
-      <CardContent
-        className={`min-w-0${bodyOpens ? ' cursor-pointer' : ''}`}
-        onClick={bodyOpens ? openReport : undefined}
-      >
-        {deleted ? (
-          <p data-testid="tile-deleted" role="alert" className="text-sm text-destructive">
-            This {KIND_LABEL[tile.kind]} (id {tile.report_id}) has been deleted.
-          </p>
-        ) : stale ? (
-          <p data-testid="tile-stale" role="alert" className="text-sm text-destructive">
-            This report's stored definition cannot be reproduced by this version.{' '}
-            {href === null ? null : (
-              <>
-                <Link to={href} className="underline">
-                  Open it
-                </Link>{' '}
-                to see what was saved.
-              </>
-            )}
-          </p>
-        ) : ceiling ? (
-          <p data-testid="tile-ceiling" className="text-sm text-muted-foreground">
-            {ceilingText(ceiling, tile)}
-          </p>
-        ) : (
-          <StatusBody status={status} tile={tile} onRetry={onRetry} />
-        )}
-      </CardContent>
+      {/* The clickable body is a COMPONENT rather than a handler on the
+       * `CardContent` below, because `useNavigate` throws outright outside a
+       * `<Router>` (react-router's own invariant) and the shared viewer page
+       * renders this card with no router at all -- `href` is `null` there
+       * for every tile. A hook cannot be called conditionally, so the only
+       * way not to call it is not to render the component that calls it.
+       * See `screens/shared-view/SharedTile.tsx`, and
+       * `SharedTile.test.tsx`'s "renders no link anywhere", which is what
+       * this shape is pinned by. */}
+      {!editing && href !== null ? (
+        <OpeningContent href={href}>{body}</OpeningContent>
+      ) : (
+        <CardContent className="min-w-0">{body}</CardContent>
+      )}
     </Card>
+  )
+}
+
+/**
+ * `TileCard`'s body when the tile leads somewhere: the whole body opens the
+ * report, not just the title. Cem, testing this: "when I click on any
+ * dashboard section, I must be redirected to that report with the same time
+ * frame so that I can deep dive" -- a chart is what a reader points at, and
+ * the title is a small target beside it.
+ *
+ * Three things it is deliberately not. It is not a `role="link"`: the title
+ * in the header IS the link, in the accessibility tree and in the tab order,
+ * and a second one over the same destination would put every tile in the tab
+ * order twice while announcing the whole chart as its name. It is not
+ * rendered in edit mode -- that is where a tile is widened, moved and
+ * removed, and navigating away mid-edit loses the layout being arranged. And
+ * it does not fire for a click that started inside a control of its own: the
+ * stale state's "Open it" link and the failed state's Retry button both live
+ * in this body and both already mean something, so a click landing on either
+ * is theirs.
+ *
+ * No key handler beside `onClick`, and no `tabindex` -- the keyboard path to
+ * this destination is the title link, which is already in the tab order and
+ * already names the report. Biome's `useKeyWithClickEvents` does not reach a
+ * click handler passed to a COMPONENT (it reads intrinsic elements only), so
+ * this is a decision the linter cannot make for us either way.
+ */
+function OpeningContent(props: { href: string; children: ReactNode }) {
+  const { href, children } = props
+  const navigate = useNavigate()
+  const openReport = (e: MouseEvent<HTMLDivElement>) => {
+    if ((e.target as Element).closest('a, button') !== null) return
+    navigate(href)
+  }
+  return (
+    <CardContent className="min-w-0 cursor-pointer" onClick={openReport}>
+      {children}
+    </CardContent>
   )
 }
 

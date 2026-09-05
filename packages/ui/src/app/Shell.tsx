@@ -76,7 +76,16 @@ function navLinkClass(isActive: boolean): string {
   }`
 }
 
-function Mark() {
+/**
+ * The brand mark: the constellation Lyra, one path per line and five stars,
+ * at every size (ADR 006 -- there is no second, simplified variant).
+ *
+ * Exported because the shared viewer page's footer draws it too
+ * (`screens/SharedDashboard.tsx`), and that page renders no `Shell` at all.
+ * A second copy of these coordinates is how the two would come to disagree
+ * about a mark that is generated from one source.
+ */
+export function Mark() {
   return (
     <svg viewBox="0 0 100 100" className="h-5 w-5 shrink-0 text-primary" aria-hidden="true">
       <g
