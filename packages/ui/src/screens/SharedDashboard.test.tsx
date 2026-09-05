@@ -72,7 +72,7 @@ describe('SharedDashboard', () => {
     expect(screen.getByText(/each tile uses its own report's default window/)).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /Lyraflow/ })).toHaveAttribute(
       'href',
-      'https://lyraflow.app',
+      'https://lyraflow.app/?ref=shared-dashboard',
     )
     expect(screen.getByText('This dashboard has no tiles yet.')).toBeInTheDocument()
   })
@@ -312,12 +312,19 @@ describe('SharedDashboard', () => {
     })
     const { container } = render(<SharedDashboard client={client} token={TOKEN} />)
     await screen.findByRole('heading', { name: 'Overview' })
-    const links = within(container).getAllByRole('link')
-    expect(links).toHaveLength(1)
-    expect(links[0]).toHaveAttribute('href', 'https://lyraflow.app')
+    expect(within(container).getAllByRole('link')).toHaveLength(1)
+    const link = within(container).getByRole('link')
+    // An ORIGIN check, not a prefix one: `https://lyraflow.app.evil.test`
+    // starts with the same characters and is a different site.
+    const href = new URL(link.getAttribute('href') ?? '')
+    expect(href.origin).toBe('https://lyraflow.app')
     // And it carries no `Referer` when it is followed: this page's URL
     // CONTAINS the share token, so a plain link would hand a working
     // credential to whatever it points at.
-    expect(links[0]).toHaveAttribute('rel', 'noreferrer')
+    expect(link).toHaveAttribute('rel', 'noreferrer')
+    // Which is exactly why the attribution has to be IN the URL. The whole
+    // query is pinned, not just the one parameter: anything else appearing
+    // here is something about this share travelling to lyraflow.app.
+    expect(href.search).toBe('?ref=shared-dashboard')
   })
 })
