@@ -113,6 +113,8 @@ const DASH: DashboardWire = {
   stale: false,
   created_at: T,
   updated_at: T,
+  shared: false,
+  share: null,
   tiles: [trendTile, funnelTile],
 }
 

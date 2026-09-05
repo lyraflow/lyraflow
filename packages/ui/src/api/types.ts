@@ -714,12 +714,74 @@ export interface DashboardSummary {
   stale: boolean
   created_at: string
   updated_at: string
+  /** Whether this dashboard currently has a live share link. The list route
+   * never sends the token itself (`DashboardShare` below is detail-only) --
+   * this is only enough for a list view to show a "Shared" badge without a
+   * second fetch per row. */
+  shared: boolean
 }
 
-/** `GET /v1/dashboards/:id`. Everything a `DashboardSummary` has, plus the resolved tiles. */
+/**
+ * `POST /v1/dashboards/:id/share`'s `200` response, and `Dashboard.share`'s
+ * shape when a link exists. `token` is the full 43-character secret --
+ * plaintext on the wire here because this IS the moment it is minted or
+ * re-read by the owner, the same one-time-disclosure discipline
+ * `CreatedProject.server_key` documents above. It must never appear in any
+ * OTHER response this client reads (`DashboardSummary.shared` is the
+ * list-safe substitute for that reason).
+ */
+export interface DashboardShare {
+  token: string
+  shared_at: string
+}
+
+/** `GET /v1/dashboards/:id`. Everything a `DashboardSummary` has, plus the
+ * resolved tiles and the share record -- `null` when this dashboard has
+ * never been shared, or was shared and then unshared. */
 export interface Dashboard extends DashboardSummary {
   tiles: ResolvedTile[]
+  share: DashboardShare | null
 }
+
+/**
+ * The range presets a shared dashboard's viewer can pick, and the ONLY ones
+ * the public run route accepts -- a value declared as a `const` array,
+ * rather than only a type, so a URL query param can be validated against it
+ * at runtime (`SHARED_RANGE_PRESETS.includes(x)`) before it ever reaches
+ * `runSharedTile`. `auto` defers to each report's own stored range the same
+ * way a dashboard tile does when nothing overrides it.
+ */
+export const SHARED_RANGE_PRESETS = ['auto', '24h', '7d', '30d', '90d', '180d', '365d'] as const
+export type SharedRangePreset = (typeof SHARED_RANGE_PRESETS)[number]
+
+/**
+ * `GET /v1/shared/:token`'s `200` body -- the read-only surface a viewer
+ * holding a share link sees. Deliberately NOT `Dashboard`: it carries no
+ * `id`, no `is_home`, no `definition_version` and no `share` -- none of
+ * those are the viewer's business, and the token itself never appears here
+ * either, matching the constraint that it never rides in a list or a
+ * report body. `stale` mirrors `DashboardSummary.stale` for the same
+ * reason: the stored layout can stop parsing under either surface.
+ */
+export interface SharedDashboard {
+  name: string
+  updated_at: string
+  stale: boolean
+  tiles: ResolvedTile[]
+}
+
+/**
+ * `POST /v1/shared/:token/tiles/:index/run`'s `200` body. A discriminated
+ * union on `kind`, the same shape `ResolvedTile` uses, so a caller narrowing
+ * on `kind` gets `result` typed as the matching run-result shape rather than
+ * a union of all three -- `StatsPage` for a trend tile (the same page shape
+ * the feed's own chart reads, per `TrendResult` above), `RetentionResult`
+ * for a retention tile, `FunnelRunResult` for a funnel tile.
+ */
+export type SharedRunResult =
+  | { kind: 'trend'; result: StatsPage }
+  | { kind: 'retention'; result: RetentionResult }
+  | { kind: 'funnel'; result: FunnelRunResult }
 
 /** `POST /v1/dashboards`'s body. `tiles` is optional -- a dashboard can be created empty. */
 export interface DashboardInput {

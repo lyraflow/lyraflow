@@ -989,6 +989,59 @@ describe('createClient', () => {
       expect(String(path)).not.toMatch(/[?&]q=/)
     })
   })
+
+  describe('sharing', () => {
+    it('shareDashboard and unshareDashboard hit the share route with the session headers', async () => {
+      const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
+        if (init.method === 'DELETE') return new Response(null, { status: 204 })
+        return new Response(JSON.stringify({ token: 'T', shared_at: 'now' }), { status: 200 })
+      })
+      const c = createClient(fetchImpl as never)
+      await c.shareDashboard(7, 3)
+      await c.unshareDashboard(7, 3)
+      expect(fetchImpl.mock.calls[0]?.[0]).toBe('/v1/dashboards/3/share')
+      expect(fetchImpl.mock.calls[0]?.[1].method).toBe('POST')
+      expect(new Headers(fetchImpl.mock.calls[0]?.[1].headers).get('x-lyraflow-project')).toBe('7')
+      expect(fetchImpl.mock.calls[1]?.[1].method).toBe('DELETE')
+    })
+
+    it('the two viewer calls send no cookie, no UI header and no project header', async () => {
+      const fetchImpl = vi.fn(
+        async (_url: string, _init?: RequestInit) =>
+          new Response(JSON.stringify({ name: 'x', updated_at: '', stale: false, tiles: [] }), {
+            status: 200,
+          }),
+      )
+      const c = createClient(fetchImpl as never)
+      await c.sharedDashboard('tok')
+      await c.runSharedTile('tok', 2, '7d')
+      for (const [url, init] of fetchImpl.mock.calls as [string, RequestInit][]) {
+        expect(init.credentials).toBe('omit')
+        const h = new Headers(init.headers)
+        expect(h.get('x-lyraflow-ui')).toBeNull()
+        expect(h.get('x-lyraflow-project')).toBeNull()
+        expect(url.startsWith('/v1/shared/tok')).toBe(true)
+      }
+      expect(fetchImpl.mock.calls[1]?.[0]).toBe('/v1/shared/tok/tiles/2/run')
+      expect(JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body))).toEqual({ range: '7d' })
+    })
+
+    it('a 429 carries retry-after as a number', async () => {
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: 'too_many_runs' }), {
+            status: 429,
+            headers: { 'retry-after': '7' },
+          }),
+      )
+      const c = createClient(fetchImpl as never)
+      await expect(c.runSharedTile('tok', 0, 'auto')).rejects.toMatchObject({
+        status: 429,
+        code: 'too_many_runs',
+        retryAfterSeconds: 7,
+      })
+    })
+  })
 })
 
 // --- The suggestion catalogue reads share an in-flight request (#127) -----
