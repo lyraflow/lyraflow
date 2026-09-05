@@ -367,10 +367,11 @@ screens, reachable from the sidebar:
   dashboard does not fan a dozen queries at ClickHouse together. A tile
   whose stored definition would exceed a server ceiling under the current
   range — too many points, too many cohorts, or a funnel range past 90
-  days — warns instead of running, the same way its own screen does. What
-  a dashboard does **not** do yet: it cannot be shared or made public,
-  it does not refresh on its own, and a tile is always a saved report — no
-  single-number tiles, no text.
+  days — warns instead of running, the same way its own screen does. A
+  dashboard can be shared by a secret link from its Share button, in view
+  mode; see [Sharing a dashboard](#sharing-a-dashboard). What a dashboard
+  does **not** do yet: it does not refresh on its own, and a tile is always
+  a saved report — no single-number tiles, no text.
 - **Feed** — a live event feed, split into an **Accepted** tab and a
   **Rejected** tab, over a window you pick — the last hour through the last
   90 days — with an optional event-name filter. The window and the filter are
@@ -747,7 +748,10 @@ header.
 | `POST /v1/batch` | `{"batch": [ … ]}` — 1 to 500 items, each with an explicit `"type"` of `track`, `page`, or `identify`. |
 
 `/health` (liveness), `/ready` (readiness), and `/metrics` (Prometheus text
-format) are also served, and are not authenticated.
+format) are also served, and are not authenticated. Neither are
+`GET /v1/shared/:token` and `POST /v1/shared/:token/tiles/:index/run`, which
+serve a shared dashboard to whoever holds its link; see
+[Sharing a dashboard](#sharing-a-dashboard).
 
 ### `GET /v1/project`
 
@@ -2625,11 +2629,13 @@ curl -X POST http://localhost:3000/v1/dashboards \
 
 | Method & path | Does |
 | --- | --- |
-| `GET /v1/dashboards` | List every dashboard in the project — name, tile count, whether it is home |
+| `GET /v1/dashboards` | List every dashboard in the project — name, tile count, whether it is home, and `"shared": true|false` |
 | `POST /v1/dashboards` | Create one, with or without tiles |
-| `GET /v1/dashboards/:id` | Read one, each tile carrying its report in that report's own shape, or `null` if it has been deleted |
+| `GET /v1/dashboards/:id` | Read one, each tile carrying its report in that report's own shape, or `null` if it has been deleted; carries `"share": { "token", "shared_at" }`, or `null` if it is not shared |
 | `PATCH /v1/dashboards/:id` | Rename it, replace its tiles, or set `is_home` |
-| `DELETE /v1/dashboards/:id` | Delete it — `204`. The reports it showed are untouched |
+| `DELETE /v1/dashboards/:id` | Delete it — `204`. The reports it showed are untouched, and its share link, if any, is gone with it |
+| `POST /v1/dashboards/:id/share` | Mint a secret link, or return the existing one — see [Sharing a dashboard](#sharing-a-dashboard) |
+| `DELETE /v1/dashboards/:id/share` | Revoke the link — see [Sharing a dashboard](#sharing-a-dashboard) |
 
 A duplicate name within the same project is a `409`. A non-numeric `:id` is a
 `400` naming `invalid_dashboard_id`; an id that does not exist, or belongs to
@@ -2660,6 +2666,95 @@ which the web UI states under the picker.
 Every row carries `definition_version`, and a stored layout this build
 cannot parse comes back `"stale": true` with `"tiles": []` rather than
 failing the list — the same behaviour a saved report has.
+
+### Sharing a dashboard
+
+A dashboard can be shared by a **secret link**. `POST /v1/dashboards/:id/share`
+mints a token and returns `{ "token", "shared_at" }`; calling it again while
+the dashboard is already shared returns the same link rather than minting a
+new one, so a retried request or a second open tab cannot rotate the link out
+from under someone who already copied it. The link is
+`https://<your host>/shared/<token>`, and anyone holding it can open the
+dashboard with no login, pick a preset range and see every tile — the viewer
+page never shows the project name, and a tile there is inert: no link to the
+report behind it, no funnel step drill-down. `DELETE /v1/dashboards/:id/share`
+revokes it; the next request against that link is a `404`, and every bookmark
+of it breaks. There is no separate rotate call — rotating a link is revoke
+then share again. One link per dashboard, and deleting the dashboard deletes
+its link with it. `GET /v1/dashboards` rows carry `"shared": true|false`, and
+`GET /v1/dashboards/:id` carries the token and its creation time as `"share"`,
+or `null` when the dashboard has no link — the same pair the web UI's
+dashboards list and Share card read.
+
+**What a link exposes** is the dashboard's name, each tile's report's name,
+the event names it queries, every breakdown value a trend is split by and
+every filter value in a stored `where` — the same list the web UI's Share
+card shows before it creates a link. A trend split by email address publishes
+those addresses to whoever holds the link; sharing is a decision about the
+report, not only about the dashboard around it.
+
+The viewer surface takes no key or session at all — it is the first
+unauthenticated *read* path in this API; every other read requires a server
+key or a session, and ingest requires a write key. A token is not a server
+key or a session cookie, and presenting one where either is expected
+authenticates nothing; the token only ever resolves through the two routes
+below.
+
+```sh
+curl http://localhost:3000/v1/shared/$TOKEN
+```
+
+`GET /v1/shared/:token` returns `{ "name", "updated_at", "stale", "tiles" }`,
+each tile carrying its report in that report's own shape, the same as
+`GET /v1/dashboards/:id`. An unknown, malformed, revoked or deleted token all
+answer the same `404 { "error": "share_not_found" }` — one body for all four,
+so a guess and an expired link cannot be told apart from the outside.
+
+```sh
+curl -X POST http://localhost:3000/v1/shared/$TOKEN/tiles/0/run \
+  -H 'content-type: application/json' -d '{ "range": "30d" }'
+```
+
+`POST /v1/shared/:token/tiles/:index/run` runs one tile and returns
+`{ "kind", "result" }` in the shape of `GET /v1/events/stats`,
+`POST /v1/reports/retention` or `POST /v1/funnels/:id/run`. `range` is one of
+`auto`, `24h`, `7d`, `30d`, `90d`, `180d` or `365d` — presets only, never a
+`since`/`until` pair, because the result cache below needs a finite key space
+per link and a caller free to name arbitrary bounds could mint an unbounded
+number of them against one token. The query itself is built entirely from the
+tile's stored report; a link cannot ask anything the dashboard does not
+already ask. A bad index is `404 tile_not_found`; a tile whose report has
+since been deleted is `404 report_not_found`; a stored definition this build
+cannot read is `400 stale_definition`; a malformed `range` is
+`400 invalid_range`; and a preset that report's own ceiling refuses — a
+funnel range past 90 days, a trend that would exceed the bucket cap — gets
+that report endpoint's own `400`, the same one its authenticated route would
+send. Running a funnel through a link does not update the funnel's cached
+last run; that number belongs to the operator's own screen.
+
+**Three bounds apply to every link, because the caller is anonymous.** At
+most 120 requests a minute count against one token — page loads (the `GET`)
+and tile runs together, not runs alone — refused with
+`429 { "error": "too_many_runs" }` and `retry-after: 60`. At most 3 runs
+execute for one token at once; a fourth gets the same `429` with
+`retry-after: 1`. A tile's result is cached for 60 seconds per link, tile and
+preset, so a link opened by fifty readers costs one query per tile rather
+than fifty, and an edit to the dashboard or to a report it shows reaches the
+shared page within a minute rather than at once.
+
+**What this does not do.** There is no embedding flow — the link opens as a
+full page, not an iframe snippet — but the server sends no frame header on
+any page today, this one included, so nothing here actually stops another
+site from framing it; that gap is tracked, not solved, by this feature. There
+is no password on a link, no expiry, no count of who opened it, no way to
+share a single report on its own, and no way to list shared dashboards other
+than the `shared` flag on `GET /v1/dashboards`. Unlike a server key, the
+token is stored in plaintext rather than hashed, because the Share card has
+to show the link again after it is created — a database leak already
+exposes every event, person and segment in the project, so a plaintext link
+alongside that does not raise the stake. A link is a
+credential: anyone who has it has the dashboard, and revoking it is the only
+remedy for one that has spread further than intended.
 
 ## Reading events
 
