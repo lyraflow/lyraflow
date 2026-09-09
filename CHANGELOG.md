@@ -21,6 +21,20 @@ here as it happened rather than tagged retroactively, for the same reason 0.1.0
 is: a tag created after the fact names a moment nobody could have fetched. Its
 one fix is contained in 0.3.0.
 
+## 0.16.1 — 2026-09-09
+
+### Fixed
+
+- **The person profile had no heading element.** 0.16.0 turned the person's id
+  from the page's `<h1>` into an `<h2>`, on the mistaken belief that the shared
+  wrapper around the People section supplied a heading above it. It does not:
+  every other route in that section uses that wrapper, and the person detail is
+  the one that does not, so the id was the page's only heading and the page was
+  left with none. It is the `<h1>` again, and a test now asserts the heading's
+  level rather than only its text — which is why nothing caught this: no screen
+  test anywhere checked a heading level, so an `<h1>` and an `<h2>` were
+  indistinguishable to the whole suite.
+
 ## 0.16.0 — 2026-09-09
 
 ### Changed
