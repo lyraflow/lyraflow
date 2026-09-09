@@ -65,9 +65,21 @@ export function NativeSelect({
       </select>
       {/* Decoration only: the select already has its own accessible name, and
        * a chevron that took pointer events would swallow the click meant to
-       * open the list. */}
+       * open the list.
+       *
+       * `opacity-50` matches `SelectTrigger`'s own chevron
+       * (`components/ui/select.tsx:47`, `size-4 opacity-50`) -- without it
+       * this one reads visibly heavier than the switcher's (verified with
+       * Playwright chromium, both themes, zoomed): full-opacity
+       * `text-muted-foreground` against the switcher's same colour at half
+       * opacity. The colour class stays; only the switcher's own trigger
+       * gets `text-muted-foreground` for free, from a descendant selector
+       * (`[&_svg:not([class*='text-'])]:text-muted-foreground`) that only
+       * fires on an SVG with no `text-*` class of its own -- dropping it
+       * here would not inherit that colour, it would fall through to the
+       * page's default text colour instead. */}
       <ChevronDown
-        className="pointer-events-none absolute right-2.5 size-4 text-muted-foreground"
+        className="pointer-events-none absolute right-2.5 size-4 text-muted-foreground opacity-50"
         aria-hidden="true"
       />
     </div>
