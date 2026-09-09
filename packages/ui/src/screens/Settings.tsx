@@ -93,7 +93,7 @@ export function Settings(props: {
   }, [client, activeId, onUnauthorized])
 
   return (
-    <div className="flex min-w-0 flex-col gap-6">
+    <div className="flex min-w-0 max-w-3xl flex-col gap-6">
       <PageHeader title="Settings" />
 
       {error && (

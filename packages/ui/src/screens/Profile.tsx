@@ -250,7 +250,7 @@ export function Profile(props: {
   onEmailChanged: () => void
 }) {
   return (
-    <div className="flex min-w-0 flex-col gap-4">
+    <div className="flex min-w-0 max-w-3xl flex-col gap-4">
       <PageHeader title="Profile" />
       <AppearanceSection />
       <EmailForm client={props.client} email={props.email} onChanged={props.onEmailChanged} />
