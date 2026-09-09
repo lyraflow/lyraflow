@@ -27,15 +27,16 @@ import { cn } from '../lib/utils.js'
  * sit inside a `Card`, where a flat page background is a visible rectangle in a
  * lighter panel, and it is what the switcher does.
  *
- * `[&>option]:bg-popover [&>option]:text-popover-foreground` is here because the
- * open-list check (spec 2026-09-09, step 5) failed without it: a `bg-transparent`
- * select hands Chromium/Linux an unresolved popup background, and the open list
- * rendered white with barely-visible pale text while the page was in dark mode.
- * `bg-popover` alone fixed it (verified with Playwright chromium, both themes,
- * list open). `text-popover-foreground` compiles to nothing here -- this codebase
- * maps `--color-popover` but never defined `--color-popover-foreground` -- kept
- * anyway rather than adding that token, since the visible result is already
- * correct without it.
+ * `[&>option]:bg-popover [&>option]:text-foreground` is here because the open-list
+ * check (spec 2026-09-09, step 5) failed without it: a `bg-transparent` select
+ * hands Chromium/Linux an unresolved popup background, and the open list rendered
+ * white with barely-visible pale text while the page was in dark mode (verified
+ * with Playwright chromium, both themes, list open). `bg-popover` gives it an
+ * explicit background; `text-foreground` -- not `text-popover-foreground`, which
+ * this codebase never maps and would compile to no rule at all -- pairs `--lf-text`
+ * with `--lf-surface-raised`, the same body-on-raised-surface contrast the brand
+ * system already measures, so the list gets a real, correct colour in both themes
+ * instead of relying on Chromium to pick one.
  */
 export function NativeSelect({
   className,
@@ -47,7 +48,7 @@ export function NativeSelect({
     <div className={cn('relative inline-flex min-w-0 items-center', containerClassName)}>
       <select
         className={cn(
-          'h-9 min-w-0 max-w-full appearance-none rounded-md border border-input bg-transparent py-2 pr-8 pl-3 text-foreground text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:bg-input/30 dark:hover:bg-input/50 dark:aria-invalid:ring-destructive/40 [&>option]:bg-popover [&>option]:text-popover-foreground',
+          'h-9 min-w-0 max-w-full appearance-none rounded-md border border-input bg-transparent py-2 pr-8 pl-3 text-foreground text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:bg-input/30 dark:hover:bg-input/50 dark:aria-invalid:ring-destructive/40 [&>option]:bg-popover [&>option]:text-foreground',
           className,
         )}
         {...props}
