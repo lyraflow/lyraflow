@@ -21,6 +21,73 @@ here as it happened rather than tagged retroactively, for the same reason 0.1.0
 is: a tag created after the fact names a moment nobody could have fetched. Its
 one fix is contained in 0.3.0.
 
+## 0.16.0 — 2026-09-09
+
+### Changed
+
+- **Every dropdown in the app is one component.** Twenty native `<select>`
+  elements were styled by nineteen hand-copied copies of the same class string,
+  in two class orderings. They kept the browser's own arrow and fill painted over
+  an otherwise correct control, had no focus ring, and did not agree with the
+  project switcher in dark mode. They now share one `NativeSelect`, which adds
+  `appearance-none` and a chevron, the focus-visible ring, the transition and
+  disabled states, and the dark-mode background. **The element stays a native
+  `<select>` on purpose**, so keyboard type-ahead and the mobile picker still
+  work — the cost, stated plainly, is that the OPEN list is drawn by the
+  operating system and does not match the switcher's popup.
+- **Every page title is one component,** at one size. Twenty `<h1>`s in three
+  sizes across eighteen files became one `PageHeader`, which wraps a long
+  operator-supplied name by default rather than letting it push the page's
+  buttons off the row.
+- **One spelling of a destructive action.** A destructive action on a saved
+  record is a quiet red trigger, a solid confirmation behind a second click, and
+  an outline cancel — so the screen's primary action outranks it. On the segment
+  and funnel detail screens `Edit` was a bare text link beside a bordered
+  `Delete`, which had it backwards. A control that only removes a row from a form
+  you are still editing is deliberately not covered: it stays neutral, because
+  reddening it would make ordinary editing look alarming.
+- **Content stops stretching on a wide monitor.** The app bounds its content at
+  1400px — wide enough that the funnel flow and the retention grid never lose
+  room — and the two single-column screens, Settings and your own Profile, bound
+  themselves further.
+- **A shared dashboard's footer link is attributed**, so a visit arriving from a
+  shared page is distinguishable from a direct one.
+
+### Added
+
+- **A security policy, and private vulnerability reporting.** `SECURITY.md` says
+  what is in scope and how long a reply should take, GitHub's private reporting
+  is enabled, and it is the first channel offered rather than an email address.
+
+### Fixed
+
+- **A property list narrowed a keystroke late.** Typing in a property field
+  filtered the suggestions on the previous value until the debounce elapsed, so
+  the list disagreed with the text for as long as you typed quickly.
+- **Two dropdowns had collapsed to their content width.** The funnel builder's
+  Segment field and the segment builder's window field stretched to their column
+  before and stopped when the shared component arrived: the border ended
+  mid-control with the chevron floating at the far edge.
+- **A scrollbar with arrows rendered beside the feed's tab strip.** It was drawn
+  for a five-pixel overflow that had been invisible until the tab list was given
+  a horizontal scroll for narrow viewports — once one axis of overflow is set,
+  the browser promotes the other from `visible` to `auto`.
+
+### What it still cannot do
+
+**Nothing here changes what the product does** — no colour, no route and no new
+capability; every measured contrast pairing still passes, and one new one was
+added to the brand system rather than asserted. The first-run experience is the
+part this did not touch: on a fresh install every list is empty, and those empty
+screens are still a single grey sentence with no next step, the sign-in screen
+still carries no mark, and most screens still show a bare "Loading…" rather than
+the shape of what is coming. The open state of a dropdown is still the operating
+system's, not the app's. Everything the 0.15.0 entry listed still stands: a
+shared page cannot be embedded and the server sends no frame header (**#252**),
+there is no password or expiry on a share link, and there is still no
+auto-refresh, no funnel breakdown or retention split, no journeys or path
+analysis, and no alerting, scheduled export or digest.
+
 ## 0.15.0 — 2026-09-05
 
 ### Added
