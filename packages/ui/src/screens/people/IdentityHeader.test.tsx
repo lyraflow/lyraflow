@@ -22,6 +22,15 @@ describe('IdentityHeader', () => {
     expect(screen.getByRole('heading', { name: 'u1' })).toBeInTheDocument()
   })
 
+  it('renders the person id as the page-level h1, not a lower heading', () => {
+    // `People.tsx`'s person-detail branch renders no `Screen` wrapper, so
+    // this heading is the page's only `<h1>`. A regression demoting it (as
+    // shipped in v0.16.0) is invisible to the untyped `getByRole('heading')`
+    // check above, which matches any heading level.
+    render(<IdentityHeader person={PERSON} />)
+    expect(screen.getByRole('heading', { name: 'u1', level: 1 })).toBeInTheDocument()
+  })
+
   it('splits ids into user/anonymous ids and devices, not merely lists them all in one place', () => {
     // The split, not just presence: a test asserting `dev-a` appears
     // ANYWHERE in the container would pass even if every id landed in the

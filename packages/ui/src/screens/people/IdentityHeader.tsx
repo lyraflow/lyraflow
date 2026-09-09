@@ -1,5 +1,6 @@
 import type { Person } from '../../api/types.js'
 import { DetailSection } from '../../components/DetailList.js'
+import { PageHeader } from '../../components/PageHeader.js'
 import { formatDate } from '../shared/format.js'
 
 /** One column of the id split -- a plain list of ids, or a line saying there
@@ -37,18 +38,23 @@ export function IdentityHeader(props: { person: Person }) {
 
   return (
     <div className="flex flex-col gap-4">
-      <div>
-        {/* `h2`, not h1 -- `People.tsx` renders every route in this
-         * section, including this one, inside the shared `Screen`
-         * wrapper, which already supplies the page's top-level heading
-         * (`PageHeader title="People"`). This id is a section heading
-         * under that page, not the page's own title. */}
-        <h2 className="break-all font-semibold text-lg">{person.person_id}</h2>
-        <p className="text-muted-foreground text-sm">
-          {person.events.toLocaleString('en-US')} events · first seen{' '}
-          {formatDate(person.first_seen)} · last seen {formatDate(person.last_seen)}
-        </p>
-      </div>
+      {/* This id IS the page's title, not a section heading under one.
+       * `People.tsx`'s `Screen` wrapper supplies the page heading for the
+       * OTHER routes in this section (list, lookup) -- the person-detail
+       * branch renders no `Screen` at all (see that file's own comment on
+       * why), so this is the only heading the page has. Rendering it via
+       * `PageHeader` keeps it the real top-level heading element instead of
+       * quietly demoting it again. */}
+      <PageHeader
+        title={person.person_id}
+        titleClassName="break-all"
+        subtitle={
+          <>
+            {person.events.toLocaleString('en-US')} events · first seen{' '}
+            {formatDate(person.first_seen)} · last seen {formatDate(person.last_seen)}
+          </>
+        }
+      />
       {/* Wraps both columns rather than either alone -- a test asking "is
        * this id shown at all" should not have to know, or guess, which
        * column the server happened to put it in. */}
