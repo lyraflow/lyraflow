@@ -7,6 +7,7 @@ import { useProject } from '../app/ProjectContext.js'
 import { ROUTES, retentionReportPath } from '../app/Router.js'
 import { EventCombobox } from '../components/EventCombobox.js'
 import { NativeSelect } from '../components/NativeSelect.js'
+import { PageHeader } from '../components/PageHeader.js'
 import { Button } from '../components/ui/button.js'
 import { Input } from '../components/ui/input.js'
 import { Label } from '../components/ui/label.js'
@@ -521,19 +522,14 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
 
   return (
     <section className="flex flex-col gap-6">
-      <div className="flex items-center justify-between gap-2">
-        <header className="flex flex-col gap-1">
-          <h1 className="font-semibold text-xl">Retention</h1>
-          <p className="text-muted-foreground text-sm">
-            Of the people who did one thing in a period, how many came back and did another in the
-            periods after it.
-          </p>
-        </header>
-        <div className="flex items-center gap-3">
-          {/* Only for a saved report -- there is nothing to delete at
+      <PageHeader
+        title="Retention"
+        actions={
+          /* Only for a saved report -- there is nothing to delete at
            * `/retention/new`, same reasoning `FunnelDetail` gates its own
-           * Delete on `funnel != null`. */}
-          {reportId != null && !confirmingDelete && (
+           * Delete on `funnel != null`. */
+          reportId != null &&
+          !confirmingDelete && (
             <Button
               type="button"
               variant="outline"
@@ -542,9 +538,13 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
             >
               Delete
             </Button>
-          )}
-        </div>
-      </div>
+          )
+        }
+      />
+      <p className="text-muted-foreground text-sm">
+        Of the people who did one thing in a period, how many came back and did another in the
+        periods after it.
+      </p>
 
       {reportError != null && (
         <p role="alert" className="text-sm text-destructive">

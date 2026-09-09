@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router'
 import { type ApiClient, ApiError } from '../api/client.js'
 import { useProject } from '../app/ProjectContext.js'
 import { dashboardPath } from '../app/Router.js'
+import { PageHeader } from '../components/PageHeader.js'
 import { Button } from '../components/ui/button.js'
 import { Input } from '../components/ui/input.js'
 import { Label } from '../components/ui/label.js'
@@ -45,7 +46,7 @@ export function DashboardNew(props: { client: ApiClient; onUnauthorized?: () => 
 
   return (
     <form onSubmit={submit} className="flex max-w-md flex-col gap-4">
-      <h1 className="text-lg font-semibold">New dashboard</h1>
+      <PageHeader title="New dashboard" />
       <div className="flex flex-col gap-1">
         <Label htmlFor="dashboard-name">Name</Label>
         <Input

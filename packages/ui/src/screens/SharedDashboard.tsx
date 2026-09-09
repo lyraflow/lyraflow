@@ -5,6 +5,7 @@ import { type ApiClient, ApiError } from '../api/client.js'
 // right name for both the screen and the body it draws.
 import type { SharedDashboard as SharedDashboardWire } from '../api/types.js'
 import { Mark } from '../app/Shell.js'
+import { PageHeader } from '../components/PageHeader.js'
 import { Button } from '../components/ui/button.js'
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card.js'
 import { createRunQueue } from './dashboards/runQueue.js'
@@ -256,7 +257,7 @@ export function SharedDashboard(props: { client: ApiClient; token: string }) {
 
   return (
     <main className="mx-auto max-w-6xl space-y-4 p-4">
-      <h1 className="font-semibold text-2xl tracking-tight">{dash.name}</h1>
+      <PageHeader title={dash.name} titleClassName="text-2xl" />
 
       <div className="flex flex-wrap items-end gap-3">
         {/* `presetsOnly`: `SHARED_RANGE_PRESETS` is the entire vocabulary

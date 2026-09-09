@@ -8,6 +8,7 @@ import type { ApiClient } from '../api/client.js'
 import type { SegmentPreview } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
 import { ROUTES, segmentPath } from '../app/Router.js'
+import { PageHeader } from '../components/PageHeader.js'
 import { Button } from '../components/ui/button.js'
 import { Input } from '../components/ui/input.js'
 import { Label } from '../components/ui/label.js'
@@ -791,7 +792,7 @@ export function SegmentBuilder(props: {
 
   return (
     <div className="flex min-w-0 max-w-2xl flex-col gap-6">
-      <h1 className="text-lg font-semibold">{isEditing ? 'Edit segment' : 'Create segment'}</h1>
+      <PageHeader title={isEditing ? 'Edit segment' : 'Create segment'} />
 
       {loadError != null && (
         <p role="alert" className="text-sm text-destructive">
