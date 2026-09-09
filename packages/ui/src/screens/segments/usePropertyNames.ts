@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError } from '../../api/client.js'
 import type { ApiClient } from '../../api/client.js'
 import type { SchemaProperty } from '../../api/types.js'
@@ -103,10 +103,37 @@ export function usePropertyNames(opts: {
     // fetched.
   }, [query, event, client, projectId])
 
+  // Narrowed to the query being asked about NOW, not the one this answer was
+  // fetched for.
+  //
+  // `superseded` above discards an answer that is still in flight when a
+  // newer query replaces it. It cannot do anything about one that has
+  // already LANDED: those names are in state, they were correct for a
+  // prefix nobody is typing any more, and they stay on screen for the next
+  // debounce plus a round trip. Every keystroke opens that window, so the
+  // list a caller renders disagrees with the field above it for a quarter
+  // of a second at a minimum -- and indefinitely if the new lookup is slow.
+  //
+  // `startsWith` on the trimmed text is the SAME predicate the route applies
+  // (`startsWith(property_key, {q:String})` in `schema/routes.ts`, on the
+  // text as sent), so this can only remove a name the server would not have
+  // returned for the current query. It is a narrowing, never a filter with
+  // an opinion of its own -- which is also why it does not fold case: the
+  // route does not, and offering a name the server declines to return is
+  // the same disagreement in the other direction.
+  //
+  // Memoised because `FieldCombobox` reports `properties` to its owner from
+  // an effect keyed on this array. A fresh array per render would call that
+  // owner on every render rather than when a lookup lands, and an owner that
+  // stores what it is given renders again -- which is a loop, not a
+  // redundant call.
+  const q = query.trim()
+  const matching = useMemo(() => properties.filter((p) => p.name.startsWith(q)), [properties, q])
+
   return {
-    properties,
+    properties: matching,
     // The names alone, for the callers that render a list and nothing else.
-    options: properties.map((p) => p.name),
+    options: matching.map((p) => p.name),
     loading: !fetched && !loadError,
     error: loadError,
   }

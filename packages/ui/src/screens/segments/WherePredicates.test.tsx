@@ -451,7 +451,15 @@ describe("WherePredicates — the value carries the property's kind", () => {
 
   const first = () => current?.[0] as { property: string; value: unknown }
 
+  // Clearing first is what an operator has to do, not a convenience for the
+  // test: the field's text IS the query, `GET /v1/schema/properties` filters
+  // on it with `startsWith`, and after a row is chosen the text is that row's
+  // name. So a field reading `results` offers `results` and nothing else, and
+  // reaching a different property means emptying it. This helper used to skip
+  // the step and still find every option, because the mock below ignores `q`
+  // and the list on screen was the answer to an earlier, broader query.
   const chooseProperty = async (name: string) => {
+    await userEvent.clear(screen.getByLabelText('Property or attribute'))
     await userEvent.click(screen.getByLabelText('Property or attribute'))
     await waitFor(() => expect(screen.getByText('Properties')).toBeInTheDocument())
     await userEvent.click(screen.getByRole('option', { name }))

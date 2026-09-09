@@ -57,6 +57,49 @@ describe('FieldCombobox', () => {
     ])
   })
 
+  // The 2026-09-05 CI failure, made deterministic.
+  //
+  // The test above waits for the `Properties` heading, and that heading is
+  // raised by ANY answered lookup -- including the one for the empty query
+  // that runs on mount. Locally that lookup never even fires: the harness
+  // builds a client per render, every render restarts the 250ms debounce,
+  // and typing starts long before it elapses. On a loaded runner the gap
+  // before the first keystroke was longer than the debounce, so the empty
+  // query was sent and answered, the wait was already satisfied when the
+  // assertion ran, and `path` and `plan` were on screen for the text `utm`.
+  // It read as a flake; it was the field offering suggestions for a prefix
+  // the operator had left.
+  //
+  // The pause below is that gap, made explicit rather than borrowed from a
+  // busy machine. The assertion is immediate rather than through `waitFor`,
+  // because waiting would let the new lookup land and hide the defect.
+  it("drops an earlier lookup's names the moment the text stops matching them", async () => {
+    render(<Harness />)
+    await userEvent.click(field())
+    // Waiting for the heading is waiting past DEBOUNCE_MS with no keystroke:
+    // the empty query is genuinely sent, and its answer -- every property
+    // there is -- is in state. `plan` is the witness, because unlike `path`
+    // it is a property and NOT also an event column.
+    await waitFor(() => expect(screen.getByText('Properties')).toBeInTheDocument(), {
+      timeout: 2000,
+    })
+    expect(options()).toContain('plan')
+
+    await userEvent.type(field(), 'utm')
+
+    // No `waitFor`: the property half must narrow with the keystroke, on the
+    // names it already holds, not a quarter-second later when the server
+    // agrees.
+    expect(options()).toEqual([
+      'utm_source',
+      'utm_medium',
+      'utm_campaign',
+      'utm_term',
+      'utm_content',
+      'utm_test_variant',
+    ])
+  })
+
   it('offers every attribute before anything is typed', async () => {
     render(<Harness />)
     await userEvent.click(field())
