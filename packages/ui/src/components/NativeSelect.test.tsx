@@ -24,8 +24,15 @@ describe('NativeSelect', () => {
   })
 
   // `<optgroup>` is why AddTilePicker and OperatorSelect stayed native at all
-  // -- Radix would need SelectGroup/SelectLabel and a rewrite of both.
-  it('renders optgroups as-is', () => {
+  // -- Radix would need SelectGroup/SelectLabel and a rewrite of both. Fix
+  // round 2: `[&>option]` compiles to `select > option`, which never matches
+  // an option nested inside an `<optgroup>` -- exactly the shape both of those
+  // call sites use, so the dark-mode fix this task exists to deliver would
+  // never have reached them. `[&_option]` (descendant, not child) does. This
+  // pins both halves: the structure survives the component, and the selector
+  // is the descendant form. Verified to fail against `[&>option]:bg-popover`
+  // (see the fix-round-2 report section).
+  it('reaches an option nested inside an optgroup with the descendant selector', () => {
     render(
       <NativeSelect aria-label="Operator" defaultValue="eq">
         <optgroup label="Comparison">
@@ -33,7 +40,12 @@ describe('NativeSelect', () => {
         </optgroup>
       </NativeSelect>,
     )
-    expect(screen.getByRole('group', { name: 'Comparison' })).toBeInTheDocument()
+    const select = screen.getByLabelText('Operator')
+    const option = select.querySelector('option')
+    expect(option).not.toBeNull()
+    expect(select.contains(option)).toBe(true)
+    expect(select).toHaveClass('[&_option]:bg-popover')
+    expect(select).not.toHaveClass('[&>option]:bg-popover')
   })
 
   it('forwards id, disabled and data attributes to the select itself', () => {
