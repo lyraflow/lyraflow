@@ -125,6 +125,7 @@ export function WindowPicker(props: {
       <NativeSelect
         id={kindId}
         aria-label="Window"
+        className="w-full"
         value={value.kind}
         onChange={(e) => setKind(e.target.value as Window['kind'])}
       >

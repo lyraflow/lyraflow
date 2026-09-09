@@ -86,6 +86,7 @@ export function SegmentPicker(props: {
       <Label htmlFor={id}>Segment</Label>
       <NativeSelect
         id={id}
+        className="w-full"
         value={selectedMissing ? 'missing' : value == null ? '' : String(value)}
         onChange={(e) => {
           const next = e.target.value
