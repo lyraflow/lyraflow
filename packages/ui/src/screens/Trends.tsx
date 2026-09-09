@@ -6,6 +6,7 @@ import type { TrendReportInput, TrendResult } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
 import { ROUTES, trendReportPath } from '../app/Router.js'
 import { EventCombobox } from '../components/EventCombobox.js'
+import { NativeSelect } from '../components/NativeSelect.js'
 import { Button } from '../components/ui/button.js'
 import { Input } from '../components/ui/input.js'
 import { Label } from '../components/ui/label.js'
@@ -604,19 +605,18 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
         />
         <div className="flex min-w-0 flex-col gap-1">
           <Label htmlFor="trend-interval">Resolution</Label>
-          <select
+          <NativeSelect
             id="trend-interval"
             aria-label="Resolution"
             value={params.interval}
             onChange={(e) => update({ interval: e.target.value as TrendParams['interval'] })}
-            className="h-9 rounded-md border border-input bg-background px-2 text-foreground text-sm shadow-xs"
           >
             {INTERVALS.map((i) => (
               <option key={i} value={i}>
                 {INTERVAL_LABELS[i]}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </div>
         <RangePicker
           id="trend-range"

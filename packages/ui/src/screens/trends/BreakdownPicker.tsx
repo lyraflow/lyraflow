@@ -1,5 +1,6 @@
 import { EVENT_COLUMN_FIELDS } from '@lyraflow/core/segments/ast.js'
 import type { ApiClient } from '../../api/client.js'
+import { NativeSelect } from '../../components/NativeSelect.js'
 import { Label } from '../../components/ui/label.js'
 import { PropertyCombobox } from '../segments/PropertyCombobox.js'
 
@@ -39,7 +40,7 @@ export function BreakdownPicker(props: {
     <>
       <div className="flex min-w-0 flex-col gap-1">
         <Label htmlFor={`${id}-source`}>Split by</Label>
-        <select
+        <NativeSelect
           id={`${id}-source`}
           aria-label="Split by"
           value={source}
@@ -49,25 +50,23 @@ export function BreakdownPicker(props: {
             // and carrying it would silently ask a different question.
             onChange({ source: e.target.value as BreakdownSource, field: '' })
           }
-          className="h-9 rounded-md border border-input bg-background px-2 text-foreground text-sm shadow-xs"
         >
           {BREAKDOWN_SOURCES.map((s) => (
             <option key={s} value={s}>
               {SOURCE_LABELS[s]}
             </option>
           ))}
-        </select>
+        </NativeSelect>
       </div>
 
       {source === 'attribute' && (
         <div className="flex min-w-0 flex-col gap-1">
           <Label htmlFor={`${id}-column`}>Column</Label>
-          <select
+          <NativeSelect
             id={`${id}-column`}
             aria-label="Column"
             value={field}
             onChange={(e) => onChange({ source, field: e.target.value })}
-            className="h-9 rounded-md border border-input bg-background px-2 text-foreground text-sm shadow-xs"
           >
             <option value="">Choose a column…</option>
             {EVENT_COLUMN_FIELDS.map((f) => (
@@ -75,7 +74,7 @@ export function BreakdownPicker(props: {
                 {f}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </div>
       )}
 

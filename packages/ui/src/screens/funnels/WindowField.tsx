@@ -1,4 +1,5 @@
 import { useId } from 'react'
+import { NativeSelect } from '../../components/NativeSelect.js'
 import { Input } from '../../components/ui/input.js'
 import { Label } from '../../components/ui/label.js'
 
@@ -77,16 +78,15 @@ export function WindowField(props: {
           onChange={(e) => onChange(Number(e.target.value), unit)}
           className="w-24"
         />
-        <select
+        <NativeSelect
           aria-label="Window unit"
           value={unit}
           onChange={(e) => onChange(value, e.target.value as WindowUnit)}
-          className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground shadow-xs"
         >
           <option value="minutes">minutes</option>
           <option value="hours">hours</option>
           <option value="days">days</option>
-        </select>
+        </NativeSelect>
       </div>
       {seconds == null && (
         <p className="text-xs text-destructive">

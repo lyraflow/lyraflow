@@ -6,6 +6,7 @@ import type { RetentionReportInput, RetentionResult } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
 import { ROUTES, retentionReportPath } from '../app/Router.js'
 import { EventCombobox } from '../components/EventCombobox.js'
+import { NativeSelect } from '../components/NativeSelect.js'
 import { Button } from '../components/ui/button.js'
 import { Input } from '../components/ui/input.js'
 import { Label } from '../components/ui/label.js'
@@ -650,21 +651,20 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
       <div className="flex flex-wrap items-end gap-3">
         <div className="flex min-w-0 flex-col gap-1">
           <Label htmlFor="retention-granularity">Period</Label>
-          <select
+          <NativeSelect
             id="retention-granularity"
             aria-label="Period"
             value={params.granularity}
             onChange={(e) =>
               update({ granularity: e.target.value as RetentionParams['granularity'] })
             }
-            className="h-9 rounded-md border border-input bg-background px-2 text-foreground text-sm shadow-xs"
           >
             {GRANULARITIES.map((g) => (
               <option key={g} value={g}>
                 {g}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </div>
         <div className="flex min-w-0 flex-col gap-1">
           <Label htmlFor="retention-periods">Periods</Label>

@@ -1,5 +1,6 @@
 import type { ApiClient } from '../../api/client.js'
 import { EventCombobox } from '../../components/EventCombobox.js'
+import { NativeSelect } from '../../components/NativeSelect.js'
 import { Label } from '../../components/ui/label.js'
 import { FEED_RANGES, type FeedRange } from './range.js'
 
@@ -37,21 +38,20 @@ export function FeedFilters(props: {
     <div className="flex flex-wrap items-end gap-4">
       <div className="flex items-center gap-2">
         <Label htmlFor="feed-range">Range</Label>
-        <select
+        <NativeSelect
           id="feed-range"
           data-testid="feed-range"
           value={range.id}
           onChange={(e) =>
             onRangeChange(FEED_RANGES.find((r) => r.id === e.target.value) as FeedRange)
           }
-          className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground shadow-xs"
         >
           {FEED_RANGES.map((r) => (
             <option key={r.id} value={r.id}>
               {r.label}
             </option>
           ))}
-        </select>
+        </NativeSelect>
       </div>
 
       {/* Rendered only with a project, because the catalogue it reads is
