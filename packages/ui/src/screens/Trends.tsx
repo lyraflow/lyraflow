@@ -514,8 +514,9 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
           !confirmingDelete && (
             <Button
               type="button"
-              variant="outline"
+              variant="ghost"
               size="sm"
+              className="text-destructive"
               onClick={() => setConfirmingDelete(true)}
             >
               Delete

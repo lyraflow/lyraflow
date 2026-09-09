@@ -353,7 +353,13 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
         />
       )}
       {dash && editing && !confirmingDelete && (
-        <Button type="button" variant="outline" size="sm" onClick={() => setConfirmingDelete(true)}>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="text-destructive"
+          onClick={() => setConfirmingDelete(true)}
+        >
           Delete
         </Button>
       )}

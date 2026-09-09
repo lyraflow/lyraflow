@@ -533,8 +533,9 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
           !confirmingDelete && (
             <Button
               type="button"
-              variant="outline"
+              variant="ghost"
               size="sm"
+              className="text-destructive"
               onClick={() => setConfirmingDelete(true)}
             >
               Delete

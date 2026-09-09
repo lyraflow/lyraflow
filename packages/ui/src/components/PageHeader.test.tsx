@@ -57,4 +57,14 @@ describe('PageHeader', () => {
     expect(heading).toHaveClass('break-words')
     expect(heading).toHaveClass('min-w-0')
   })
+
+  // Trends and Retention pass `actions={someCondition && <Button/>}`. When
+  // the condition is false the value is `false`, not `null` -- a `!= null`
+  // guard lets it through and renders an empty actions `<div>`. A plain
+  // truthiness check is what keeps that div out entirely.
+  it('renders no actions region when actions is false', () => {
+    const { container } = render(<PageHeader title="Trends" actions={false} />)
+    expect(screen.queryByRole('button')).not.toBeInTheDocument()
+    expect(container.querySelector('.shrink-0')).not.toBeInTheDocument()
+  })
 })

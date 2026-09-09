@@ -42,13 +42,9 @@ export function PageHeader(props: {
         >
           {props.title}
         </h1>
-        {props.subtitle != null && (
-          <p className="text-muted-foreground text-sm">{props.subtitle}</p>
-        )}
+        {props.subtitle && <p className="text-muted-foreground text-sm">{props.subtitle}</p>}
       </div>
-      {props.actions != null && (
-        <div className="flex shrink-0 items-center gap-2">{props.actions}</div>
-      )}
+      {props.actions && <div className="flex shrink-0 items-center gap-2">{props.actions}</div>}
     </div>
   )
 }
