@@ -524,6 +524,7 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
     <section className="flex flex-col gap-6">
       <PageHeader
         title="Retention"
+        subtitle="Of the people who did one thing in a period, how many came back and did another in the periods after it."
         actions={
           /* Only for a saved report -- there is nothing to delete at
            * `/retention/new`, same reasoning `FunnelDetail` gates its own
@@ -541,10 +542,6 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
           )
         }
       />
-      <p className="text-muted-foreground text-sm">
-        Of the people who did one thing in a period, how many came back and did another in the
-        periods after it.
-      </p>
 
       {reportError != null && (
         <p role="alert" className="text-sm text-destructive">

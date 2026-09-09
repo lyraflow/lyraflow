@@ -505,6 +505,7 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
     <section className="flex flex-col gap-6">
       <PageHeader
         title="Trends"
+        subtitle="How many of an event over time, and how that splits by a property or a column."
         actions={
           /* Only for a saved report -- there is nothing to delete at
            * `/trends/new`, same reasoning `FunnelDetail` gates its own Delete
@@ -522,9 +523,6 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
           )
         }
       />
-      <p className="text-muted-foreground text-sm">
-        How many of an event over time, and how that splits by a property or a column.
-      </p>
 
       {reportError != null && (
         <p role="alert" className="text-sm text-destructive">
