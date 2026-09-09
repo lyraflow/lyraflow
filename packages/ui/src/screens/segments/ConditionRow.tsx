@@ -9,6 +9,7 @@ import type {
 import type { CostWarning } from '@lyraflow/core/segments/validate.js'
 import { AlertTriangle } from 'lucide-react'
 import type { ApiClient } from '../../api/client.js'
+import { NativeSelect } from '../../components/NativeSelect.js'
 import { Button } from '../../components/ui/button.js'
 import { Label } from '../../components/ui/label.js'
 import { BehaviourForm } from './BehaviourForm.js'
@@ -409,19 +410,18 @@ export function ConditionRow(props: {
          * `LEAF_KINDS`. */}
         <div className="flex min-w-0 flex-col gap-1">
           <Label htmlFor={kindId}>Match on</Label>
-          <select
+          <NativeSelect
             id={kindId}
             aria-label="Match on"
             value={inner.kind}
             onChange={(e) => setKind(e.target.value as LeafKind)}
-            className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground shadow-xs"
           >
             {LEAF_KINDS.map(({ kind, label }) => (
               <option key={kind} value={kind} disabled={switchRefusal(kind) != null}>
                 {label}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </div>
       </div>
       {body()}

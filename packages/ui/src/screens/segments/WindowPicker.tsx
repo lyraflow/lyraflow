@@ -1,4 +1,5 @@
 import type { Window } from '@lyraflow/core/segments/ast.js'
+import { NativeSelect } from '../../components/NativeSelect.js'
 import { Input } from '../../components/ui/input.js'
 import { Label } from '../../components/ui/label.js'
 import { localZone, toInstant, toPickerValue } from './datetime.js'
@@ -121,12 +122,11 @@ export function WindowPicker(props: {
   return (
     <div className="flex flex-col gap-1">
       <Label htmlFor={kindId}>Window</Label>
-      <select
+      <NativeSelect
         id={kindId}
         aria-label="Window"
         value={value.kind}
         onChange={(e) => setKind(e.target.value as Window['kind'])}
-        className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground shadow-xs"
       >
         {/* The words an OPERATOR reads, in the order `ast.ts` declares the
          * variants -- from `vocabulary.ts`, which `summarise` reads too, so
@@ -139,7 +139,7 @@ export function WindowPicker(props: {
             {label}
           </option>
         ))}
-      </select>
+      </NativeSelect>
 
       {/* The cost of `ever`, said WHERE IT IS CHOSEN. `costWarnings` already
        * raises the same fact against the finished condition, and that warning
@@ -177,17 +177,16 @@ export function WindowPicker(props: {
             }
             className="w-24"
           />
-          <select
+          <NativeSelect
             aria-label="Window unit"
             value={value.unit}
             onChange={(e) =>
               onChange({ kind: 'last', n: value.n, unit: e.target.value as LastUnit })
             }
-            className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground shadow-xs"
           >
             <option value="hours">hours</option>
             <option value="days">days</option>
-          </select>
+          </NativeSelect>
         </div>
       )}
       {value.kind === 'last' && !isValidN(value.n) && (
