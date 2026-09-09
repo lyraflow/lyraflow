@@ -6,6 +6,7 @@ import { ApiError } from '../api/client.js'
 import type { RetentionReport } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
 import { ROUTES, retentionReportPath } from '../app/Router.js'
+import { PageHeader } from '../components/PageHeader.js'
 import { Button } from '../components/ui/button.js'
 import type { SavedReportRow } from './shared/SavedReportList.js'
 import { SavedReportList } from './shared/SavedReportList.js'
@@ -86,12 +87,14 @@ export function RetentionReports(props: { client: ApiClient; onUnauthorized?: ()
 
   return (
     <div className="flex min-w-0 flex-col gap-6">
-      <div className="flex items-center justify-between gap-2">
-        <h1 className="text-lg font-semibold">Retention</h1>
-        <Button asChild size="sm">
-          <Link to={ROUTES.retentionNew}>New retention report</Link>
-        </Button>
-      </div>
+      <PageHeader
+        title="Retention"
+        actions={
+          <Button asChild size="sm">
+            <Link to={ROUTES.retentionNew}>New retention report</Link>
+          </Button>
+        }
+      />
 
       <SavedReportList
         rows={reports === null ? null : reports.map(toRow)}

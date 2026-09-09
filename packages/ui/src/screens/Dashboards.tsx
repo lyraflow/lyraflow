@@ -5,6 +5,7 @@ import { ApiError } from '../api/client.js'
 import type { DashboardSummary } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
 import { ROUTES, dashboardPath } from '../app/Router.js'
+import { PageHeader } from '../components/PageHeader.js'
 import { Button } from '../components/ui/button.js'
 import { HomeStar } from './dashboards/HomeStar.js'
 import type { SavedReportRow } from './shared/SavedReportList.js'
@@ -119,12 +120,14 @@ export function Dashboards(props: { client: ApiClient; onUnauthorized?: () => vo
 
   return (
     <div className="flex min-w-0 flex-col gap-6">
-      <div className="flex items-center justify-between gap-2">
-        <h1 className="text-lg font-semibold">Dashboards</h1>
-        <Button asChild size="sm">
-          <Link to={ROUTES.dashboardNew}>New dashboard</Link>
-        </Button>
-      </div>
+      <PageHeader
+        title="Dashboards"
+        actions={
+          <Button asChild size="sm">
+            <Link to={ROUTES.dashboardNew}>New dashboard</Link>
+          </Button>
+        }
+      />
 
       {homeError && (
         <p role="alert" className="text-sm text-destructive">

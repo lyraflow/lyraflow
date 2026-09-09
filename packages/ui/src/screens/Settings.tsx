@@ -3,6 +3,7 @@ import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import type { ProjectIdentity, Usage } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
+import { PageHeader } from '../components/PageHeader.js'
 import { AboutSection } from './settings/AboutSection.js'
 import { LimitsSection } from './settings/LimitsSection.js'
 import { ProjectsSection } from './settings/ProjectsSection.js'
@@ -93,7 +94,7 @@ export function Settings(props: {
 
   return (
     <div className="flex min-w-0 flex-col gap-6">
-      <h1 className="text-lg font-semibold">Settings</h1>
+      <PageHeader title="Settings" />
 
       {error && (
         <p role="alert" className="text-sm text-destructive">
