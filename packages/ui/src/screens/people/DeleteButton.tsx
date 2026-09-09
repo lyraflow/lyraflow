@@ -189,7 +189,13 @@ export function DeleteButton(props: {
   }
 
   return (
-    <Button type="button" variant="outline" size="sm" onClick={() => setConfirming(true)}>
+    <Button
+      type="button"
+      variant="ghost"
+      size="sm"
+      className="text-destructive"
+      onClick={() => setConfirming(true)}
+    >
       Delete this person
     </Button>
   )

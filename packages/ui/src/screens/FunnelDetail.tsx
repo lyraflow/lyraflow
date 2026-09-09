@@ -479,18 +479,16 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
              * Offering an Edit link the server cannot honour would be its own
              * broken promise. */}
             {funnel != null && !funnel.stale && (
-              <Link
-                to={funnelEditPath(funnel.id)}
-                className="text-sm font-medium text-primary hover:underline"
-              >
-                Edit
-              </Link>
+              <Button asChild variant="outline" size="sm">
+                <Link to={funnelEditPath(funnel.id)}>Edit</Link>
+              </Button>
             )}
             {funnel != null && !confirmingDelete && (
               <Button
                 type="button"
-                variant="outline"
+                variant="ghost"
                 size="sm"
+                className="text-destructive"
                 onClick={() => setConfirmingDelete(true)}
               >
                 Delete

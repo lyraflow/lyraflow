@@ -221,18 +221,16 @@ export function SegmentDetail(props: { client: ApiClient; onUnauthorized?: () =>
              * has nothing to show it, same reasoning FunnelDetail withholds
              * Edit for a stale funnel's steps. */}
             {segment != null && !segment.stale && (
-              <Link
-                to={segmentEditPath(segment.id)}
-                className="text-sm font-medium text-primary hover:underline"
-              >
-                Edit
-              </Link>
+              <Button asChild variant="outline" size="sm">
+                <Link to={segmentEditPath(segment.id)}>Edit</Link>
+              </Button>
             )}
             {segment != null && !confirmingDelete && (
               <Button
                 type="button"
-                variant="outline"
+                variant="ghost"
                 size="sm"
+                className="text-destructive"
                 onClick={() => setConfirmingDelete(true)}
               >
                 Delete
