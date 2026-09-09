@@ -283,8 +283,19 @@ export function Feed(props: {
          * phone-width viewport. Without a cap this list -- being `w-fit` --
          * refuses to shrink and pushes the whole page into horizontal
          * scroll instead of scrolling in place.
+         *
+         * `overflow-y-hidden` rides along, and it is not decorative: setting
+         * only `overflow-x` leaves the y-axis's `visible` computing to
+         * `auto` per spec (a `visible`/non-`visible` pair on the same box is
+         * not allowed), not staying `visible`. `TabsList` is `h-9` with
+         * `p-[3px]` -- a 30px content box -- and `TabsTrigger` is
+         * `h-[calc(100%-1px)]`, which resolves against the list's 36px
+         * height to 35px, 5px taller than the box it sits in. That overflow
+         * is normally invisible; add `overflow-x-auto` without this and the
+         * newly-`auto` y-axis turns it into a real vertical scrollbar next
+         * to the "Rejected N" tab.
          */}
-        <TabsList className="max-w-full overflow-x-auto">
+        <TabsList className="max-w-full overflow-x-auto overflow-y-hidden">
           <TabsTrigger value="accepted">
             Accepted {formatBadgeCount(events.length, DEFAULT_LIMIT, eventsLoadFailed)}
           </TabsTrigger>
