@@ -5,6 +5,7 @@ import type { ApiClient } from '../api/client.js'
 import type { FunnelDefinition, FunnelRunResult, FunnelStep } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
 import { ROUTES, funnelPath } from '../app/Router.js'
+import { PageHeader } from '../components/PageHeader.js'
 import { Button } from '../components/ui/button.js'
 import { Input } from '../components/ui/input.js'
 import { Label } from '../components/ui/label.js'
@@ -382,7 +383,7 @@ export function FunnelBuilder(props: { client: ApiClient; onUnauthorized?: () =>
 
   return (
     <div className="flex min-w-0 max-w-xl flex-col gap-6">
-      <h1 className="text-lg font-semibold">{isEditing ? 'Edit funnel' : 'Create funnel'}</h1>
+      <PageHeader title={isEditing ? 'Edit funnel' : 'Create funnel'} />
 
       {loadError != null && (
         <p role="alert" className="text-sm text-destructive">

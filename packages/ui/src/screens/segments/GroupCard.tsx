@@ -6,6 +6,7 @@ import {
   MAX_TREE_NODES,
 } from '@lyraflow/core/segments/validate.js'
 import type { ApiClient } from '../../api/client.js'
+import { NativeSelect } from '../../components/NativeSelect.js'
 import { Button } from '../../components/ui/button.js'
 import { Label } from '../../components/ui/label.js'
 import { ConditionRow, NEGATE_PRESSED } from './ConditionRow.js'
@@ -302,19 +303,18 @@ export function GroupCard(props: {
     >
       <div className="flex flex-wrap items-center gap-2">
         <Label htmlFor={matchId}>Match</Label>
-        <select
+        <NativeSelect
           id={matchId}
           aria-label="Match"
           value={group.op}
           onChange={(e) => setOp(e.target.value as 'and' | 'or')}
-          className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground shadow-xs"
         >
           {/* From `MATCH_LABELS`, which the Add controls' own sentence below
            * reads as well -- see that record's doc comment for why the two
            * have to be the same words rather than merely mean the same. */}
           <option value="and">{MATCH_LABELS.and}</option>
           <option value="or">{MATCH_LABELS.or}</option>
-        </select>
+        </NativeSelect>
 
         {/* The root is never removable (tree.ts's removeAt rejects
          * `path === []` outright) and, after TreeEditor's normalisation,

@@ -3,6 +3,7 @@ import { Link } from 'react-router'
 import { type ApiClient, ApiError } from '../../api/client.js'
 import type { DashboardTileInput, TileKind } from '../../api/types.js'
 import { ROUTES } from '../../app/Router.js'
+import { NativeSelect } from '../../components/NativeSelect.js'
 import { Button } from '../../components/ui/button.js'
 
 /** One choosable row, flattened out of the three list shapes -- all this
@@ -172,11 +173,11 @@ export function AddTilePicker(props: {
 
   return (
     <div className="flex flex-wrap items-end gap-2">
-      <select
+      <NativeSelect
         aria-label="Report to add"
         value={chosen}
         onChange={(e) => setChosen(e.target.value)}
-        className="h-9 min-w-0 rounded-md border border-input bg-background px-2 text-foreground text-sm shadow-xs"
+        containerClassName="min-w-0"
       >
         <option value="">Choose a saved report…</option>
         {GROUPS.map((g) => {
@@ -198,7 +199,7 @@ export function AddTilePicker(props: {
             </optgroup>
           )
         })}
-      </select>
+      </NativeSelect>
       <Button
         type="button"
         size="sm"

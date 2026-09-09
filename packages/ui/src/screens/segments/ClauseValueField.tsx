@@ -1,5 +1,6 @@
 import { OPERATOR_FAMILY } from '@lyraflow/core/segments/ast.js'
 import type { Operator, RelativeWindow } from '@lyraflow/core/segments/ast.js'
+import { NativeSelect } from '../../components/NativeSelect.js'
 import { Input } from '../../components/ui/input.js'
 import { Label } from '../../components/ui/label.js'
 
@@ -85,16 +86,15 @@ export function ClauseValueField(props: {
         </div>
         <div className="flex min-w-0 flex-col gap-1">
           <Label htmlFor={`${id}-unit`}>Unit</Label>
-          <select
+          <NativeSelect
             id={`${id}-unit`}
             aria-label="Value unit"
             value={w.unit}
             onChange={(e) => onChange({ n: w.n, unit: e.target.value as RelativeWindow['unit'] })}
-            className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground shadow-xs"
           >
             <option value="hours">hours</option>
             <option value="days">days</option>
-          </select>
+          </NativeSelect>
         </div>
       </div>
     )

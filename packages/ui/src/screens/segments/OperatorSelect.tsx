@@ -1,4 +1,5 @@
 import type { Operator } from '@lyraflow/core/segments/ast.js'
+import { NativeSelect } from '../../components/NativeSelect.js'
 import { Label } from '../../components/ui/label.js'
 import { OPERATOR_GROUPS } from './vocabulary.js'
 
@@ -45,12 +46,11 @@ export function OperatorSelect(props: {
   return (
     <div className="flex min-w-0 flex-col gap-1">
       <Label htmlFor={id}>Operator</Label>
-      <select
+      <NativeSelect
         id={id}
         aria-label="Operator"
         value={value}
         onChange={(e) => onChange(e.target.value as Operator)}
-        className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground shadow-xs"
       >
         {groups.map((group) =>
           flat ? (
@@ -69,7 +69,7 @@ export function OperatorSelect(props: {
             </optgroup>
           ),
         )}
-      </select>
+      </NativeSelect>
     </div>
   )
 }

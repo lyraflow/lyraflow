@@ -349,6 +349,19 @@ describe('Shell', () => {
     expect(screen.getByRole('link', { name: /funnels/i })).not.toHaveAttribute('aria-current')
     expect(screen.getByRole('link', { name: /settings/i })).not.toHaveAttribute('aria-current')
   })
+
+  // Without a ceiling, every table stretches the full width of whatever
+  // monitor it is opened on -- the person profile leaves its right half
+  // empty at 2560px and a feed row's Time and Path columns end up a foot
+  // apart. `main` still fills the viewport; its CONTENT is what is bounded.
+  it('bounds the content width inside main', () => {
+    renderShell()
+    const main = document.querySelector('main')
+    expect(main).not.toBeNull()
+    const container = main?.firstElementChild
+    expect(container).toHaveClass('mx-auto')
+    expect(container).toHaveClass('max-w-[1400px]')
+  })
 })
 
 describe('Shell — archived projects in the switcher', () => {

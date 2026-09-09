@@ -1,5 +1,6 @@
 import { CONTEXT_FIELDS, OPERATOR_FAMILY } from '@lyraflow/core/segments/ast.js'
 import type { Context, ContextField } from '@lyraflow/core/segments/ast.js'
+import { NativeSelect } from '../../components/NativeSelect.js'
 import { Label } from '../../components/ui/label.js'
 import { ClauseValueField } from './ClauseValueField.js'
 import { OperatorSelect } from './OperatorSelect.js'
@@ -34,32 +35,30 @@ export function ContextForm(props: {
     <div className="flex min-w-0 flex-wrap items-end gap-2">
       <div className="flex min-w-0 flex-col gap-1">
         <Label htmlFor={fieldId}>Field</Label>
-        <select
+        <NativeSelect
           id={fieldId}
           aria-label="Field"
           value={node.field}
           onChange={(e) => onChange({ ...node, field: e.target.value as ContextField })}
-          className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground shadow-xs"
         >
           {CONTEXT_FIELDS.map((field) => (
             <option key={field} value={field}>
               {field}
             </option>
           ))}
-        </select>
+        </NativeSelect>
       </div>
       <div className="flex min-w-0 flex-col gap-1">
         <Label htmlFor={scopeId}>Scope</Label>
-        <select
+        <NativeSelect
           id={scopeId}
           aria-label="Scope"
           value={node.scope}
           onChange={(e) => onChange({ ...node, scope: e.target.value as Context['scope'] })}
-          className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground shadow-xs"
         >
           <option value="latest">latest</option>
           <option value="first_touch">first touch</option>
-        </select>
+        </NativeSelect>
       </div>
       <OperatorSelect
         id={operatorId}

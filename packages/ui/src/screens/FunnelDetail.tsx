@@ -5,6 +5,7 @@ import type { ApiClient } from '../api/client.js'
 import type { Funnel, FunnelRunResult, Segment } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
 import { ROUTES, funnelEditPath } from '../app/Router.js'
+import { PageHeader } from '../components/PageHeader.js'
 import { Button } from '../components/ui/button.js'
 import { FunnelFlowOrBars } from './funnels/FunnelFlowOrBars.js'
 import type { RangeDays } from './funnels/RangePicker.js'
@@ -445,7 +446,7 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
   if (validId == null) {
     return (
       <div className="flex flex-col gap-4">
-        <h1 className="text-lg font-semibold">Funnel</h1>
+        <PageHeader title="Funnel" />
         <p role="alert" className="text-sm text-destructive">
           This funnel no longer exists.
         </p>
@@ -458,44 +459,44 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
 
   return (
     <div className="flex min-w-0 flex-col gap-6">
-      <div className="flex items-center justify-between gap-2">
-        {/* `min-w-0 break-words` (#218), and `shrink-0` on the controls
-         * beside it. A funnel name is operator-supplied and is often one
-         * long unbroken token. This row is `flex ... justify-between`, so
-         * without `min-w-0` the heading refuses to shrink below its widest
-         * child and without `break-words` that child is the whole name --
-         * the row grew to 733px against a 390px viewport and carried Edit
-         * and Delete outside it, which made a long-named funnel impossible
-         * to edit or delete from this screen. `break-words` rather than
-         * `break-all`, so an ordinary multi-word name still breaks at its
-         * spaces -- the same distinction `SavedReportList` draws for a
-         * report name, for the same reason. */}
-        <h1 className="min-w-0 break-words text-lg font-semibold">{funnel?.name ?? 'Funnel'}</h1>
-        <div className="flex shrink-0 items-center gap-3">
-          {/* A funnel whose stored `steps` no longer parse cannot be opened in
-           * the builder -- `FunnelBuilder` (Task 6) has nothing to show it.
-           * Offering an Edit link the server cannot honour would be its own
-           * broken promise. */}
-          {funnel != null && !funnel.stale && (
-            <Link
-              to={funnelEditPath(funnel.id)}
-              className="text-sm font-medium text-primary hover:underline"
-            >
-              Edit
-            </Link>
-          )}
-          {funnel != null && !confirmingDelete && (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => setConfirmingDelete(true)}
-            >
-              Delete
-            </Button>
-          )}
-        </div>
-      </div>
+      {/* `min-w-0 break-words` (#218), and `shrink-0` on the controls
+       * beside it. A funnel name is operator-supplied and is often one
+       * long unbroken token. This row is `flex ... justify-between`, so
+       * without `min-w-0` the heading refuses to shrink below its widest
+       * child and without `break-words` that child is the whole name --
+       * the row grew to 733px against a 390px viewport and carried Edit
+       * and Delete outside it, which made a long-named funnel impossible
+       * to edit or delete from this screen. `break-words` rather than
+       * `break-all`, so an ordinary multi-word name still breaks at its
+       * spaces -- the same distinction `SavedReportList` draws for a
+       * report name, for the same reason. */}
+      <PageHeader
+        title={funnel?.name ?? 'Funnel'}
+        actions={
+          <>
+            {/* A funnel whose stored `steps` no longer parse cannot be opened in
+             * the builder -- `FunnelBuilder` (Task 6) has nothing to show it.
+             * Offering an Edit link the server cannot honour would be its own
+             * broken promise. */}
+            {funnel != null && !funnel.stale && (
+              <Button asChild variant="outline" size="sm">
+                <Link to={funnelEditPath(funnel.id)}>Edit</Link>
+              </Button>
+            )}
+            {funnel != null && !confirmingDelete && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="text-destructive"
+                onClick={() => setConfirmingDelete(true)}
+              >
+                Delete
+              </Button>
+            )}
+          </>
+        }
+      />
 
       {/* A second, explicit click behind the first -- deletion has no undo,
        * so this screen never treats one click on "Delete" as consent. */}

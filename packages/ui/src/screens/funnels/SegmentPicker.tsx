@@ -2,6 +2,7 @@ import { useEffect, useId, useState } from 'react'
 import { ApiError } from '../../api/client.js'
 import type { ApiClient } from '../../api/client.js'
 import type { Segment } from '../../api/types.js'
+import { NativeSelect } from '../../components/NativeSelect.js'
 import { Label } from '../../components/ui/label.js'
 
 /**
@@ -83,8 +84,9 @@ export function SegmentPicker(props: {
   return (
     <div className="flex flex-col gap-1">
       <Label htmlFor={id}>Segment</Label>
-      <select
+      <NativeSelect
         id={id}
+        className="w-full"
         value={selectedMissing ? 'missing' : value == null ? '' : String(value)}
         onChange={(e) => {
           const next = e.target.value
@@ -93,7 +95,6 @@ export function SegmentPicker(props: {
           if (next === 'missing') return
           onChange(next === '' ? null : Number(next))
         }}
-        className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground shadow-xs"
       >
         <option value="">Everyone</option>
         {/* Rendered ONLY while genuinely unresolvable, and SELECTED -- this
@@ -112,7 +113,7 @@ export function SegmentPicker(props: {
             {s.stale ? ' -- cannot be read' : ''}
           </option>
         ))}
-      </select>
+      </NativeSelect>
       {loadError && (
         <p role="alert" className="text-xs text-destructive">
           Could not load segments. Everyone is available; reload to try again for the rest.

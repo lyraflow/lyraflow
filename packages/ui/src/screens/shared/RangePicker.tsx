@@ -1,3 +1,4 @@
+import { NativeSelect } from '../../components/NativeSelect.js'
 import { Input } from '../../components/ui/input.js'
 import { Label } from '../../components/ui/label.js'
 import { CUSTOM, RANGE_PRESETS, type RangeChoice } from './range.js'
@@ -44,19 +45,18 @@ export function RangePicker(props: {
     <>
       <div className="flex min-w-0 flex-col gap-1">
         <Label htmlFor={id}>Range</Label>
-        <select
+        <NativeSelect
           id={id}
           aria-label="Range"
           value={value.preset}
           onChange={(e) => onChange({ ...value, preset: e.target.value as RangeChoice['preset'] })}
-          className="h-9 rounded-md border border-input bg-background px-2 text-foreground text-sm shadow-xs"
         >
           {presets.map((p) => (
             <option key={p.id} value={p.id}>
               {p.label}
             </option>
           ))}
-        </select>
+        </NativeSelect>
       </div>
       {!presetsOnly && value.preset === CUSTOM && (
         <>

@@ -463,7 +463,15 @@ export function Shell(props: {
             <AccountMenu email={props.email} onLogout={props.onLogout} />
           </div>
         </header>
-        <main className="min-w-0 flex-1 overflow-auto p-6">{props.children}</main>
+        {/* `main` still fills the viewport and owns the scroll; the inner
+         * container is what is bounded. 1400px is wide enough that the funnel
+         * Sankey and the retention grid never lose room, and narrow enough
+         * that a 2560px monitor stops stretching a table across the whole
+         * desk. Screens that are genuinely single-column -- Profile, Settings
+         * -- bound themselves further at `max-w-3xl`. */}
+        <main className="min-w-0 flex-1 overflow-auto p-6">
+          <div className="mx-auto w-full max-w-[1400px]">{props.children}</div>
+        </main>
       </div>
     </div>
   )

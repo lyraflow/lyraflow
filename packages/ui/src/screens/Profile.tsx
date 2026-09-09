@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
+import { PageHeader } from '../components/PageHeader.js'
 import { Button } from '../components/ui/button.js'
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card.js'
 import { Input } from '../components/ui/input.js'
@@ -249,8 +250,8 @@ export function Profile(props: {
   onEmailChanged: () => void
 }) {
   return (
-    <div className="flex min-w-0 flex-col gap-4">
-      <h1 className="font-semibold text-xl">Profile</h1>
+    <div className="flex min-w-0 max-w-3xl flex-col gap-4">
+      <PageHeader title="Profile" />
       <AppearanceSection />
       <EmailForm client={props.client} email={props.email} onChanged={props.onEmailChanged} />
       <PasswordForm client={props.client} />

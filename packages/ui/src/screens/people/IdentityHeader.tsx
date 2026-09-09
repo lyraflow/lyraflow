@@ -38,7 +38,12 @@ export function IdentityHeader(props: { person: Person }) {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h1 className="break-all font-semibold text-lg">{person.person_id}</h1>
+        {/* `h2`, not h1 -- `People.tsx` renders every route in this
+         * section, including this one, inside the shared `Screen`
+         * wrapper, which already supplies the page's top-level heading
+         * (`PageHeader title="People"`). This id is a section heading
+         * under that page, not the page's own title. */}
+        <h2 className="break-all font-semibold text-lg">{person.person_id}</h2>
         <p className="text-muted-foreground text-sm">
           {person.events.toLocaleString('en-US')} events · first seen{' '}
           {formatDate(person.first_seen)} · last seen {formatDate(person.last_seen)}

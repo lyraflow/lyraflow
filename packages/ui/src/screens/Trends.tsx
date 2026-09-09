@@ -6,6 +6,8 @@ import type { TrendReportInput, TrendResult } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
 import { ROUTES, trendReportPath } from '../app/Router.js'
 import { EventCombobox } from '../components/EventCombobox.js'
+import { NativeSelect } from '../components/NativeSelect.js'
+import { PageHeader } from '../components/PageHeader.js'
 import { Button } from '../components/ui/button.js'
 import { Input } from '../components/ui/input.js'
 import { Label } from '../components/ui/label.js'
@@ -501,29 +503,27 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
 
   return (
     <section className="flex flex-col gap-6">
-      <div className="flex items-center justify-between gap-2">
-        <header className="flex flex-col gap-1">
-          <h1 className="font-semibold text-xl">Trends</h1>
-          <p className="text-muted-foreground text-sm">
-            How many of an event over time, and how that splits by a property or a column.
-          </p>
-        </header>
-        <div className="flex items-center gap-3">
-          {/* Only for a saved report -- there is nothing to delete at
+      <PageHeader
+        title="Trends"
+        subtitle="How many of an event over time, and how that splits by a property or a column."
+        actions={
+          /* Only for a saved report -- there is nothing to delete at
            * `/trends/new`, same reasoning `FunnelDetail` gates its own Delete
-           * on `funnel != null`. */}
-          {reportId != null && !confirmingDelete && (
+           * on `funnel != null`. */
+          reportId != null &&
+          !confirmingDelete && (
             <Button
               type="button"
-              variant="outline"
+              variant="ghost"
               size="sm"
+              className="text-destructive"
               onClick={() => setConfirmingDelete(true)}
             >
               Delete
             </Button>
-          )}
-        </div>
-      </div>
+          )
+        }
+      />
 
       {reportError != null && (
         <p role="alert" className="text-sm text-destructive">
@@ -604,19 +604,18 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
         />
         <div className="flex min-w-0 flex-col gap-1">
           <Label htmlFor="trend-interval">Resolution</Label>
-          <select
+          <NativeSelect
             id="trend-interval"
             aria-label="Resolution"
             value={params.interval}
             onChange={(e) => update({ interval: e.target.value as TrendParams['interval'] })}
-            className="h-9 rounded-md border border-input bg-background px-2 text-foreground text-sm shadow-xs"
           >
             {INTERVALS.map((i) => (
               <option key={i} value={i}>
                 {INTERVAL_LABELS[i]}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </div>
         <RangePicker
           id="trend-range"

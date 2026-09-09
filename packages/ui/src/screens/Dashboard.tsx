@@ -4,6 +4,7 @@ import { type ApiClient, ApiError } from '../api/client.js'
 import type { DashboardTileInput, Dashboard as DashboardWire, ResolvedTile } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
 import { ROUTES } from '../app/Router.js'
+import { PageHeader } from '../components/PageHeader.js'
 import { Button } from '../components/ui/button.js'
 import { Input } from '../components/ui/input.js'
 import { AddTilePicker } from './dashboards/AddTilePicker.js'
@@ -334,6 +335,50 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
     )
   }
 
+  // Shared between the editing and view-mode rows below so the four
+  // controls are written once rather than duplicated per branch.
+  const nameActions = (
+    <>
+      {/* In BOTH modes, unlike every other control in this group. Which
+       * dashboard `/` opens is a fact about this dashboard rather than
+       * an edit to its contents, and it was the one thing a viewer
+       * could not see without entering a mode that also offers Delete.
+       * The star reads as a state when it is filled, which the old
+       * `Home`/`Set as home` button could not do at a glance. */}
+      {dash && (
+        <HomeStar
+          isHome={dash.is_home}
+          disabled={saving}
+          onToggle={() => patch({ is_home: !dash.is_home })}
+        />
+      )}
+      {dash && editing && !confirmingDelete && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="text-destructive"
+          onClick={() => setConfirmingDelete(true)}
+        >
+          Delete
+        </Button>
+      )}
+      {/* View mode only -- editing already closes the card
+       * (`setEditing`), and offering both at once would mean a viewer
+       * shares a layout mid-edit that the server has not seen yet. */}
+      {dash && !editing && (
+        <Button type="button" variant="outline" size="sm" onClick={() => setSharing((s) => !s)}>
+          Share
+        </Button>
+      )}
+      {dash && (
+        <Button type="button" size="sm" onClick={() => setEditing(!editing)}>
+          {editing ? 'Done' : 'Edit'}
+        </Button>
+      )}
+    </>
+  )
+
   return (
     <div className="flex min-w-0 flex-col gap-6">
       {/* The sidebar's Dashboards entry and the Lyraflow mark both now open
@@ -344,8 +389,8 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
       <Link to={ROUTES.dashboards} className="text-sm text-muted-foreground hover:underline">
         All dashboards
       </Link>
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        {editing && dash ? (
+      {editing && dash ? (
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <Input
             aria-label="Dashboard name"
             value={nameDraft}
@@ -357,48 +402,11 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
             maxLength={200}
             className="max-w-sm"
           />
-        ) : (
-          <h1 className="min-w-0 break-words font-semibold text-lg">{dash?.name ?? 'Dashboard'}</h1>
-        )}
-        <div className="flex flex-wrap gap-2">
-          {/* In BOTH modes, unlike every other control in this group. Which
-           * dashboard `/` opens is a fact about this dashboard rather than
-           * an edit to its contents, and it was the one thing a viewer
-           * could not see without entering a mode that also offers Delete.
-           * The star reads as a state when it is filled, which the old
-           * `Home`/`Set as home` button could not do at a glance. */}
-          {dash && (
-            <HomeStar
-              isHome={dash.is_home}
-              disabled={saving}
-              onToggle={() => patch({ is_home: !dash.is_home })}
-            />
-          )}
-          {dash && editing && !confirmingDelete && (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => setConfirmingDelete(true)}
-            >
-              Delete
-            </Button>
-          )}
-          {/* View mode only -- editing already closes the card
-           * (`setEditing`), and offering both at once would mean a viewer
-           * shares a layout mid-edit that the server has not seen yet. */}
-          {dash && !editing && (
-            <Button type="button" variant="outline" size="sm" onClick={() => setSharing((s) => !s)}>
-              Share
-            </Button>
-          )}
-          {dash && (
-            <Button type="button" size="sm" onClick={() => setEditing(!editing)}>
-              {editing ? 'Done' : 'Edit'}
-            </Button>
-          )}
+          <div className="flex flex-wrap gap-2">{nameActions}</div>
         </div>
-      </div>
+      ) : (
+        <PageHeader title={dash?.name ?? 'Dashboard'} actions={nameActions} />
+      )}
 
       {dash && sharing && (
         <ShareCard

@@ -6,6 +6,7 @@ import { ApiError } from '../api/client.js'
 import type { Segment } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
 import { ROUTES, segmentPath } from '../app/Router.js'
+import { PageHeader } from '../components/PageHeader.js'
 import { Button } from '../components/ui/button.js'
 import { formatRelative } from './funnels/format.js'
 import { summarise } from './segments/summarise.js'
@@ -98,12 +99,14 @@ export function Segments(props: {
 
   return (
     <div className="flex min-w-0 flex-col gap-6">
-      <div className="flex items-center justify-between gap-2">
-        <h1 className="text-lg font-semibold">Segments</h1>
-        <Button asChild size="sm">
-          <Link to={ROUTES.segmentNew}>Create segment</Link>
-        </Button>
-      </div>
+      <PageHeader
+        title="Segments"
+        actions={
+          <Button asChild size="sm">
+            <Link to={ROUTES.segmentNew}>Create segment</Link>
+          </Button>
+        }
+      />
 
       {error && (
         <p role="alert" className="text-sm text-destructive">

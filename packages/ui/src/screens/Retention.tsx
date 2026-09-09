@@ -6,6 +6,8 @@ import type { RetentionReportInput, RetentionResult } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
 import { ROUTES, retentionReportPath } from '../app/Router.js'
 import { EventCombobox } from '../components/EventCombobox.js'
+import { NativeSelect } from '../components/NativeSelect.js'
+import { PageHeader } from '../components/PageHeader.js'
 import { Button } from '../components/ui/button.js'
 import { Input } from '../components/ui/input.js'
 import { Label } from '../components/ui/label.js'
@@ -520,30 +522,27 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
 
   return (
     <section className="flex flex-col gap-6">
-      <div className="flex items-center justify-between gap-2">
-        <header className="flex flex-col gap-1">
-          <h1 className="font-semibold text-xl">Retention</h1>
-          <p className="text-muted-foreground text-sm">
-            Of the people who did one thing in a period, how many came back and did another in the
-            periods after it.
-          </p>
-        </header>
-        <div className="flex items-center gap-3">
-          {/* Only for a saved report -- there is nothing to delete at
+      <PageHeader
+        title="Retention"
+        subtitle="Of the people who did one thing in a period, how many came back and did another in the periods after it."
+        actions={
+          /* Only for a saved report -- there is nothing to delete at
            * `/retention/new`, same reasoning `FunnelDetail` gates its own
-           * Delete on `funnel != null`. */}
-          {reportId != null && !confirmingDelete && (
+           * Delete on `funnel != null`. */
+          reportId != null &&
+          !confirmingDelete && (
             <Button
               type="button"
-              variant="outline"
+              variant="ghost"
               size="sm"
+              className="text-destructive"
               onClick={() => setConfirmingDelete(true)}
             >
               Delete
             </Button>
-          )}
-        </div>
-      </div>
+          )
+        }
+      />
 
       {reportError != null && (
         <p role="alert" className="text-sm text-destructive">
@@ -650,21 +649,20 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
       <div className="flex flex-wrap items-end gap-3">
         <div className="flex min-w-0 flex-col gap-1">
           <Label htmlFor="retention-granularity">Period</Label>
-          <select
+          <NativeSelect
             id="retention-granularity"
             aria-label="Period"
             value={params.granularity}
             onChange={(e) =>
               update({ granularity: e.target.value as RetentionParams['granularity'] })
             }
-            className="h-9 rounded-md border border-input bg-background px-2 text-foreground text-sm shadow-xs"
           >
             {GRANULARITIES.map((g) => (
               <option key={g} value={g}>
                 {g}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </div>
         <div className="flex min-w-0 flex-col gap-1">
           <Label htmlFor="retention-periods">Periods</Label>

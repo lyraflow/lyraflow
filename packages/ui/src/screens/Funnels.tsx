@@ -5,6 +5,7 @@ import { ApiError } from '../api/client.js'
 import type { Funnel } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
 import { ROUTES, funnelPath } from '../app/Router.js'
+import { PageHeader } from '../components/PageHeader.js'
 import { Badge } from '../components/ui/badge.js'
 import { Button } from '../components/ui/button.js'
 import {
@@ -165,12 +166,14 @@ export function Funnels(props: {
 
   return (
     <div className="flex min-w-0 flex-col gap-6">
-      <div className="flex items-center justify-between gap-2">
-        <h1 className="text-lg font-semibold">Funnels</h1>
-        <Button asChild size="sm">
-          <Link to={ROUTES.funnelNew}>Create funnel</Link>
-        </Button>
-      </div>
+      <PageHeader
+        title="Funnels"
+        actions={
+          <Button asChild size="sm">
+            <Link to={ROUTES.funnelNew}>Create funnel</Link>
+          </Button>
+        }
+      />
 
       {error && (
         <p role="alert" className="text-sm text-destructive">

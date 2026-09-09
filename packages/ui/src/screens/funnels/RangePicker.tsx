@@ -1,3 +1,4 @@
+import { NativeSelect } from '../../components/NativeSelect.js'
 import { Label } from '../../components/ui/label.js'
 
 /** The four ranges this screen offers. Deliberately a fixed set, not free
@@ -30,18 +31,17 @@ export function RangePicker(props: { days: RangeDays; onChange: (days: RangeDays
   return (
     <div className="flex items-center gap-2">
       <Label htmlFor="funnel-range">Range</Label>
-      <select
+      <NativeSelect
         id="funnel-range"
         value={days}
         onChange={(e) => onChange(Number(e.target.value) as RangeDays)}
-        className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground shadow-xs"
       >
         {RANGE_DAY_OPTIONS.map((d) => (
           <option key={d} value={d}>
             Last {d} day{d === 1 ? '' : 's'}
           </option>
         ))}
-      </select>
+      </NativeSelect>
     </div>
   )
 }

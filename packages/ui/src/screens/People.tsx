@@ -6,6 +6,7 @@ import type { ApiClient } from '../api/client.js'
 import type { LyraEvent, Person } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
 import { DetailSection } from '../components/DetailList.js'
+import { PageHeader } from '../components/PageHeader.js'
 import { Button } from '../components/ui/button.js'
 import { Input } from '../components/ui/input.js'
 import { Label } from '../components/ui/label.js'
@@ -129,7 +130,7 @@ function LookupForm(props: {
 function Screen(props: { children: ReactNode }) {
   return (
     <div className="flex flex-col gap-6">
-      <h1 className="font-semibold text-lg">People</h1>
+      <PageHeader title="People" />
       {props.children}
     </div>
   )

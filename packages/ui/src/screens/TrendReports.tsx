@@ -6,6 +6,7 @@ import { ApiError } from '../api/client.js'
 import type { TrendReport } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
 import { ROUTES, trendReportPath } from '../app/Router.js'
+import { PageHeader } from '../components/PageHeader.js'
 import { Button } from '../components/ui/button.js'
 import type { SavedReportRow } from './shared/SavedReportList.js'
 import { SavedReportList } from './shared/SavedReportList.js'
@@ -108,12 +109,14 @@ export function TrendReports(props: { client: ApiClient; onUnauthorized?: () => 
 
   return (
     <div className="flex min-w-0 flex-col gap-6">
-      <div className="flex items-center justify-between gap-2">
-        <h1 className="text-lg font-semibold">Trends</h1>
-        <Button asChild size="sm">
-          <Link to={ROUTES.trendNew}>New trend</Link>
-        </Button>
-      </div>
+      <PageHeader
+        title="Trends"
+        actions={
+          <Button asChild size="sm">
+            <Link to={ROUTES.trendNew}>New trend</Link>
+          </Button>
+        }
+      />
 
       <SavedReportList
         rows={reports === null ? null : reports.map(toRow)}

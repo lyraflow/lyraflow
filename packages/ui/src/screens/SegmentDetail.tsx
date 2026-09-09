@@ -8,6 +8,7 @@ import type { ApiClient } from '../api/client.js'
 import type { Segment, SegmentPreview } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
 import { ROUTES, segmentEditPath } from '../app/Router.js'
+import { PageHeader } from '../components/PageHeader.js'
 import { Button } from '../components/ui/button.js'
 import { WarningPanel } from './funnels/WarningPanel.js'
 import { formatRelative } from './funnels/format.js'
@@ -197,7 +198,7 @@ export function SegmentDetail(props: { client: ApiClient; onUnauthorized?: () =>
   if (validId == null) {
     return (
       <div className="flex flex-col gap-4">
-        <h1 className="text-lg font-semibold">Segment</h1>
+        <PageHeader title="Segment" />
         <p role="alert" className="text-sm text-destructive">
           This segment no longer exists.
         </p>
@@ -207,37 +208,37 @@ export function SegmentDetail(props: { client: ApiClient; onUnauthorized?: () =>
 
   return (
     <div className="flex min-w-0 flex-col gap-6">
-      <div className="flex items-center justify-between gap-2">
-        {/* Same header shape and same defect as `FunnelDetail` (#218,
-         * filed against funnels alone): a segment name is operator-supplied
-         * too, and this row is the identical `flex ... justify-between`
-         * with Edit and Delete on the right. See that file's comment for
-         * why `break-words` and not `break-all`. */}
-        <h1 className="min-w-0 break-words text-lg font-semibold">{segment?.name ?? 'Segment'}</h1>
-        <div className="flex shrink-0 items-center gap-3">
-          {/* A stale segment's stored filter cannot be read -- SegmentBuilder
-           * has nothing to show it, same reasoning FunnelDetail withholds
-           * Edit for a stale funnel's steps. */}
-          {segment != null && !segment.stale && (
-            <Link
-              to={segmentEditPath(segment.id)}
-              className="text-sm font-medium text-primary hover:underline"
-            >
-              Edit
-            </Link>
-          )}
-          {segment != null && !confirmingDelete && (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => setConfirmingDelete(true)}
-            >
-              Delete
-            </Button>
-          )}
-        </div>
-      </div>
+      {/* Same header shape and same defect as `FunnelDetail` (#218,
+       * filed against funnels alone): a segment name is operator-supplied
+       * too, and this row is the identical `flex ... justify-between`
+       * with Edit and Delete on the right. See that file's comment for
+       * why `break-words` and not `break-all`. */}
+      <PageHeader
+        title={segment?.name ?? 'Segment'}
+        actions={
+          <>
+            {/* A stale segment's stored filter cannot be read -- SegmentBuilder
+             * has nothing to show it, same reasoning FunnelDetail withholds
+             * Edit for a stale funnel's steps. */}
+            {segment != null && !segment.stale && (
+              <Button asChild variant="outline" size="sm">
+                <Link to={segmentEditPath(segment.id)}>Edit</Link>
+              </Button>
+            )}
+            {segment != null && !confirmingDelete && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="text-destructive"
+                onClick={() => setConfirmingDelete(true)}
+              >
+                Delete
+              </Button>
+            )}
+          </>
+        }
+      />
 
       {/* A second, explicit click behind the first -- deletion has no undo,
        * so this screen never treats one click on "Delete" as consent. */}

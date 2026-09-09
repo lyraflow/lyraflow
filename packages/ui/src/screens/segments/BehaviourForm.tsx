@@ -2,6 +2,7 @@ import { AGGREGATES } from '@lyraflow/core/segments/ast.js'
 import type { Aggregate, Behavior } from '@lyraflow/core/segments/ast.js'
 import type { ApiClient } from '../../api/client.js'
 import { EventCombobox } from '../../components/EventCombobox.js'
+import { NativeSelect } from '../../components/NativeSelect.js'
 import { Label } from '../../components/ui/label.js'
 import { OperatorSelect } from './OperatorSelect.js'
 import { PropertyCombobox } from './PropertyCombobox.js'
@@ -92,19 +93,18 @@ export function BehaviourForm(props: {
         />
         <div className="flex min-w-0 flex-col gap-1">
           <Label htmlFor={aggregateId}>Aggregate</Label>
-          <select
+          <NativeSelect
             id={aggregateId}
             aria-label="Aggregate"
             value={node.aggregate}
             onChange={(e) => setAggregate(e.target.value as Aggregate)}
-            className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground shadow-xs"
           >
             {AGGREGATES.map((a) => (
               <option key={a} value={a}>
                 {a}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </div>
         {node.aggregate !== 'count' && (
           <PropertyCombobox

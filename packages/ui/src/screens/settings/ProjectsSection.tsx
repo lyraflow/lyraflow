@@ -316,8 +316,9 @@ function ProjectRow(props: {
                 ) : (
                   <Button
                     type="button"
+                    variant="ghost"
                     size="sm"
-                    variant="outline"
+                    className="text-destructive"
                     onClick={() => setConfirmDelete(true)}
                   >
                     Delete
