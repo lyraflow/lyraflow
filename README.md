@@ -11,42 +11,62 @@ Lyraflow records what people do in your product, stitches anonymous visits to
 known accounts, and lets you ask who did what. It runs on your own machine
 under Docker, and nothing leaves it.
 
-> **Early days.** v0.15 is the API and the operations behind it — ingest,
-> identity, segments, funnels, event reads, privacy, retention, quotas and
-> backup — with a web UI over the top: a live event feed where any event opens
-> to show everything it arrived with, funnels that read as a flow and whose
-> steps can gate on who someone is as well as what they did, a segment builder
-> that filters on an event's own attributes as well as its properties, and
-> settings for your projects and your own account. Clicking a funnel step or a
-> segment lists the people behind the number, with their traits.
+<!-- readme-only:start -->
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://lyraflow.app/shots/feed-dark.webp?v=0.16">
+  <img src="https://lyraflow.app/shots/feed-light.webp?v=0.16" width="900" alt="The live event feed: a table of events with the person who sent each one, the time, and the properties it arrived with.">
+</picture>
+
+**Five minutes, most of it waiting for Docker.**
+
+```sh
+git clone https://github.com/lyraflow/lyraflow.git
+cd lyraflow
+./install.sh
+docker compose exec lyraflow node packages/cli/dist/index.js create-project "My App"
+```
+
+That generates passwords into `.env`, starts three containers, waits until the
+app answers on port 3000, and prints a write key and a server key.
+[Getting started](#getting-started) is the same four steps with everything that
+matters said out loud: the Compose version this needs, serving HTTPS on a
+domain, the snippet, and your first event from a backend. Nothing to look at in
+a fresh install? [Demo data](#demo-data) fills one with generated people and
+events.
+
+Saved reports sit together on a dashboard, and one dashboard can be the screen
+you land on:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://lyraflow.app/shots/dashboard-dark.webp?v=0.16">
+  <img src="https://lyraflow.app/shots/dashboard-light.webp?v=0.16" width="900" alt="A dashboard: a funnel, a trends chart, a retention grid and a segment count as tiles on one screen.">
+</picture>
+
+**Documentation.** Every section below is also a page at
+[lyraflow.app/docs](https://lyraflow.app/docs/).
+
+| | |
+| --- | --- |
+| **Start here** | [Getting started](#getting-started) · [Demo data](#demo-data) · [Web UI](#web-ui) |
+| **Sending data in** | [The ingest API](#the-ingest-api) · [From a browser](#sending-events-from-a-browser) · [Identity resolution](#identity-resolution) · [More than one site](#tracking-more-than-one-site) |
+| **Asking questions** | [Segments](#segments) · [Funnels](#funnels) · [Trends](#trends) · [Retention](#retention) · [Dashboards](#dashboards) · [Reading events](#reading-events) |
+| **Running it** | [Operations](#operations) · [Privacy: deletion and export](#privacy-deletion-and-export) · [Upgrading](#upgrading) |
+
+<!-- readme-only:end -->
+
+> **Early days.** v0.16 is the HTTP API and the operations behind it — ingest,
+> identity, segments, funnels, trends, retention grids, dashboards, event
+> reads, privacy, retention, quotas and backup — with a web UI over all of it.
+> [Web UI](#web-ui) walks every screen and says, screen by screen, what each
+> one does not do yet; [the changelog](CHANGELOG.md) says what each release
+> added.
 >
-> This release finishes the reporting line it started: **retention grids** — of
-> the people who did one thing in a period, how many came back and did another
-> — and **trends**, an event over time split by a property or a column. Both
-> take conditions on the events they name, so one event name can mean two
-> things, and a condition can now ask for text, presence, a flag or a relative
-> date rather than only equality and ordering.
->
-> There is now a **person profile**: their stitched identity, traits, latest
-> context and full event history, opened from a segment member row, a funnel
-> step's people panel, the feed, the sidebar, or either of the two ways in on
-> the screen itself — a lookup box for an id you already have, and a **trait
-> search** for when you have none, which pages through everyone matching and
-> links each row to a profile, where there is one to open: a visitor who was
-> never identified has events and no profile, and that link 404s. The search
-> takes one condition on one named trait, with the operator list a segment
-> condition has — comparison, text matching, presence, true/false, relative
-> date. What it will not do is combine conditions, look for a value across
-> every trait at once, or list **everyone** without naming a condition at all.
-> Journeys and path analysis are still ahead. Trends and
-> retention grids can now be saved and reopened, the same way a funnel
-> already could — but the range one ran over is not part of what gets
-> saved, so reopening a report runs the stored question over whatever
-> range is currently on screen, never the range it was created with.
-> Several saved reports can sit side by side on a dashboard, and one
-> dashboard can be the screen you land on — the range is the viewer's
-> choice there too, never part of the dashboard. See
-> [Web UI](#web-ui) for exactly what exists and what does not.
+> The largest gaps today: journeys and path analysis do not exist. A saved
+> trend or retention report stores its question but not the range it ran over,
+> so reopening one runs it over whatever range is on screen. Trait search takes
+> one condition on one named trait, and cannot combine two or search every
+> trait at once.
 
 ## What it is good at
 
