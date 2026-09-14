@@ -43,6 +43,13 @@ you land on:
   <img src="https://lyraflow.app/shots/dashboard-light.webp?v=0.16" width="900" alt="A dashboard: a funnel, a trends chart, a retention grid and a segment count as tiles on one screen.">
 </picture>
 
+**Live demo.** [demo.lyraflow.app](https://demo.lyraflow.app/) is a running
+Lyraflow, signed in with `demo@lyraflow.app` / `lyraflow-demo`. It is one shared
+instance filled with generated people and events — everyone who opens it is in
+the same session — and it rebuilds itself every hour, so nothing you do there
+survives and nothing real belongs in it. Deletions are refused rather than
+performed.
+
 **Documentation.** Every section below is also a page at
 [lyraflow.app/docs](https://lyraflow.app/docs/).
 
