@@ -26,7 +26,7 @@
     "@lyraflow/core": "workspace:*"
   },
   "devDependencies": {
-    "esbuild": "^0.24.0",
+    "esbuild": "^0.28.1",
     "happy-dom": "^15.11.0"
   }
 }
