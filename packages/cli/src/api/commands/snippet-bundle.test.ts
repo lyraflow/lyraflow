@@ -159,7 +159,25 @@ function newPage(): {
   requests: CapturedRequest[]
   api: () => SnippetApi
 } {
-  const win = new Window({ url: 'https://shop.example.test/checkout' })
+  // `enableJavaScriptEvaluation` is what makes the three `run()` calls below do
+  // anything. happy-dom 20 turned inline `<script>` evaluation into an opt-in
+  // — a script appended to a document is parsed and left inert unless this is
+  // set. Without it every `run()` here is a no-op that still returns normally,
+  // so `window.lyraflow` is simply never defined and the failure arrives as
+  // `Cannot read properties of undefined`, several lines after the call that
+  // actually did nothing.
+  const win = new Window({
+    url: 'https://shop.example.test/checkout',
+    settings: {
+      enableJavaScriptEvaluation: true,
+      // The warning that setting raises is about running UNTRUSTED code in a
+      // VM context. What runs here is this repo's own built bundle and the
+      // snippet parsed out of its own README — fixed inputs, both of them
+      // checked in. Left on, it prints eleven lines of stderr per window and
+      // buries the test output.
+      suppressInsecureJavaScriptEnvironmentWarning: true,
+    },
+  })
   open.push(win)
 
   // The fake transport. Installed before any SDK code runs, because
