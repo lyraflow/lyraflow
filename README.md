@@ -47,8 +47,8 @@ you land on:
 Lyraflow, signed in with `demo@lyraflow.app` / `lyraflow-demo`. It is one shared
 instance filled with generated people and events — everyone who opens it is in
 the same session — and it rebuilds itself every hour, so nothing you do there
-survives and nothing real belongs in it. Deletions are refused rather than
-performed.
+survives and nothing real belongs in it. Deleting a person is refused there;
+everything else you can delete, and the rebuild brings it back.
 
 **Documentation.** Every section below is also a page at
 [lyraflow.app/docs](https://lyraflow.app/docs/).
