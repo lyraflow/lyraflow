@@ -297,12 +297,16 @@ its defaults. Nothing it writes could be mistaken for a real person or
 company: identifiers are prefixed `demo-`, names are "Demo Person 0042",
 there are no email addresses, and URLs use the reserved `.invalid` domain.
 
+### Reproducible runs
+
 **It is reproducible.** At a fixed `--seed` every person, trait, property
 value and the whole sequence of events is identical run to run, so you can
 compare a screen before and after a change and know the data did not move
 underneath you. The one thing that does move is the anchor — "now" for the
 generated history — which defaults to the moment you run the command; pass
 `--anchor` to pin it and two runs become byte-for-byte identical.
+
+### Connecting it to the databases
 
 **It writes to Postgres and ClickHouse directly, not through the ingest
 API,** so it needs `LYRAFLOW_POSTGRES_URL` and the `LYRAFLOW_CLICKHOUSE_*`
@@ -315,6 +319,8 @@ events posted over HTTP therefore all land inside a single day, and ninety
 days of history is impossible to create that way. The clamp is not relaxed
 and there is no trusted-backdating flag; the seeder simply does not go
 through it.
+
+### It only ever inserts
 
 **It only ever inserts.** There is no reset, no wipe and no `--force`: it
 cannot delete anything, including its own earlier output. Two consequences
@@ -367,191 +373,211 @@ done with it. There is also a "Skip to dashboard" for the case where you
 cannot instrument the target site right now.
 
 Past the wizard (or immediately, if a project already exists), there are eight
-screens, reachable from the sidebar:
+screens, reachable from the sidebar.
 
-- **Dashboards** — several saved reports on one screen: a named, ordered
-  grid of tiles, each a saved trend, a saved retention report or a funnel,
-  half or full width. One range picker applies to every tile and lives in
-  the URL, not in the dashboard, for the same reason a saved report never
-  stores its range. Its default setting is the exception, and the screen
-  says so: at *Default for this resolution* no range is sent at all, so each
-  tile falls back to its own report's default window and the tiles are not
-  on one period. Pick a preset to put them on the same range. A project can
-  have many dashboards; the star — on a list row, and on the dashboard
-  itself in both view and edit mode — marks one as **home**. It opens at
-  `/` after login, and "Dashboards" in the sidebar and the Lyraflow mark
-  both go to it when one is starred (the list otherwise); "All dashboards"
-  on a dashboard opens the list. Clicking the filled star clears it,
-  leaving the project with no home. Editing happens in place — rename,
-  reorder, resize, add, remove — and every change saves as it is made. A
-  tile whose report has since
-  been deleted stays on the dashboard and says so rather than vanishing.
-  Clicking a tile opens the report it shows, over the dashboard's range —
-  for a funnel only when that range is one the funnel screen itself offers
-  (24 hours, 7, 30 or 90 days), and otherwise the funnel opens on its own
-  default and says which range it ran.
-  At most twelve tiles, and at most three of them run at once, so opening a
-  dashboard does not fan a dozen queries at ClickHouse together. A tile
-  whose stored definition would exceed a server ceiling under the current
-  range — too many points, too many cohorts, or a funnel range past 90
-  days — warns instead of running, the same way its own screen does. A
-  dashboard can be shared by a secret link from its Share button, in view
-  mode; see [Sharing a dashboard](#sharing-a-dashboard). What a dashboard
-  does **not** do yet: it does not refresh on its own, and a tile is always
-  a saved report — no single-number tiles, no text.
-- **Feed** — a live event feed, split into an **Accepted** tab and a
-  **Rejected** tab, over a window you pick — the last hour through the last
-  90 days — with an optional event-name filter. The window and the filter are
-  held in the URL, so a refresh keeps them and the screen can be shared as a
-  link; the page polls every few seconds on the short windows and once a
-  minute on the long ones. The chart above the tables counts events per
-  bucket over the same window, at the finest resolution that window allows.
-  The event filter reaches the chart and the Accepted tab but **not** the
-  Rejected one: a payload may have been refused precisely because its event
-  name was missing or unparseable, so filtering the rejections by name would
-  hide the rows that tab exists for. Rejected events carry the reason they
-  were dropped next to each row — `validation_failed`, `too_many_properties`,
-  `event_name_cardinality` or `property_key_cardinality` — which is
-  otherwise only visible by reading server logs. An unauthenticated or
-  over-quota request is refused *before* it reaches a project at all, so it
-  is never dead-lettered and never shows up here — the Rejected tab tells
-  you about payloads that reached a real project and were still refused,
-  not about a bad or missing write key.
-- **Settings** — the install snippet for the active project (so losing the
-  copy from the wizard is not a trip to the CLI); the project list, where each
-  one can be renamed or archived; this month's usage
-  (accepted, rejected, throttled, and the quota — reading plainly as
-  **Unlimited** rather than a bar or a number when none is set); the
-  project's retention and monthly quota, both editable in place; and the
-  full project list with a create-project flow of its own, whose server key
-  is likewise shown exactly once and never again.
+### The dashboards screen
 
-- **Funnels** — create a funnel from an ordered list of events, run it over a
-  range you choose, and read the result as one row per step: how many people
-  reached it, what share of the entrants that is, and how many dropped between
-  it and the step before. Opening a saved funnel runs it once; changing the
-  range does **not** re-run it — the chart dims and waits for you, because a
-  funnel is a real scan and because numbers from the old range sitting under a
-  new one would be a wrong answer stated confidently.
+Several saved reports on one screen: a named, ordered
+grid of tiles, each a saved trend, a saved retention report or a funnel,
+half or full width. One range picker applies to every tile and lives in
+the URL, not in the dashboard, for the same reason a saved report never
+stores its range. Its default setting is the exception, and the screen
+says so: at *Default for this resolution* no range is sent at all, so each
+tile falls back to its own report's default window and the tiles are not
+on one period. Pick a preset to put them on the same range. A project can
+have many dashboards; the star — on a list row, and on the dashboard
+itself in both view and edit mode — marks one as **home**. It opens at
+`/` after login, and "Dashboards" in the sidebar and the Lyraflow mark
+both go to it when one is starred (the list otherwise); "All dashboards"
+on a dashboard opens the list. Clicking the filled star clears it,
+leaving the project with no home. Editing happens in place — rename,
+reorder, resize, add, remove — and every change saves as it is made. A
+tile whose report has since
+been deleted stays on the dashboard and says so rather than vanishing.
+Clicking a tile opens the report it shows, over the dashboard's range —
+for a funnel only when that range is one the funnel screen itself offers
+(24 hours, 7, 30 or 90 days), and otherwise the funnel opens on its own
+default and says which range it ran.
+At most twelve tiles, and at most three of them run at once, so opening a
+dashboard does not fan a dozen queries at ClickHouse together. A tile
+whose stored definition would exceed a server ceiling under the current
+range — too many points, too many cohorts, or a funnel range past 90
+days — warns instead of running, the same way its own screen does. A
+dashboard can be shared by a secret link from its Share button, in view
+mode; see [Sharing a dashboard](#sharing-a-dashboard). What a dashboard
+does **not** do yet: it does not refresh on its own, and a tile is always
+a saved report — no single-number tiles, no text.
 
-  Two honesty details worth knowing, both of which the screen states without
-  being asked. If some of the people who entered did so too recently to have
-  had the funnel's full window, it says so and tells you how many — otherwise
-  every run over a range shorter than the window quietly under-reports
-  conversion. And if a funnel's segment filter has been deleted, the run
-  succeeds over **everyone** rather than failing; the screen reports that and
-  stops showing the filter as though it applied, because the numbers alone
-  look entirely normal.
+### The feed screen
 
-  Click a step and a Reached/Dropped panel opens beneath the chart — two
-  different populations, each counted on its own rather than assumed from the
-  chart above (see *Who reached a step, or stopped there* under Funnels below).
+A live event feed, split into an **Accepted** tab and a
+**Rejected** tab, over a window you pick — the last hour through the last
+90 days — with an optional event-name filter. The window and the filter are
+held in the URL, so a refresh keeps them and the screen can be shared as a
+link; the page polls every few seconds on the short windows and once a
+minute on the long ones. The chart above the tables counts events per
+bucket over the same window, at the finest resolution that window allows.
+The event filter reaches the chart and the Accepted tab but **not** the
+Rejected one: a payload may have been refused precisely because its event
+name was missing or unparseable, so filtering the rejections by name would
+hide the rows that tab exists for. Rejected events carry the reason they
+were dropped next to each row — `validation_failed`, `too_many_properties`,
+`event_name_cardinality` or `property_key_cardinality` — which is
+otherwise only visible by reading server logs. An unauthenticated or
+over-quota request is refused *before* it reaches a project at all, so it
+is never dead-lettered and never shows up here — the Rejected tab tells
+you about payloads that reached a real project and were still refused,
+not about a bad or missing write key.
 
-- **Trends** — how many of an event over time, optionally split by an event
-  column or by a key from its own properties. It runs on demand rather than
-  on render, and it can be saved: create one, give it a name, and reopen it
-  later from the Trends list, the same as a funnel. What is saved is the
-  event, the interval and the breakdown — not the range, so reopening a
-  trend runs it over whatever range the screen currently has, never the one
-  it was saved with. A split is drawn as **small multiples** — one panel per
-  value, all on one shared scale, which the screen states — rather than as
-  overlaid coloured lines: Lyraflow's palette is a single copper ramp built
-  for *ordinal* data like funnel stages, and a breakdown's values have no
-  order, so there is no honest colour to give them. Ten panels at most;
-  everything smaller is summed into `(other)`, and the screen says how many
-  values that was so the panels still add up. Every
-  point is marked, and hovering one reads out its bucket and its value in
-  **every** panel at once — the pointer picks a moment and each series says
-  what it was doing then.
+### The settings screen
 
-- **Retention** — pick a start event, a return event, a condition on either of
-  them, a period and how many of them, and run a cohort grid. It does **not**
-  run on render and does not
-  re-run when you change the controls: a grid is a real scan, and numbers from
-  one definition sitting under the controls of another is a wrong answer
-  stated confidently, so the grid clears and waits for you. Cells shade by
-  retention **relative to the strongest cell in that grid**, which the screen
-  states — a narrowed grid peaking at 15% would otherwise render with no
-  visible colour at all, so shades compare within one grid and never between
-  two. A period that had not finished when the grid ran shows a dash
-  rather than 0% — with a line underneath saying how many did, because a dash
-  read as a zero is the one way this chart misleads.
+The install snippet for the active project (so losing the
+copy from the wizard is not a trip to the CLI); the project list, where each
+one can be renamed or archived; this month's usage
+(accepted, rejected, throttled, and the quota — reading plainly as
+**Unlimited** rather than a bar or a number when none is set); the
+project's retention and monthly quota, both editable in place; and the
+full project list with a create-project flow of its own, whose server key
+is likewise shown exactly once and never again.
 
-  It can be saved too: create one, name it, and reopen it later from the
-  Retention list. What is saved is the two events, their conditions, the
-  granularity, the period count and the segment — not the range, so
-  reopening a report runs it over whatever range the screen currently has.
-  Two things can stop that run before it starts. A range and granularity
-  that would together exceed 60 cohorts disables Run and computes nothing —
-  the same ceiling and warning a fresh grid gets. A report whose stored
-  filters no longer parse says so and skips the automatic run too, but
-  leaves Run enabled, so the operator can still run the degraded version
-  knowingly rather than being locked out of it.
+### The funnels screen
 
-- **Segments** — build a filter tree in the browser: `and`/`or` groups, traits,
-  context, lifecycle bounds, and behaviours with their own `where` predicates.
-  Preview it before saving — the person count and a bounded page of members,
-  taken at one instant — then save, re-run, edit or delete it. Clicking a
-  person opens what the preview already knows about them: their latest
-  country, city, device, OS and browser, the referrer and campaign they
-  arrived through, and the traits `identify()` has set. Attributes with no
-  value are left out and counted rather than listed as blanks, and a person
-  carrying more traits than a row returns says how many are not shown.
+Create a funnel from an ordered list of events, run it over a
+range you choose, and read the result as one row per step: how many people
+reached it, what share of the entrants that is, and how many dropped between
+it and the step before. Opening a saved funnel runs it once; changing the
+range does **not** re-run it — the chart dims and waits for you, because a
+funnel is a real scan and because numbers from the old range sitting under a
+new one would be a wrong answer stated confidently.
 
-  The same honesty details as Funnels, for the same reasons. A saved segment's
-  count is the server's **cache** from its last evaluation, shown with the
-  instant it was taken and never passed off as current; a segment that has
-  never been evaluated says so rather than rendering as a count of zero. The
-  list does not silently re-evaluate everything on every visit, because each
-  evaluation is a real ClickHouse scan. And a segment whose stored tree no
-  longer parses opens read-only rather than being offered for editing as
-  though the builder understood it.
+Two honesty details worth knowing, both of which the screen states without
+being asked. If some of the people who entered did so too recently to have
+had the funnel's full window, it says so and tells you how many — otherwise
+every run over a range shorter than the window quietly under-reports
+conversion. And if a funnel's segment filter has been deleted, the run
+succeeds over **everyone** rather than failing; the screen reports that and
+stops showing the filter as though it applied, because the numbers alone
+look entirely normal.
 
-- **People** — a person profile at `/people?id=…`: the canonical id and every
-  id ever bound to it, split into user ids and device ids; first seen, last
-  seen and the event count; their traits; their latest context — device,
-  browser, OS, country, referrer and campaign — read from their newest event;
-  and their full event timeline, newest first, paged backwards a page at a
-  time and bounded by their own first-seen and last-seen rather than by the
-  last 24 hours — so a customer last active in June opens on June, not on an
-  empty screen. Reached from a segment member row, a funnel step's people
-  panel, the feed's person cell, the sidebar, or either of the two searches
-  on the screen itself.
+Click a step and a Reached/Dropped panel opens beneath the chart — two
+different populations, each counted on its own rather than assumed from the
+chart above (see *Who reached a step, or stopped there* under Funnels below).
 
-  Those two sit side by side whenever no id is in the URL. The **lookup box**
-  takes an id you already have. **Find by trait** is for when you have none:
-  one condition on one named trait, built exactly as a segment's trait
-  condition is and offering the same operators — compare, text (contains,
-  starts with, ends with, and their negations), presence, true or false,
-  relative date — with the value box that operator calls for, or none at all
-  for `is set` and `is true`. It runs through the same engine a segment
-  preview uses, listing everyone who matches with their traits and a link to
-  each profile, paged the way a segment's member list is. One condition is
-  the shape of the search, not a claim that the matching is exact: what it
-  will not do is combine several conditions — that is what a segment is for
-  — look for a value across every trait at once, since you name the trait,
-  or list everyone without naming a condition at all. The condition lives in
-  the URL, so a search that matched nobody is still a link that says so after
-  a reload.
+### The trends screen
 
-  **The entry points reach further than the profile does.** A person only
-  enters the identity graph through `identify()`, so a visitor who has only
-  ever been tracked anonymously has events — visible in the feed, under their
-  `anonymous_id` — and no profile to open. The feed still links their rows,
-  and the profile answers by naming that as the first of the four things a
-  "nothing to show" can mean, rather than by hiding the link or by claiming
-  the id was never seen. On a fresh install, where little has been identified
-  yet, that is the common case. It is the same limit *Privacy: deletion and export* below
-  documents for the API, met from the UI side. The rows that *do* open a
-  profile carry a person icon — in the feed's accepted table and in every
-  member list — so which link pays off is visible before the click.
+How many of an event over time, optionally split by an event
+column or by a key from its own properties. It runs on demand rather than
+on render, and it can be saved: create one, give it a name, and reopen it
+later from the Trends list, the same as a funnel. What is saved is the
+event, the interval and the breakdown — not the range, so reopening a
+trend runs it over whatever range the screen currently has, never the one
+it was saved with. A split is drawn as **small multiples** — one panel per
+value, all on one shared scale, which the screen states — rather than as
+overlaid coloured lines: Lyraflow's palette is a single copper ramp built
+for *ordinal* data like funnel stages, and a breakdown's values have no
+order, so there is no honest colour to give them. Ten panels at most;
+everything smaller is summed into `(other)`, and the screen says how many
+values that was so the panels still add up. Every
+point is marked, and hovering one reads out its bucket and its value in
+**every** panel at once — the pointer picks a moment and each series says
+what it was doing then.
 
-  Two privacy actions sit on the profile. **Export** buffers the subject-access
-  response in the browser and triggers a save — past 50,000 events it shows
-  the equivalent `lyraflow persons export` command instead, because a button
-  that starts a download doomed to hang is worse than no button. **Delete**
-  is the same two-step, typed-id-confirm pattern project deletion uses, then
-  polls to completion rather than trusting the request that started it.
+### The retention screen
+
+Pick a start event, a return event, a condition on either of
+them, a period and how many of them, and run a cohort grid. It does **not**
+run on render and does not
+re-run when you change the controls: a grid is a real scan, and numbers from
+one definition sitting under the controls of another is a wrong answer
+stated confidently, so the grid clears and waits for you. Cells shade by
+retention **relative to the strongest cell in that grid**, which the screen
+states — a narrowed grid peaking at 15% would otherwise render with no
+visible colour at all, so shades compare within one grid and never between
+two. A period that had not finished when the grid ran shows a dash
+rather than 0% — with a line underneath saying how many did, because a dash
+read as a zero is the one way this chart misleads.
+
+It can be saved too: create one, name it, and reopen it later from the
+Retention list. What is saved is the two events, their conditions, the
+granularity, the period count and the segment — not the range, so
+reopening a report runs it over whatever range the screen currently has.
+Two things can stop that run before it starts. A range and granularity
+that would together exceed 60 cohorts disables Run and computes nothing —
+the same ceiling and warning a fresh grid gets. A report whose stored
+filters no longer parse says so and skips the automatic run too, but
+leaves Run enabled, so the operator can still run the degraded version
+knowingly rather than being locked out of it.
+
+### The segments screen
+
+Build a filter tree in the browser: `and`/`or` groups, traits,
+context, lifecycle bounds, and behaviours with their own `where` predicates.
+Preview it before saving — the person count and a bounded page of members,
+taken at one instant — then save, re-run, edit or delete it. Clicking a
+person opens what the preview already knows about them: their latest
+country, city, device, OS and browser, the referrer and campaign they
+arrived through, and the traits `identify()` has set. Attributes with no
+value are left out and counted rather than listed as blanks, and a person
+carrying more traits than a row returns says how many are not shown.
+
+The same honesty details as Funnels, for the same reasons. A saved segment's
+count is the server's **cache** from its last evaluation, shown with the
+instant it was taken and never passed off as current; a segment that has
+never been evaluated says so rather than rendering as a count of zero. The
+list does not silently re-evaluate everything on every visit, because each
+evaluation is a real ClickHouse scan. And a segment whose stored tree no
+longer parses opens read-only rather than being offered for editing as
+though the builder understood it.
+
+### The people screen
+
+A person profile at `/people?id=…`: the canonical id and every
+id ever bound to it, split into user ids and device ids; first seen, last
+seen and the event count; their traits; their latest context — device,
+browser, OS, country, referrer and campaign — read from their newest event;
+and their full event timeline, newest first, paged backwards a page at a
+time and bounded by their own first-seen and last-seen rather than by the
+last 24 hours — so a customer last active in June opens on June, not on an
+empty screen. Reached from a segment member row, a funnel step's people
+panel, the feed's person cell, the sidebar, or either of the two searches
+on the screen itself.
+
+Those two sit side by side whenever no id is in the URL. The **lookup box**
+takes an id you already have. **Find by trait** is for when you have none:
+one condition on one named trait, built exactly as a segment's trait
+condition is and offering the same operators — compare, text (contains,
+starts with, ends with, and their negations), presence, true or false,
+relative date — with the value box that operator calls for, or none at all
+for `is set` and `is true`. It runs through the same engine a segment
+preview uses, listing everyone who matches with their traits and a link to
+each profile, paged the way a segment's member list is. One condition is
+the shape of the search, not a claim that the matching is exact: what it
+will not do is combine several conditions — that is what a segment is for
+— look for a value across every trait at once, since you name the trait,
+or list everyone without naming a condition at all. The condition lives in
+the URL, so a search that matched nobody is still a link that says so after
+a reload.
+
+**The entry points reach further than the profile does.** A person only
+enters the identity graph through `identify()`, so a visitor who has only
+ever been tracked anonymously has events — visible in the feed, under their
+`anonymous_id` — and no profile to open. The feed still links their rows,
+and the profile answers by naming that as the first of the four things a
+"nothing to show" can mean, rather than by hiding the link or by claiming
+the id was never seen. On a fresh install, where little has been identified
+yet, that is the common case. It is the same limit *Privacy: deletion and export* below
+documents for the API, met from the UI side. The rows that *do* open a
+profile carry a person icon — in the feed's accepted table and in every
+member list — so which link pays off is visible before the click.
+
+Two privacy actions sit on the profile. **Export** buffers the subject-access
+response in the browser and triggers a save — past 50,000 events it shows
+the equivalent `lyraflow persons export` command instead, because a button
+that starts a download doomed to hang is worse than no button. **Delete**
+is the same two-step, typed-id-confirm pattern project deletion uses, then
+polls to completion rather than trusting the request that started it.
+
+### Your profile, and the accent colour
 
 The account menu in the header also has a **Profile** screen, for changing the
 admin's email address and password, and for picking the UI's **accent colour**.
@@ -566,6 +592,8 @@ enough to change what recovers the account — and a password change signs out
 every other browser, which is the point of changing it after a leak. There is no
 confirmation email, because Lyraflow sends no mail; a new address takes effect
 immediately.
+
+### Archiving, renaming and deleting a project
 
 **Archiving a project** stops Lyraflow accepting events for it and nothing else.
 Its data is untouched, every report still works, retention still applies, and
@@ -591,6 +619,8 @@ the project from Postgres — in that order, so a half-finished delete can be
 retried rather than leaving data nothing will ever sweep again. Settings shows
 the progress; `lyraflow projects deletion get <id>` reports the same thing, and
 `lyraflow projects deletion retry <id>` resumes one that gave up.
+
+### What the UI does not do yet
 
 **Volunteering the limit:** that is the whole UI. A person profile exists, but
 there is no **People list** — nothing browses or searches persons, so the
