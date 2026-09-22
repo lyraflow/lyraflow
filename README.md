@@ -3462,10 +3462,11 @@ controls the server would refuse: create, edit, save, delete, share, the home
 star, project settings, and the email and password forms. A share link made
 before the switch was turned on keeps working. No new one can be made.
 
-**It is not a second user.** Every session on a read-only install is refused
-the same writes, including yours. To change anything, set it back to `false`
-and restart. There is still no way for one install to have an operator who
-writes and a visitor who only looks.
+**It is not a second user.** Every caller, session or server key, is refused
+the same writes on a read-only install, including you. To change anything, set
+it back to `false` and restart. There is still no way for one install to have
+an operator who writes and a visitor who only looks; that is
+[#223](https://github.com/lyraflow/lyraflow/issues/223).
 
 ### Retention
 
