@@ -150,6 +150,13 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
     // A save failure belongs to the dashboard it was reported for. Left
     // standing, it reads as a failure of the one now on screen.
     setSaveError(null)
+    // Same rule for a removal notice: it names a tile from the PREVIOUS
+    // dashboard, and `undo()` would PATCH that tile into whichever dashboard
+    // is on screen when Undo is clicked. Both `id: 7` cases the share reset
+    // below already guards against apply here too -- a project switch and a
+    // same-project navigation to another dashboard id.
+    setRemoved(null)
+    undoing.current = false
     // Same rule for the share card: a card left open, or an error left
     // standing, from the PREVIOUS dashboard on this screen would read as
     // being about the one that just loaded -- and for the shared `id: 7`

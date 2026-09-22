@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
@@ -320,6 +320,42 @@ function renderTwoProjectScreen(client: ApiClient, at: string) {
   )
 }
 
+/** A second dashboard in the SAME project as `DASH` -- id 8, so navigating
+ *  to it is a same-project id change rather than the `activeId` change
+ *  `renderTwoProjectScreen` covers. Both are the load effect's reset key. */
+const OTHER_DASHBOARD: DashboardWire = {
+  ...DASH,
+  id: 8,
+  name: 'Other board',
+  tile_count: 1,
+  tiles: [{ kind: 'retention', report_id: 2, width: 'half', report: RETENTION }],
+}
+
+function SwitchDashboard(props: { to: number }) {
+  const navigate = useNavigate()
+  return (
+    <button type="button" onClick={() => navigate(`/dashboards/${props.to}?edit=1`)}>
+      switch dashboard
+    </button>
+  )
+}
+
+/** Like `renderTwoProjectScreen`, but the id in the URL changes while the
+ *  project stays put -- navigating from one dashboard to another without
+ *  ever leaving project 1. */
+function renderTwoDashboardScreen(client: ApiClient, at: string) {
+  return render(
+    <MemoryRouter initialEntries={[at]}>
+      <ProjectProvider projects={PROJECTS} initialId={1}>
+        <SwitchDashboard to={8} />
+        <Routes>
+          <Route path="/dashboards/:id" element={<Dashboard client={client} />} />
+        </Routes>
+      </ProjectProvider>
+    </MemoryRouter>,
+  )
+}
+
 describe('Dashboard', () => {
   it('fetches the dashboard for the active project and the id in the URL', async () => {
     const { client } = renderScreen()
@@ -535,8 +571,15 @@ describe('Dashboard', () => {
       const funnel = await screen.findByTestId('tile-funnel-3')
       await localUser.click(within(funnel).getByRole('button', { name: 'Remove' }))
       await screen.findByRole('status')
-      await vi.advanceTimersByTimeAsync(10_000)
-      await waitFor(() => expect(screen.queryByRole('status')).toBeNull())
+      // Wrapped in `act()`, unlike a plain `advanceTimersByTimeAsync` --
+      // the timer fires `setRemoved(null)` outside any event handler
+      // `userEvent` already wraps, and an unwrapped update here prints
+      // "not wrapped in act(...)" even though the assertion below still
+      // passes once `waitFor` catches up.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000)
+      })
+      expect(screen.queryByRole('status')).toBeNull()
     } finally {
       vi.useRealTimers()
     }
@@ -571,6 +614,25 @@ describe('Dashboard', () => {
     await userEvent.click(within(notice).getByRole('button', { name: 'Undo' }))
     expect(await screen.findByText(/something went wrong/i)).toBeInTheDocument()
     expect(screen.getByRole('status')).toHaveTextContent('Removed Signup flow.')
+  })
+
+  // Fix round 1, Minor: `AddTilePicker`'s `onAdd` clears `removed` same as
+  // every other layout edit, but nothing pinned it -- the suite stayed green
+  // with that one `setRemoved(null)` deleted.
+  it('adding a tile clears an open removal notice', async () => {
+    const { client } = renderScreen({ at: '/dashboards/7?edit=1' })
+    const funnel = await screen.findByTestId('tile-funnel-3')
+    await userEvent.click(within(funnel).getByRole('button', { name: 'Remove' }))
+    await waitFor(() =>
+      expect(client.patchDashboard).toHaveBeenCalledWith(1, 7, { tiles: [trendInput] }),
+    )
+    await screen.findByRole('status')
+
+    const select = await screen.findByLabelText('Report to add')
+    await waitFor(() => expect(select).toBeEnabled())
+    await userEvent.selectOptions(select, 'retention:2')
+    await userEvent.click(screen.getByRole('button', { name: 'Add tile' }))
+    await waitFor(() => expect(screen.queryByRole('status')).toBeNull())
   })
 
   it('add appends a half tile', async () => {
@@ -953,6 +1015,57 @@ describe('Dashboard', () => {
     expect(screen.queryByTestId('tile-funnel-3')).toBeNull()
     expect(screen.getByDisplayValue('Beta board')).toBeInTheDocument()
     expect(screen.queryByDisplayValue('Overview')).toBeNull()
+  })
+
+  // Fix round 1, Critical: the load effect resets `dash`, `saveError`,
+  // `sharing` and the rest on an `activeId`/`id` change, but had not been
+  // taught about `removed` -- so a removal notice (and its enabled Undo)
+  // survived a project switch. Clicking Undo there would PATCH project 1's
+  // tile into project 2's dashboard, which happens to share id 7. Pinned by
+  // the notice being gone after the switch and by `patchDashboard` never
+  // being called a second time -- there is no control left that could have
+  // sent one.
+  it('a removal notice does not survive a project switch, so Undo cannot land a foreign tile', async () => {
+    const client = fakeClient({
+      dashboard: vi.fn(async (projectId: number) => (projectId === 1 ? DASH : BETA)),
+    })
+    renderTwoProjectScreen(client, '/dashboards/7?edit=1')
+    const funnel = await screen.findByTestId('tile-funnel-3')
+    await userEvent.click(within(funnel).getByRole('button', { name: 'Remove' }))
+    await waitFor(() =>
+      expect(client.patchDashboard).toHaveBeenCalledWith(1, 7, { tiles: [trendInput] }),
+    )
+    await screen.findByRole('status')
+
+    await userEvent.click(screen.getByRole('button', { name: 'switch project' }))
+    expect(await screen.findByTestId('tile-retention-2')).toBeInTheDocument()
+
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(client.patchDashboard).toHaveBeenCalledTimes(1)
+  })
+
+  // Same leak, the same-project shape: navigating to a DIFFERENT dashboard
+  // id without ever changing `activeId`. The URL still carries `?edit=1`
+  // across the navigation, so if `removed` survived, the notice would too.
+  it('a removal notice does not survive navigating to a different dashboard in the same project', async () => {
+    const client = fakeClient({
+      dashboard: vi.fn(async (_projectId: number, id: number) =>
+        id === 7 ? DASH : OTHER_DASHBOARD,
+      ),
+    })
+    renderTwoDashboardScreen(client, '/dashboards/7?edit=1')
+    const funnel = await screen.findByTestId('tile-funnel-3')
+    await userEvent.click(within(funnel).getByRole('button', { name: 'Remove' }))
+    await waitFor(() =>
+      expect(client.patchDashboard).toHaveBeenCalledWith(1, 7, { tiles: [trendInput] }),
+    )
+    await screen.findByRole('status')
+
+    await userEvent.click(screen.getByRole('button', { name: 'switch dashboard' }))
+    expect(await screen.findByTestId('tile-retention-2')).toBeInTheDocument()
+
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(client.patchDashboard).toHaveBeenCalledTimes(1)
   })
 
   // I4 from the final whole-branch review: `auto` sends no range at all, so
