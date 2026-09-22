@@ -23,13 +23,16 @@ under Docker, and nothing leaves it.
 ```sh
 git clone https://github.com/lyraflow/lyraflow.git
 cd lyraflow
+git checkout "$(git describe --tags --abbrev=0)"
 ./install.sh
 docker compose exec lyraflow node packages/cli/dist/index.js create-project "My App"
 ```
 
-That generates passwords into `.env`, starts three containers, waits until the
-app answers on port 3000, and prints a write key and a server key.
-[Getting started](#getting-started) is the same four steps with everything that
+That moves the checkout to the newest release, so it matches the image
+`install.sh` pulls. It then generates passwords into `.env`, starts three
+containers, waits until the app answers on port 3000, and prints a write key
+and a server key.
+[Getting started](#getting-started) is the same five steps with everything that
 matters said out loud: the Compose version this needs, serving HTTPS on a
 domain, the snippet, and your first event from a backend. Nothing to look at in
 a fresh install? [Demo data](#demo-data) fills one with generated people and
@@ -131,11 +134,14 @@ Check yours with `docker compose version`.
 ```sh
 git clone https://github.com/lyraflow/lyraflow.git
 cd lyraflow
+git checkout "$(git describe --tags --abbrev=0)"
 ./install.sh
 ```
 
-That generates passwords into `.env`, starts three containers, and waits until
-the app answers on port 3000.
+The `git checkout` moves you from `main` to the newest release tag, so the
+checkout matches the image `install.sh` pulls: `main` can describe settings
+that no published image has yet. `install.sh` then generates passwords into
+`.env`, starts three containers, and waits until the app answers on port 3000.
 
 That is a local install: plain HTTP on port 3000, which is all the examples
 below need. **Running this on a server with a domain name?** Pass it to the
