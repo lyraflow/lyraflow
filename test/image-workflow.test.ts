@@ -93,9 +93,20 @@ describe('the image workflow', () => {
     'type=semver,pattern={{version}}',
     'type=semver,pattern={{major}}.{{minor}}',
     'type=semver,pattern={{major}}',
-    'type=raw,value=latest',
   ])('publishes the tag %s', (tag) => {
     expect(block(job('merge'), 'tags', 10).map((l) => l.trim())).toContain(tag)
+  })
+
+  // metadata-action's `latest=auto` adds `latest` only for a valid semver tag
+  // that is not a prerelease. The two tests below are the two halves of that:
+  // the flavor that grants it, and the absence of an entry that would grant it
+  // to every tag regardless.
+  it('moves latest only through flavor latest=auto', () => {
+    expect(job('merge')).toContain('          flavor: latest=auto')
+  })
+
+  it('has no raw latest tag, which would move latest on a prerelease or non-semver tag', () => {
+    expect(job('merge').filter((l) => /type=raw,value=latest/.test(l))).toEqual([])
   })
 
   // A floating tag like `@v4` can be moved by whoever controls that repository,

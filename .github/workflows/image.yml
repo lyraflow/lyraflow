@@ -1,5 +1,6 @@
 # Publishes ghcr.io/lyraflow/lyraflow for linux/amd64 and linux/arm64 on every
-# pushed version tag, tagged X.Y.Z, X.Y, X and latest (#275).
+# pushed version tag, tagged X.Y.Z, X.Y, X and (for a final release) latest
+# (#275).
 #
 # FIRST PUBLISH: GHCR creates a new package as PRIVATE, whatever the visibility
 # of the repository. Until a maintainer switches it to public by hand (the
@@ -101,11 +102,13 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/lyraflow/lyraflow
+          # `latest` only for a valid, non-prerelease semver tag. A raw `latest`
+          # entry would move it on `v1.0.0-rc.1` or any other `v*` tag too.
+          flavor: latest=auto
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=raw,value=latest
       # Refuses to publish unless both platforms delivered a digest. The build
       # legs failing already stops this job through `needs`; this catches a leg
       # that succeeded without leaving its artifact behind.
