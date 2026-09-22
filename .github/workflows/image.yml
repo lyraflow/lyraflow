@@ -16,6 +16,10 @@
 # A release whose arm64 build fails therefore publishes nothing, rather than an
 # amd64-only `latest` that breaks every arm64 install that pulls it.
 #
+# BACKPORTS MOVE TAGS BACKWARDS: tagging a patch on an older line after a newer
+# release (v0.13.1 after v0.14.0) repoints `:0`, `X` and `latest` at the older
+# code, so do not backport-tag without handling that first.
+#
 # Every action is pinned to a full commit SHA, with the release it resolved
 # from in a trailing comment. The other workflows use floating major tags; this
 # one does not, because it holds a token that can overwrite every published
@@ -123,6 +127,9 @@ jobs:
           fi
           tags=()
           while read -r tag; do tags+=(-t "$tag"); done < <(jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          # A `v*` tag that is not semver matches no entry above and yields no
+          # tags; imagetools would then fail with a far less useful message.
+          [ "${#tags[@]}" -gt 0 ] || { echo "no tags for $GITHUB_REF" >&2; exit 1; }
           docker buildx imagetools create "${tags[@]}" "${sources[@]}"
       - name: Show what was published
         env:

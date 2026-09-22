@@ -89,6 +89,16 @@ describe('the image workflow', () => {
     expect(job('merge').join('\n')).toMatch(/docker buildx imagetools create /)
   })
 
+  // Renaming either silently publishes under a different package: `images:`
+  // names the tags, `env.IMAGE` names the digests they are assembled from.
+  it('tags the image ghcr.io/lyraflow/lyraflow', () => {
+    expect(job('merge')).toContain(`          images: ${IMAGE}`)
+  })
+
+  it('assembles and inspects ghcr.io/lyraflow/lyraflow', () => {
+    expect(block(lines(), 'env')).toEqual([`  IMAGE: ${IMAGE}`])
+  })
+
   it.each([
     'type=semver,pattern={{version}}',
     'type=semver,pattern={{major}}.{{minor}}',

@@ -3912,7 +3912,7 @@ means the newest 0.x release.** So a checkout left on an older tag still pulls
 the newest image, not the one that matches it. To hold an install at one
 version, name that version in `.env` as
 `LYRAFLOW_IMAGE=ghcr.io/lyraflow/lyraflow:X.Y.Z`. Every release is also
-published as `X.Y` and `latest`. Releases older than the first published image
+published as `X.Y`, `X` and, for a final release, `latest`. Releases older than the first published image
 have no image; build those with `docker compose build`.
 
 **If you have modified your checkout**, build it instead of pulling:
