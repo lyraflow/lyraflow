@@ -58,9 +58,9 @@
   --color-foreground: var(--lf-text);
   --color-card: var(--lf-surface-raised);
   /* #267: card and popover share the same surface, --lf-surface-raised, so
-   * both foregrounds are the same pairing -- palette.py's "body on raised"
-   * check, already passing (18.86:1 light, 15.25:1 dark; see
-   * brand/contrast-report.txt in lyraflow-internal). Not a new check: that
+   * both foregrounds are the same pairing -- the "body on raised" check,
+   * already passing (18.86:1 light, 15.25:1 dark; see this repo's
+   * brand/contrast-report.txt). Not a new check: that
    * pairing already existed for `body`, this only lets Select/DropdownMenu/
    * Card state it explicitly instead of relying on inheriting it. */
   --color-card-foreground: var(--lf-text);
