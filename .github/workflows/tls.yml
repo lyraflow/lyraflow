@@ -16,6 +16,7 @@ on:
       - 'docker-compose.tls-test.yml'
       - 'test/tls-proxy.test.ts'
       - 'test/fixtures/tls.d/**'
+      - 'test/fixtures/proxy.d/**'
       - 'vitest.tls.config.ts'
       - '.github/workflows/tls.yml'
       # The proxy target is the server, and its readiness endpoint and the

@@ -159,18 +159,27 @@ describe('the reverse-proxy extension point', () => {
 
   // #271: `static` is the module name for Caddy's *global*
   // `servers { trusted_proxies static ... }` option. Inside `reverse_proxy`,
-  // where this file's example lands, `trusted_proxies` takes ranges directly
-  // -- `static` there is parsed as an IP address and caddy:2-alpine exits at
-  // boot. This pins the comment's spelling so a future edit cannot
-  // reintroduce it silently; test/tls-proxy.test.ts boots the real thing.
+  // where every one of this file's examples lands, `trusted_proxies` takes
+  // ranges directly -- `static` there is parsed as an IP address and
+  // caddy:2-alpine exits at boot. This scans every `trusted_proxies`
+  // occurrence in the file's comments, not just the first example line, so a
+  // second or third mention (the `0.0.0.0/0` warning included) cannot drift
+  // back to the wrong spelling unnoticed; test/tls-proxy.test.ts boots the
+  // real thing.
   it('documents the reverse_proxy spelling, not the global-option one (#271)', () => {
     const src = readFileSync('docker/caddy/proxy.d/00-defaults.caddy', 'utf8')
-    const examples = src
-      .split('\n')
-      .map((l) => l.replace(/^#\s?/, '').trim())
-      .filter((l) => l.startsWith('trusted_proxies'))
-    expect(examples.length).toBeGreaterThan(0)
-    for (const l of examples.filter((l) => !l.includes('0.0.0.0/0')))
-      expect(l).not.toMatch(/\bstatic\b/)
+    const tokens: string[] = []
+    for (const line of src.split('\n')) {
+      const serversAt = line.indexOf('servers {')
+      for (const m of line.matchAll(/trusted_proxies\s+(\S+)/g)) {
+        // The one legitimate `static` names the global option itself, in the
+        // explanatory sentence -- excluded only when the match sits inside
+        // that `servers { ... }` phrase on this line, not the whole line.
+        if (serversAt !== -1 && m.index !== undefined && m.index > serversAt) continue
+        tokens.push(m[1])
+      }
+    }
+    expect(tokens.length).toBeGreaterThan(0)
+    for (const t of tokens) expect(t).not.toBe('static')
   })
 })
