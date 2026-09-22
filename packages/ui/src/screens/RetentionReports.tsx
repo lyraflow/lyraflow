@@ -5,6 +5,7 @@ import type { ApiClient } from '../api/client.js'
 import { ApiError } from '../api/client.js'
 import type { RetentionReport } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
+import { useReadOnly } from '../app/ReadOnly.js'
 import { ROUTES, retentionReportPath } from '../app/Router.js'
 import { PageHeader } from '../components/PageHeader.js'
 import { Button } from '../components/ui/button.js'
@@ -85,14 +86,17 @@ export function RetentionReports(props: { client: ApiClient; onUnauthorized?: ()
     }
   }, [client, activeId, onUnauthorized])
 
+  const readOnly = useReadOnly()
   return (
     <div className="flex min-w-0 flex-col gap-6">
       <PageHeader
         title="Retention"
         actions={
-          <Button asChild size="sm">
-            <Link to={ROUTES.retentionNew}>New retention report</Link>
-          </Button>
+          !readOnly && (
+            <Button asChild size="sm">
+              <Link to={ROUTES.retentionNew}>New retention report</Link>
+            </Button>
+          )
         }
       />
 

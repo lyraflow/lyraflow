@@ -42,6 +42,11 @@ export interface SegmentDeps {
    * instance nothing here ever reads from.
    */
   cache: SegmentCache
+  /**
+   * `config.readOnly`. A read-only install still runs a saved segment, but
+   * does not write its snapshot -- see FunnelDeps.readOnly.
+   */
+  readOnly: boolean
 }
 
 /**
@@ -167,7 +172,7 @@ interface UnusedWalkCursor {
 const walkCursors = makeWalkCursorCodec('lyraflow.segment-cursor.v1')
 
 export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): void {
-  const { authenticate, ch, pg, database, cache } = deps
+  const { authenticate, ch, pg, database, cache, readOnly } = deps
 
   const store = new SegmentStore(pg)
 
@@ -566,8 +571,10 @@ export function registerSegmentRoutes(app: FastifyInstance, deps: SegmentDeps): 
       })
       // Both modes write the snapshot: the count is computed either way, so
       // asking for members must not leave a staler snapshot behind than
-      // asking for a count would.
-      await store.recordRun(project.id, found.id, result.count, new Date(result.asOf))
+      // asking for a count would. Neither writes it on a read-only install.
+      if (!readOnly) {
+        await store.recordRun(project.id, found.id, result.count, new Date(result.asOf))
+      }
       const last = result.members.at(-1)
       const canOfferNext =
         wantMembers && result.members.length === MEMBER_PAGE_SIZE && !result.windowExhausted

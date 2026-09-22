@@ -1,9 +1,18 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import { userEvent } from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import { Profile } from './Profile.js'
+
+// The read-only switch, as the screen reads it. Mocked rather than provided,
+// so this file's render helpers stay as they are; `app/ReadOnly.test.tsx`
+// covers the real context that feeds `useReadOnly` from `/v1/meta`.
+const readOnly = vi.hoisted(() => ({ value: false }))
+vi.mock('../app/ReadOnly.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../app/ReadOnly.js')>()),
+  useReadOnly: () => readOnly.value,
+}))
 
 function fakeClient(over: Partial<ApiClient> = {}): ApiClient {
   return {
@@ -217,5 +226,27 @@ describe('Profile — appearance', () => {
     const group = screen.getByRole('group', { name: /accent colour/i })
     const email = screen.getByText('Email address')
     expect(group.compareDocumentPosition(email) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+})
+
+describe('Profile on a read-only install', () => {
+  afterEach(() => {
+    readOnly.value = false
+  })
+
+  it('offers both forms on a writable install', () => {
+    renderProfile(fakeClient())
+    expect(screen.getByRole('button', { name: 'Change email' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Change password' })).toBeInTheDocument()
+  })
+
+  // On an install that publishes its one login, a changed password locks out
+  // every other visitor. Appearance stays: it is stored in this browser.
+  it('hides both forms, and keeps Appearance', () => {
+    readOnly.value = true
+    renderProfile(fakeClient())
+    expect(screen.queryByRole('button', { name: 'Change email' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Change password' })).toBeNull()
+    expect(screen.getByText('Appearance')).toBeInTheDocument()
   })
 })

@@ -4,6 +4,7 @@ import type { ApiClient } from '../../api/client.js'
 import { Button } from '../../components/ui/button.js'
 import { Input } from '../../components/ui/input.js'
 import { Label } from '../../components/ui/label.js'
+import { describeError } from '../funnels/errors.js'
 
 /**
  * The destructive action on a person's profile, mirroring
@@ -54,6 +55,10 @@ export function DeleteButton(props: {
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         onUnauthorized?.()
+      } else if (err instanceof ApiError && (err.status === 403 || err.status === 405)) {
+        // Refused by the install (read-only) or by a proxy in front of it.
+        // "Try again" would invite a retry refused the same way every time.
+        setError(describeError(err))
       } else {
         setError('Could not start the deletion. Try again.')
       }

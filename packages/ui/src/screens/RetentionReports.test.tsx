@@ -6,6 +6,15 @@ import type { ApiClient } from '../api/client.js'
 import { ProjectProvider } from '../app/ProjectContext.js'
 import { RetentionReports } from './RetentionReports.js'
 
+// The read-only switch, as the screen reads it. Mocked rather than provided,
+// so this file's render helpers stay as they are; `app/ReadOnly.test.tsx`
+// covers the real context that feeds `useReadOnly` from `/v1/meta`.
+const readOnly = vi.hoisted(() => ({ value: false }))
+vi.mock('../app/ReadOnly.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../app/ReadOnly.js')>()),
+  useReadOnly: () => readOnly.value,
+}))
+
 const T = '2026-08-27T00:00:00.000Z'
 
 const PROJECTS = [
@@ -146,5 +155,24 @@ describe('RetentionReports — unauthorized', () => {
     )
     await waitFor(() => expect(onUnauthorized).toHaveBeenCalled())
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+})
+
+describe('RetentionReports on a read-only install', () => {
+  afterEach(() => {
+    readOnly.value = false
+  })
+
+  it('offers New retention report on a writable install', async () => {
+    renderList([ROW])
+    await screen.findByRole('link', { name: /Signup to purchase/ })
+    expect(screen.getByRole('link', { name: /new retention report/i })).toBeInTheDocument()
+  })
+
+  it('hides New retention report', async () => {
+    readOnly.value = true
+    renderList([ROW])
+    await screen.findByRole('link', { name: /Signup to purchase/ })
+    expect(screen.queryByRole('link', { name: /new retention report/i })).toBeNull()
   })
 })

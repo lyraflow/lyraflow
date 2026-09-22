@@ -64,6 +64,28 @@ describe('describeError', () => {
     )
   })
 
+  // What a read-only install's guard answers for a write it refuses.
+  it('maps 403 read_only_install to a message saying the install is read-only', () => {
+    expect(describeError(new ApiError(403, 'read_only_install'))).toBe(
+      'This install is read-only. Nothing can be changed here.',
+    )
+  })
+
+  it('keeps any other 403 on the generic message', () => {
+    expect(describeError(new ApiError(403, 'missing_ui_header'))).toBe(
+      'Something went wrong. Reload to try again.',
+    )
+  })
+
+  // What a proxy in front of an install answers for a method it refuses --
+  // the public demo refuses a person purge this way. Without a case the
+  // visitor is told something went wrong, which reads as a bug.
+  it('maps 405 to a message saying the install does not allow that action', () => {
+    expect(describeError(new ApiError(405, 'method_not_allowed'))).toBe(
+      'This install does not allow that action.',
+    )
+  })
+
   it('maps an unrecognized ApiError status to the generic message', () => {
     expect(describeError(new ApiError(500, 'boom'))).toBe(
       'Something went wrong. Reload to try again.',

@@ -3,6 +3,7 @@ import { ApiError } from '../../api/client.js'
 import type { ApiClient } from '../../api/client.js'
 import type { CreatedProject, Project } from '../../api/types.js'
 import { useProject } from '../../app/ProjectContext.js'
+import { useReadOnly } from '../../app/ReadOnly.js'
 import { Button } from '../../components/ui/button.js'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card.js'
 import { Input } from '../../components/ui/input.js'
@@ -38,6 +39,7 @@ function ProjectRow(props: {
   onUnauthorized?: () => void
 }) {
   const { project, client, onUpdated, onDeleted, onUnauthorized } = props
+  const readOnly = useReadOnly()
   const [renaming, setRenaming] = useState(false)
   const [draft, setDraft] = useState(project.name)
   const [busy, setBusy] = useState(false)
@@ -223,7 +225,9 @@ function ProjectRow(props: {
              * above is the only thing left to say about this row. Rename
              * used to render here disabled, which read as an action that
              * might come back; nothing about this row is actionable again. */}
-            {!deleting && (
+            {/* A read-only install refuses every one of these, so the row
+             * is the name, the slug and its badges and nothing else. */}
+            {!deleting && !readOnly && (
               <>
                 <Button
                   type="button"
@@ -394,6 +398,7 @@ export function ProjectsSection(props: {
   onUnauthorized?: () => void
 }) {
   const { client, onSessionStale, onUnauthorized } = props
+  const readOnly = useReadOnly()
   const { projects, addProject, updateProject, removeProject } = useProject()
 
   const [mode, setMode] = useState<Mode>('idle')
@@ -542,7 +547,7 @@ export function ProjectsSection(props: {
           </div>
         )}
 
-        {mode === 'idle' && (
+        {mode === 'idle' && !readOnly && (
           <div>
             <Button type="button" size="sm" onClick={openForm}>
               New project

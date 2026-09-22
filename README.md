@@ -3431,6 +3431,51 @@ nothing else. That is the price of an install this simple. At minimum, put
 it behind [HTTPS](#serving-over-https), and treat the admin password with
 the same care as the server key.
 
+### Showing an install to strangers
+
+There is one admin account and no roles, so a login you hand to someone else
+can change everything the admin can. For an install where everyone who signs
+in is a visitor, such as a public demo, one switch makes the whole install
+refuse writes:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `LYRAFLOW_READ_ONLY` | `false` | Set to `true` to refuse every write except the ones listed below. Only the lowercase literals `true`/`false` are accepted. `1`, `yes` or any other spelling fails to boot with an error rather than being read as `false`, because an install left writable by a typo is the failure this setting exists to prevent. |
+
+Like every other setting, it has to reach the server through the `lyraflow`
+service's `environment:` block in `docker-compose.yml`. The shipped compose file
+passes it through, so setting it in `.env` and running `docker compose up -d` is
+enough.
+
+**What a read-only install still accepts.** Anything that is `GET`, `HEAD` or
+`OPTIONS`, plus these, matched on the route rather than the raw URL:
+
+- `POST /v1/auth/login` and `POST /v1/auth/logout`, or nobody could sign in.
+- `POST /v1/track`, `/v1/identify`, `/v1/page`, `/v1/batch` and `/v1/alias`.
+  Read-only means the admin surface: ingest still accepts events, so a
+  read-only install's live feed stays live.
+- The reads that travel as `POST` because they carry a definition or a range:
+  `POST /v1/segments/preview`, `/v1/segments/:id/preview`,
+  `/v1/funnels/preview`, `/v1/funnels/:id/run`, `/v1/funnels/:id/dropoff`,
+  `/v1/funnels/:id/people`, `/v1/reports/retention`, and a shared dashboard's
+  `/v1/shared/:token/tiles/:index/run`. Running a saved funnel or segment
+  normally records its counts as the "last run" its list shows. A read-only
+  install skips that, so one visitor's run does not rewrite what the next one
+  sees.
+
+Everything else answers `403` with `{"error":"read_only_install"}` before its
+body is read, including any route added in a later release that nobody thought
+to list. The web UI reads the setting from `GET /v1/meta` and hides the
+controls the server would refuse: create, edit, save, delete, share, the home
+star, project settings, and the email and password forms. A share link made
+before the switch was turned on keeps working. No new one can be made.
+
+**It is not a second user.** Every caller, session or server key, is refused
+the same writes on a read-only install, including you. To change anything, set
+it back to `false` and restart. There is still no way for one install to have
+an operator who writes and a visitor who only looks; that is
+[#223](https://github.com/lyraflow/lyraflow/issues/223).
+
 ### Retention
 
 A background worker drops events older than each project's own

@@ -39,6 +39,7 @@ import { ProjectDeletionStore } from './project/deletion-store.js'
 import { purgeProject } from './project/purge.js'
 import { registerProjectRoutes } from './project/routes.js'
 import { ProjectPurgeWorker } from './project/worker.js'
+import { registerReadOnlyGuard } from './read-only.js'
 import { registerRetentionReportRoutes } from './reports/retention-routes.js'
 import { registerReportRoutes } from './reports/routes.js'
 import { registerTrendRoutes } from './reports/trend-routes.js'
@@ -216,6 +217,14 @@ export function buildApp(input: {
     trustProxy: true,
   }
   const app = Fastify(options)
+  // First, before any route or plugin. On Fastify 5 the position is not
+  // what makes it work -- a root hook reaches every route in this context,
+  // and moving this call to the end of buildApp was tried and left
+  // read-only.wiring.test.ts green -- but first is the placement that does
+  // not depend on that. The guard names only what it lets through, so a
+  // route added later is refused on a read-only install until someone
+  // decides otherwise -- see read-only.ts.
+  registerReadOnlyGuard(app, config.readOnly)
 
   // Rule 1: ingest never returns 5xx for bad data, and reserves 5xx for
   // saturation/outage only — as 503, not 500. authenticate() awaits
@@ -475,6 +484,7 @@ export function buildApp(input: {
     pg,
     database: config.ch.database,
     cache: segmentCache,
+    readOnly: config.readOnly,
   })
   // Shares the same `ch` and `pg` instances as the registrations around it —
   // a second ProjectCache-shaped duplicate would double the Postgres load an
@@ -488,6 +498,7 @@ export function buildApp(input: {
     ch,
     pg,
     database: config.ch.database,
+    readOnly: config.readOnly,
   })
   // Stored, not ad hoc, and needs neither `ch` nor `database` -- a saved
   // trend definition is three scalar Postgres columns with nothing to
@@ -535,6 +546,7 @@ export function buildApp(input: {
     // The shared instance, not a new one — see `segmentCache`'s own comment
     // above and `AdminProjectDeps.clearSegmentCache`.
     clearSegmentCache: (projectId) => segmentCache.clearProject(projectId),
+    readOnly: config.readOnly,
   })
   // One shared object, not one built per registration: registerExportRoute
   // takes the exact same PrivacyDeps registerPrivacyRoutes does (export.ts's

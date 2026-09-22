@@ -7,6 +7,7 @@ import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import type { Segment, SegmentPreview } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
+import { useReadOnly } from '../app/ReadOnly.js'
 import { ROUTES, segmentEditPath } from '../app/Router.js'
 import { PageHeader } from '../components/PageHeader.js'
 import { Button } from '../components/ui/button.js'
@@ -77,6 +78,7 @@ export function SegmentDetail(props: { client: ApiClient; onUnauthorized?: () =>
   const [previewRun, setPreviewRun] = useState(0)
   const [previewing, setPreviewing] = useState(false)
   const [previewError, setPreviewError] = useState<string | null>(null)
+  const readOnly = useReadOnly()
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
@@ -220,12 +222,12 @@ export function SegmentDetail(props: { client: ApiClient; onUnauthorized?: () =>
             {/* A stale segment's stored filter cannot be read -- SegmentBuilder
              * has nothing to show it, same reasoning FunnelDetail withholds
              * Edit for a stale funnel's steps. */}
-            {segment != null && !segment.stale && (
+            {segment != null && !segment.stale && !readOnly && (
               <Button asChild variant="outline" size="sm">
                 <Link to={segmentEditPath(segment.id)}>Edit</Link>
               </Button>
             )}
-            {segment != null && !confirmingDelete && (
+            {segment != null && !confirmingDelete && !readOnly && (
               <Button
                 type="button"
                 variant="ghost"

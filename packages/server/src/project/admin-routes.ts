@@ -28,6 +28,8 @@ export interface AdminProjectDeps {
    * untouched. See the DELETE route below for the window it closes.
    */
   clearSegmentCache: (projectId: number) => void
+  /** `config.readOnly`, reported by `GET /v1/meta` so the UI can hide what the server refuses. */
+  readOnly: boolean
 }
 
 const CreateBody = z.object({ name: z.string().min(1).max(200) })
@@ -66,8 +68,17 @@ function parseId(raw: string): number | null {
  * backing routes for the coming web UI.
  */
 export function registerAdminProjectRoutes(app: FastifyInstance, deps: AdminProjectDeps): void {
-  const { pg, sessions, projects, readiness, deletions, maxAttempts, leaseMs, clearSegmentCache } =
-    deps
+  const {
+    pg,
+    sessions,
+    projects,
+    readiness,
+    deletions,
+    maxAttempts,
+    leaseMs,
+    clearSegmentCache,
+    readOnly,
+  } = deps
 
   /**
    * Session-only, and deliberately NOT routed through auth/bridge.ts. These
@@ -112,10 +123,15 @@ export function registerAdminProjectRoutes(app: FastifyInstance, deps: AdminProj
    * without a second route or a breaking rename. Adding one is a decision
    * about what an install discloses about itself, and the test pinning this
    * key set exactly is what makes it one.
+   *
+   * `read_only` was the second such decision: the UI hides the controls a
+   * read-only install would refuse, rather than offering them and answering
+   * 403. It discloses nothing a signed-in caller could not learn by trying a
+   * write.
    */
   app.get('/v1/meta', async (req, reply) => {
     if (!(await requireSession(req, reply))) return
-    return { version: SERVER_VERSION }
+    return { version: SERVER_VERSION, read_only: readOnly }
   })
 
   app.get('/v1/projects', async (req, reply) => {

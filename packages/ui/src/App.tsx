@@ -3,6 +3,7 @@ import type { ApiClient } from './api/client.js'
 import { ApiError, createClient } from './api/client.js'
 import type { Project } from './api/types.js'
 import { ProjectProvider } from './app/ProjectContext.js'
+import { ReadOnlyProvider } from './app/ReadOnly.js'
 import { AppRouter } from './app/Router.js'
 import { applyTheme, readStoredTheme } from './app/ThemeToggle.js'
 import { applyPalette, readStoredPalette } from './app/palette.js'
@@ -308,41 +309,44 @@ export default function App(props: { client?: ApiClient; sessionPollIntervalMs?:
 
   return (
     <ProjectProvider projects={session.projects} initialId={session.projects[0]?.id ?? null}>
-      <AppRouter
-        client={client}
-        email={session.email}
-        onLogout={handleLogout}
-        onUnauthorized={handleSessionExpired}
-        onSessionStale={() => {
-          // The project list changed underneath the shell in a way the shell
-          // cannot represent -- today, the last project was destroyed. The
-          // wizard-or-shell decision lives HERE, above ProjectProvider, so
-          // the fix is to re-read the session and let that decision run
-          // again rather than teach a screen below it to render an install
-          // with no projects.
-          loadSession(client, session.email)
-            .then((loaded) => setPhase({ kind: 'authenticated', session: loaded }))
-            .catch(() => setPhase({ kind: 'unavailable' }))
-        }}
-        // Re-read rather than patched in place: the header renders `email`
-        // from this state, and `GET /v1/auth/session` is the thing that
-        // knows what was actually stored -- taking the profile screen's
-        // word for it would be two sources for one value. A failure here is
-        // deliberately silent: the change already succeeded, and the only
-        // consequence is a header showing the old address until the next
-        // load, which is not worth an error banner over a saved change.
-        onEmailChanged={() => {
-          client
-            .session()
-            .then((s) =>
-              // The PROJECTS are kept, not re-fetched: they did not change,
-              // and replacing them from a second request would race
-              // `ProjectContext`'s own additive edits (#89).
-              setPhase({ kind: 'authenticated', session: { ...session, email: s.email } }),
-            )
-            .catch(() => {})
-        }}
-      />
+      {/* Inside the authenticated branch only: `/v1/meta` is session-gated. */}
+      <ReadOnlyProvider client={client}>
+        <AppRouter
+          client={client}
+          email={session.email}
+          onLogout={handleLogout}
+          onUnauthorized={handleSessionExpired}
+          onSessionStale={() => {
+            // The project list changed underneath the shell in a way the shell
+            // cannot represent -- today, the last project was destroyed. The
+            // wizard-or-shell decision lives HERE, above ProjectProvider, so
+            // the fix is to re-read the session and let that decision run
+            // again rather than teach a screen below it to render an install
+            // with no projects.
+            loadSession(client, session.email)
+              .then((loaded) => setPhase({ kind: 'authenticated', session: loaded }))
+              .catch(() => setPhase({ kind: 'unavailable' }))
+          }}
+          // Re-read rather than patched in place: the header renders `email`
+          // from this state, and `GET /v1/auth/session` is the thing that
+          // knows what was actually stored -- taking the profile screen's
+          // word for it would be two sources for one value. A failure here is
+          // deliberately silent: the change already succeeded, and the only
+          // consequence is a header showing the old address until the next
+          // load, which is not worth an error banner over a saved change.
+          onEmailChanged={() => {
+            client
+              .session()
+              .then((s) =>
+                // The PROJECTS are kept, not re-fetched: they did not change,
+                // and replacing them from a second request would race
+                // `ProjectContext`'s own additive edits (#89).
+                setPhase({ kind: 'authenticated', session: { ...session, email: s.email } }),
+              )
+              .catch(() => {})
+          }}
+        />
+      </ReadOnlyProvider>
     </ProjectProvider>
   )
 }

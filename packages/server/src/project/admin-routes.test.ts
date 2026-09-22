@@ -412,7 +412,26 @@ describe('GET /v1/meta', () => {
   it('reports the running version to a session', async () => {
     const res = await app.inject({ method: 'GET', url: '/v1/meta', headers: sessionHeaders })
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ version: SERVER_VERSION })
+    expect(res.json()).toEqual({ version: SERVER_VERSION, read_only: false })
+  })
+
+  // The UI reads this to hide the controls the server would refuse. Same
+  // session, same databases, a second app built read-only.
+  it('reports read_only: true on a read-only install', async () => {
+    const readOnly = buildApp({
+      config: { ...app.deps.config, readOnly: true },
+      pg,
+      ch,
+      readiness: app.deps.readiness,
+    })
+    await readOnly.ready()
+    try {
+      const res = await readOnly.inject({ method: 'GET', url: '/v1/meta', headers: sessionHeaders })
+      expect(res.statusCode).toBe(200)
+      expect(res.json()).toEqual({ version: SERVER_VERSION, read_only: true })
+    } finally {
+      await readOnly.close()
+    }
   })
 
   // Pins the exact key set, not merely that `version` is present. This
@@ -420,9 +439,9 @@ describe('GET /v1/meta', () => {
   // added here later (a commit sha, a hostname, the Node version) is a
   // decision about what an install discloses about itself -- it should have
   // to fail a test to arrive, rather than being appended in passing.
-  it('carries that field and no other', async () => {
+  it('carries those fields and no other', async () => {
     const res = await app.inject({ method: 'GET', url: '/v1/meta', headers: sessionHeaders })
-    expect(Object.keys(res.json() as Record<string, unknown>)).toEqual(['version'])
+    expect(Object.keys(res.json() as Record<string, unknown>)).toEqual(['version', 'read_only'])
   })
 
   // The whole reason this is not on `/health`: a version number tells an
@@ -565,6 +584,7 @@ describe('a session inside its renewal window, used through GET /v1/projects', (
       maxAttempts: 5,
       leaseMs: 1_800_000,
       clearSegmentCache: () => {},
+      readOnly: false,
     })
     await local.ready()
 

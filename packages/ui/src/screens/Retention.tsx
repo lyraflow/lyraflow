@@ -4,6 +4,7 @@ import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import type { RetentionReportInput, RetentionResult } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
+import { useReadOnly } from '../app/ReadOnly.js'
 import { ROUTES, retentionReportPath } from '../app/Router.js'
 import { EventCombobox } from '../components/EventCombobox.js'
 import { NativeSelect } from '../components/NativeSelect.js'
@@ -124,6 +125,7 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
   const [reportError, setReportError] = useState<string | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const readOnly = useReadOnly()
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
@@ -530,7 +532,8 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
            * `/retention/new`, same reasoning `FunnelDetail` gates its own
            * Delete on `funnel != null`. */
           reportId != null &&
-          !confirmingDelete && (
+          !confirmingDelete &&
+          !readOnly && (
             <Button
               type="button"
               variant="ghost"
@@ -697,9 +700,16 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
         >
           {running ? 'Running…' : 'Run'}
         </Button>
-        <Button type="button" variant="outline" onClick={handleSave} disabled={!canSave || saving}>
-          {saving ? 'Saving…' : 'Save'}
-        </Button>
+        {!readOnly && (
+          <Button
+            type="button"
+            variant="outline"
+            onClick={handleSave}
+            disabled={!canSave || saving}
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </Button>
+        )}
       </div>
 
       {saveError != null && (

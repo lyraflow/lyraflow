@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { type ApiClient, ApiError } from '../api/client.js'
 import type { DashboardTileInput, Dashboard as DashboardWire, ResolvedTile } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
+import { useReadOnly } from '../app/ReadOnly.js'
 import { ROUTES } from '../app/Router.js'
 import { PageHeader } from '../components/PageHeader.js'
 import { Button } from '../components/ui/button.js'
@@ -58,7 +59,10 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
   const id = rawId !== undefined && /^\d+$/.test(rawId) ? Number(rawId) : null
   const navigate = useNavigate()
   const [search, setSearch] = useSearchParams()
-  const editing = search.get(EDIT_KEY) === '1'
+  const readOnly = useReadOnly()
+  // A read-only install has no edit mode: `?edit=1` is a URL anyone can type,
+  // and it would otherwise open Delete and the rename field.
+  const editing = search.get(EDIT_KEY) === '1' && !readOnly
 
   // `DashboardTile`'s run effect depends on the IDENTITY of `range`, `tile`
   // and `queue` (see its own dependency comment), so all three have to
@@ -345,7 +349,7 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
        * could not see without entering a mode that also offers Delete.
        * The star reads as a state when it is filled, which the old
        * `Home`/`Set as home` button could not do at a glance. */}
-      {dash && (
+      {dash && !readOnly && (
         <HomeStar
           isHome={dash.is_home}
           disabled={saving}
@@ -366,12 +370,12 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
       {/* View mode only -- editing already closes the card
        * (`setEditing`), and offering both at once would mean a viewer
        * shares a layout mid-edit that the server has not seen yet. */}
-      {dash && !editing && (
+      {dash && !editing && !readOnly && (
         <Button type="button" variant="outline" size="sm" onClick={() => setSharing((s) => !s)}>
           Share
         </Button>
       )}
-      {dash && (
+      {dash && !readOnly && (
         <Button type="button" size="sm" onClick={() => setEditing(!editing)}>
           {editing ? 'Done' : 'Edit'}
         </Button>

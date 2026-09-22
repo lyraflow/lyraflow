@@ -159,6 +159,36 @@ describe('DeleteButton', () => {
     expect(screen.queryByText(/could not start/i)).toBeNull()
   })
 
+  // A proxy in front of the install can refuse the purge outright -- the
+  // public demo does. "Could not start the deletion. Try again." invites a
+  // retry that will be refused the same way every time.
+  it('says the install does not allow it when a proxy answers 405', async () => {
+    const client = makeClient()
+    ;(client.deletePerson as Mock).mockRejectedValue(new ApiError(405, 'unknown'))
+    render(<DeleteButton {...base(client)} onDeleted={vi.fn()} />)
+    await confirmAndDelete('u1')
+    expect(await screen.findByText('This install does not allow that action.')).toBeInTheDocument()
+    expect(screen.queryByText(/could not start/i)).toBeNull()
+  })
+
+  it('says the install is read-only when the server answers 403 read_only_install', async () => {
+    const client = makeClient()
+    ;(client.deletePerson as Mock).mockRejectedValue(new ApiError(403, 'read_only_install'))
+    render(<DeleteButton {...base(client)} onDeleted={vi.fn()} />)
+    await confirmAndDelete('u1')
+    expect(
+      await screen.findByText('This install is read-only. Nothing can be changed here.'),
+    ).toBeInTheDocument()
+  })
+
+  it('keeps the retry message for a failure that a retry might fix', async () => {
+    const client = makeClient()
+    ;(client.deletePerson as Mock).mockRejectedValue(new ApiError(503, 'unavailable'))
+    render(<DeleteButton {...base(client)} onDeleted={vi.fn()} />)
+    await confirmAndDelete('u1')
+    expect(await screen.findByText('Could not start the deletion. Try again.')).toBeInTheDocument()
+  })
+
   it('reports a 401 from the poll through onUnauthorized, and stops polling', async () => {
     const client = makeClient()
     ;(client.deletion as Mock).mockRejectedValue(new ApiError(401, 'no_session'))
