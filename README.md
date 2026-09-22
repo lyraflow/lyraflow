@@ -3494,7 +3494,8 @@ before the switch was turned on keeps working. No new one can be made.
 the same writes on a read-only install, including you. To change anything, set
 it back to `false` and restart. The CLI commands that talk to the databases
 directly rather than to the API are the exception: `create-project`,
-`projects delete`, `reset-admin-login`, `seed-demo` and `migrate` still write,
+`projects delete`, `projects deletion retry`, `reset-admin-login`, `seed-demo`
+and `migrate` still write,
 because the switch lives in the API server and they never pass through it. They
 need a shell on the host, so this is how an operator changes a read-only install
 without restarting it. There is still no way for one install to have
