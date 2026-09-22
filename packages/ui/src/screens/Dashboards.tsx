@@ -4,6 +4,7 @@ import type { ApiClient } from '../api/client.js'
 import { ApiError } from '../api/client.js'
 import type { DashboardSummary } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
+import { useReadOnly } from '../app/ReadOnly.js'
 import { ROUTES, dashboardPath } from '../app/Router.js'
 import { PageHeader } from '../components/PageHeader.js'
 import { Button } from '../components/ui/button.js'
@@ -118,14 +119,17 @@ export function Dashboards(props: { client: ApiClient; onUnauthorized?: () => vo
     [client, activeId, onUnauthorized],
   )
 
+  const readOnly = useReadOnly()
   return (
     <div className="flex min-w-0 flex-col gap-6">
       <PageHeader
         title="Dashboards"
         actions={
-          <Button asChild size="sm">
-            <Link to={ROUTES.dashboardNew}>New dashboard</Link>
-          </Button>
+          !readOnly && (
+            <Button asChild size="sm">
+              <Link to={ROUTES.dashboardNew}>New dashboard</Link>
+            </Button>
+          )
         }
       />
 
@@ -146,7 +150,8 @@ export function Dashboards(props: { client: ApiClient; onUnauthorized?: () => vo
           // `is_home`, so the wire row is looked up by id rather than
           // widening the shared interface for one caller's field.
           const d = dashboards?.find((x) => x.id === r.id)
-          if (d === undefined) return null
+          // The star is a PATCH, which a read-only install refuses.
+          if (d === undefined || readOnly) return null
           return (
             <HomeStar
               isHome={d.is_home}

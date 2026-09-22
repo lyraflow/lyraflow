@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
+import { useReadOnly } from '../app/ReadOnly.js'
 import { PageHeader } from '../components/PageHeader.js'
 import { Button } from '../components/ui/button.js'
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card.js'
@@ -249,12 +250,19 @@ export function Profile(props: {
   email: string | null
   onEmailChanged: () => void
 }) {
+  // On an install that publishes its one login, a changed password would lock
+  // out every other visitor -- and the server refuses both changes anyway.
+  const readOnly = useReadOnly()
   return (
     <div className="flex min-w-0 max-w-3xl flex-col gap-4">
       <PageHeader title="Profile" />
       <AppearanceSection />
-      <EmailForm client={props.client} email={props.email} onChanged={props.onEmailChanged} />
-      <PasswordForm client={props.client} />
+      {!readOnly && (
+        <>
+          <EmailForm client={props.client} email={props.email} onChanged={props.onEmailChanged} />
+          <PasswordForm client={props.client} />
+        </>
+      )}
     </div>
   )
 }

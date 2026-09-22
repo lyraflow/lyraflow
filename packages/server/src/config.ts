@@ -24,6 +24,13 @@ export interface Config {
   retentionIntervalMs: number
   retentionEnabled: boolean
   /**
+   * An install-level switch, not a per-user one: every signed-in session on
+   * a read-only install is refused the same writes (see read-only.ts). It
+   * exists for an install shown to strangers, where the one admin login is
+   * published. Ingest stays open; see READ_ONLY_ALLOW.
+   */
+  readOnly: boolean
+  /**
    * Read once at boot by ensureAdminUser and never again. Absent on any
    * install that predates the admin account, which is why nothing here
    * throws on a missing value -- see auth/bootstrap.ts.
@@ -228,6 +235,10 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     // data an operator believed they had turned off, which is the worse
     // failure of the two by a wide margin.
     retentionEnabled: bool(env, 'LYRAFLOW_RETENTION_ENABLED', true),
+    // Same bool() and the same reasoning: `=1` or `=yes` is refused at boot,
+    // because an unrecognised "on" silently read as `false` would leave an
+    // install writable that its operator believed was locked.
+    readOnly: bool(env, 'LYRAFLOW_READ_ONLY', false),
     adminEmail: env.LYRAFLOW_ADMIN_EMAIL,
     adminPassword: env.LYRAFLOW_ADMIN_PASSWORD,
   }

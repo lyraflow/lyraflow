@@ -9,6 +9,15 @@ import { ProjectProvider } from '../app/ProjectContext.js'
 import { FunnelBuilder } from './FunnelBuilder.js'
 import { Funnels } from './Funnels.js'
 
+// The read-only switch, as the screen reads it. Mocked rather than provided,
+// so this file's render helpers stay as they are; `app/ReadOnly.test.tsx`
+// covers the real context that feeds `useReadOnly` from `/v1/meta`.
+const readOnly = vi.hoisted(() => ({ value: false }))
+vi.mock('../app/ReadOnly.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../app/ReadOnly.js')>()),
+  useReadOnly: () => readOnly.value,
+}))
+
 const PROJECTS = [
   {
     id: 1,
@@ -522,5 +531,24 @@ describe('the rate says which range produced it (#91)', () => {
     renderList([withRange({ last_entered: 0, last_converted: 0 })])
     expect(await screen.findByText(/0 entered/)).toBeInTheDocument()
     expect(await screen.findByText(/Last 90 days/)).toBeInTheDocument()
+  })
+})
+
+describe('Funnels on a read-only install', () => {
+  afterEach(() => {
+    readOnly.value = false
+  })
+
+  it('offers Create funnel on a writable install', async () => {
+    renderList([RUN_ONCE])
+    await screen.findByRole('link', { name: /Signup flow/ })
+    expect(screen.getByRole('link', { name: /create funnel/i })).toBeInTheDocument()
+  })
+
+  it('hides Create funnel', async () => {
+    readOnly.value = true
+    renderList([RUN_ONCE])
+    await screen.findByRole('link', { name: /Signup flow/ })
+    expect(screen.queryByRole('link', { name: /create funnel/i })).toBeNull()
   })
 })

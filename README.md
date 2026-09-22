@@ -2516,6 +2516,14 @@ A duplicate name within the same project is a `409`. A non-numeric `:id` is a
 another project, is a `404` — never a `403`, which would confirm the id
 exists.
 
+**`group_by` takes the same values `GET /v1/events/stats` does** — see
+[Splitting](#splitting) above — and nothing else: on both `POST` and `PATCH`,
+anything `parseBreakdown` would refuse (a `trait:` prefix, an unknown
+`attribute:`, a bare string with no colon) is a `400` naming `invalid_trend`,
+with `detail[0].path` set to `group_by`. Before this, only a length check
+gated the field, so a value the chart engine would later refuse could be
+saved and then silently reopened as no breakdown at all (#274).
+
 **What is not stored is the range.** `since`, `until` and every relative
 preset live only in the Trends screen's own URL, the same way a funnel never
 stores `since`/`until` either — only its `window_seconds`, a duration rather
@@ -3423,6 +3431,51 @@ nothing else. That is the price of an install this simple. At minimum, put
 it behind [HTTPS](#serving-over-https), and treat the admin password with
 the same care as the server key.
 
+### Showing an install to strangers
+
+There is one admin account and no roles, so a login you hand to someone else
+can change everything the admin can. For an install where everyone who signs
+in is a visitor, such as a public demo, one switch makes the whole install
+refuse writes:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `LYRAFLOW_READ_ONLY` | `false` | Set to `true` to refuse every write except the ones listed below. Only the lowercase literals `true`/`false` are accepted. `1`, `yes` or any other spelling fails to boot with an error rather than being read as `false`, because an install left writable by a typo is the failure this setting exists to prevent. |
+
+Like every other setting, it has to reach the server through the `lyraflow`
+service's `environment:` block in `docker-compose.yml`. The shipped compose file
+passes it through, so setting it in `.env` and running `docker compose up -d` is
+enough.
+
+**What a read-only install still accepts.** Anything that is `GET`, `HEAD` or
+`OPTIONS`, plus these, matched on the route rather than the raw URL:
+
+- `POST /v1/auth/login` and `POST /v1/auth/logout`, or nobody could sign in.
+- `POST /v1/track`, `/v1/identify`, `/v1/page`, `/v1/batch` and `/v1/alias`.
+  Read-only means the admin surface: ingest still accepts events, so a
+  read-only install's live feed stays live.
+- The reads that travel as `POST` because they carry a definition or a range:
+  `POST /v1/segments/preview`, `/v1/segments/:id/preview`,
+  `/v1/funnels/preview`, `/v1/funnels/:id/run`, `/v1/funnels/:id/dropoff`,
+  `/v1/funnels/:id/people`, `/v1/reports/retention`, and a shared dashboard's
+  `/v1/shared/:token/tiles/:index/run`. Running a saved funnel or segment
+  normally records its counts as the "last run" its list shows. A read-only
+  install skips that, so one visitor's run does not rewrite what the next one
+  sees.
+
+Everything else answers `403` with `{"error":"read_only_install"}` before its
+body is read, including any route added in a later release that nobody thought
+to list. The web UI reads the setting from `GET /v1/meta` and hides the
+controls the server would refuse: create, edit, save, delete, share, the home
+star, project settings, and the email and password forms. A share link made
+before the switch was turned on keeps working. No new one can be made.
+
+**It is not a second user.** Every caller, session or server key, is refused
+the same writes on a read-only install, including you. To change anything, set
+it back to `false` and restart. There is still no way for one install to have
+an operator who writes and a visitor who only looks; that is
+[#223](https://github.com/lyraflow/lyraflow/issues/223).
+
 ### Retention
 
 A background worker drops events older than each project's own
@@ -3809,12 +3862,15 @@ the intermediary's. Name the ranges you actually sit behind by dropping a file
 into `docker/caddy/proxy.d/`:
 
 ```
-trusted_proxies static 173.245.48.0/20 103.21.244.0/22
+trusted_proxies 173.245.48.0/20 103.21.244.0/22
 ```
 
 Those directives land inside the `reverse_proxy` block, which is why they go in
 `proxy.d/` rather than `tls.d/` — `trusted_proxies` is a sub-directive of the
-proxy, not of the site.
+proxy, not of the site. That is also why `static` does not belong here: it
+names the module for Caddy's *global* `servers { trusted_proxies static ... }`
+option, one level up. Used inside `reverse_proxy` it is parsed as an IP
+address and caddy:2-alpine exits at boot.
 
 The ranges are your CDN's published egress list and they change; Cloudflare
 publishes theirs at <https://www.cloudflare.com/ips/>. A stale list fails
@@ -3824,9 +3880,9 @@ arriving through it record the CDN's address instead of their own.
 **Do not use `0.0.0.0/0`.** Trusting everyone is the same as having no check at
 all — it lets any client claim any IP by setting a header.
 
-This has no visible effect today: GeoIP returns an empty country, region and
-city for every event, so nothing currently reads the client address. It matters
-from the moment that changes.
+This is not cosmetic: `req.ip` keys the login rate limiter, so behind a CDN
+with no trusted range every visitor shares the CDN's address and therefore one
+bucket, until this is set.
 
 ## Upgrading
 

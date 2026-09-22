@@ -1,11 +1,20 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import { ProjectProvider } from '../app/ProjectContext.js'
 import { Dashboards } from './Dashboards.js'
+
+// The read-only switch, as the screen reads it. Mocked rather than provided,
+// so this file's render helpers stay as they are; `app/ReadOnly.test.tsx`
+// covers the real context that feeds `useReadOnly` from `/v1/meta`.
+const readOnly = vi.hoisted(() => ({ value: false }))
+vi.mock('../app/ReadOnly.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../app/ReadOnly.js')>()),
+  useReadOnly: () => readOnly.value,
+}))
 
 const T = '2026-08-27T00:00:00.000Z'
 
@@ -272,5 +281,34 @@ describe('Dashboards — the home star, while a PATCH is in flight', () => {
     resolve?.(patched(B, true))
     const filled = await screen.findByRole('button', { name: UNSET_B, pressed: true })
     expect(filled).not.toBeDisabled()
+  })
+})
+
+describe('Dashboards on a read-only install', () => {
+  afterEach(() => {
+    readOnly.value = false
+  })
+
+  it('offers New dashboard and the home star on a writable install', async () => {
+    renderList([A, B])
+    await screen.findByRole('link', { name: /Growth/ })
+    expect(screen.getByRole('link', { name: /new dashboard/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: SET_B })).toBeInTheDocument()
+  })
+
+  it('hides New dashboard', async () => {
+    readOnly.value = true
+    renderList([A, B])
+    await screen.findByRole('link', { name: /Growth/ })
+    expect(screen.queryByRole('link', { name: /new dashboard/i })).toBeNull()
+  })
+
+  // The star is a PATCH, so it goes too.
+  it('hides the home star', async () => {
+    readOnly.value = true
+    renderList([A, B])
+    await screen.findByRole('link', { name: /Growth/ })
+    expect(screen.queryByRole('button', { name: SET_B })).toBeNull()
+    expect(screen.queryByRole('button', { name: UNSET_A })).toBeNull()
   })
 })

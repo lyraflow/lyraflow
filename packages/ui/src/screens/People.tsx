@@ -5,6 +5,7 @@ import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import type { LyraEvent, Person } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
+import { useReadOnly } from '../app/ReadOnly.js'
 import { DetailSection } from '../components/DetailList.js'
 import { PageHeader } from '../components/PageHeader.js'
 import { Button } from '../components/ui/button.js'
@@ -154,6 +155,7 @@ function Screen(props: { children: ReactNode }) {
 export function People(props: { client: ApiClient; onUnauthorized?: () => void }) {
   const { client, onUnauthorized } = props
   const { activeId } = useProject()
+  const readOnly = useReadOnly()
   const location = useLocation()
   const navigate = useNavigate()
   const id = readPersonId(location.search)
@@ -428,18 +430,21 @@ export function People(props: { client: ApiClient; onUnauthorized?: () => void }
             eventCount={person.events}
             onUnauthorized={onUnauthorized}
           />
-          <DeleteButton
-            key={`delete-${person.person_id}`}
-            client={client}
-            projectId={activeId}
-            personId={person.person_id}
-            // Bumping `reloadToken` re-runs the person-read effect against
-            // the same id -- see that state's own doc comment for why a
-            // re-fetch, rather than trusting `onDeleted` to mean "gone", is
-            // the correct end here.
-            onDeleted={() => setReloadToken((t) => t + 1)}
-            onUnauthorized={onUnauthorized}
-          />
+          {/* Refused by a read-only install; Export beside it is a read. */}
+          {!readOnly && (
+            <DeleteButton
+              key={`delete-${person.person_id}`}
+              client={client}
+              projectId={activeId}
+              personId={person.person_id}
+              // Bumping `reloadToken` re-runs the person-read effect against
+              // the same id -- see that state's own doc comment for why a
+              // re-fetch, rather than trusting `onDeleted` to mean "gone", is
+              // the correct end here.
+              onDeleted={() => setReloadToken((t) => t + 1)}
+              onUnauthorized={onUnauthorized}
+            />
+          )}
         </div>
       )}
       {/*

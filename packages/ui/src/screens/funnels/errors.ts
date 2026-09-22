@@ -45,8 +45,19 @@ export function describeError(err: unknown, noun = 'funnel'): string {
           .join('; ')}`
       }
       return `This ${noun} could not be read: ${err.code}`
+    case 403:
+      // The guard on a read-only install (LYRAFLOW_READ_ONLY). Any other 403
+      // keeps the generic message: it is not something this screen caused.
+      if (err.code === 'read_only_install') {
+        return 'This install is read-only. Nothing can be changed here.'
+      }
+      return 'Something went wrong. Reload to try again.'
     case 404:
       return `This ${noun} no longer exists.`
+    case 405:
+      // Not from Lyraflow itself: a proxy in front of the install refusing a
+      // method, which is how the public demo refuses a person purge.
+      return 'This install does not allow that action.'
     case 409:
       return `A ${noun} with that name already exists.`
     case 422:

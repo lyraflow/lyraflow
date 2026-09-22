@@ -772,6 +772,38 @@ describe('/v1/segments CRUD and run', () => {
     expect(after.json().last_evaluated_at).not.toBeNull()
   })
 
+  // The preview route is on the read-only allow-list, and must not write the
+  // snapshot there -- see the funnel suite's twin of this test.
+  it('does not record the snapshot on a read-only install', async () => {
+    const created = await create({ name: 'Read-only run', ast_version: 1, filter: trait })
+    const id = created.json().id
+    const readOnly = buildApp({
+      config: { ...app.deps.config, readOnly: true },
+      pg,
+      ch,
+      readiness: app.deps.readiness,
+    })
+    await readOnly.ready()
+    try {
+      const run = await readOnly.inject({
+        method: 'POST',
+        url: `/v1/segments/${id}/preview`,
+        headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+        payload: {},
+      })
+      expect(run.statusCode).toBe(200)
+    } finally {
+      await readOnly.close()
+    }
+    const after = await app.inject({
+      method: 'GET',
+      url: `/v1/segments/${id}`,
+      headers: { 'x-lyraflow-server-key': SERVER_KEY },
+    })
+    expect(after.json().last_count).toBeNull()
+    expect(after.json().last_evaluated_at).toBeNull()
+  })
+
   /**
    * #21: the saved-segment run used to omit the cost warnings the ad-hoc
    * preview returns for the identical tree. Enumerates every warning kind

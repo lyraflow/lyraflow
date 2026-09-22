@@ -71,6 +71,11 @@ services:
       # allowlist is working. The startup line in index.ts states which of the
       # two it is; this line is what makes the documented `.env` route true.
       LYRAFLOW_ALLOWED_ORIGINS: ${LYRAFLOW_ALLOWED_ORIGINS:-}
+      # Named for the reason the line above is: not arriving fails
+      # permissively. Without this line an operator who sets it in `.env` and
+      # restarts gets no error and an install that is still writable. `false`
+      # rather than empty so the default is spelled the way loadConfig accepts.
+      LYRAFLOW_READ_ONLY: ${LYRAFLOW_READ_ONLY:-false}
     # Interpolated so domain mode can drop this to loopback without a second
     # compose file. Unset it is 3000:3000 -- byte-for-byte today's behaviour.
     # The three-part IP:host:container form is required in domain mode;

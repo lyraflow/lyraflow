@@ -1,7 +1,7 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import type {
@@ -20,6 +20,15 @@ import { ProjectProvider, useProject } from '../app/ProjectContext.js'
 import { ROUTES } from '../app/Router.js'
 import { Dashboard } from './Dashboard.js'
 import { MAX_TILES } from './dashboards/tileRequest.js'
+
+// The read-only switch, as the screen reads it. Mocked rather than provided,
+// so this file's render helpers stay as they are; `app/ReadOnly.test.tsx`
+// covers the real context that feeds `useReadOnly` from `/v1/meta`.
+const readOnly = vi.hoisted(() => ({ value: false }))
+vi.mock('../app/ReadOnly.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../app/ReadOnly.js')>()),
+  useReadOnly: () => readOnly.value,
+}))
 
 const T = '2026-08-01T00:00:00.000Z'
 
@@ -1223,5 +1232,38 @@ describe('Dashboard — sharing', () => {
     // dashboard, even though both are id 7 and the card is open.
     expect(screen.getByRole('button', { name: 'Create link' })).toBeInTheDocument()
     expect(screen.queryByRole('textbox', { name: 'Share link' })).toBeNull()
+  })
+})
+
+describe('Dashboard on a read-only install', () => {
+  afterEach(() => {
+    readOnly.value = false
+  })
+
+  it('offers Edit, Share and the home star on a writable install', async () => {
+    renderScreen()
+    await screen.findByRole('heading', { name: 'Overview' })
+    expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Share' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: SET_HOME })).toBeInTheDocument()
+  })
+
+  it('hides Edit, Share and the home star', async () => {
+    readOnly.value = true
+    renderScreen()
+    await screen.findByRole('heading', { name: 'Overview' })
+    expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Share' })).toBeNull()
+    expect(screen.queryByRole('button', { name: SET_HOME })).toBeNull()
+  })
+
+  // `?edit=1` is a URL anyone can type. On a read-only install it opens the
+  // same view mode, so Delete and the rename field never appear.
+  it('ignores ?edit=1', async () => {
+    readOnly.value = true
+    renderScreen({ at: '/dashboards/7?edit=1' })
+    await screen.findByRole('heading', { name: 'Overview' })
+    expect(screen.queryByRole('button', { name: /^delete$/i })).toBeNull()
+    expect(screen.queryByRole('textbox', { name: 'Dashboard name' })).toBeNull()
   })
 })

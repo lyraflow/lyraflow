@@ -2,7 +2,7 @@ import type { FilterNode } from '@lyraflow/core/segments/ast.js'
 import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
@@ -10,6 +10,15 @@ import type { MemberRow, Segment, SegmentPreview } from '../api/types.js'
 import { ProjectProvider } from '../app/ProjectContext.js'
 import { ROUTES, segmentEditPath, segmentPath } from '../app/Router.js'
 import { SegmentDetail } from './SegmentDetail.js'
+
+// The read-only switch, as the screen reads it. Mocked rather than provided,
+// so this file's render helpers stay as they are; `app/ReadOnly.test.tsx`
+// covers the real context that feeds `useReadOnly` from `/v1/meta`.
+const readOnly = vi.hoisted(() => ({ value: false }))
+vi.mock('../app/ReadOnly.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../app/ReadOnly.js')>()),
+  useReadOnly: () => readOnly.value,
+}))
 
 const PROJECTS = [
   {
@@ -750,5 +759,26 @@ describe('SegmentDetail -- the segment an action belongs to', () => {
     expect(screen.queryByText(/delete this segment\?/i)).toBeNull()
     expect(screen.queryByRole('button', { name: /^delete segment$/i })).toBeNull()
     expect(client.deleteSegment).not.toHaveBeenCalled()
+  })
+})
+
+describe('SegmentDetail on a read-only install', () => {
+  afterEach(() => {
+    readOnly.value = false
+  })
+
+  it('offers Edit and Delete on a writable install', async () => {
+    renderDetail()
+    await screen.findByRole('heading', { name: 'Paying customers' })
+    expect(screen.getByRole('link', { name: /^edit$/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^delete$/i })).toBeInTheDocument()
+  })
+
+  it('hides Edit and Delete', async () => {
+    readOnly.value = true
+    renderDetail()
+    await screen.findByRole('heading', { name: 'Paying customers' })
+    expect(screen.queryByRole('link', { name: /^edit$/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /^delete$/i })).toBeNull()
   })
 })

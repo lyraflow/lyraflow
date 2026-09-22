@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { ApiClient } from '../../api/client.js'
 import type { Project, ProjectLimits } from '../../api/types.js'
+import { useReadOnly } from '../../app/ReadOnly.js'
 import { Button } from '../../components/ui/button.js'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card.js'
 import { Input } from '../../components/ui/input.js'
@@ -93,6 +94,8 @@ export function LimitsSection(props: {
   onSaved: (patch: ProjectLimits) => void
 }) {
   const { client, project, onSaved } = props
+  // On a read-only install the values stay readable and nothing sends them.
+  const readOnly = useReadOnly()
 
   const [retentionInput, setRetentionInput] = useState(() =>
     project ? String(project.retention_months) : '',
@@ -180,16 +183,19 @@ export function LimitsSection(props: {
               inputMode="numeric"
               className="max-w-32"
               value={retentionInput}
+              readOnly={readOnly}
               onChange={(e) => setRetentionInput(e.target.value)}
             />
-            <Button
-              type="button"
-              size="sm"
-              onClick={handleSaveRetention}
-              disabled={retentionSaving}
-            >
-              Save retention
-            </Button>
+            {!readOnly && (
+              <Button
+                type="button"
+                size="sm"
+                onClick={handleSaveRetention}
+                disabled={retentionSaving}
+              >
+                Save retention
+              </Button>
+            )}
           </div>
           <p className="text-sm text-muted-foreground">Events older than this are purged. 1-120.</p>
           {retentionError && (
@@ -209,11 +215,14 @@ export function LimitsSection(props: {
               placeholder="Unlimited"
               className="max-w-48"
               value={quotaInput}
+              readOnly={readOnly}
               onChange={(e) => setQuotaInput(e.target.value)}
             />
-            <Button type="button" size="sm" onClick={handleSaveQuota} disabled={quotaSaving}>
-              Save quota
-            </Button>
+            {!readOnly && (
+              <Button type="button" size="sm" onClick={handleSaveQuota} disabled={quotaSaving}>
+                Save quota
+              </Button>
+            )}
           </div>
           <p className="text-sm text-muted-foreground">Leave empty for unlimited.</p>
           {quotaError && (

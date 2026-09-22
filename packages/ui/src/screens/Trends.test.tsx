@@ -1,12 +1,21 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import type { StatsPage, TrendReport, TrendReportInput } from '../api/types.js'
 import { ProjectProvider } from '../app/ProjectContext.js'
 import { Trends } from './Trends.js'
+
+// The read-only switch, as the screen reads it. Mocked rather than provided,
+// so this file's render helpers stay as they are; `app/ReadOnly.test.tsx`
+// covers the real context that feeds `useReadOnly` from `/v1/meta`.
+const readOnly = vi.hoisted(() => ({ value: false }))
+vi.mock('../app/ReadOnly.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../app/ReadOnly.js')>()),
+  useReadOnly: () => readOnly.value,
+}))
 
 /** An arbitrary fixed timestamp -- the exact value never matters to any
  * assertion below, only that every stored report carries one. */
@@ -325,6 +334,60 @@ describe('Trends -- saving and reopening a saved report', () => {
       interval: '1d',
       group_by: 'attribute:country',
     })
+  })
+
+  // #274: a report saved before the server validated `group_by` can carry a
+  // value the chart engine refuses -- `trait:plan` was accepted by CREATE
+  // and PATCH, and `sourceAndFieldFromGroupBy` silently falls back to
+  // `none` for it, so the breakdown used to vanish with nothing said. Now
+  // it says so.
+  it('says the saved breakdown could not be drawn, when the stored group_by does not parse', async () => {
+    renderAt('/trends/3', {
+      trendReport: vi.fn(async () => reportFixture({ group_by: 'trait:plan' })),
+    })
+    const notice = await screen.findByTestId('trend-breakdown-dropped')
+    // `<output>` carries an implicit `status` role -- biome's
+    // `lint/a11y/useSemanticElements` refuses the explicit `role="status"`
+    // this test used to assert on a `<p>`, in favour of the element itself.
+    expect(screen.getByRole('status')).toBe(notice)
+    expect(notice).toHaveTextContent(
+      'This report was saved with a breakdown this screen cannot show (trait:plan). It is drawn without one; saving it will remove the breakdown.',
+    )
+  })
+
+  it('clears the dropped-breakdown notice once the operator picks a new split', async () => {
+    // Fix round 1: `setDroppedGroupBy(null)` on a `source` patch was unpinned
+    // -- deleting it left all other tests green. This exercises the real
+    // control (`BreakdownPicker`'s "Split by" select), the same way
+    // "clears the field when the split source changes" above does, rather
+    // than calling `update` directly.
+    renderAt('/trends/3', {
+      trendReport: vi.fn(async () => reportFixture({ group_by: 'trait:plan' })),
+    })
+    await screen.findByTestId('trend-breakdown-dropped')
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: /split by/i }), 'attribute')
+    expect(screen.queryByTestId('trend-breakdown-dropped')).not.toBeInTheDocument()
+  })
+
+  it('says nothing about a dropped breakdown for a group_by this screen understands', async () => {
+    const client = renderAt('/trends/3', {
+      trendReport: vi.fn(async () => reportFixture({ group_by: 'attribute:country' })),
+    })
+    await waitFor(() => expect(client.stats).toHaveBeenCalled())
+    expect(screen.queryByTestId('trend-breakdown-dropped')).not.toBeInTheDocument()
+  })
+
+  // `event_name` is a real `BREAKDOWN_SOURCES` member with no field of its
+  // own -- `sourceAndFieldFromGroupBy('event_name')` already returns
+  // `{ source: 'event_name', field: '' }` rather than falling back to
+  // `none`, so it was never dropped. Pinned here so the notice condition
+  // cannot regress into firing for it.
+  it('says nothing about a dropped breakdown for a stored group_by of event_name', async () => {
+    const client = renderAt('/trends/3', {
+      trendReport: vi.fn(async () => reportFixture({ group_by: 'event_name' })),
+    })
+    await waitFor(() => expect(client.stats).toHaveBeenCalled())
+    expect(screen.queryByTestId('trend-breakdown-dropped')).not.toBeInTheDocument()
   })
 
   it('does not overwrite parameters already in the URL', async () => {
@@ -884,5 +947,28 @@ describe('Trends -- a stale saved report', () => {
     await userEvent.selectOptions(screen.getByRole('combobox', { name: /resolution/i }), '1h')
     expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
     expect(client.patchTrendReport).not.toHaveBeenCalled()
+  })
+})
+
+describe('Trends on a read-only install', () => {
+  afterEach(() => {
+    readOnly.value = false
+  })
+
+  it('offers Save and Delete on a writable install', async () => {
+    renderAt('/trends/3')
+    await screen.findByDisplayValue('Report')
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^delete$/i })).toBeInTheDocument()
+  })
+
+  // Run stays: it is a read, and the reason to open a saved report.
+  it('hides Save and Delete, and keeps Run', async () => {
+    readOnly.value = true
+    renderAt('/trends/3')
+    await screen.findByDisplayValue('Report')
+    expect(screen.queryByRole('button', { name: /^save$/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /^delete$/i })).toBeNull()
+    expect(screen.getByRole('button', { name: /^run$/i })).toBeInTheDocument()
   })
 })

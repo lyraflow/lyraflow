@@ -11,6 +11,15 @@ import { ProjectProvider, useProject } from '../../app/ProjectContext.js'
 import { Shell } from '../../app/Shell.js'
 import { ProjectsSection } from './ProjectsSection.js'
 
+// The read-only switch, as the screen reads it. Mocked rather than provided,
+// so this file's render helpers stay as they are; `app/ReadOnly.test.tsx`
+// covers the real context that feeds `useReadOnly` from `/v1/meta`.
+const readOnly = vi.hoisted(() => ({ value: false }))
+vi.mock('../../app/ReadOnly.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../app/ReadOnly.js')>()),
+  useReadOnly: () => readOnly.value,
+}))
+
 function project(over: Partial<Project> = {}): Project {
   return {
     id: 1,
@@ -515,5 +524,27 @@ describe('ProjectsSection — delete', () => {
     // time left for a fresh 3s interval to fire.
     await vi.advanceTimersByTimeAsync(1000)
     await waitFor(() => expect(client.projectDeletion).toHaveBeenCalledTimes(1))
+  })
+})
+
+describe('ProjectsSection on a read-only install', () => {
+  afterEach(() => {
+    readOnly.value = false
+  })
+
+  it('offers Rename, Archive, Delete and New project on a writable install', () => {
+    renderSection([project()], fakeClient().client)
+    const r = within(row('Demo Data'))
+    expect(r.getByRole('button', { name: 'Rename' })).toBeInTheDocument()
+    expect(r.getByRole('button', { name: 'Archive' })).toBeInTheDocument()
+    expect(r.getByRole('button', { name: 'Delete' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'New project' })).toBeInTheDocument()
+  })
+
+  it('lists the projects with no control on any row, and no New project', () => {
+    readOnly.value = true
+    renderSection([project()], fakeClient().client)
+    expect(within(row('Demo Data')).queryAllByRole('button')).toHaveLength(0)
+    expect(screen.queryByRole('button', { name: 'New project' })).toBeNull()
   })
 })
