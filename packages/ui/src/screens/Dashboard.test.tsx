@@ -594,16 +594,28 @@ describe('Dashboard', () => {
     }
   })
 
-  it('Undo is disabled while a PATCH is in flight', async () => {
+  // The notice only appears once the removal has landed, so the PATCH that
+  // can be in flight beside an enabled-looking Undo is Undo's own.
+  it('Undo is disabled while its own PATCH is in flight', async () => {
     const gate = deferred<DashboardWire>()
-    const client = fakeClient({ patchDashboard: vi.fn(() => gate.promise) })
+    const patchDashboard = vi
+      .fn()
+      .mockImplementationOnce(async (_p: number, _id: number, patch: DashboardPatch) =>
+        applied(patch),
+      )
+      .mockImplementationOnce(() => gate.promise)
+    const client = fakeClient({ patchDashboard })
     renderScreen({ client, at: '/dashboards/7?edit=1' })
     const funnel = await screen.findByTestId('tile-funnel-3')
     await userEvent.click(within(funnel).getByRole('button', { name: 'Remove' }))
     const notice = await screen.findByRole('status')
-    expect(within(notice).getByRole('button', { name: 'Undo' })).toBeDisabled()
-    gate.resolve(applied({ tiles: [trendInput] }))
     await waitFor(() => expect(within(notice).getByRole('button', { name: 'Undo' })).toBeEnabled())
+    await userEvent.click(within(notice).getByRole('button', { name: 'Undo' }))
+    await waitFor(() => expect(patchDashboard).toHaveBeenCalledTimes(2))
+    expect(within(notice).getByRole('button', { name: 'Undo' })).toBeDisabled()
+    gate.resolve(applied({ tiles: [trendInput, funnelInput] }))
+    await waitFor(() => expect(screen.queryByRole('status')).toBeNull())
+    expect(patchDashboard).toHaveBeenCalledTimes(2)
   })
 
   it('a failed undo shows the save error and keeps the notice so it can be retried', async () => {
@@ -1265,5 +1277,44 @@ describe('Dashboard on a read-only install', () => {
     await screen.findByRole('heading', { name: 'Overview' })
     expect(screen.queryByRole('button', { name: /^delete$/i })).toBeNull()
     expect(screen.queryByRole('textbox', { name: 'Dashboard name' })).toBeNull()
+  })
+})
+
+describe('Dashboard — a removal the server refused', () => {
+  afterEach(() => {
+    readOnly.value = false
+  })
+
+  // `/v1/meta` has not answered yet (or failed), so the screen still thinks
+  // the install is writable, and the server refuses the removal.
+  it('a read-only refusal does not claim the tile was removed', async () => {
+    const patchDashboard = vi.fn(async () => {
+      throw new ApiError(403, 'read_only_install')
+    })
+    const client = fakeClient({ patchDashboard })
+    renderScreen({ client, at: '/dashboards/7?edit=1' })
+    const funnel = await screen.findByTestId('tile-funnel-3')
+    await userEvent.click(within(funnel).getByRole('button', { name: 'Remove' }))
+    expect(
+      await screen.findByText('This install is read-only. Nothing can be changed here.'),
+    ).toBeInTheDocument()
+    expect(screen.getByTestId('tile-funnel-3')).toBeInTheDocument()
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
+  // Before the fix the notice stood beside the unremoved tile, and its Undo
+  // sent that tile a second time -- a duplicate the server refuses with 400.
+  it('a failed removal offers no Undo, so the tile cannot be sent twice', async () => {
+    const patchDashboard = vi.fn(async () => {
+      throw new ApiError(500, 'server_error')
+    })
+    const client = fakeClient({ patchDashboard })
+    renderScreen({ client, at: '/dashboards/7?edit=1' })
+    const funnel = await screen.findByTestId('tile-funnel-3')
+    await userEvent.click(within(funnel).getByRole('button', { name: 'Remove' }))
+    await screen.findByText(/something went wrong/i)
+    expect(screen.getByTestId('tile-funnel-3')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Undo' })).toBeNull()
+    expect(patchDashboard).toHaveBeenCalledTimes(1)
   })
 })

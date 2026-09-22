@@ -98,7 +98,8 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
   // A tile just removed, kept only so `undo()` can put it back -- see
   // `onRemove`'s own comment for why removal gets this instead of a
   // confirmation. Cleared by any other layout edit, by leaving edit mode, by
-  // the 10s timer below, and (on success only) by `undo()` itself.
+  // the 10s timer below, and (on success only) by `undo()` itself. Set only
+  // once the removal's own PATCH has landed -- see `pendingRemoval`.
   const [removed, setRemoved] = useState<{ tile: ResolvedTile; index: number } | null>(null)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
@@ -136,6 +137,14 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
   // time.
   const undoing = useRef(false)
 
+  // The tile `onRemove` is removing, held here until its PATCH answers.
+  // `removed` is set from it on success only: a removal the server refused
+  // (a read-only install before `/v1/meta` has answered, or a 500) leaves the
+  // tile on screen, and a notice saying "Removed X. Undo" beside it would
+  // offer an Undo that sends the tile a second time -- which the server
+  // refuses as a duplicate. Cleared in `finally` like `undoing`.
+  const pendingRemoval = useRef<{ tile: ResolvedTile; index: number } | null>(null)
+
   // The notice clears itself 10s after a removal, same as it would on any
   // other edit -- a status message that never goes away on its own reads as
   // something still needing attention.
@@ -161,6 +170,7 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
     // same-project navigation to another dashboard id.
     setRemoved(null)
     undoing.current = false
+    pendingRemoval.current = null
     // Same rule for the share card: a card left open, or an error left
     // standing, from the PREVIOUS dashboard on this screen would read as
     // being about the one that just loaded -- and for the shared `id: 7`
@@ -217,8 +227,10 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
           setNameDraft(d.name)
           // Only an undo's own success clears the notice -- a failure keeps
           // it standing (with `saveError` alongside) so the same Undo can be
-          // retried, and no other edit gets to touch it here at all.
+          // retried. The only other edit that touches it here is a removal,
+          // whose notice appears only now that the removal has landed.
           if (undoing.current) setRemoved(null)
+          if (pendingRemoval.current) setRemoved(pendingRemoval.current)
         })
         .catch((err: unknown) => {
           // Same check as the success path, and for the same reason: this
@@ -243,6 +255,7 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
         .finally(() => {
           setSaving(false)
           undoing.current = false
+          pendingRemoval.current = null
         })
     },
     [client, activeId, id, onUnauthorized],
@@ -616,7 +629,8 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
                       // removing a tile the one edit that asks (#268). An
                       // inline Undo covers the same mistake without it.
                       onRemove: () => {
-                        setRemoved({ tile, index: i })
+                        setRemoved(null)
+                        pendingRemoval.current = { tile, index: i }
                         sendTiles(tiles.filter((_, j) => j !== i))
                       },
                       // Every action above sends the whole array as it
