@@ -6,6 +6,7 @@ import {
   hasTrendDefinitionParams,
   incompletePredicates,
   readTrendParams,
+  sourceAndFieldFromGroupBy,
   writeTrendParams,
 } from './params.js'
 
@@ -102,5 +103,33 @@ describe('trend where predicates', () => {
     // Otherwise opening a saved report through such a link would seed the
     // stored definition OVER the filter the link was sent to show.
     expect(hasTrendDefinitionParams(new URLSearchParams('where=%5B%5D'))).toBe(true)
+  })
+})
+
+describe('sourceAndFieldFromGroupBy (#274)', () => {
+  it('reads event_name to its own source, not a fallback', () => {
+    // `Trends.tsx`'s dropped-breakdown notice depends on this: `event_name`
+    // must resolve to `source: 'event_name'`, never `'none'`, or the notice
+    // would fire for a breakdown that was never dropped.
+    expect(sourceAndFieldFromGroupBy('event_name')).toEqual({ source: 'event_name', field: '' })
+  })
+
+  it('reads an attribute/property pair', () => {
+    expect(sourceAndFieldFromGroupBy('attribute:country')).toEqual({
+      source: 'attribute',
+      field: 'country',
+    })
+    expect(sourceAndFieldFromGroupBy('property:plan')).toEqual({
+      source: 'property',
+      field: 'plan',
+    })
+  })
+
+  it('falls back to none for a value the chart engine refuses', () => {
+    // The server now refuses `trait:plan` on write (`trend-routes.ts`), but
+    // an older row can still carry it -- this is the fallback `Trends.tsx`
+    // detects to show its notice.
+    expect(sourceAndFieldFromGroupBy('trait:plan')).toEqual({ source: 'none', field: '' })
+    expect(sourceAndFieldFromGroupBy(null)).toEqual({ source: 'none', field: '' })
   })
 })
