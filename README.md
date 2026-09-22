@@ -900,9 +900,13 @@ shaped `{"id", "name", "slug", "created_at", "retention_months",
 kind** — the one response in this API that names every project at once, so a
 key leaking here would leak the whole install rather than one project.
 `POST /v1/projects` takes `{"name"}`, slugifies it the same way
-`create-project` does, and returns `{"name", "slug", "write_key",
-"server_key"}` — the server key shown once, exactly as `create-project`
-prints it once, and never served again by anything.
+`create-project` does, and returns every field a `GET /v1/projects` entry
+carries (`{"id", "name", "slug", "created_at", "retention_months",
+"monthly_event_quota", "disabled_at", "deleting_at"}` — the UI appends this
+response straight to its in-memory list rather than re-fetching it) plus the
+two one-time keys, `{"write_key", "server_key"}` — the server key shown
+once, exactly as `create-project` prints it once, and never served again by
+anything.
 
 `PATCH /v1/projects/:id` takes any of `{"name"}` and `{"archived": true|false}`
 and returns the updated entry; it never changes the slug. `DELETE

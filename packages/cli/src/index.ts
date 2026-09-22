@@ -599,10 +599,12 @@ export async function runCreateProject(
     // change, create-project did no flag parsing at all, so `--host` (say)
     // was never rejected — it was silently read as the project NAME. This
     // is a new, reachable path, so it renders like every other command's
-    // usage error (`emitError`) rather than mimicking one specific to this
-    // command.
-    emitError(err, hasRawFlag(argv, 'json') ? 'json' : 'human', ctx.writeErr)
-    return 2
+    // usage error — through `reportUsageError`, not a bare `emitError` call,
+    // so a closed stderr pipe (EPIPE) is swallowed the same way it is for
+    // every other command's parse failure instead of throwing here.
+    return reportUsageError(err, hasRawFlag(argv, 'json') ? 'json' : 'human', {
+      writeErr: ctx.writeErr,
+    })
   }
 
   // Not `resolveMode(flags, ctx.isTty)` — see this function's own docstring.
