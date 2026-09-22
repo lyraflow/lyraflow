@@ -49,9 +49,13 @@ Inside a running install, the binary is already built at
 `packages/cli/dist/index.js`:
 
 ```sh
-docker compose exec -e LYRAFLOW_HOST=http://localhost:3000 -e LYRAFLOW_SERVER_KEY=$LYRAFLOW_SERVER_KEY \
+docker compose exec -e LYRAFLOW_HOST=http://localhost:3000 -e LYRAFLOW_SERVER_KEY \
   lyraflow node packages/cli/dist/index.js events --since 1h --json
 ```
+
+`-e LYRAFLOW_SERVER_KEY` with no value takes the key from your own shell, so
+export it first (see *Configuration*). Passing it by name keeps it out of the
+host's process list, where `-e LYRAFLOW_SERVER_KEY=sk_…` would show it.
 
 Building from a checkout (`pnpm build` at the repo root, or
 `pnpm --filter @lyraflow/cli build`) produces the same `dist/index.js`, runnable
@@ -733,7 +737,7 @@ domain does not have to be told its own host a second time just to print a
 snippet:
 
 ```sh
-docker compose exec -e LYRAFLOW_SERVER_KEY=$LYRAFLOW_SERVER_KEY \
+docker compose exec -e LYRAFLOW_SERVER_KEY \
   lyraflow node packages/cli/dist/index.js snippet
 # host defaults to https://analytics.example.com — no -e LYRAFLOW_HOST needed
 ```

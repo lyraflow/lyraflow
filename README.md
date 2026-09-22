@@ -23,13 +23,16 @@ under Docker, and nothing leaves it.
 ```sh
 git clone https://github.com/lyraflow/lyraflow.git
 cd lyraflow
+git checkout "$(git describe --tags --abbrev=0)"
 ./install.sh
 docker compose exec lyraflow node packages/cli/dist/index.js create-project "My App"
 ```
 
-That generates passwords into `.env`, starts three containers, waits until the
-app answers on port 3000, and prints a write key and a server key.
-[Getting started](#getting-started) is the same four steps with everything that
+That moves the checkout to the newest release, so it matches the image
+`install.sh` pulls. It then generates passwords into `.env`, starts three
+containers, waits until the app answers on port 3000, and prints a write key
+and a server key.
+[Getting started](#getting-started) is the same five steps with everything that
 matters said out loud: the Compose version this needs, serving HTTPS on a
 domain, the snippet, and your first event from a backend. Nothing to look at in
 a fresh install? [Demo data](#demo-data) fills one with generated people and
@@ -131,11 +134,14 @@ Check yours with `docker compose version`.
 ```sh
 git clone https://github.com/lyraflow/lyraflow.git
 cd lyraflow
+git checkout "$(git describe --tags --abbrev=0)"
 ./install.sh
 ```
 
-That generates passwords into `.env`, starts three containers, and waits until
-the app answers on port 3000.
+The `git checkout` moves you from `main` to the newest release tag, so the
+checkout matches the image `install.sh` pulls: `main` can describe settings
+that no published image has yet. `install.sh` then generates passwords into
+`.env`, starts three containers, and waits until the app answers on port 3000.
 
 That is a local install: plain HTTP on port 3000, which is all the examples
 below need. **Running this on a server with a domain name?** Pass it to the
@@ -190,9 +196,13 @@ host and write key, and escapes them correctly:
 ```sh
 docker compose exec \
   -e LYRAFLOW_HOST=http://localhost:3000 \
-  -e LYRAFLOW_SERVER_KEY=$LYRAFLOW_SERVER_KEY \
+  -e LYRAFLOW_SERVER_KEY \
   lyraflow node packages/cli/dist/index.js snippet
 ```
+
+`-e LYRAFLOW_SERVER_KEY` with no value hands Compose the key you exported
+above, so it never appears in the host's process list the way
+`-e LYRAFLOW_SERVER_KEY=sk_…` would.
 
 Paste what it prints into your site's `<head>`. It loads a ~5 KB script, starts
 recording page views immediately, and queues events in `localStorage` if your
@@ -243,7 +253,7 @@ container, so give yourself a shorthand:
 lyraflow() {
   docker compose exec \
     -e LYRAFLOW_HOST=http://localhost:3000 \
-    -e LYRAFLOW_SERVER_KEY="$LYRAFLOW_SERVER_KEY" \
+    -e LYRAFLOW_SERVER_KEY \
     lyraflow node packages/cli/dist/index.js "$@"
 }
 ```
@@ -921,7 +931,7 @@ not here.
 
 ### `GET /v1/meta`
 
-**What release this install is running**, as `{"version": "0.16.1"}`. The Settings
+**What release this install is running**, as `{"version": "0.17.0"}`. The Settings
 screen's Install card reads it, which is where an operator finds the number to
 quote into a bug report or to compare against the latest release.
 
@@ -3482,7 +3492,13 @@ before the switch was turned on keeps working. No new one can be made.
 
 **It is not a second user.** Every caller, session or server key, is refused
 the same writes on a read-only install, including you. To change anything, set
-it back to `false` and restart. There is still no way for one install to have
+it back to `false` and restart. The CLI commands that talk to the databases
+directly rather than to the API are the exception: `create-project`,
+`projects delete`, `projects deletion retry`, `reset-admin-login`, `seed-demo`
+and `migrate` still write,
+because the switch lives in the API server and they never pass through it. They
+need a shell on the host, so this is how an operator changes a read-only install
+without restarting it. There is still no way for one install to have
 an operator who writes and a visitor who only looks; that is
 [#223](https://github.com/lyraflow/lyraflow/issues/223).
 

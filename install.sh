@@ -206,9 +206,10 @@ echo
 echo "Lyraflow is running. Create your first project:"
 echo "  docker compose exec lyraflow node packages/cli/dist/index.js create-project \"My App\""
 echo
-echo "Then get your snippet:"
-echo "  docker compose exec -e LYRAFLOW_HOST=$HOST \\"
-echo "    -e LYRAFLOW_SERVER_KEY=sk_... \\"
+echo "Then get your snippet, with the server key exported first so it is passed by"
+echo "name and stays out of the process list:"
+echo "  export LYRAFLOW_SERVER_KEY=sk_..."
+echo "  docker compose exec -e LYRAFLOW_HOST=$HOST -e LYRAFLOW_SERVER_KEY \\"
 echo "    lyraflow node packages/cli/dist/index.js snippet"
 echo
 if [ -n "$ADMIN_PASSWORD" ]; then

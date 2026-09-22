@@ -8,11 +8,11 @@ milestone, so this file starts at 0.2.0 rather than inventing a history it does
 not have. `0.1.0` in the manifests before this release meant "pre-release", not a
 release anyone could name.
 
-There is no published container image yet. `docker-compose.yml` names
-`ghcr.io/lyraflow/lyraflow:0`, and `install.sh` runs `docker compose pull ||
-docker compose build`, so today every install builds from its own checkout. A
-release is therefore a git tag and the source at that tag — upgrading means
-pulling the tag and rebuilding, not pulling an image.
+**From 0.17.0 every tag publishes a container image**, `ghcr.io/lyraflow/lyraflow`
+for amd64 and arm64, tagged `X.Y.Z`, `X.Y`, `X` and, for a final release, `latest`.
+`install.sh` pulls it and builds from the checkout only when the pull fails.
+Releases before 0.17.0 have no image and never will: each is a git tag and the
+source at that tag, and running one means checking the tag out and building it.
 
 **0.2.1 was never tagged either.** Its version bump and changelog entry shipped
 in the repository, but no `v0.2.1` tag was ever created — so the release below
@@ -20,6 +20,92 @@ exists in the manifests and in this file and nowhere in `git tag`. It is recorde
 here as it happened rather than tagged retroactively, for the same reason 0.1.0
 is: a tag created after the fact names a moment nobody could have fetched. Its
 one fix is contained in 0.3.0.
+
+## 0.17.0 — 2026-09-22
+
+### Added
+
+- **A published container image.** Every `v*` tag now builds `ghcr.io/lyraflow/lyraflow`
+  for `linux/amd64` and `linux/arm64` on native runners and publishes it as `X.Y.Z`,
+  `X.Y`, `X` and, for a final release only, `latest`. `docker-compose.yml` has named
+  `:0` all along; it now resolves to something, and means the newest 0.x release.
+  `install.sh` already tried a pull before building, so a fresh install now pulls
+  instead of spending most of its five minutes on `pnpm build`. It still builds from
+  the checkout when the pull fails. **0.16.1 and earlier have no image**, and never
+  will: the workflow publishes forward from this tag.
+- **A read-only install.** `LYRAFLOW_READ_ONLY=true` makes the whole install refuse
+  every write through its API with `403 {"error":"read_only_install"}`. That covers
+  every caller, session or server key. The exceptions are signing in and out, ingest
+  (`/v1/track`, `/v1/identify`, `/v1/page`, `/v1/batch`, `/v1/alias`), so a read-only
+  install's live feed stays live, and the reads that travel as `POST`. Opening a saved
+  funnel or segment still runs it but no longer records the run. The value must be
+  exactly `true` or `false`, the same as every other boolean the server reads, so `1`
+  refuses to boot rather than being quietly ignored. `GET /v1/meta` reports
+  `read_only`. The UI hides what the install would refuse (create, edit, save and
+  delete; dashboard editing, sharing and the home star; project settings and limits;
+  the email and password forms; person deletion) and ignores `?edit=1`. **It is not
+  a second user** (#223). The direct-database CLI commands still write, because they
+  need shell access to the host. (#272)
+- **`create-project --json`.** Prints one line,
+  `{"id","name","slug","write_key","server_key"}`, using the key names
+  `POST /v1/projects` already uses. A duplicate name writes `code: project_exists` to
+  stderr and exits 1. The default stays human-readable even when the output is piped,
+  because the documented install runs it through `docker compose exec` for a person
+  to read. (#284)
+- **Undo after removing a dashboard tile.** Removal still writes immediately, like
+  every other layout edit. Once it has landed, a line offers to put the tile back at
+  its old position and width for ten seconds. It clears on any other edit, on
+  **Done**, and on switching dashboard or project. A removal that failed shows the
+  error and no Undo, since there is nothing to undo. (#268)
+
+### Changed
+
+- **A saved trend refuses a breakdown the chart cannot draw.** `POST` and
+  `PATCH /v1/trends` now check `group_by` the way `/v1/events/stats` always has:
+  `trait:plan`, or an `attribute:` that is not an event column, is
+  `400 invalid_trend` on `group_by`. Before, both were stored, and the trends screen
+  then opened the report with the breakdown silently dropped. Reports already stored
+  that way are not migrated. The screen now says the breakdown cannot be shown
+  instead of hiding it. (#274)
+- **Upgrading means checking out the tag, then pulling its image:**
+  `git fetch --tags && git checkout vX.Y.Z`, then
+  `docker compose pull && docker compose up -d`. `LYRAFLOW_IMAGE=ghcr.io/lyraflow/lyraflow:X.Y.Z`
+  in `.env` pins one version. `docker compose build` remains the route for a modified
+  checkout. Getting started now checks out the newest tag after cloning, so the
+  checkout matches the image it pulls.
+- **Error messages that describe a policy rather than a bug.** A read-only refusal
+  says "This install is read-only". A `405` from a proxy in front of an install (the
+  public demo refuses the person purge this way) says "This install does not allow
+  that action" instead of "Something went wrong. Reload to try again."
+- **The docs pass the server key to `docker compose exec` by name**
+  (`-e LYRAFLOW_SERVER_KEY`, with the variable already exported), so the key is not
+  in the host's process list while the command runs.
+
+### Fixed
+
+- **The `trusted_proxies` example crashed the bundled Caddy.** The comment in
+  `proxy.d/00-defaults.caddy` spelled it `trusted_proxies static <ranges>`, which is
+  the form for Caddy's global `servers` option. Inside `reverse_proxy`,
+  `caddy:2-alpine` parses `static` as an address and crash-loops at boot. The
+  example drops it, a boot test now loads a real `trusted_proxies` line, and the
+  comment says what the setting actually protects: `req.ip` keys the login rate
+  limiter, so behind a CDN without it every visitor shares one bucket. (#271)
+- **Four colour names the theme never defined.** Popovers, cards, secondary buttons
+  and hover states asked for `*-foreground` colours that compiled to no rule, and
+  rendered correctly only by inheriting from `body`. They are defined now. Nothing
+  looks different, and a test fails if a vendored component names a colour the theme
+  does not map. (#267)
+- **`POST /v1/projects` was documented with four fields.** It returns every project
+  field plus both keys.
+
+### Docs
+
+- The README opens with the live feed and a dashboard, links the public demo, and
+  gives the Web UI and demo-data sections their own subheadings.
+
+### Dependencies
+
+- `happy-dom` 15 → 20 and `esbuild` 0.24 → 0.28, both development-only.
 
 ## 0.16.1 — 2026-09-09
 
