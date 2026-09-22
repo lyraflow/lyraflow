@@ -95,6 +95,11 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
   const [loadError, setLoadError] = useState<string | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  // A tile just removed, kept only so `undo()` can put it back -- see
+  // `onRemove`'s own comment for why removal gets this instead of a
+  // confirmation. Cleared by any other layout edit, by leaving edit mode, by
+  // the 10s timer below, and (on success only) by `undo()` itself.
+  const [removed, setRemoved] = useState<{ tile: ResolvedTile; index: number } | null>(null)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
   // The Share card's own state, separate from `saving`/`saveError`: creating
@@ -123,6 +128,23 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
     asking.current = activeId == null || id === null ? null : `${activeId}:${id}`
   }, [activeId, id])
 
+  // Set by `undo()` around its own `sendTiles` call, so `patch()`'s success
+  // handler below can tell an undo's response from every other layout
+  // edit's -- only an undo clears `removed` on success. Reset in `finally`
+  // regardless of outcome, so a failed undo leaves the notice standing (for
+  // a retry) without leaving this flag pointed at the wrong request next
+  // time.
+  const undoing = useRef(false)
+
+  // The notice clears itself 10s after a removal, same as it would on any
+  // other edit -- a status message that never goes away on its own reads as
+  // something still needing attention.
+  useEffect(() => {
+    if (!removed) return
+    const t = setTimeout(() => setRemoved(null), 10_000)
+    return () => clearTimeout(t)
+  }, [removed])
+
   useEffect(() => {
     if (activeId == null || id === null) return
     let cancelled = false
@@ -132,6 +154,13 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
     // A save failure belongs to the dashboard it was reported for. Left
     // standing, it reads as a failure of the one now on screen.
     setSaveError(null)
+    // Same rule for a removal notice: it names a tile from the PREVIOUS
+    // dashboard, and `undo()` would PATCH that tile into whichever dashboard
+    // is on screen when Undo is clicked. Both `id: 7` cases the share reset
+    // below already guards against apply here too -- a project switch and a
+    // same-project navigation to another dashboard id.
+    setRemoved(null)
+    undoing.current = false
     // Same rule for the share card: a card left open, or an error left
     // standing, from the PREVIOUS dashboard on this screen would read as
     // being about the one that just loaded -- and for the shared `id: 7`
@@ -186,6 +215,10 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
           // in `api/types.ts` keeps.
           setDash((prev) => (body.tiles === undefined && prev ? { ...d, tiles: prev.tiles } : d))
           setNameDraft(d.name)
+          // Only an undo's own success clears the notice -- a failure keeps
+          // it standing (with `saveError` alongside) so the same Undo can be
+          // retried, and no other edit gets to touch it here at all.
+          if (undoing.current) setRemoved(null)
         })
         .catch((err: unknown) => {
           // Same check as the success path, and for the same reason: this
@@ -204,8 +237,13 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
         // UNCONDITIONAL, unlike the two handlers above: `saving` is what
         // holds the edit controls shut, and skipping it for a response that
         // arrived late would leave the screen frozen for the dashboard that
-        // is now on it.
-        .finally(() => setSaving(false))
+        // is now on it. `undoing` gets the same treatment for the same
+        // reason -- a stale or failed response must not leave it set for
+        // the NEXT request, which might not be an undo at all.
+        .finally(() => {
+          setSaving(false)
+          undoing.current = false
+        })
     },
     [client, activeId, id, onUnauthorized],
   )
@@ -276,13 +314,31 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
   const tiles = dash?.tiles ?? []
   const sendTiles = (next: ResolvedTile[]) => patch({ tiles: next.map(toInput) })
 
+  /** Puts the last-removed tile back at its original index and width. The
+   *  tile the PATCH is built from is the one captured in `removed`, not
+   *  anything re-derived from the current `tiles` -- that is what lets
+   *  `undo` survive tiles having moved since the removal (the index still
+   *  targets the same SLOT, clamped to the array's current length). */
+  function undo() {
+    if (!removed) return
+    const next = [...tiles]
+    next.splice(Math.min(removed.index, next.length), 0, removed.tile)
+    undoing.current = true
+    sendTiles(next)
+  }
+
   function setEditing(on: boolean) {
     // Leaving edit mode withdraws an open delete confirmation. Without this
     // the panel -- and its `Delete dashboard` button -- outlives the mode
     // that raised it: `Done` would leave a destructive prompt on a screen
     // that no longer shows any other edit control, and the operator who
-    // pressed Done has already said they are finished editing.
-    if (!on) setConfirmingDelete(false)
+    // pressed Done has already said they are finished editing. A removal
+    // notice is withdrawn for the same reason: nothing on screen would be
+    // able to show it once editing ends.
+    if (!on) {
+      setConfirmingDelete(false)
+      setRemoved(null)
+    }
     // Entering edit mode closes an open share card for the same reason:
     // Share is a view-mode-only control (`dash && !editing` below), so a
     // card left open would be the one edit-adjacent panel with no button
@@ -467,6 +523,19 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
         </p>
       )}
 
+      {/* `<output>` rather than `<p role="status">`: Biome's a11y lint
+       * rejects an explicit `role="status"` on a `<p>` and asks for the
+       * element that carries the role implicitly. Query it the same way --
+       * `getByRole('status')`. */}
+      {editing && removed && (
+        <output className="text-sm text-muted-foreground">
+          Removed {removed.tile.report?.name ?? 'a deleted report'}.{' '}
+          <Button variant="link" size="sm" onClick={undo} disabled={saving}>
+            Undo
+          </Button>
+        </output>
+      )}
+
       {dash?.stale && (
         <p role="alert" className="text-destructive text-sm">
           This dashboard's stored layout cannot be read by this version. Add tiles to replace it, or
@@ -519,16 +588,37 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
               actions={
                 editing
                   ? {
-                      onMoveUp: i > 0 ? () => sendTiles(swap(tiles, i, i - 1)) : undefined,
+                      onMoveUp:
+                        i > 0
+                          ? () => {
+                              setRemoved(null)
+                              sendTiles(swap(tiles, i, i - 1))
+                            }
+                          : undefined,
                       onMoveDown:
-                        i < tiles.length - 1 ? () => sendTiles(swap(tiles, i, i + 1)) : undefined,
-                      onToggleWidth: () =>
+                        i < tiles.length - 1
+                          ? () => {
+                              setRemoved(null)
+                              sendTiles(swap(tiles, i, i + 1))
+                            }
+                          : undefined,
+                      onToggleWidth: () => {
+                        setRemoved(null)
                         sendTiles(
                           tiles.map((t, j) =>
                             j === i ? { ...t, width: t.width === 'half' ? 'full' : 'half' } : t,
                           ),
-                        ),
-                      onRemove: () => sendTiles(tiles.filter((_, j) => j !== i)),
+                        )
+                      },
+                      // Unconfirmed, unlike Delete dashboard above: every
+                      // OTHER layout edit here already writes immediately
+                      // with no second step, so a confirmation would make
+                      // removing a tile the one edit that asks (#268). An
+                      // inline Undo covers the same mistake without it.
+                      onRemove: () => {
+                        setRemoved({ tile, index: i })
+                        sendTiles(tiles.filter((_, j) => j !== i))
+                      },
                       // Every action above sends the whole array as it
                       // stands on screen, and that array is the pre-edit one
                       // until the response lands.
@@ -566,7 +656,10 @@ export function Dashboard(props: { client: ApiClient; onUnauthorized?: () => voi
           onUnauthorized={onUnauthorized}
           disabled={saving}
           present={tiles.map(toInput)}
-          onAdd={(t) => patch({ tiles: [...tiles.map(toInput), t] })}
+          onAdd={(t) => {
+            setRemoved(null)
+            patch({ tiles: [...tiles.map(toInput), t] })
+          }}
         />
       )}
     </div>
