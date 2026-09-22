@@ -1,13 +1,22 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, useNavigate } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import type { EventsPage, LyraEvent, Person } from '../api/types.js'
 import { ProjectProvider } from '../app/ProjectContext.js'
 import { People } from './People.js'
+
+// The read-only switch, as the screen reads it. Mocked rather than provided,
+// so this file's render helpers stay as they are; `app/ReadOnly.test.tsx`
+// covers the real context that feeds `useReadOnly` from `/v1/meta`.
+const readOnly = vi.hoisted(() => ({ value: false }))
+vi.mock('../app/ReadOnly.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../app/ReadOnly.js')>()),
+  useReadOnly: () => readOnly.value,
+}))
 
 const PROJECTS = [
   {
@@ -591,5 +600,32 @@ describe('People -- navigating between profiles mid-flow', () => {
 
     // B's profile must not show A's failed-export message.
     expect(screen.queryByText(/could not be exported/i)).toBeNull()
+  })
+})
+
+describe('People on a read-only install', () => {
+  afterEach(() => {
+    readOnly.value = false
+  })
+
+  const client = () =>
+    ({
+      person: vi.fn(async (_projectId: number, id: string) => person({ person_id: id })),
+      events: noTimeline(),
+    }) as unknown as ApiClient
+
+  it('offers Delete this person on a writable install', async () => {
+    renderPeople('/people?id=a', client())
+    await screen.findByTestId('identity-ids')
+    expect(screen.getByRole('button', { name: /delete this person/i })).toBeInTheDocument()
+  })
+
+  // Export stays: it is a read.
+  it('hides Delete this person, and keeps Export', async () => {
+    readOnly.value = true
+    renderPeople('/people?id=a', client())
+    await screen.findByTestId('identity-ids')
+    expect(screen.queryByRole('button', { name: /delete this person/i })).toBeNull()
+    expect(screen.getByRole('button', { name: /^export$/i })).toBeInTheDocument()
   })
 })

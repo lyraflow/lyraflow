@@ -1,8 +1,17 @@
 import { render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SavedReportList } from './SavedReportList.js'
 import type { SavedReportRow } from './SavedReportList.js'
+
+// The read-only switch, as the screen reads it. Mocked rather than provided,
+// so this file's render helpers stay as they are; `app/ReadOnly.test.tsx`
+// covers the real context that feeds `useReadOnly` from `/v1/meta`.
+const readOnly = vi.hoisted(() => ({ value: false }))
+vi.mock('../../app/ReadOnly.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../app/ReadOnly.js')>()),
+  useReadOnly: () => readOnly.value,
+}))
 
 const ROW: SavedReportRow = {
   id: 3,
@@ -230,5 +239,23 @@ describe('SavedReportList', () => {
     )
     expect(screen.getByTestId('t-3')).toBeInTheDocument()
     expect(screen.getByTestId('t-4')).toBeInTheDocument()
+  })
+})
+
+describe('SavedReportList on a read-only install', () => {
+  afterEach(() => {
+    readOnly.value = false
+  })
+
+  it('offers Create one beside the empty message on a writable install', () => {
+    renderRows([])
+    expect(screen.getByRole('link', { name: /create one/i })).toBeInTheDocument()
+  })
+
+  it('keeps the empty message but drops Create one', () => {
+    readOnly.value = true
+    renderRows([])
+    expect(screen.getByText(/Nothing saved here yet/)).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /create one/i })).toBeNull()
   })
 })

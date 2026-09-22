@@ -3,7 +3,8 @@ import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 
 /**
- * The release the server is running, from `GET /v1/meta`.
+ * The release the server is running, and whether the install is read-only,
+ * from `GET /v1/meta`.
  *
  * Shared by the two places that show it: the sidebar's footer and the
  * Settings screen's Install card. They fetch separately rather than sharing
@@ -22,8 +23,11 @@ import type { ApiClient } from '../api/client.js'
 export function useVersion(
   client: ApiClient,
   onUnauthorized?: () => void,
-): { version: string | null; failed: boolean } {
+): { version: string | null; readOnly: boolean; failed: boolean } {
   const [version, setVersion] = useState<string | null>(null)
+  // `false` until the answer arrives, and after a failed read: see
+  // ReadOnly.tsx for why a guess, when one is needed, is "writable".
+  const [readOnly, setReadOnly] = useState(false)
   const [failed, setFailed] = useState(false)
 
   useEffect(() => {
@@ -31,7 +35,9 @@ export function useVersion(
     client
       .meta()
       .then((meta) => {
-        if (!cancelled) setVersion(meta.version)
+        if (cancelled) return
+        setVersion(meta.version)
+        setReadOnly(meta.read_only === true)
       })
       .catch((err: unknown) => {
         if (cancelled) return
@@ -49,5 +55,5 @@ export function useVersion(
     }
   }, [client, onUnauthorized])
 
-  return { version, failed }
+  return { version, readOnly, failed }
 }

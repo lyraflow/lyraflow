@@ -415,3 +415,20 @@ async function confirmDelete(user: ReturnType<typeof userEvent.setup>, slug: str
   await user.type(screen.getByLabelText(new RegExp(`Type ${slug} to confirm`)), slug)
   await user.click(screen.getByRole('button', { name: new RegExp(`Delete ${slug} permanently`) }))
 }
+
+describe('App on a read-only install', () => {
+  afterEach(() => {
+    window.history.pushState({}, '', '/')
+  })
+
+  // The screens read `useReadOnly()`; this is the one test that the value
+  // they read comes from `/v1/meta` through the provider App mounts, rather
+  // than from the context's writable default.
+  it('hides a screen’s create control when /v1/meta says read_only', async () => {
+    window.history.pushState({}, '', '/funnels')
+    const meta = vi.fn(async () => ({ version: '0.14.0', read_only: true }))
+    render(<App client={client({ meta, funnels: vi.fn(async () => []) })} />)
+    await screen.findByText(/No funnels yet/i)
+    await waitFor(() => expect(screen.queryByRole('link', { name: /create funnel/i })).toBeNull())
+  })
+})

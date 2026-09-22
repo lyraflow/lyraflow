@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import { Link } from 'react-router'
+import { useReadOnly } from '../../app/ReadOnly.js'
 import { Badge } from '../../components/ui/badge.js'
 import { formatRelative } from '../funnels/format.js'
 
@@ -141,6 +142,7 @@ export function SavedReportList(props: {
   trailing?: (row: SavedReportRow) => ReactNode
 }) {
   const { rows, loadFailed, hrefFor, newHref, emptyMessage, trailing } = props
+  const readOnly = useReadOnly()
 
   return (
     <>
@@ -157,10 +159,15 @@ export function SavedReportList(props: {
         // than as the control it is. Same treatment the in-app links on the
         // funnel and segment detail screens already use.
         <p className="text-sm text-muted-foreground">
-          {emptyMessage}{' '}
-          <Link to={newHref} className="text-primary hover:underline">
-            Create one
-          </Link>
+          {emptyMessage}
+          {!readOnly && (
+            <>
+              {' '}
+              <Link to={newHref} className="text-primary hover:underline">
+                Create one
+              </Link>
+            </>
+          )}
         </p>
       )}
 

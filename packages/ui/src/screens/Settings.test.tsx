@@ -1,13 +1,22 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import { ProjectProvider, useProject } from '../app/ProjectContext.js'
 import { Shell } from '../app/Shell.js'
 import { Settings } from './Settings.js'
+
+// The read-only switch, as the screen reads it. Mocked rather than provided,
+// so this file's render helpers stay as they are; `app/ReadOnly.test.tsx`
+// covers the real context that feeds `useReadOnly` from `/v1/meta`.
+const readOnly = vi.hoisted(() => ({ value: false }))
+vi.mock('../app/ReadOnly.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../app/ReadOnly.js')>()),
+  useReadOnly: () => readOnly.value,
+}))
 
 // Same idiom as SegmentPicker.test.tsx's own `deferred`: a promise the test
 // controls, so an ordering that would otherwise depend on real timing (the
@@ -776,5 +785,30 @@ describe('Settings — projects invented mutations', () => {
     await userEvent.click(screen.getByRole('button', { name: /^create$/i }))
     expect(await screen.findByText('sk_g')).toBeInTheDocument()
     expect(createProject).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('Settings on a read-only install', () => {
+  afterEach(() => {
+    readOnly.value = false
+  })
+
+  it('offers Save retention and Save quota on a writable install', async () => {
+    renderSettings()
+    await screen.findByTestId('install-snippet')
+    expect(screen.getByRole('button', { name: 'Save retention' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save quota' })).toBeInTheDocument()
+  })
+
+  // The values stay on screen -- they are what a visitor came to read -- but
+  // as fields nobody can type into and no button that would send them.
+  it('shows the limits without a way to change them', async () => {
+    readOnly.value = true
+    renderSettings()
+    await screen.findByTestId('install-snippet')
+    expect(screen.queryByRole('button', { name: 'Save retention' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Save quota' })).toBeNull()
+    expect(screen.getByLabelText('Retention (months)')).toHaveAttribute('readonly')
+    expect(screen.getByLabelText('Monthly event quota')).toHaveAttribute('readonly')
   })
 })

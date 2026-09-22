@@ -1,12 +1,21 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import type { StatsPage, TrendReport, TrendReportInput } from '../api/types.js'
 import { ProjectProvider } from '../app/ProjectContext.js'
 import { Trends } from './Trends.js'
+
+// The read-only switch, as the screen reads it. Mocked rather than provided,
+// so this file's render helpers stay as they are; `app/ReadOnly.test.tsx`
+// covers the real context that feeds `useReadOnly` from `/v1/meta`.
+const readOnly = vi.hoisted(() => ({ value: false }))
+vi.mock('../app/ReadOnly.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../app/ReadOnly.js')>()),
+  useReadOnly: () => readOnly.value,
+}))
 
 /** An arbitrary fixed timestamp -- the exact value never matters to any
  * assertion below, only that every stored report carries one. */
@@ -884,5 +893,28 @@ describe('Trends -- a stale saved report', () => {
     await userEvent.selectOptions(screen.getByRole('combobox', { name: /resolution/i }), '1h')
     expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
     expect(client.patchTrendReport).not.toHaveBeenCalled()
+  })
+})
+
+describe('Trends on a read-only install', () => {
+  afterEach(() => {
+    readOnly.value = false
+  })
+
+  it('offers Save and Delete on a writable install', async () => {
+    renderAt('/trends/3')
+    await screen.findByDisplayValue('Report')
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^delete$/i })).toBeInTheDocument()
+  })
+
+  // Run stays: it is a read, and the reason to open a saved report.
+  it('hides Save and Delete, and keeps Run', async () => {
+    readOnly.value = true
+    renderAt('/trends/3')
+    await screen.findByDisplayValue('Report')
+    expect(screen.queryByRole('button', { name: /^save$/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /^delete$/i })).toBeNull()
+    expect(screen.getByRole('button', { name: /^run$/i })).toBeInTheDocument()
   })
 })

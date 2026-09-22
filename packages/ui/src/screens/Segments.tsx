@@ -5,6 +5,7 @@ import type { ApiClient } from '../api/client.js'
 import { ApiError } from '../api/client.js'
 import type { Segment } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
+import { useReadOnly } from '../app/ReadOnly.js'
 import { ROUTES, segmentPath } from '../app/Router.js'
 import { PageHeader } from '../components/PageHeader.js'
 import { Button } from '../components/ui/button.js'
@@ -97,14 +98,17 @@ export function Segments(props: {
     }
   }, [client, activeId, onUnauthorized])
 
+  const readOnly = useReadOnly()
   return (
     <div className="flex min-w-0 flex-col gap-6">
       <PageHeader
         title="Segments"
         actions={
-          <Button asChild size="sm">
-            <Link to={ROUTES.segmentNew}>Create segment</Link>
-          </Button>
+          !readOnly && (
+            <Button asChild size="sm">
+              <Link to={ROUTES.segmentNew}>Create segment</Link>
+            </Button>
+          )
         }
       />
 

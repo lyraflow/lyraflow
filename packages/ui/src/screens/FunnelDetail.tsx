@@ -4,6 +4,7 @@ import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import type { Funnel, FunnelRunResult, Segment } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
+import { useReadOnly } from '../app/ReadOnly.js'
 import { ROUTES, funnelEditPath } from '../app/Router.js'
 import { PageHeader } from '../components/PageHeader.js'
 import { Button } from '../components/ui/button.js'
@@ -177,6 +178,7 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
   // response discarded for failing the answer-identity check (see the big
   // comment on `answerIdRef`) cannot move the selection either.
   const [selectedStep, setSelectedStep] = useState<number | null>(null)
+  const readOnly = useReadOnly()
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
@@ -478,12 +480,12 @@ export function FunnelDetail(props: { client: ApiClient; onUnauthorized?: () => 
              * the builder -- `FunnelBuilder` (Task 6) has nothing to show it.
              * Offering an Edit link the server cannot honour would be its own
              * broken promise. */}
-            {funnel != null && !funnel.stale && (
+            {funnel != null && !funnel.stale && !readOnly && (
               <Button asChild variant="outline" size="sm">
                 <Link to={funnelEditPath(funnel.id)}>Edit</Link>
               </Button>
             )}
-            {funnel != null && !confirmingDelete && (
+            {funnel != null && !confirmingDelete && !readOnly && (
               <Button
                 type="button"
                 variant="ghost"

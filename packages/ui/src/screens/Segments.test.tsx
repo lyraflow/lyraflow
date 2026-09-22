@@ -6,6 +6,15 @@ import type { ApiClient } from '../api/client.js'
 import { ProjectProvider } from '../app/ProjectContext.js'
 import { Segments } from './Segments.js'
 
+// The read-only switch, as the screen reads it. Mocked rather than provided,
+// so this file's render helpers stay as they are; `app/ReadOnly.test.tsx`
+// covers the real context that feeds `useReadOnly` from `/v1/meta`.
+const readOnly = vi.hoisted(() => ({ value: false }))
+vi.mock('../app/ReadOnly.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../app/ReadOnly.js')>()),
+  useReadOnly: () => readOnly.value,
+}))
+
 const PROJECTS = [
   {
     id: 1,
@@ -281,5 +290,24 @@ describe('Segments list — invented mutations', () => {
     const row = await screen.findByRole('link', { name: /Paying customers/ })
     expect(row).toHaveTextContent(/cannot be read/i)
     expect(row).not.toHaveTextContent('plan eq paid')
+  })
+})
+
+describe('Segments on a read-only install', () => {
+  afterEach(() => {
+    readOnly.value = false
+  })
+
+  it('offers Create segment on a writable install', async () => {
+    renderList([SEG])
+    await screen.findByRole('link', { name: /Paying customers/ })
+    expect(screen.getByRole('link', { name: /create segment/i })).toBeInTheDocument()
+  })
+
+  it('hides Create segment', async () => {
+    readOnly.value = true
+    renderList([SEG])
+    await screen.findByRole('link', { name: /Paying customers/ })
+    expect(screen.queryByRole('link', { name: /create segment/i })).toBeNull()
   })
 })

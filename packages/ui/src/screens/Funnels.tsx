@@ -4,6 +4,7 @@ import type { ApiClient } from '../api/client.js'
 import { ApiError } from '../api/client.js'
 import type { Funnel } from '../api/types.js'
 import { useProject } from '../app/ProjectContext.js'
+import { useReadOnly } from '../app/ReadOnly.js'
 import { ROUTES, funnelPath } from '../app/Router.js'
 import { PageHeader } from '../components/PageHeader.js'
 import { Badge } from '../components/ui/badge.js'
@@ -164,14 +165,17 @@ export function Funnels(props: {
     }
   }, [client, activeId, onUnauthorized])
 
+  const readOnly = useReadOnly()
   return (
     <div className="flex min-w-0 flex-col gap-6">
       <PageHeader
         title="Funnels"
         actions={
-          <Button asChild size="sm">
-            <Link to={ROUTES.funnelNew}>Create funnel</Link>
-          </Button>
+          !readOnly && (
+            <Button asChild size="sm">
+              <Link to={ROUTES.funnelNew}>Create funnel</Link>
+            </Button>
+          )
         }
       />
 

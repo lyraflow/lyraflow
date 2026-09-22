@@ -1,12 +1,21 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/client.js'
 import type { ApiClient } from '../api/client.js'
 import type { RetentionReport, RetentionReportInput, RetentionResult } from '../api/types.js'
 import { ProjectProvider } from '../app/ProjectContext.js'
 import { Retention } from './Retention.js'
+
+// The read-only switch, as the screen reads it. Mocked rather than provided,
+// so this file's render helpers stay as they are; `app/ReadOnly.test.tsx`
+// covers the real context that feeds `useReadOnly` from `/v1/meta`.
+const readOnly = vi.hoisted(() => ({ value: false }))
+vi.mock('../app/ReadOnly.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../app/ReadOnly.js')>()),
+  useReadOnly: () => readOnly.value,
+}))
 
 /** An arbitrary fixed timestamp -- the exact value never matters to any
  * assertion below, only that every stored report carries one. */
@@ -909,5 +918,28 @@ describe('Retention -- delete', () => {
     expect(screen.queryByText(/delete this retention report\?/i)).toBeNull()
     expect(screen.queryByRole('button', { name: /^delete retention report$/i })).toBeNull()
     expect(client.deleteRetentionReport).not.toHaveBeenCalled()
+  })
+})
+
+describe('Retention on a read-only install', () => {
+  afterEach(() => {
+    readOnly.value = false
+  })
+
+  it('offers Save and Delete on a writable install', async () => {
+    renderAt('/retention/3')
+    await screen.findByDisplayValue('Report')
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^delete$/i })).toBeInTheDocument()
+  })
+
+  // Run stays: it is a read, and the reason to open a saved report.
+  it('hides Save and Delete, and keeps Run', async () => {
+    readOnly.value = true
+    renderAt('/retention/3')
+    await screen.findByDisplayValue('Report')
+    expect(screen.queryByRole('button', { name: /^save$/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /^delete$/i })).toBeNull()
+    expect(screen.getByRole('button', { name: /^run$/i })).toBeInTheDocument()
   })
 })

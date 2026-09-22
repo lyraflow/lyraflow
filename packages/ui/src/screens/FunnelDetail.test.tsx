@@ -10,6 +10,15 @@ import { ProjectProvider } from '../app/ProjectContext.js'
 import { ROUTES, funnelPath } from '../app/Router.js'
 import { FunnelDetail } from './FunnelDetail.js'
 
+// The read-only switch, as the screen reads it. Mocked rather than provided,
+// so this file's render helpers stay as they are; `app/ReadOnly.test.tsx`
+// covers the real context that feeds `useReadOnly` from `/v1/meta`.
+const readOnly = vi.hoisted(() => ({ value: false }))
+vi.mock('../app/ReadOnly.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../app/ReadOnly.js')>()),
+  useReadOnly: () => readOnly.value,
+}))
+
 const PROJECT_1 = {
   id: 1,
   name: 'Alpha',
@@ -1621,5 +1630,26 @@ describe('FunnelDetail — opens over the range in the URL', () => {
     await screen.findByTestId('funnel-step-1')
     await userEvent.selectOptions(screen.getByLabelText(/range/i), '90')
     expect(screen.getByTestId('funnel-url')).toHaveTextContent(`${funnelPath(FUNNEL.id)}?days=30`)
+  })
+})
+
+describe('FunnelDetail on a read-only install', () => {
+  afterEach(() => {
+    readOnly.value = false
+  })
+
+  it('offers Edit and Delete on a writable install', async () => {
+    renderDetail(fakeClient())
+    await screen.findByRole('heading', { name: 'Signup flow' })
+    expect(screen.getByRole('link', { name: /^edit$/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^delete$/i })).toBeInTheDocument()
+  })
+
+  it('hides Edit and Delete', async () => {
+    readOnly.value = true
+    renderDetail(fakeClient())
+    await screen.findByRole('heading', { name: 'Signup flow' })
+    expect(screen.queryByRole('link', { name: /^edit$/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /^delete$/i })).toBeNull()
   })
 })

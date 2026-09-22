@@ -65,6 +65,11 @@ export interface ProjectIdentity {
 export interface Meta {
   /** The release the running server was built from, e.g. `0.10.0`. */
   version: string
+  /**
+   * `LYRAFLOW_READ_ONLY`: the server refuses every write but sign-in, ingest
+   * and the reads that travel as POST. The UI hides what it would refuse.
+   */
+  read_only: boolean
 }
 
 /** `GET /v1/project/usage` -- this calendar month's counts against the project's quota. */
