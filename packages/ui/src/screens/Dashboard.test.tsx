@@ -450,6 +450,129 @@ describe('Dashboard', () => {
     expect(screen.queryByTestId('tile-funnel-3')).toBeNull()
   })
 
+  it('remove shows a status naming the removed report, with an Undo button', async () => {
+    const { client } = renderScreen({ at: '/dashboards/7?edit=1' })
+    const funnel = await screen.findByTestId('tile-funnel-3')
+    await userEvent.click(within(funnel).getByRole('button', { name: 'Remove' }))
+    await waitFor(() =>
+      expect(client.patchDashboard).toHaveBeenCalledWith(1, 7, { tiles: [trendInput] }),
+    )
+    const notice = await screen.findByRole('status')
+    expect(notice).toHaveTextContent('Removed Signup flow.')
+    expect(within(notice).getByRole('button', { name: 'Undo' })).toBeEnabled()
+  })
+
+  it('a tile whose report is null (stale) says "Removed a deleted report."', async () => {
+    const dangling: ResolvedTile = { ...funnelTile, report: null }
+    const client = fakeClient({
+      dashboard: vi.fn(async () => ({ ...DASH, tiles: [trendTile, dangling] })),
+    })
+    renderScreen({ client, at: '/dashboards/7?edit=1' })
+    const funnel = await screen.findByTestId('tile-funnel-3')
+    await userEvent.click(within(funnel).getByRole('button', { name: 'Remove' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Removed a deleted report.')
+  })
+
+  it('undo puts the tile back at its original index and width', async () => {
+    const retentionFull: ResolvedTile = {
+      kind: 'retention',
+      report_id: 2,
+      width: 'full',
+      report: RETENTION,
+    }
+    const threeTiles: DashboardWire = {
+      ...DASH,
+      tile_count: 3,
+      tiles: [trendTile, retentionFull, funnelTile],
+    }
+    const client = fakeClient({ dashboard: vi.fn(async () => threeTiles) })
+    renderScreen({ client, at: '/dashboards/7?edit=1' })
+    const retentionCard = await screen.findByTestId('tile-retention-2')
+    await userEvent.click(within(retentionCard).getByRole('button', { name: 'Remove' }))
+    await waitFor(() =>
+      expect(client.patchDashboard).toHaveBeenCalledWith(1, 7, {
+        tiles: [trendInput, funnelInput],
+      }),
+    )
+    const notice = await screen.findByRole('status')
+    await userEvent.click(within(notice).getByRole('button', { name: 'Undo' }))
+    await waitFor(() =>
+      expect(client.patchDashboard).toHaveBeenCalledWith(1, 7, {
+        tiles: [trendInput, { kind: 'retention', report_id: 2, width: 'full' }, funnelInput],
+      }),
+    )
+  })
+
+  it('another layout edit clears the notice', async () => {
+    renderScreen({ at: '/dashboards/7?edit=1' })
+    const funnel = await screen.findByTestId('tile-funnel-3')
+    await userEvent.click(within(funnel).getByRole('button', { name: 'Remove' }))
+    await screen.findByRole('status')
+    const trend = await screen.findByTestId('tile-trend-1')
+    await waitFor(() =>
+      expect(within(trend).getByRole('button', { name: 'Full width' })).toBeEnabled(),
+    )
+    await userEvent.click(within(trend).getByRole('button', { name: 'Full width' }))
+    await waitFor(() => expect(screen.queryByRole('status')).toBeNull())
+  })
+
+  it('leaving edit mode (Done) clears the notice', async () => {
+    renderScreen({ at: '/dashboards/7?edit=1' })
+    const funnel = await screen.findByTestId('tile-funnel-3')
+    await userEvent.click(within(funnel).getByRole('button', { name: 'Remove' }))
+    await screen.findByRole('status')
+    await userEvent.click(screen.getByRole('button', { name: 'Done' }))
+    expect(screen.queryByRole('status')).toBeNull()
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
+  it('the notice clears itself automatically after 10 seconds', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const localUser = userEvent.setup({ delay: null })
+    try {
+      renderScreen({ at: '/dashboards/7?edit=1' })
+      const funnel = await screen.findByTestId('tile-funnel-3')
+      await localUser.click(within(funnel).getByRole('button', { name: 'Remove' }))
+      await screen.findByRole('status')
+      await vi.advanceTimersByTimeAsync(10_000)
+      await waitFor(() => expect(screen.queryByRole('status')).toBeNull())
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('Undo is disabled while a PATCH is in flight', async () => {
+    const gate = deferred<DashboardWire>()
+    const client = fakeClient({ patchDashboard: vi.fn(() => gate.promise) })
+    renderScreen({ client, at: '/dashboards/7?edit=1' })
+    const funnel = await screen.findByTestId('tile-funnel-3')
+    await userEvent.click(within(funnel).getByRole('button', { name: 'Remove' }))
+    const notice = await screen.findByRole('status')
+    expect(within(notice).getByRole('button', { name: 'Undo' })).toBeDisabled()
+    gate.resolve(applied({ tiles: [trendInput] }))
+    await waitFor(() => expect(within(notice).getByRole('button', { name: 'Undo' })).toBeEnabled())
+  })
+
+  it('a failed undo shows the save error and keeps the notice so it can be retried', async () => {
+    const patchDashboard = vi
+      .fn()
+      .mockImplementationOnce(async (_p: number, _id: number, patch: DashboardPatch) =>
+        applied(patch),
+      )
+      .mockImplementationOnce(async () => {
+        throw new ApiError(500, 'server_error')
+      })
+    const client = fakeClient({ patchDashboard })
+    renderScreen({ client, at: '/dashboards/7?edit=1' })
+    const funnel = await screen.findByTestId('tile-funnel-3')
+    await userEvent.click(within(funnel).getByRole('button', { name: 'Remove' }))
+    const notice = await screen.findByRole('status')
+    await userEvent.click(within(notice).getByRole('button', { name: 'Undo' }))
+    expect(await screen.findByText(/something went wrong/i)).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Removed Signup flow.')
+  })
+
   it('add appends a half tile', async () => {
     const { client } = renderScreen({ at: '/dashboards/7?edit=1' })
     const select = await screen.findByLabelText('Report to add')
