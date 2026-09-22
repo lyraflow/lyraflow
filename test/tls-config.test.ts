@@ -156,4 +156,21 @@ describe('the reverse-proxy extension point', () => {
     const dir = join(import.meta.dirname, '..', 'docker', 'caddy', 'proxy.d')
     expect(readdirSync(dir).filter((f) => f.endsWith('.caddy')).length).toBeGreaterThan(0)
   })
+
+  // #271: `static` is the module name for Caddy's *global*
+  // `servers { trusted_proxies static ... }` option. Inside `reverse_proxy`,
+  // where this file's example lands, `trusted_proxies` takes ranges directly
+  // -- `static` there is parsed as an IP address and caddy:2-alpine exits at
+  // boot. This pins the comment's spelling so a future edit cannot
+  // reintroduce it silently; test/tls-proxy.test.ts boots the real thing.
+  it('documents the reverse_proxy spelling, not the global-option one (#271)', () => {
+    const src = readFileSync('docker/caddy/proxy.d/00-defaults.caddy', 'utf8')
+    const examples = src
+      .split('\n')
+      .map((l) => l.replace(/^#\s?/, '').trim())
+      .filter((l) => l.startsWith('trusted_proxies'))
+    expect(examples.length).toBeGreaterThan(0)
+    for (const l of examples.filter((l) => !l.includes('0.0.0.0/0')))
+      expect(l).not.toMatch(/\bstatic\b/)
+  })
 })
