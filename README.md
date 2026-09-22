@@ -931,7 +931,7 @@ not here.
 
 ### `GET /v1/meta`
 
-**What release this install is running**, as `{"version": "0.16.1"}`. The Settings
+**What release this install is running**, as `{"version": "0.17.0"}`. The Settings
 screen's Install card reads it, which is where an operator finds the number to
 quote into a bug report or to compare against the latest release.
 
