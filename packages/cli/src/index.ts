@@ -4,7 +4,14 @@ import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { pathToFileURL } from 'node:url'
 import { ProjectExistsError, SCHEMA_VERSION, createProject } from '@lyraflow/core'
-import { createChClient, createPgPool, loadMigrations, migrate } from '@lyraflow/db'
+import {
+  type ClickHouseClient,
+  type Pool,
+  createChClient,
+  createPgPool,
+  loadMigrations,
+  migrate,
+} from '@lyraflow/db'
 import { UsageError, hasRawFlag, parseCommandArgs } from './api/args.js'
 import { Client } from './api/client.js'
 import { runDeletions, runSchema, runSegments } from './api/commands/catalog.js'
@@ -24,6 +31,7 @@ import { runUsage } from './api/commands/usage.js'
 import type { CommandContext } from './api/context.js'
 import {
   CLI_VERSION,
+  type Mode,
   OUTPUT_SCHEMA_VERSION,
   emitError,
   emitObject,
@@ -546,6 +554,121 @@ export async function runVersion(args: string[], ctx: CommandContext): Promise<n
   return 0
 }
 
+/**
+ * `lyraflow create-project <name>` — issue #284. Until this change the
+ * command printed its two one-time keys as prose only, so a script or an
+ * agent had to scrape `wk_…`/`sk_…` out of human text with a regex —
+ * `binary.test.ts`'s own setup did exactly that, which is what surfaced the
+ * gap in the first place.
+ *
+ * DELIBERATELY DOES NOT CALL `resolveMode` — the one command in this CLI
+ * whose default does not follow whether stdout is a terminal. Every other
+ * command flips to `json` the instant stdout is NOT a tty (`resolveMode`,
+ * output.ts), which is right for a command built to be piped into a
+ * parser. This one is different: the root README's getting-started walk
+ * through and this repo's own install docs run `create-project` inside
+ * `docker compose exec …`, which is not a tty either, and pipe its human
+ * lines straight into a terminal a reader is looking at. Following
+ * `resolveMode` here would silently turn every one of those into NDJSON
+ * with no `--json` anywhere in the command a reader copy-pasted. `--json`
+ * stays opt-in for this one command; everything else about `Mode`
+ * (`--json`/`--human`, `--json` winning when both are given) is unchanged.
+ *
+ * Takes an UNOPENED database handle (`getClients`, matching `clients()`
+ * below) rather than an already-open `{ pg, ch }` pair, and calls it only
+ * once a name has actually been given — preserving the original inline
+ * implementation's property that a bare usage error (no name, or an
+ * unrecognised flag) never opens a database connection or requires the
+ * Postgres/ClickHouse env vars to be set at all.
+ */
+export async function runCreateProject(
+  argv: string[],
+  ctx: {
+    write: (s: string) => void
+    writeErr: (s: string) => void
+    getClients: () => { pg: Pool; ch: ClickHouseClient }
+  },
+): Promise<number> {
+  let flags: Record<string, string | boolean>
+  let positionals: string[]
+  try {
+    ;({ flags, positionals } = parseCommandArgs(argv, { booleans: ['json', 'human'] }))
+  } catch (err) {
+    if (!(err instanceof UsageError)) throw err
+    // No prior behaviour to stay byte-identical to here: before this
+    // change, create-project did no flag parsing at all, so `--host` (say)
+    // was never rejected — it was silently read as the project NAME. This
+    // is a new, reachable path, so it renders like every other command's
+    // usage error (`emitError`) rather than mimicking one specific to this
+    // command.
+    emitError(err, hasRawFlag(argv, 'json') ? 'json' : 'human', ctx.writeErr)
+    return 2
+  }
+
+  // Not `resolveMode(flags, ctx.isTty)` — see this function's own docstring.
+  const mode: Mode = flags.json ? 'json' : 'human'
+
+  const name = positionals[0]
+  if (!name) {
+    if (mode === 'json') {
+      emitError(new UsageError('Usage: lyraflow create-project <name>'), 'json', ctx.writeErr)
+    } else {
+      // Byte-identical to the pre-`--json` behaviour
+      // (`console.error('Usage: lyraflow create-project <name>')`), not
+      // `emitError`'s human `Error: … (usage_error)` wrapping — this exact
+      // line is what every existing install guide and script already sees.
+      ctx.writeErr('Usage: lyraflow create-project <name>\n')
+    }
+    return 2
+  }
+
+  const { pg, ch } = ctx.getClients()
+  try {
+    const project = await createProject(pg, name)
+    if (mode === 'json') {
+      // Key names match POST /v1/projects (admin-routes.ts): id, name,
+      // slug, write_key, server_key. One NDJSON line, nothing else — no
+      // wrapper, matching every other single-record `--json` command.
+      emitObject(
+        {
+          id: Number(project.id),
+          name: project.name,
+          slug: project.slug,
+          write_key: project.writeKey,
+          server_key: project.serverKey,
+        },
+        'json',
+        ctx.write,
+      )
+    } else {
+      // Byte-identical to the pre-`--json` human output.
+      ctx.write(`Project "${project.name}" created.\n`)
+      ctx.write(`  Write key  (public, safe in browser JS): ${project.writeKey}\n`)
+      ctx.write(`  Server key (secret, shown once):         ${project.serverKey}\n`)
+    }
+    return 0
+  } catch (err) {
+    if (!(err instanceof ProjectExistsError)) throw err
+    if (mode === 'json') {
+      // Not `emitError`: `describeError` (output.ts) only classifies
+      // `ApiError`/`UsageError` and would report this as the generic
+      // `code: "error"` — wrong, and less useful than no code at all.
+      // `emitObject` is still the shared, hardened serialiser (NDJSON-safe,
+      // control-character-escaped); it is just handed the record directly
+      // rather than an error instance it cannot classify.
+      emitObject({ error: err.message, code: 'project_exists' }, 'json', ctx.writeErr)
+    } else {
+      // Byte-identical to the pre-`--json` behaviour
+      // (`console.error(err.message)`).
+      ctx.writeErr(`${err.message}\n`)
+    }
+    return 1
+  } finally {
+    await pg.end()
+    await ch.close()
+  }
+}
+
 async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2)
 
@@ -589,30 +712,17 @@ async function main(): Promise<void> {
     }
 
     case 'create-project': {
-      const name = args[0]
-      if (!name) {
-        console.error('Usage: lyraflow create-project <name>')
-        process.exit(2)
-      }
-      const { pg, ch } = clients()
-      try {
-        const project = await createProject(pg, name)
-        console.log(`Project "${project.name}" created.`)
-        console.log(`  Write key  (public, safe in browser JS): ${project.writeKey}`)
-        console.log(`  Server key (secret, shown once):         ${project.serverKey}`)
-      } catch (err) {
-        if (!(err instanceof ProjectExistsError)) throw err
-        console.error(err.message)
-        // process.exitCode, not process.exit(1): exit() can truncate a stderr
-        // write that has not flushed yet (stderr is asynchronous when it is a
-        // pipe, which is exactly what `docker compose exec … | tee` gives you),
-        // and the message is the entire point of this branch. Closing the
-        // clients below lets the process end on its own with this code.
-        process.exitCode = 1
-      } finally {
-        await pg.end()
-        await ch.close()
-      }
+      // process.exitCode, not process.exit(): exit() can truncate a stderr
+      // write that has not flushed yet (stderr is asynchronous when it is a
+      // pipe, which is exactly what `docker compose exec … | tee` gives
+      // you), and for the error paths the message IS the point. Letting the
+      // process end on its own once `runCreateProject`'s `finally` has
+      // closed the clients is what keeps that write intact.
+      process.exitCode = await runCreateProject(args, {
+        write: (s) => process.stdout.write(s),
+        writeErr: (s) => process.stderr.write(s),
+        getClients: clients,
+      })
       break
     }
 

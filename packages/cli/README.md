@@ -25,6 +25,11 @@ login* for the reset. Unlike everything below, those six talk to Postgres and
 ClickHouse directly rather than over HTTP, so they read the database environment variables and not
 `LYRAFLOW_HOST`/`LYRAFLOW_SERVER_KEY` — which is also what lets `projects
 delete` work on an install whose server is stopped.
+
+`create-project` also takes `--json`/`--human` (#284) — see *`--json` is the
+stable interface* below for the one way it differs from every other command
+that flag applies to.
+
 `healthcheck` reads its own
 env var, `LYRAFLOW_URL` (defaulting to `http://localhost:3000`), not
 `LYRAFLOW_HOST` — the two are not interchangeable and neither falls back to
@@ -147,6 +152,18 @@ the same command can render differently depending on how it happens to be
 invoked (a real terminal vs. a pty-allocated harness vs. a pipe), which is
 exactly the "works in my terminal, breaks in CI" failure mode `--json` exists
 to route around. When both `--json` and `--human` are passed, `--json` wins.
+
+**`create-project` is the one exception to that detection.** It defaults to
+`--human` unconditionally, tty or not, rather than guessing — the root
+README's and this repo's own install docs run it inside `docker compose exec
+…`, which is not a terminal either, and pipe its two printed keys straight
+into one a person is reading. Guessing from stdout there would silently
+switch those instructions to NDJSON with no `--json` anywhere in the command
+to explain why. `--json` still works — the shape is
+`{"id","name","slug","write_key","server_key"}`, matching what
+`POST /v1/projects` returns — it is only the *default* that does not follow
+the terminal. An agent scripting `create-project` should still pass `--json`
+explicitly, same as everywhere else.
 
 `json` mode is NDJSON: one `JSON.stringify`d record per line for a list, one
 line for a single record — no wrapping array, no header row. An empty list
