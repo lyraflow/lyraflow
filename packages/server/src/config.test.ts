@@ -162,4 +162,23 @@ describe('loadConfig', () => {
       } as NodeJS.ProcessEnv),
     ).toThrow(/LYRAFLOW_RETENTION_ENABLED must be "true" or "false", got "yes"/)
   })
+
+  it('leaves the install writable when LYRAFLOW_READ_ONLY is unset', () => {
+    expect(loadConfig({ ...required } as NodeJS.ProcessEnv).readOnly).toBe(false)
+  })
+
+  it('makes the install read-only when LYRAFLOW_READ_ONLY is "true"', () => {
+    const c = loadConfig({ ...required, LYRAFLOW_READ_ONLY: 'true' } as NodeJS.ProcessEnv)
+    expect(c.readOnly).toBe(true)
+  })
+
+  // `=1` is the spelling the issue used, and it is refused on purpose: the
+  // same bool() every other switch goes through, so an operator who typed a
+  // spelling the server does not know hears about it at boot rather than
+  // getting a writable install they believed was locked.
+  it('rejects LYRAFLOW_READ_ONLY=1 rather than guessing what it meant', () => {
+    expect(() =>
+      loadConfig({ ...required, LYRAFLOW_READ_ONLY: '1' } as NodeJS.ProcessEnv),
+    ).toThrow(/LYRAFLOW_READ_ONLY must be "true" or "false", got "1"/)
+  })
 })
