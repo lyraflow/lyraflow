@@ -196,9 +196,13 @@ host and write key, and escapes them correctly:
 ```sh
 docker compose exec \
   -e LYRAFLOW_HOST=http://localhost:3000 \
-  -e LYRAFLOW_SERVER_KEY=$LYRAFLOW_SERVER_KEY \
+  -e LYRAFLOW_SERVER_KEY \
   lyraflow node packages/cli/dist/index.js snippet
 ```
+
+`-e LYRAFLOW_SERVER_KEY` with no value hands Compose the key you exported
+above, so it never appears in the host's process list the way
+`-e LYRAFLOW_SERVER_KEY=sk_…` would.
 
 Paste what it prints into your site's `<head>`. It loads a ~5 KB script, starts
 recording page views immediately, and queues events in `localStorage` if your
@@ -249,7 +253,7 @@ container, so give yourself a shorthand:
 lyraflow() {
   docker compose exec \
     -e LYRAFLOW_HOST=http://localhost:3000 \
-    -e LYRAFLOW_SERVER_KEY="$LYRAFLOW_SERVER_KEY" \
+    -e LYRAFLOW_SERVER_KEY \
     lyraflow node packages/cli/dist/index.js "$@"
 }
 ```
