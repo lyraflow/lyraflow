@@ -177,8 +177,8 @@ describe('loadConfig', () => {
   // spelling the server does not know hears about it at boot rather than
   // getting a writable install they believed was locked.
   it('rejects LYRAFLOW_READ_ONLY=1 rather than guessing what it meant', () => {
-    expect(() =>
-      loadConfig({ ...required, LYRAFLOW_READ_ONLY: '1' } as NodeJS.ProcessEnv),
-    ).toThrow(/LYRAFLOW_READ_ONLY must be "true" or "false", got "1"/)
+    expect(() => loadConfig({ ...required, LYRAFLOW_READ_ONLY: '1' } as NodeJS.ProcessEnv)).toThrow(
+      /LYRAFLOW_READ_ONLY must be "true" or "false", got "1"/,
+    )
   })
 })
