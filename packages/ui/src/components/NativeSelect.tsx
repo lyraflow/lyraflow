@@ -32,11 +32,13 @@ import { cn } from '../lib/utils.js'
  * hands Chromium/Linux an unresolved popup background, and the open list rendered
  * white with barely-visible pale text while the page was in dark mode (verified
  * with Playwright chromium, both themes, list open). `bg-popover` gives it an
- * explicit background; `text-foreground` -- not `text-popover-foreground`, which
- * this codebase never maps and would compile to no rule at all -- pairs `--lf-text`
- * with `--lf-surface-raised`, the same body-on-raised-surface contrast the brand
+ * explicit background; `text-foreground` pairs `--lf-text` with
+ * `--lf-surface-raised`, the same body-on-raised-surface contrast the brand
  * system already measures, so the list gets a real, correct colour in both themes
- * instead of relying on Chromium to pick one.
+ * instead of relying on Chromium to pick one. `text-popover-foreground` now
+ * resolves to the identical pairing (#267) and would work here too; kept as
+ * `text-foreground` since that is what was verified above and the two are the
+ * same colour.
  *
  * The descendant form `[&_option]` is deliberate, not `[&>option]`: `AddTilePicker`
  * and `OperatorSelect` above both wrap their `<option>`s in an `<optgroup>`, which

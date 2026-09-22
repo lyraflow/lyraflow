@@ -131,3 +131,115 @@ describe('brand/tokens.css palettes', () => {
     }
   })
 })
+
+describe('theme.css maps every semantic colour class the vendored components use', () => {
+  // #267: `text-popover-foreground` compiled to no rule at all, because
+  // `@theme inline` mapped `--color-popover` but never `--color-popover-foreground`
+  // -- Tailwind silently drops a utility whose custom property is undefined
+  // rather than erroring. This glob is what makes the check structural
+  // rather than a one-off pin: it reads the vendored components themselves,
+  // so a later `shadcn add` that reintroduces the same fault on a new
+  // component fails here too.
+  // `query: '?raw'` without `import: 'default'` hands back a module
+  // namespace object per file (`{ default: "<source text>" }`), not the
+  // string itself -- unwrapped just below.
+  const componentModules = import.meta.glob('../components/ui/*.tsx', {
+    query: '?raw',
+    eager: true,
+  }) as Record<string, { default: string }>
+  const componentFiles = Object.fromEntries(
+    Object.entries(componentModules).map(([path, mod]) => [path, mod.default]),
+  )
+
+  // `text-*` and `bg-*` are overloaded Tailwind utilities: besides a
+  // `--color-<name>` custom property, `text-*` also carries Tailwind's own
+  // font-size scale and alignment/wrap keywords, and `bg-*` carries
+  // attachment/position/repeat/clip keywords -- none of which name a colour
+  // or have a `--color-*` entry to check against. These are Tailwind's
+  // fixed vocabulary, not this project's, so they are excluded rather than
+  // asserted on.
+  const NON_COLOR_TEXT_NAMES = new Set([
+    'xs',
+    'sm',
+    'base',
+    'lg',
+    'xl',
+    '2xl',
+    '3xl',
+    '4xl',
+    '5xl',
+    '6xl',
+    '7xl',
+    '8xl',
+    '9xl',
+    'left',
+    'center',
+    'right',
+    'justify',
+    'start',
+    'end',
+    'ellipsis',
+    'clip',
+    'wrap',
+    'nowrap',
+    'balance',
+    'pretty',
+  ])
+  const NON_COLOR_BG_NAMES = new Set([
+    'transparent',
+    'current',
+    'inherit',
+    'fixed',
+    'local',
+    'scroll',
+    'none',
+    'cover',
+    'contain',
+    'auto',
+    'top',
+    'bottom',
+    'center',
+    'left',
+    'right',
+    'repeat',
+    'no-repeat',
+    'repeat-x',
+    'repeat-y',
+    'round',
+    'space',
+    'clip-border',
+    'clip-padding',
+    'clip-content',
+    'clip-text',
+    'origin-border',
+    'origin-padding',
+    'origin-content',
+  ])
+
+  const mappedColorNames = new Set(
+    [...theme.matchAll(/--color-([a-z0-9-]+):/g)].map((m) => m[1] as string),
+  )
+
+  // name -> the class name matched (`text-` or `bg-` prefix) and one file it
+  // was found in, so a failing case says where to look.
+  const found = new Map<string, string>()
+  for (const [path, source] of Object.entries(componentFiles)) {
+    for (const m of source.matchAll(
+      /\b(text|bg)-([a-z][a-z0-9]*(?:-[a-z0-9]+)*)(?=[\s"'`/)\]!]|$)/g,
+    )) {
+      const kind = m[1] as 'text' | 'bg'
+      const name = m[2] as string
+      const excluded = kind === 'text' ? NON_COLOR_TEXT_NAMES : NON_COLOR_BG_NAMES
+      if (excluded.has(name)) continue
+      if (!found.has(name)) found.set(name, `${kind}-${name} in ${path}`)
+    }
+  }
+
+  it('found at least one text-/bg- class to check (a sign the glob still matches something)', () => {
+    expect(found.size).toBeGreaterThan(0)
+  })
+
+  it.each([...found.entries()])('--color-%s exists in theme.css', (name, seenAt) => {
+    expect(mappedColorNames.has(name), seenAt).toBe(true)
+  })
+})

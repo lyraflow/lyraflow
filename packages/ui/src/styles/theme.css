@@ -57,13 +57,27 @@
   --color-background: var(--lf-surface);
   --color-foreground: var(--lf-text);
   --color-card: var(--lf-surface-raised);
+  /* #267: card and popover share the same surface, --lf-surface-raised, so
+   * both foregrounds are the same pairing -- palette.py's "body on raised"
+   * check, already passing (18.86:1 light, 15.25:1 dark; see
+   * brand/contrast-report.txt in lyraflow-internal). Not a new check: that
+   * pairing already existed for `body`, this only lets Select/DropdownMenu/
+   * Card state it explicitly instead of relying on inheriting it. */
+  --color-card-foreground: var(--lf-text);
   --color-popover: var(--lf-surface-raised);
+  --color-popover-foreground: var(--lf-text);
   --color-muted: var(--lf-surface-sunken);
   --color-muted-foreground: var(--lf-text-muted);
   --color-primary: var(--lf-accent);
   --color-primary-foreground: var(--lf-on-accent);
   --color-secondary: var(--lf-surface-inset);
+  /* palette.py's "body on inset" check (15.85:1 light, 12.72:1 dark). */
+  --color-secondary-foreground: var(--lf-text);
   --color-accent: var(--lf-accent-surface);
+  /* palette.py's "body on accent tint" check (17.08:1 light, 15.03:1 dark).
+   * This is Tailwind/shadcn's `accent` role (a hover tint), unrelated to
+   * this file's own `--lf-accent-*` ramp naming. */
+  --color-accent-foreground: var(--lf-text);
   --color-border: var(--lf-border);
   /* Not --lf-border-strong: that token was never measured as a component
    * boundary and falls to ~1.7:1 against surface/raised, well under WCAG
