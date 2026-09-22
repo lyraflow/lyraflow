@@ -377,14 +377,11 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
           // says must never fail to parse (see its own docstring). `none`
           // alone is not enough to tell "genuinely no breakdown" apart from
           // "had one, could not show it", so this checks the raw string
-          // instead: `event_name` is excluded because it parses to its own
-          // source, never `none`, so this can only be a breakdown that
-          // really was dropped.
-          if (
-            r.group_by != null &&
-            seededBreakdown.source === 'none' &&
-            r.group_by !== 'event_name'
-          ) {
+          // instead. No separate `event_name` exclusion is needed here --
+          // `sourceAndFieldFromGroupBy('event_name')` always resolves to
+          // `{ source: 'event_name' }`, never `none`; that invariant is
+          // pinned in `trends/params.test.ts`, not here.
+          if (r.group_by != null && seededBreakdown.source === 'none') {
             setDroppedGroupBy(r.group_by)
           }
           finalParams = {

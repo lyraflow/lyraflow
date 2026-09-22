@@ -346,6 +346,20 @@ describe('Trends -- saving and reopening a saved report', () => {
     )
   })
 
+  it('clears the dropped-breakdown notice once the operator picks a new split', async () => {
+    // Fix round 1: `setDroppedGroupBy(null)` on a `source` patch was unpinned
+    // -- deleting it left all other tests green. This exercises the real
+    // control (`BreakdownPicker`'s "Split by" select), the same way
+    // "clears the field when the split source changes" above does, rather
+    // than calling `update` directly.
+    renderAt('/trends/3', {
+      trendReport: vi.fn(async () => reportFixture({ group_by: 'trait:plan' })),
+    })
+    await screen.findByTestId('trend-breakdown-dropped')
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: /split by/i }), 'attribute')
+    expect(screen.queryByTestId('trend-breakdown-dropped')).not.toBeInTheDocument()
+  })
+
   it('says nothing about a dropped breakdown for a group_by this screen understands', async () => {
     const client = renderAt('/trends/3', {
       trendReport: vi.fn(async () => reportFixture({ group_by: 'attribute:country' })),
