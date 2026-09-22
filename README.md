@@ -3309,9 +3309,10 @@ reach for `-v` repeatedly, because certificate authorities rate-limit
 re-issuing for the same name.
 
 Re-running `./install.sh analytics.example.com` on an install that already
-serves that name is fine — it picks up a new image and restarts the stack. It
-will not change a domain that is already in `.env`; nothing in the installer
-rewrites a value that file already holds.
+serves that name is fine — it pulls the newest published image and restarts
+the stack. It does not move your checkout to a new release; [*Upgrading*](#upgrading)
+covers that. It will not change a domain that is already in `.env`; nothing in
+the installer rewrites a value that file already holds.
 
 To go back to a local install, remove **all three** of the settings the
 installer added — `LYRAFLOW_DOMAIN`, `COMPOSE_PROFILES` and `LYRAFLOW_PUBLISH`
@@ -3893,16 +3894,31 @@ cannot be undone, so this is the one step worth never skipping:
 ./backup.sh /var/backups/lyraflow
 ```
 
-Then:
+Then move the checkout to the release and pull its image. Every release tag
+publishes `ghcr.io/lyraflow/lyraflow` for amd64 and arm64:
 
 ```sh
-docker compose pull || docker compose build
-docker compose down
-docker compose up -d
+git fetch --tags
+git checkout vX.Y.Z
+docker compose pull && docker compose up -d
 ```
 
-The `|| docker compose build` covers the period before the first image is
-published; once it is, the pull succeeds and the build never runs.
+Check out the tag before pulling, not after. The compose file, `install.sh`
+and the backup scripts come from the checkout, and a new image can expect a
+compose file that only the new tag has.
+
+**`docker-compose.yml` names the image `ghcr.io/lyraflow/lyraflow:0`, and `:0`
+means the newest 0.x release.** So a checkout left on an older tag still pulls
+the newest image, not the one that matches it. To hold an install at one
+version, name that version in `.env` as
+`LYRAFLOW_IMAGE=ghcr.io/lyraflow/lyraflow:X.Y.Z`. Every release is also
+published as `X.Y`, `X` and, for a final release, `latest`. Releases older than the first published image
+have no image; build those with `docker compose build`.
+
+**If you have modified your checkout**, build it instead of pulling:
+`docker compose build && docker compose up -d`. The build writes the same
+local tag, so a later `docker compose pull` replaces your build with the
+published image.
 
 The restart itself loses nothing. Accepted events are flushed before shutdown,
 migrations run on boot, and the ClickHouse identity dictionaries are rebuilt

@@ -3,9 +3,9 @@ services:
     image: ${LYRAFLOW_IMAGE:-ghcr.io/lyraflow/lyraflow:0}
     # `image:` and `build:` together: Compose uses the named image when it is
     # available and builds from this checkout (tagging the result with that
-    # same name) when it is not. Until the image is published, `install.sh`'s
-    # `docker compose pull || docker compose build` is what makes a fresh clone
-    # work; once it is published, the pull wins and nothing here changes.
+    # same name) when it is not. Every release tag publishes this image, so
+    # `install.sh` pulls it and builds from the checkout only if the pull fails.
+    # `:0` is the newest 0.x release.
     #
     # THE IMAGE TAG IS A SHARED NAMESPACE, and `LYRAFLOW_IMAGE` is how a second
     # stack stays out of it. Isolating a Compose project by `-p` and by host

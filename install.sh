@@ -120,18 +120,17 @@ fi
 # progress output is worth seeing on a slow connection.
 docker compose pull clickhouse postgres
 
-# The Lyraflow image may not be published yet (or not for this architecture),
-# and `set -e` would abort the install on a failed pull. Attempt it quietly:
-# a registry "denied" here is the expected case before the first release, and
-# the daemon prints ~25 lines of retries that look alarming for something that
-# is about to work fine. Fall back to building from this checkout. The moment
-# the image is published, the pull succeeds and the build is skipped.
+# Releases publish ghcr.io/lyraflow/lyraflow for amd64 and arm64, but a pull
+# can still fail: a platform with no image, a registry unreachable from this
+# host, or an image name in LYRAFLOW_IMAGE that was never published. `set -e`
+# would abort the install there, so attempt it quietly -- the daemon prints
+# ~25 lines of retries that look alarming for something that is about to work
+# fine -- and fall back to building from this checkout.
 echo "Fetching the Lyraflow image..."
 if docker compose pull lyraflow >/dev/null 2>&1; then
   echo "Pulled the published image."
 else
-  echo "No published image yet — building from this checkout instead."
-  echo "(Expected before the first release. The first build takes a few minutes.)"
+  echo "No published image for this version — building from this checkout instead."
   docker compose build lyraflow
 fi
 
