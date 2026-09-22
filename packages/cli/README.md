@@ -244,6 +244,18 @@ lyraflow events --host http://127.0.0.1:1 --json
 # exit 1 too — reached nothing at all
 ```
 
+**One exit `1` in this CLI is not an `ApiError`.** `create-project` talks to
+Postgres directly rather than over HTTP (see the six operational commands
+noted above), so a duplicate name is `ProjectExistsError` (`@lyraflow/core`),
+not a rejected request — same exit code as every `ApiError` above, a
+`code` no server ever sent:
+
+```sh
+lyraflow create-project "Acme" --json
+# {"error":"A project with slug \"acme\" already exists. Project names must be unique. Pick a different name, or look up the existing project's write key in the projects table.","code":"project_exists"}
+# exit 1 — stdout prints nothing
+```
+
 **Piping into something that exits early is still success.** `lyraflow events
 --json | head -2` exits `0` — a closed reader (`head`, `less`, a script that
 stops consuming) is a normal end for a streaming command, not a failure, and
