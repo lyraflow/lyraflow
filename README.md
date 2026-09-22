@@ -161,6 +161,11 @@ It prints two keys, and the difference between them matters:
 | **Write key** `wk_…` | **Public.** It can only write events. Ship it in your page source — that is what it is for. Leaked? Rotate it — see [`POST /v1/project/rotate-write-key`](#post-v1projectrotate-write-key). |
 | **Server key** `sk_…` | **Secret, shown once.** Reads people, merges them, deletes and exports them. Write it down; only its hash is stored, so nothing can recover it for you. |
 
+Scripting this instead of reading it? `create-project "My App" --json` prints
+one line — `{"id","name","slug","write_key","server_key"}` — rather than the
+two lines above, so a script reads the keys as JSON instead of scraping this
+text.
+
 Run `create-project` again for each additional website you want to track
 separately — one install holds as many projects as you like, and the rest of
 this document shows one only because a project is the unit each example
@@ -895,9 +900,13 @@ shaped `{"id", "name", "slug", "created_at", "retention_months",
 kind** — the one response in this API that names every project at once, so a
 key leaking here would leak the whole install rather than one project.
 `POST /v1/projects` takes `{"name"}`, slugifies it the same way
-`create-project` does, and returns `{"name", "slug", "write_key",
-"server_key"}` — the server key shown once, exactly as `create-project`
-prints it once, and never served again by anything.
+`create-project` does, and returns every field a `GET /v1/projects` entry
+carries (`{"id", "name", "slug", "created_at", "retention_months",
+"monthly_event_quota", "disabled_at", "deleting_at"}` — the UI appends this
+response straight to its in-memory list rather than re-fetching it) plus the
+two one-time keys, `{"write_key", "server_key"}` — the server key shown
+once, exactly as `create-project` prints it once, and never served again by
+anything.
 
 `PATCH /v1/projects/:id` takes any of `{"name"}` and `{"archived": true|false}`
 and returns the updated entry; it never changes the slug. `DELETE
