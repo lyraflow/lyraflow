@@ -33,8 +33,3 @@ export function ReadOnlyProvider(props: { client: ApiClient; children?: ReactNod
   const { readOnly } = useVersion(props.client)
   return <ReadOnlyContext.Provider value={readOnly}>{props.children}</ReadOnlyContext.Provider>
 }
-
-/** For tests: a fixed answer, without a client. */
-export function ReadOnlyValue(props: { value: boolean; children?: ReactNode }) {
-  return <ReadOnlyContext.Provider value={props.value}>{props.children}</ReadOnlyContext.Provider>
-}
