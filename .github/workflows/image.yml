@@ -1,0 +1,127 @@
+# Publishes ghcr.io/lyraflow/lyraflow for linux/amd64 and linux/arm64 on every
+# pushed version tag, tagged X.Y.Z, X.Y, X and latest (#275).
+#
+# FIRST PUBLISH: GHCR creates a new package as PRIVATE, whatever the visibility
+# of the repository. Until a maintainer switches it to public by hand (the
+# package's settings on github.com, "Change visibility"), every anonymous
+# `docker compose pull` answers `denied` and install.sh falls back to building
+# from the checkout. This is a one-time step, and it cannot be done from here:
+# GITHUB_TOKEN has no permission to change a package's visibility.
+#
+# The shape is Docker's documented multi-platform pattern, on NATIVE runners
+# rather than QEMU: each platform builds on its own architecture and pushes by
+# digest only, so no leg can publish a tag by itself. The `merge` job runs only
+# once every leg has succeeded, and writes all four tags in one manifest list.
+# A release whose arm64 build fails therefore publishes nothing, rather than an
+# amd64-only `latest` that breaks every arm64 install that pulls it.
+#
+# Every action is pinned to a full commit SHA, with the release it resolved
+# from in a trailing comment. The other workflows use floating major tags; this
+# one does not, because it holds a token that can overwrite every published
+# image, and a floating tag can be moved by whoever controls that repository.
+name: Image
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/lyraflow/lyraflow
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    # Finite on purpose, as in ci.yml (#137). The e2e job builds this same
+    # Dockerfile in three to seven minutes on amd64.
+    timeout-minutes: 30
+    steps:
+      - name: Name the digest artifact after the platform
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: echo "PLATFORM_PAIR=${PLATFORM//\//-}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=ghcr.io/lyraflow/lyraflow,push-by-digest=true,name-canonical=true,push=true
+      - name: Export the digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    runs-on: ubuntu-24.04
+    needs: build
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      # `{{major}}` on a v0.x tag is `0`, the tag docker-compose.yml names. So
+      # `:0` always means the newest 0.x release, and a checkout left on an
+      # older tag still pulls the newest image. The README's Upgrading section
+      # says so.
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/lyraflow/lyraflow
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
+      # Refuses to publish unless both platforms delivered a digest. The build
+      # legs failing already stops this job through `needs`; this catches a leg
+      # that succeeded without leaving its artifact behind.
+      - name: Create the manifest list and push every tag
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          sources=()
+          for digest in *; do sources+=("$IMAGE@sha256:$digest"); done
+          if [ "${#sources[@]}" -ne 2 ]; then
+            echo "expected 2 platform digests, found ${#sources[@]}: ${sources[*]}" >&2
+            exit 1
+          fi
+          tags=()
+          while read -r tag; do tags+=(-t "$tag"); done < <(jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          docker buildx imagetools create "${tags[@]}" "${sources[@]}"
+      - name: Show what was published
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: docker buildx imagetools inspect "$IMAGE:$VERSION"

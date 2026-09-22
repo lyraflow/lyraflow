@@ -15,6 +15,9 @@ COPY brand ./brand
 RUN pnpm install --frozen-lockfile && pnpm build
 
 FROM node:22-alpine AS runtime
+# `source` is what links the package on ghcr.io to this repository.
+LABEL org.opencontainers.image.source="https://github.com/lyraflow/lyraflow" \
+      org.opencontainers.image.licenses="LicenseRef-Sustainable-Use-License"
 WORKDIR /app
 RUN corepack enable && addgroup -S lyraflow && adduser -S lyraflow -G lyraflow
 COPY --from=build /app /app
