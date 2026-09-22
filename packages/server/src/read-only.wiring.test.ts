@@ -80,7 +80,13 @@ describe('buildApp with LYRAFLOW_READ_ONLY=true', () => {
   // concrete request to it. The ingest routes are the case that needs both:
   // each is registered as `''` under its own plugin prefix.
   it.each(READ_ONLY_ALLOW)('lets $method $url reach its handler', async ({ method, url }) => {
-    const res = await app.inject({ method, url: url.replace(/:[A-Za-z]+/g, '7'), payload: {} })
+    const res = await app.inject({
+      // Every entry is a POST today; inject's method type is narrower than
+      // Fastify's, which is all this cast bridges.
+      method: method as 'POST',
+      url: url.replace(/:[A-Za-z]+/g, '7'),
+      payload: {},
+    })
     expect(res.json()).not.toEqual({ error: 'read_only_install' })
   })
 })
