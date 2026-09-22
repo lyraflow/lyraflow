@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { act, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '../api/client.js'
 import { ReadOnlyProvider, useReadOnly } from './ReadOnly.js'
@@ -26,7 +26,27 @@ describe('ReadOnlyProvider', () => {
         <Probe />
       </ReadOnlyProvider>,
     )
-    await vi.waitFor(() => expect(meta).toHaveBeenCalled())
+    // Settle the read and the state update it causes before asserting.
+    // Asserting as soon as `meta` was called would pass on the context's
+    // writable default without the answer ever having been read.
+    await act(async () => {
+      await meta.mock.results[0]?.value
+    })
+    expect(screen.getByText('writable')).toBeInTheDocument()
+  })
+
+  // Only `read_only: true` hides anything. A body without the field -- a
+  // server from before it existed -- is an ordinary writable install.
+  it('stays writable when /v1/meta has no read_only field', async () => {
+    const meta = vi.fn(async () => ({ version: '0.13.0' }))
+    render(
+      <ReadOnlyProvider client={{ meta } as unknown as ApiClient}>
+        <Probe />
+      </ReadOnlyProvider>,
+    )
+    await act(async () => {
+      await meta.mock.results[0]?.value
+    })
     expect(screen.getByText('writable')).toBeInTheDocument()
   })
 
@@ -43,7 +63,9 @@ describe('ReadOnlyProvider', () => {
         <Probe />
       </ReadOnlyProvider>,
     )
-    await vi.waitFor(() => expect(meta).toHaveBeenCalled())
+    await act(async () => {
+      await meta.mock.results[0]?.value.catch(() => {})
+    })
     expect(screen.getByText('writable')).toBeInTheDocument()
   })
 
