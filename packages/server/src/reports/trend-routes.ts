@@ -3,6 +3,7 @@ import type { Pool } from '@lyraflow/db'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { Authenticate } from '../auth/bridge.js'
+import { BreakdownError, parseBreakdown } from '../events/breakdown.js'
 import { parseNumericId } from '../numeric-id.js'
 import { DuplicateTrendNameError, type StoredTrend, TrendStore } from './trend-store.js'
 
@@ -31,6 +32,34 @@ export interface TrendDeps {
 const Interval = z.enum(INTERVALS)
 
 /**
+ * `group_by`'s shape, shared between `CreateBody` and `PatchBody`.
+ *
+ * The `superRefine` runs the SAME `parseBreakdown` the run path
+ * (`events/routes.ts`'s `/v1/events/stats`) already validates against, so a
+ * trend this endpoint accepts is one that endpoint will actually draw. Before
+ * this, only `.min(1).max(200)` gated the field -- a value like `trait:plan`
+ * or a bare `bogus` string passed here, was stored, and was then silently
+ * dropped by the UI's own `sourceAndFieldFromGroupBy` the next time the
+ * report was reopened (#274). `event_name` is unaffected: `parseBreakdown`
+ * already accepts it bare.
+ */
+const GroupBy = z
+  .string()
+  .min(1)
+  .max(200)
+  .nullable()
+  .optional()
+  .superRefine((v, ctx) => {
+    if (v == null) return
+    try {
+      parseBreakdown(v)
+    } catch (err) {
+      if (!(err instanceof BreakdownError)) throw err
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: err.message })
+    }
+  })
+
+/**
  * The `where` predicates' own schema -- the same `z.array(WherePredicate)
  * .max(MAX_WHERE_PREDICATES)` `events/routes.ts` validates a RUN against, so
  * a trend this endpoint will happily save is one that endpoint will happily
@@ -46,8 +75,9 @@ const CreateBody = z.object({
   // Absent means "no breakdown" -- the same meaning `null` carries once
   // stored, so both are folded to `null` before reaching `TrendStore.create`
   // and the table's own `group_by` column (nullable, no default) never sees
-  // a distinction the domain does not have.
-  group_by: z.string().min(1).max(200).nullable().optional(),
+  // a distinction the domain does not have. See `GroupBy`'s own docstring
+  // for the `parseBreakdown` refinement.
+  group_by: GroupBy,
   // Absent means "no filter" -- the same meaning `[]` carries once stored,
   // and on CREATE there is no stored value to leave alone, so both are
   // folded to `[]` before reaching `TrendStore.create`. `PatchBody` below
@@ -61,8 +91,9 @@ const PatchBody = z.object({
   interval: Interval.optional(),
   // `undefined` (key omitted) leaves the breakdown alone; `null` clears it;
   // a string sets it. Passed straight through to `TrendStore.update`, which
-  // draws exactly this distinction -- see that method's own docstring.
-  group_by: z.string().min(1).max(200).nullable().optional(),
+  // draws exactly this distinction -- see that method's own docstring. See
+  // `GroupBy`'s own docstring for the `parseBreakdown` refinement.
+  group_by: GroupBy,
   // `undefined` (key omitted) leaves the filter alone; `[]` clears it; a
   // list sets it. Passed straight through to `TrendStore.update`, which
   // draws exactly this distinction.

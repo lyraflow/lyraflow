@@ -2516,6 +2516,14 @@ A duplicate name within the same project is a `409`. A non-numeric `:id` is a
 another project, is a `404` — never a `403`, which would confirm the id
 exists.
 
+**`group_by` takes the same values `GET /v1/events/stats` does** — see
+[Splitting](#splitting) above — and nothing else: on both `POST` and `PATCH`,
+anything `parseBreakdown` would refuse (a `trait:` prefix, an unknown
+`attribute:`, a bare string with no colon) is a `400` naming `invalid_trend`,
+with `detail[0].path` set to `group_by`. Before this, only a length check
+gated the field, so a value the chart engine would later refuse could be
+saved and then silently reopened as no breakdown at all (#274).
+
 **What is not stored is the range.** `since`, `until` and every relative
 preset live only in the Trends screen's own URL, the same way a funnel never
 stores `since`/`until` either — only its `window_seconds`, a duration rather

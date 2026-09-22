@@ -126,6 +126,19 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
   // reasoning as `Retention.tsx`'s `stale`: it must survive past the seed
   // effect that discovers it, for as long as this report stays open.
   const [stale, setStale] = useState(false)
+  // The stored `group_by`, but only while it is one `sourceAndFieldFromGroupBy`
+  // cannot turn into a source/field pair -- `null` otherwise. The server used
+  // to accept any non-empty string here and this screen would fall back to
+  // `none` for anything it could not parse, so a report saved with `trait:plan`
+  // (#274) drew an ungrouped chart with nothing said. `event_name` never
+  // triggers this -- `sourceAndFieldFromGroupBy('event_name')` already returns
+  // `{ source: 'event_name', field: '' }`, not `none`.
+  //
+  // Cleared the moment the operator changes the breakdown (`update`, below):
+  // at that point the screen is showing what they chose, not what seeding
+  // could not reproduce, and Save now writes THAT choice over the stored
+  // value -- which is exactly what the notice already warns will happen.
+  const [droppedGroupBy, setDroppedGroupBy] = useState<string | null>(null)
   // Saving now would write a definition over stored predicates this screen
   // could not reproduce. A stale trend's predicates fail to reproduce in one
   // of two ways -- an element that fails core's schema but still LOOKS like a
@@ -184,6 +197,7 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
     setSaveError(null)
     setStale(false)
     setSaveWouldNarrow(false)
+    setDroppedGroupBy(null)
     setConfirmingDelete(false)
     setDeleteError(null)
   }, [identity])
@@ -200,6 +214,11 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
       // says, which is what makes a subsequent Save an intentional write
       // rather than the load effect's own silent narrowing.
       if ('where' in patch) setSaveWouldNarrow(false)
+      // Same reasoning for the breakdown: `BreakdownPicker.onChange` always
+      // patches `source` (with `field`), so this fires exactly when the
+      // operator has chosen a new breakdown -- at which point the screen is
+      // showing what they picked, not what seeding could not reproduce.
+      if ('source' in patch) setDroppedGroupBy(null)
     },
     [setSearch],
   )
@@ -350,10 +369,28 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
         if (alreadyDefined) {
           finalParams = params
         } else {
+          const seededBreakdown = sourceAndFieldFromGroupBy(r.group_by)
+          // #274: a `group_by` the server now refuses on write can still sit
+          // in an older row. `sourceAndFieldFromGroupBy` already falls back
+          // to `none` for it -- silently, since it is also the fallback for
+          // a hand-edited or future-version value the saved-reports spec
+          // says must never fail to parse (see its own docstring). `none`
+          // alone is not enough to tell "genuinely no breakdown" apart from
+          // "had one, could not show it", so this checks the raw string
+          // instead: `event_name` is excluded because it parses to its own
+          // source, never `none`, so this can only be a breakdown that
+          // really was dropped.
+          if (
+            r.group_by != null &&
+            seededBreakdown.source === 'none' &&
+            r.group_by !== 'event_name'
+          ) {
+            setDroppedGroupBy(r.group_by)
+          }
           finalParams = {
             event: r.event,
             interval: r.interval,
-            ...sourceAndFieldFromGroupBy(r.group_by),
+            ...seededBreakdown,
             where: seededWhere,
             range: params.range,
           }
@@ -672,6 +709,16 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
           The filters saved with this report no longer parse, so it cannot be reproduced as saved.
           Run it to see what these controls ask for now, or fix the conditions and save over it.
         </p>
+      )}
+
+      {droppedGroupBy != null && (
+        <output
+          data-testid="trend-breakdown-dropped"
+          className="block text-muted-foreground text-sm"
+        >
+          This report was saved with a breakdown this screen cannot show ({droppedGroupBy}). It is
+          drawn without one; saving it will remove the breakdown.
+        </output>
       )}
 
       {incompleteRange && (

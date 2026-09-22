@@ -299,3 +299,59 @@ describe('/v1/trends where predicates', () => {
     expect(filteredRow.stale).toBe(false)
   })
 })
+
+// #274: a saved trend used to accept any non-empty `group_by` string, so a
+// value the chart engine's own `parseBreakdown` refuses -- `trait:plan`, an
+// unknown `attribute:`, anything with no colon at all -- was stored and then
+// silently dropped when the report was reopened. Validating it here, with
+// the SAME `parseBreakdown` the run path uses, means a saved report can
+// never disagree with the endpoint that draws it.
+describe('/v1/trends group_by validation (#274)', () => {
+  it.each(['trait:plan', 'attribute:not_a_column', 'bogus', 'property:'])(
+    'refuses group_by %s on create with a field-level 400',
+    async (group_by) => {
+      const res = await call('POST', '/v1/trends', {
+        name: `t-${group_by}`,
+        event: 'signup',
+        interval: '1d',
+        group_by,
+      })
+      expect(res.statusCode).toBe(400)
+      expect(res.json().error).toBe('invalid_trend')
+      expect(res.json().detail[0].path).toBe('group_by')
+    },
+  )
+
+  it('refuses an unparseable group_by on PATCH and leaves the stored one alone', async () => {
+    const created = await call('POST', '/v1/trends', {
+      name: 'patch-refusal',
+      event: 'signup',
+      interval: '1d',
+      group_by: 'attribute:country',
+    })
+    expect(created.statusCode).toBe(201)
+    const id = created.json().id
+
+    const patched = await call('PATCH', `/v1/trends/${id}`, { group_by: 'trait:plan' })
+    expect(patched.statusCode).toBe(400)
+    expect(patched.json().error).toBe('invalid_trend')
+    expect(patched.json().detail[0].path).toBe('group_by')
+
+    // Never reached `TrendStore.update` -- the stored value is untouched.
+    const found = await call('GET', `/v1/trends/${id}`)
+    expect(found.json().group_by).toBe('attribute:country')
+  })
+
+  it.each(['event_name', 'attribute:country', 'property:plan', null])(
+    'still accepts %s',
+    async (group_by) => {
+      const res = await call('POST', '/v1/trends', {
+        name: `ok-${group_by}`,
+        event: 'signup',
+        interval: '1d',
+        group_by,
+      })
+      expect(res.statusCode).toBe(201)
+    },
+  )
+})
