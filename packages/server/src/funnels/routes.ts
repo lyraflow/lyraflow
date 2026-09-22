@@ -30,6 +30,12 @@ export interface FunnelDeps {
   pg: Pool
   /** The configured ClickHouse database; the dictionaries live in it. */
   database: string
+  /**
+   * `config.readOnly`. A read-only install still runs a funnel, but does not
+   * write the run snapshot: every visitor would otherwise rewrite the "last
+   * run" the list shows everyone else.
+   */
+  readOnly: boolean
 }
 
 /**
@@ -174,7 +180,7 @@ function stepIsOptional(steps: FunnelStep[], step: number): boolean {
 }
 
 export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): void {
-  const { authenticate, ch, pg, database } = deps
+  const { authenticate, ch, pg, database, readOnly } = deps
   const store = new FunnelStore(pg)
   // `compileFor` and `execute` live in `run.ts` and construct their own
   // `SegmentStore` there; nothing else in this file touches segments
@@ -412,15 +418,17 @@ export function registerFunnelRoutes(app: FastifyInstance, deps: FunnelDeps): vo
     try {
       const { result, ...body } = await runner.execute(project, funnel, range)
       // A cache, not a fact: written after every run, never recomputed, and
-      // always rendered next to its timestamp.
-      await store.recordRun(project.id, id, {
-        entered: result.entered,
-        converted: result.converted,
-        at: new Date(),
-        // The range this run actually used, not the list's default. Without it
-        // the cached rate answered a question nobody could see (#91).
-        range,
-      })
+      // always rendered next to its timestamp. Not on a read-only install.
+      if (!readOnly) {
+        await store.recordRun(project.id, id, {
+          entered: result.entered,
+          converted: result.converted,
+          at: new Date(),
+          // The range this run actually used, not the list's default. Without it
+          // the cached rate answered a question nobody could see (#91).
+          range,
+        })
+      }
       return reply.code(200).send(body)
     } catch (err) {
       if (err instanceof FunnelValidationError) {

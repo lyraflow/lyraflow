@@ -456,6 +456,35 @@ describe('funnel routes', () => {
     expect(afterPatch.json().last_entered).toBeNull()
   })
 
+  // A read-only install still runs a funnel -- the run route is on the
+  // allow-list -- but must not write the run snapshot, or every visitor
+  // rewrites the "last run" a list shows everyone else.
+  it('does not record the run snapshot on a read-only install', async () => {
+    const created = await call('POST', '/v1/funnels', { name: 'signup', ...signup })
+    const id = created.json().id
+    const readOnly = buildApp({
+      config: { ...app.deps.config, readOnly: true },
+      pg,
+      ch,
+      readiness: app.deps.readiness,
+    })
+    await readOnly.ready()
+    try {
+      const run = await readOnly.inject({
+        method: 'POST',
+        url: `/v1/funnels/${id}/run`,
+        headers: { 'content-type': 'application/json', 'x-lyraflow-server-key': SERVER_KEY },
+        payload: {},
+      })
+      expect(run.statusCode).toBe(200)
+    } finally {
+      await readOnly.close()
+    }
+    const after = await call('GET', `/v1/funnels/${id}`)
+    expect(after.json().last_evaluated_at).toBeNull()
+    expect(after.json().last_entered).toBeNull()
+  })
+
   it('runs over everyone AND warns when the funnel’s segment is gone', async () => {
     const seg = await pg.query<{ id: string }>(
       `INSERT INTO segments (project_id, name, filter, ast_version)

@@ -484,6 +484,7 @@ export function buildApp(input: {
     pg,
     database: config.ch.database,
     cache: segmentCache,
+    readOnly: config.readOnly,
   })
   // Shares the same `ch` and `pg` instances as the registrations around it —
   // a second ProjectCache-shaped duplicate would double the Postgres load an
@@ -497,6 +498,7 @@ export function buildApp(input: {
     ch,
     pg,
     database: config.ch.database,
+    readOnly: config.readOnly,
   })
   // Stored, not ad hoc, and needs neither `ch` nor `database` -- a saved
   // trend definition is three scalar Postgres columns with nothing to
