@@ -59,6 +59,19 @@ describe('buildApp with LYRAFLOW_READ_ONLY=true', () => {
     expect(res.json()).toEqual({ error: 'read_only_install' })
   })
 
+  // A PATCH against the real app: changing the admin password is the write
+  // a published login most needs refused.
+  it('refuses PATCH /v1/auth/password', async () => {
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/v1/auth/password',
+      headers: { 'x-lyraflow-ui': '1' },
+      payload: { current_password: 'x', new_password: 'y' },
+    })
+    expect(res.statusCode).toBe(403)
+    expect(res.json()).toEqual({ error: 'read_only_install' })
+  })
+
   // Reaches the login handler, which answers for itself: a wrong password
   // is its own 401, not the guard's 403.
   it('lets POST /v1/auth/login through to its handler', async () => {

@@ -54,6 +54,9 @@ async function build(enabled: boolean): Promise<FastifyInstance> {
   // onRequest hook reaching into a child context is what this proves.
   a.register(async (child) => {
     child.delete('/v1/new-thing', ok)
+    child.put('/v1/new-thing', ok)
+    child.patch('/v1/new-thing', ok)
+    child.post('/v1/new-thing', ok)
   })
   await a.ready()
   app = a
@@ -108,6 +111,15 @@ describe('registerReadOnlyGuard, enabled', () => {
   it('refuses a route registered after the guard that the guard never names', async () => {
     const a = await build(true)
     const res = await a.inject({ method: 'DELETE', url: '/v1/new-thing' })
+    expect(res.statusCode).toBe(403)
+    expect(res.json()).toEqual({ error: 'read_only_install' })
+  })
+
+  // One row per write method, on the same unlisted route. PATCH is every
+  // edit in the product; a SAFE set that grew to include it must fail here.
+  it.each(['POST', 'PUT', 'PATCH', 'DELETE'] as const)('refuses %s', async (method) => {
+    const a = await build(true)
+    const res = await a.inject({ method, url: '/v1/new-thing', payload: {} })
     expect(res.statusCode).toBe(403)
     expect(res.json()).toEqual({ error: 'read_only_install' })
   })
