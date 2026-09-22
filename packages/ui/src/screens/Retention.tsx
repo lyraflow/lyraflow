@@ -731,7 +731,10 @@ export function Retention(props: { client: ApiClient; onUnauthorized?: () => voi
       {stale && (
         <p data-testid="retention-stale" className="text-muted-foreground text-sm">
           The filters saved with this report no longer parse, so it cannot be reproduced as saved.
-          Run it to see what these controls ask for now, or fix the conditions and save over it.
+          {/* A read-only install hides Save, so it is not offered here either. */}
+          {readOnly
+            ? ' Run it to see what these controls ask for now.'
+            : ' Run it to see what these controls ask for now, or fix the conditions and save over it.'}
         </p>
       )}
 

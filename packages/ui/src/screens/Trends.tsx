@@ -714,7 +714,10 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
       {stale && (
         <p data-testid="trend-stale" className="text-muted-foreground text-sm">
           The filters saved with this report no longer parse, so it cannot be reproduced as saved.
-          Run it to see what these controls ask for now, or fix the conditions and save over it.
+          {/* A read-only install hides Save, so it is not offered here either. */}
+          {readOnly
+            ? ' Run it to see what these controls ask for now.'
+            : ' Run it to see what these controls ask for now, or fix the conditions and save over it.'}
         </p>
       )}
 
@@ -724,7 +727,7 @@ export function Trends(props: { client: ApiClient; onUnauthorized?: () => void }
           className="block text-muted-foreground text-sm"
         >
           This report was saved with a breakdown this screen cannot show ({droppedGroupBy}). It is
-          drawn without one; saving it will remove the breakdown.
+          drawn without one{readOnly ? '.' : '; saving it will remove the breakdown.'}
         </output>
       )}
 

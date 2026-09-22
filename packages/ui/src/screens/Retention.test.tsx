@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -941,5 +941,23 @@ describe('Retention on a read-only install', () => {
     expect(screen.queryByRole('button', { name: /^save$/i })).toBeNull()
     expect(screen.queryByRole('button', { name: /^delete$/i })).toBeNull()
     expect(screen.getByRole('button', { name: /^run$/i })).toBeInTheDocument()
+  })
+
+  // Save is hidden on a read-only install, so the notice may not tell the
+  // operator to save. Both states are rendered, so the ternary cannot be
+  // collapsed either way without one half failing.
+  it('the stale notice offers "save over it" only where Save exists', async () => {
+    renderAt('/retention/3', {
+      retentionReport: vi.fn(async () => reportFixture({ stale: true })),
+    })
+    expect(await screen.findByTestId('retention-stale')).toHaveTextContent(/save over it/)
+    cleanup()
+    readOnly.value = true
+    renderAt('/retention/3', {
+      retentionReport: vi.fn(async () => reportFixture({ stale: true })),
+    })
+    const notice = await screen.findByTestId('retention-stale')
+    expect(notice).toHaveTextContent(/\brun\b/i)
+    expect(notice).not.toHaveTextContent(/save over it/)
   })
 })

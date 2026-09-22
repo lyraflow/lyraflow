@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -970,5 +970,33 @@ describe('Trends on a read-only install', () => {
     expect(screen.queryByRole('button', { name: /^save$/i })).toBeNull()
     expect(screen.queryByRole('button', { name: /^delete$/i })).toBeNull()
     expect(screen.getByRole('button', { name: /^run$/i })).toBeInTheDocument()
+  })
+
+  // Save is hidden on a read-only install, so neither notice may tell the
+  // operator to save. Each test renders both states, so the ternary cannot
+  // be collapsed either way without one half failing.
+  it('the stale notice offers "save over it" only where Save exists', async () => {
+    renderAt('/trends/3', { trendReport: vi.fn(async () => reportFixture({ stale: true })) })
+    expect(await screen.findByTestId('trend-stale')).toHaveTextContent(/save over it/)
+    cleanup()
+    readOnly.value = true
+    renderAt('/trends/3', { trendReport: vi.fn(async () => reportFixture({ stale: true })) })
+    const notice = await screen.findByTestId('trend-stale')
+    expect(notice).toHaveTextContent(/\brun\b/i)
+    expect(notice).not.toHaveTextContent(/save over it/)
+  })
+
+  it('the dropped-breakdown notice says saving removes it only where Save exists', async () => {
+    const report = () => vi.fn(async () => reportFixture({ group_by: 'trait:plan' }))
+    renderAt('/trends/3', { trendReport: report() })
+    expect(await screen.findByTestId('trend-breakdown-dropped')).toHaveTextContent(
+      /saving it will remove the breakdown/,
+    )
+    cleanup()
+    readOnly.value = true
+    renderAt('/trends/3', { trendReport: report() })
+    const notice = await screen.findByTestId('trend-breakdown-dropped')
+    expect(notice).toHaveTextContent(/It is drawn without one\.$/)
+    expect(notice).not.toHaveTextContent(/saving/i)
   })
 })
