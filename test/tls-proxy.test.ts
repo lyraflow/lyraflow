@@ -60,6 +60,13 @@ beforeAll(async () => {
   // --build for the reason the other compose-driven suites pass it: the image
   // is named, so Compose reuses a stale tag indefinitely and the suite
   // quietly asserts things about an old build.
+  //
+  // docker-compose.tls-test.yml mounts test/fixtures/proxy.d over
+  // /etc/caddy/proxy.d, which carries a real `trusted_proxies` line (#271).
+  // `up --wait` blocking on the healthcheck below is therefore also the
+  // regression test for that spelling: `static` inside `reverse_proxy`
+  // parses as an IP address and crash-loops Caddy, which fails this line
+  // exactly the way the config-error case at the bottom of this file does.
   compose('up', '-d', '--build', '--wait')
 
   // Caddy's healthcheck says its config loaded and the proxy is provisioned,
