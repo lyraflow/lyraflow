@@ -76,9 +76,13 @@ describe('buildApp with LYRAFLOW_READ_ONLY=true', () => {
     expect(app.hasRoute({ method, url })).toBe(true)
   })
 
-  // hasRoute proves the pattern exists; this proves the real app resolves a
-  // concrete request to it. The ingest routes are the case that needs both:
-  // each is registered as `''` under its own plugin prefix.
+  // hasRoute proves the path exists, but not the param NAMES: find-my-way
+  // matches params by position, so `:id` in the list and `:funnelId` in a
+  // route file both pass it. This test is the one that catches that rename,
+  // because the guard compares the pattern string Fastify resolved -- tried
+  // by renaming the run route's param, which failed this row alone. It is
+  // also what covers the ingest routes, each registered as `''` under its
+  // own plugin prefix.
   it.each(READ_ONLY_ALLOW)('lets $method $url reach its handler', async ({ method, url }) => {
     const res = await app.inject({
       // Every entry is a POST today; inject's method type is narrower than
