@@ -14,8 +14,8 @@ under Docker, and nothing leaves it.
 <!-- readme-only:start -->
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://lyraflow.app/shots/feed-dark.webp?v=0.16">
-  <img src="https://lyraflow.app/shots/feed-light.webp?v=0.16" width="900" alt="The live event feed: a table of events with the person who sent each one, the time, and the properties it arrived with.">
+  <source media="(prefers-color-scheme: dark)" srcset="https://lyraflow.app/shots/feed-dark.webp?v=0.17">
+  <img src="https://lyraflow.app/shots/feed-light.webp?v=0.17" width="900" alt="The live event feed: a table of events with the person who sent each one, the time, and the properties it arrived with.">
 </picture>
 
 **Five minutes, most of it waiting for Docker.**
@@ -42,8 +42,8 @@ Saved reports sit together on a dashboard, and one dashboard can be the screen
 you land on:
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://lyraflow.app/shots/dashboard-dark.webp?v=0.16">
-  <img src="https://lyraflow.app/shots/dashboard-light.webp?v=0.16" width="900" alt="A dashboard: a funnel, a trends chart, a retention grid and a segment count as tiles on one screen.">
+  <source media="(prefers-color-scheme: dark)" srcset="https://lyraflow.app/shots/dashboard-dark.webp?v=0.17">
+  <img src="https://lyraflow.app/shots/dashboard-light.webp?v=0.17" width="900" alt="A dashboard: a funnel, a trends chart, a retention grid and a segment count as tiles on one screen.">
 </picture>
 
 **Live demo.** [demo.lyraflow.app](https://demo.lyraflow.app/) is a running
