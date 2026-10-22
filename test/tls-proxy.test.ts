@@ -183,13 +183,25 @@ describe('the caddy healthcheck', () => {
     }
   }
 
+  const caddyValidate = (env: NodeJS.ProcessEnv): string => {
+    try {
+      const run = ['run', '--rm', '--no-deps', '--entrypoint', 'caddy', 'caddy']
+      return composeWith(env, ...run, 'validate', '--config', '/etc/caddy/Caddyfile')
+    } catch (e) {
+      const err = e as { stderr?: string; stdout?: string }
+      return `${err.stdout ?? ''}${err.stderr ?? ''}`
+    }
+  }
+
   it('fails `up -d --wait` when Caddy cannot start at all', () => {
     const failure = upWaitCaddy(NO_DOMAIN)
     expect(failure, '`up -d --wait` succeeded against a Caddy that cannot start').toBeDefined()
     expect(failure).toContain('unhealthy')
     // The diagnosis really is the config error, not something else that
-    // happened to make the probe fail.
-    expect(composeWith(NO_DOMAIN, 'logs', 'caddy')).toContain('unrecognized global option')
+    // happened to make the probe fail. Asked of `caddy validate` rather than
+    // read from the logs: from Caddy 2.11.7 `caddy run` exits 1 on an adapt
+    // error without logging it, so the logs no longer carry the reason.
+    expect(caddyValidate(NO_DOMAIN)).toContain('unrecognized global option')
   }, 300_000)
 
   it('fails `up -d --wait` when Caddy is up and serving but proxying nothing', () => {

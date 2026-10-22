@@ -21,6 +21,26 @@ here as it happened rather than tagged retroactively, for the same reason 0.1.0
 is: a tag created after the fact names a moment nobody could have fetched. Its
 one fix is contained in 0.3.0.
 
+## 0.17.1 — 2026-10-22
+
+### Security
+
+- **The image runs Node.js 22.23.4.** 0.17.0 was built on `node:22-alpine`, which
+  resolved to 22.23.2 and is affected by the Node.js security release of
+  2026-10-21: an out-of-bounds write in the Brotli decoder (CVE-2026-111497), TLS
+  hostname verification bypasses (CVE-2026-105483, CVE-2026-106069,
+  CVE-2026-106072) and DNS name truncation (CVE-2026-105482). Both stages of the
+  `Dockerfile` now name `node:22.23.4-alpine` exactly, so a rebuild cannot drift
+  to a different patch release without a change to this file. No code, schema or
+  configuration changed. Upgrading is `docker compose pull && docker compose up -d`.
+
+### Known limitations
+
+- The pin means a future Node security release needs a new Lyraflow release to
+  reach the image. A floating `22-alpine` picked one up on any rebuild, but
+  published images are not rebuilt, so the float bought nothing for anyone
+  pulling them.
+
 ## 0.17.0 — 2026-09-22
 
 ### Added
