@@ -20,6 +20,6 @@
     "@lyraflow/sdk-browser": "workspace:*",
     "fastify": "^5.12.1",
     "pino": "^9.5.0",
-    "zod": "^3.23.0"
+    "zod": "^4.6.6"
   }
 }
