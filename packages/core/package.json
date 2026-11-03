@@ -63,7 +63,7 @@
     "build": "tsc -b"
   },
   "dependencies": {
-    "zod": "^3.23.0"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "pg": "^8.13.0",
